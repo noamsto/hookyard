@@ -2328,12 +2328,15 @@ unverified and undeclared elsewhere.
 
 **How this pass got its answers, since it changes how much they are worth.**
 All three engines are installed on this host, and all three ship their own
-contract in a readable form: `cursor-agent` as unminified-enough JavaScript
-bundles, `claude-code` and `codex-cli` as compiled binaries whose embedded
-documentation, serde field names, and validation strings enumerate the
-accepted surface by naming what falls outside it. Reading an implementation's
-own rejection messages is stronger evidence than reading documentation about
-it and weaker than watching it behave. Every status below that says
+contract in a readable form. `cursor-agent` is a set of JavaScript bundles
+minified but not obfuscated, so its hook resolution, its reducer, and its
+Claude Code converter can be read as code. `claude-code` is a compiled bundle
+that still carries both its own hook reference and the readable JavaScript of
+its settings-merge path. `codex-cli` is a Rust binary, which gives the least —
+serde field names and validation strings — but those strings enumerate the
+accepted surface precisely, by naming everything outside it as unsupported.
+Reading an implementation's own rejection messages is stronger evidence than
+reading documentation about it, and weaker than watching it behave. Every status below that says
 *resolved* means resolved at that middle grade unless it says otherwise, and
 the one gap that only a live run can close is called out as still open.
 
@@ -2355,9 +2358,8 @@ the one gap that only a live run can close is called out as still open.
    independently by the vendor. Claude Code's and Codex's native rules remain
    unread: Claude Code is documented as running matching hooks in parallel
    but not as to how it reconciles disagreement, and Codex was not examined
-   on this point. The design's deny-wins rule stays stated rather than
-   borrowed for the unchanged reason (§4) — it should not shift when an
-   engine changes its own — so the remaining two are informational.
+   on this point. §4 explains why the design states its own rule regardless,
+   so the remaining two are informational.
 3. **Per-engine deny capability beyond Claude Code (§4).** **Resolved for
    both engines, and this item is no longer security-blocking.** It was the
    one genuinely load-bearing question on this list, and it resolved in the
@@ -2462,8 +2464,8 @@ Six items the prior pass's own findings added, each with this pass's status:
   actually refuse a call (item 3), and timing Codex's default timeout
   (item 4) — so one capture run per engine closes three items at once. This
   pass did not attempt it: each engine's capture needs a live agent session,
-  which is a decision about spending on the user's own accounts rather than a
-  research step, and it was left to be asked rather than assumed.
+  which is a decision about spending on the user's own accounts, not a
+  research step, and it was left to be asked.
 - **Which Cursor keys does hookyard register for `pre_tool` and `post_tool`
   (§7)?** **Resolved: both families exist.** Cursor's shipped event enum
   carries the generic `preToolUse`/`postToolUse`/`postToolUseFailure`
@@ -2581,7 +2583,7 @@ being more capable than this document assumed rather than less.
 
 Everything this pass left unverified is accounted for above. What is now
 **resolved** and no longer a risk anyone has to carry: Claude Code's settings
-merge (item 1, retired rather than mitigated), Codex's and Cursor's deny paths
+merge (item 1), Codex's and Cursor's deny paths
 (item 3, which removes the coverage gap on two of three engines), Cursor's
 native consolidation rule (item 2, one of three), Cursor's tool mapping and
 event families (items 6 and the Cursor-keys item), Codex's trust mechanism in
