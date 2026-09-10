@@ -25,39 +25,17 @@ Two passes. `hookyard install` writes the table down into every engine's
 config; `hookyard route` is what an engine actually invokes when a hook
 fires.
 
-```mermaid
-flowchart TD
-    subgraph reg["hookyard install"]
-        direction LR
-        M1["repo A's hookyard.json"] --> INSTALL["hookyard install"]
-        M2["repo B's hookyard.json"] --> INSTALL
-        INSTALL -->|marker-scoped strip| CCCFG["~/.claude/settings.json"]
-        INSTALL -->|marker-scoped strip| CXCFG["~/.codex/config.toml"]
-        INSTALL -->|marker-scoped strip| CUCFG["~/.cursor/hooks.json"]
-        INSTALL --> TABLE[("table.json\nin the state dir")]
-    end
+Several repos' manifests fold into one `hookyard install` pass, out to three
+engines' native config plus hookyard's own state table:
 
-    subgraph route["hookyard route, invoked by each engine's native config"]
-        direction TB
-        CCFIRE["Claude Code fires a hook"] --> CCPAY["native payload\n(prompt_id discriminator)"]
-        CXFIRE["Codex fires a hook"] --> CXPAY["native payload\n(turn_id discriminator)"]
-        CUFIRE["Cursor fires a hook"] --> CUPAY["native payload\n(cursor_version discriminator)"]
-        CCPAY --> ENV["normalized envelope\n(envelope.Decode)"]
-        CXPAY --> ENV
-        CUPAY --> ENV
-        TABLE --> SELECT["select the handlers\nthis payload matches"]
-        ENV --> SELECT
-        SELECT --> FANOUT["run them concurrently,\none 4.5s deadline"]
-        FANOUT --> FOLD["fold verdicts,\ndeny wins"]
-        FOLD --> RENDER["render for the\ncalling engine"]
-        RENDER --> CCOUT["Claude Code:\npermissionDecision +\nadditionalContext"]
-        RENDER --> CXOUT["Codex:\npermissionDecision only,\nask degrades to deny"]
-        RENDER --> CUOUT["Cursor:\npermission +\nuser_message"]
-        CCOUT --> RECORD["event record appended\n— always, every path"]
-        CXOUT --> RECORD
-        CUOUT --> RECORD
-    end
-```
+![Registration: repo A's and repo B's hookyard.json manifests fold into one hookyard install pass, which writes into Claude Code's settings.json, Codex's config.toml, and Cursor's hooks.json, and records the installed handlers in hookyard's state table.](docs/diagrams/registration.svg)
+
+An engine firing a hook decodes its native payload into one normalized
+envelope, fans out to the matching handlers under a shared deadline, folds
+their verdicts deny-wins, and renders the result for the calling engine
+before the record is appended:
+
+![Routing: Claude Code, Codex, and Cursor each decode their own native hook payload into a normalized envelope; the matching handlers run concurrently under one 4.5s deadline; their verdicts fold deny-wins; the result renders for the calling engine; and the event record is appended on every path.](docs/diagrams/routing.svg)
 
 A few things worth calling out because they're not visible from the
 `hookyard` label alone: each engine's writer strips only its own
