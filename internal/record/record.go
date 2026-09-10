@@ -232,8 +232,8 @@ func buildLine(rec Record) ([]byte, error) {
 		return line, nil
 	}
 
-	// Bounded fallback: Key and SessionID are the only two fields nothing
-	// else in the cascade constrains, so bounding them here — rather than
+	// Bounded fallback: Key is the last field nothing above constrains
+	// (SessionID is already bounded), so truncating it here — rather than
 	// clipping the marshaled JSON bytes — keeps this a valid JSON object with
 	// a static, provable upper bound regardless of input.
 	min := minimalRecord{

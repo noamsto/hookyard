@@ -172,9 +172,9 @@ func TestBuildLineTruncatesOversizeHandlers(t *testing.T) {
 }
 
 func TestBuildLineFallsBackToMinimalRecord(t *testing.T) {
-	// SessionID alone is now bounded by the CWD/ToolName/SessionID truncation
-	// cascade step, so Key — which nothing bounds before the minimal fallback
-	// — is what forces the fallback here.
+	// Key is unbounded until the minimal fallback, so an oversize Key (not
+	// SessionID, which the cascade truncates earlier) is what forces this
+	// path.
 	e := Event{
 		Engine:    vocab.Codex,
 		SessionID: strings.Repeat("s", 300_000),

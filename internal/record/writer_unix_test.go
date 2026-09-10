@@ -17,7 +17,6 @@ import (
 	"time"
 )
 
-// assertFileMode fails the test if path's permission bits aren't exactly want.
 func assertFileMode(t *testing.T, path string, want os.FileMode) {
 	t.Helper()
 	info, err := os.Stat(path)
@@ -65,10 +64,9 @@ func TestAppendPermissionBitsRestrictiveUmask(t *testing.T) {
 	assertFileMode(t, StreamPath(stateDir, w.now()), 0o600)
 }
 
-// TestAppendTightensPreexistingDir is the regression test for ensureDir
-// leaving a directory that already existed at whatever permissions it was
-// created with: §6 requires the state directory be 0700 unconditionally, not
-// only on the first-created path.
+// TestAppendTightensPreexistingDir asserts ensureDir enforces 0700 on a
+// directory that already existed at looser permissions — §6 requires this
+// unconditionally, not only on first creation.
 func TestAppendTightensPreexistingDir(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "hookyard")
 	streamDir := filepath.Join(stateDir, "stream")
@@ -100,7 +98,7 @@ func TestConcurrentAppendWorker(t *testing.T) {
 	}
 
 	w := &Writer{StateDir: os.Getenv("HOOKYARD_STATE_DIR")}
-	for i := 0; i < appends; i++ {
+	for i := range appends {
 		e := testEvent()
 		if i == 0 {
 			e.Handlers = padHandlers(900) // sized near the 64 KiB cap
@@ -135,9 +133,7 @@ func TestConcurrentAppendsAcrossProcesses(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, numProcs)
 	for i := range numProcs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			cmd := exec.Command(binary, "-test.run=^TestConcurrentAppendWorker$")
 			cmd.Env = append(os.Environ(),
 				concurrentAppendWorkerEnv+"=1",
@@ -148,7 +144,7 @@ func TestConcurrentAppendsAcrossProcesses(t *testing.T) {
 			if err != nil {
 				errs[i] = fmt.Errorf("subprocess %d: %w\n%s", i, err, out)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	for _, err := range errs {
