@@ -1,4 +1,4 @@
-# Evaluates the exported home-manager module against two scratch
+# Evaluates the exported home-manager module against several scratch
 # configurations and then executes the rendered install command. Two
 # properties are silent when broken and nothing else in the repo checks
 # either: the emitted router path must be the rebuild-stable *profile* path,
@@ -72,16 +72,25 @@
     externalPackageInstall = true;
   } {};
 
-  # Proves the quoting above survives a whitespace-containing value:
-  # stateDir here is not exercised by dryRunScript below, because
-  # checkShellSafe correctly refuses a space in --state-dir before a real
-  # `install` ever runs — that refusal is the CLI's own defense, not this
-  # bug. So this configuration is checked only at the Nix-evaluation level
-  # in scratchChecks, against the rendered installCommand string: the
-  # `--state-dir` assertion there fails if quoting is lost, because the
-  # substring it looks for is the whole quoted flag, space included.
-  spaced = mkScratch "spaced" {} {
-    stateDir = "/build/hookyard-check-spaced/state dir";
+  # One hostile value carrying both halves of what escapeShellArg buys: a
+  # space, and a command substitution. The space is no longer the interesting
+  # half, because manual double quotes already stop word-splitting. The
+  # substitution is what they do not stop — bash expands $(...), backticks and
+  # $VAR inside double quotes just the same, so an unescaped value here runs at
+  # activation time with the user's own privileges.
+  #
+  # The evaluation-level `--state-dir` assertion in scratchChecks catches a
+  # lost escape on its own: its needle is built with escapeShellArg, so an
+  # unescaped or merely double-quoted rendering does not contain it.
+  #
+  # The substitution is a `touch` rather than something inert like $(id) so
+  # that an expansion leaves evidence behind for expansionScript below. The
+  # marker is a relative path, created in the build's cwd, so that assertion
+  # can't pass vacuously because some absolute directory happened not to exist.
+  pwnedMarker = "hookyard-check-pwned";
+
+  hostile = mkScratch "hostile" {} {
+    stateDir = "/build/hookyard-check-hostile/state $(touch ${pwnedMarker}) dir";
   };
 
   # Counts non-overlapping occurrences of `needle` in `haystack` — how the
@@ -110,7 +119,9 @@
   }: let
     hy = cfg.programs.hookyard;
     entry = cfg.home.activation.hookyardInstall;
-    expectedRouterFlag = ''--router-path "${cfg.home.profileDirectory}/bin/hookyard"'';
+    # Built with escapeShellArg, like the module itself, so the two cannot
+    # drift into agreeing on a hand-copied quoting style that neither uses.
+    expectedRouterFlag = "--router-path ${lib.escapeShellArg "${cfg.home.profileDirectory}/bin/hookyard"}";
   in
     lib.optionals (name == "submodule") [
       {
@@ -136,8 +147,8 @@
         msg = "expected ${toString (builtins.length hy.manifests)} --manifest flags, found ${toString (countOccurrences "--manifest" hy.installCommand)}: ${hy.installCommand}";
       }
       {
-        cond = hasInfixCtx ''--state-dir "${hy.stateDir}"'' hy.installCommand;
-        msg = ''installCommand is missing --state-dir "${hy.stateDir}": ${hy.installCommand}'';
+        cond = hasInfixCtx "--state-dir ${lib.escapeShellArg hy.stateDir}" hy.installCommand;
+        msg = "installCommand is missing --state-dir ${lib.escapeShellArg hy.stateDir}: ${hy.installCommand}";
       }
       {
         cond = hasInfixCtx "${pkgs.jq}/bin" hy.installCommand;
@@ -157,7 +168,7 @@
       }
     ];
 
-  allChecks = lib.concatMap scratchChecks [standalone submodule spaced];
+  allChecks = lib.concatMap scratchChecks [standalone submodule hostile];
   failures = lib.filter (c: !c.cond) allChecks;
 
   # Fail with a readable message: throwing every collected offender beats a
@@ -188,10 +199,32 @@
       exit 1
     fi
   '';
+
+  # The regression escapeShellArg exists to prevent, executed rather than
+  # asserted about. hostile deliberately does not go through dryRunScript:
+  # checkShellSafe refuses a space and a `$` in --state-dir before any real
+  # install, so a success-path check there would exercise the CLI's own guard
+  # rather than this module's escaping. What is proved here instead is that
+  # bash handed the binary the substitution as literal text — the command is
+  # refused, and the marker was never created. Unescaped, bash runs `touch`
+  # first and hookyard only ever sees the harmless empty expansion.
+  expansionScript = ''
+    echo "=== hostile ==="
+    rm -f ${pwnedMarker}
+    if ${hostile.cfg.programs.hookyard.installCommand} --dry-run; then
+      echo "hm-module check (hostile): install accepted a --state-dir it should have refused" >&2
+      exit 1
+    fi
+    if [ -e ${pwnedMarker} ]; then
+      echo "hm-module check (hostile): activation executed the command substitution in --state-dir" >&2
+      exit 1
+    fi
+  '';
 in
   builtins.seq guard (pkgs.runCommand "hookyard-hm-module-check" {} ''
     set -euo pipefail
     ${dryRunScript standalone}
     ${dryRunScript submodule}
+    ${expansionScript}
     touch $out
   '')

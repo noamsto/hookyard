@@ -18,7 +18,7 @@
   # per-repo invocation would strip the first repo's rows and those handlers
   # would vanish with no error. Consumers contribute to this one list; they
   # cannot express a second invocation.
-  manifestFlags = lib.concatMapStringsSep " " (p: ''--manifest "${p}"'') cfg.manifests;
+  manifestFlags = lib.concatMapStringsSep " " (p: "--manifest ${lib.escapeShellArg p}") cfg.manifests;
 
   # §9: hookyard is invoked by its **store** path here, because a store path
   # is a dependency of the generation and so is always present during
@@ -43,16 +43,21 @@
       # The profile path changes only when the guard x event x engine table
       # does.
       #
-      # Every path below is quoted: this runs as bash, which word-splits an
-      # unquoted value on whitespace, and Go's flag package stops parsing at
-      # the first non-flag argument — so one whitespace-containing value
-      # would silently truncate the flags after it and let their defaults
-      # resolve against the real $HOME instead of these configured targets.
-      ''--router-path "${config.home.profileDirectory}/bin/hookyard"''
-      ''--state-dir "${cfg.stateDir}"''
-      ''--claude-settings "${cfg.claudeSettings}"''
-      ''--codex-config "${cfg.codexConfig}"''
-      ''--cursor-hooks "${cfg.cursorHooks}"''
+      # Every path below goes through escapeShellArg. These values come from
+      # the operator and from consumer modules, and they are interpolated into
+      # a bash line that `home-manager switch` runs with the user's own
+      # privileges — so a value carrying `$(...)`, a backtick or `$VAR`
+      # executes at activation time, and one carrying whitespace truncates the
+      # flags after it (Go's flag package stops at the first non-flag
+      # argument), silently resolving their defaults against the real $HOME.
+      # Double quotes would stop only the second of those; single-quoting is
+      # what stops both. checkShellSafe in the binary cannot help here: it runs
+      # after bash has already parsed the line.
+      "--router-path ${lib.escapeShellArg "${config.home.profileDirectory}/bin/hookyard"}"
+      "--state-dir ${lib.escapeShellArg cfg.stateDir}"
+      "--claude-settings ${lib.escapeShellArg cfg.claudeSettings}"
+      "--codex-config ${lib.escapeShellArg cfg.codexConfig}"
+      "--cursor-hooks ${lib.escapeShellArg cfg.cursorHooks}"
     ]
   );
 in {
