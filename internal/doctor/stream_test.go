@@ -3,6 +3,7 @@ package doctor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,7 +34,7 @@ func TestStreamFindingsCountsEnforcedFalseAndSkipsTornLine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	findings := streamFindings(stateDir, now)
+	findings := streamFindings(stateDir, nil, now)
 	if len(findings) != 1 {
 		t.Fatalf("want 1 finding, got %d", len(findings))
 	}
@@ -51,11 +52,27 @@ func TestStreamFindingsUnknownWhenNoFile(t *testing.T) {
 	stateDir := t.TempDir()
 	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
 
-	findings := streamFindings(stateDir, now)
+	findings := streamFindings(stateDir, nil, now)
 	if len(findings) != 1 {
 		t.Fatalf("want 1 finding, got %d", len(findings))
 	}
 	if findings[0].Status != Unknown {
 		t.Errorf("status = %v, want Unknown", findings[0].Status)
+	}
+}
+
+func TestStreamFindingsFailsWhenEnginesDisagreeOnStateDir(t *testing.T) {
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+
+	findings := streamFindings("", []string{"/state/a", "/state/b"}, now)
+	if len(findings) != 1 {
+		t.Fatalf("want 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Status != Fail {
+		t.Errorf("status = %v, want Fail", f.Status)
+	}
+	if !strings.Contains(f.Detail, "/state/a") || !strings.Contains(f.Detail, "/state/b") {
+		t.Errorf("detail = %q, want both state dirs named", f.Detail)
 	}
 }
