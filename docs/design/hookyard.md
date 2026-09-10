@@ -508,15 +508,17 @@ has to render to Codex is the one Codex takes. The engine with the poorest
 decision vocabulary is the engine whose vocabulary happens to be exactly the
 one this design uses.
 
-One thing about this evidence is worth stating precisely, because the rest of
-the document is careful about it. The confirmation is **static**: it comes
-from the validation strings compiled into the shipped `codex-cli 0.153.4`
-binary, which enumerate the accepted surface by naming everything outside it
-as unsupported. That is strong evidence about the contract — these are the
-messages Codex emits when it refuses a field — and it is not the same as
-having watched Codex refuse a tool call. §12 carries the live confirmation as
-a remaining item, downgraded from security-blocking to a behavioural check on
-a contract already read off the implementation.
+One thing about this evidence was worth stating precisely, because the rest
+of the document is careful about it. The confirmation had been **static**: it
+came from the validation strings compiled into the shipped `codex-cli
+0.153.4` binary, which enumerate the accepted surface by naming everything
+outside it as unsupported — strong evidence about the contract, since these
+are the messages Codex emits when it refuses a field, but not the same as
+having watched Codex refuse a tool call. That gap is closed:
+`codex-pre_tool_use-DENY.json` is a payload captured from a live call, and it
+reports `Blocked by hook — hookyard probe deny`. §12, item 3 carries the full
+record; the confirmation there is now first-hand, not read off the
+implementation.
 
 Note where that verdict goes. It goes to hookyard's own record, which exists
 on disk whether or not anything is subscribed to it (§5, §6). It does *not*
@@ -1466,6 +1468,24 @@ not have it silently resolved in the permissive direction. This applies to
 Cursor unless and until its `permission` field is confirmed to support a
 genuine third state, and it is the deliberately conservative default for any
 future engine whose decision shape turns out to be binary.
+
+**That default is now overridden for Codex, and the override is real rather
+than the rule aging out.** Cursor's tri-state is confirmed in §4 — `permission`
+accepts `allow`, `deny`, and `ask` — so the rule's first clause has already
+retired on its own terms. The second clause is the standing general default,
+and Codex's `pre_tool_use` channel, which accepts a deny and rejects
+everything else including `ask` (§4), sits squarely inside it: this is a rule
+still in force being overridden, not a rule that was already going to stop
+applying. Issue #9 overrides it anyway. It rules that a consolidated `ask` on
+Codex records as `enforced: false` — computed but not enforced — and
+rendering a deny to Codex *is* enforcing it, so the two cannot both be true of
+the same verdict. The consequence is stated plainly, because it sits on the
+permissive side of a security path: a guard's `ask` on a Codex tool call now
+results in the call proceeding, the exact outcome this rule exists to rule
+out everywhere else it applies. What the override buys back is visibility,
+not enforcement — the record marks the verdict `enforced: false`, so the loss
+is in the stream rather than silent, the same trade the advisory-slot
+paragraph above makes.
 
 ## 8. Native config emission, registration, and coexistence
 

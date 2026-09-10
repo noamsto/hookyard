@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 
+	"github.com/noamsto/hookyard/internal/atomicfile"
 	"github.com/noamsto/hookyard/internal/vocab"
 )
 
@@ -81,11 +83,33 @@ func (m *Manifest) validate() error {
 
 func (m *Manifest) validateHandler(h Handler) error {
 	where := fmt.Sprintf("%s: handler %q", m.Source, h.ID)
-	if !idPattern.MatchString(h.ID) {
-		return fmt.Errorf("%s: id must match %s", where, idPattern)
+	if err := validateStatic(where, h); err != nil {
+		return err
 	}
 	if err := execIsRunnable(h.Exec); err != nil {
 		return fmt.Errorf("%s: exec %q: %w", where, h.Exec, err)
+	}
+	return nil
+}
+
+// validateStatic runs every rule that does not touch the filesystem: id
+// pattern, exec path form, event and engine vocabulary, match vocabulary, the
+// timeout_ms bound, and coverage. ReadTable calls this alone, on the critical
+// path of every guarded tool call, because re-statting an exec there buys
+// nothing the exec attempt does not already report as a handler error.
+func validateStatic(where string, h Handler) error {
+	if !idPattern.MatchString(h.ID) {
+		return fmt.Errorf("%s: id must match %s", where, idPattern)
+	}
+	// Same rule §9 applies to the emitted router command, applied to handlers.
+	// A relative exec resolves at hook-fire time against the directory the
+	// agent's tool call runs in, and a bare name against the PATH the engine
+	// hands down — neither is hookyard's to choose, so either would let a file
+	// that happens to sit there stand in for the guard.
+	if !filepath.IsAbs(h.Exec) {
+		return fmt.Errorf("%s: exec %q must be an absolute path, because it is resolved at "+
+			"hook-fire time against the agent's working directory and PATH, not the installer's",
+			where, h.Exec)
 	}
 	if h.TimeoutMS < 0 || h.TimeoutMS > MaxHandlerTimeoutMS {
 		return fmt.Errorf("%s: timeout_ms %d outside 0..%d", where, h.TimeoutMS, MaxHandlerTimeoutMS)
@@ -195,4 +219,44 @@ func Merge(manifests []*Manifest) ([]Handler, error) {
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
 	return all, nil
+}
+
+// WriteTable writes the consolidated handler table, in the same shape as a
+// manifest, at a fixed 0600: the table is hookyard's own file, so a
+// pre-existing one left looser must be tightened rather than honoured.
+func WriteTable(path string, handlers []Handler) error {
+	raw, err := json.Marshal(Manifest{Handlers: handlers})
+	if err != nil {
+		return err
+	}
+	return atomicfile.Write(path, raw, 0o600)
+}
+
+// ReadTable reads the table WriteTable produces and re-runs every validation
+// rule that does not touch the filesystem, because a hand-edited or stale
+// table must not be trusted on the critical path just because some earlier
+// install was well-behaved. Unlike Load, it does not call execIsRunnable and
+// does not reject a zero-handler table: "nothing is registered" is a
+// legitimate table state, distinct from "the table is gone".
+func ReadTable(path string) ([]Handler, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var t Manifest
+	if err := json.Unmarshal(raw, &t); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	seen := map[string]bool{}
+	for _, h := range t.Handlers {
+		where := fmt.Sprintf("%s: handler %q", path, h.ID)
+		if err := validateStatic(where, h); err != nil {
+			return nil, err
+		}
+		if seen[h.ID] {
+			return nil, fmt.Errorf("%s: handler id %q declared twice in table", path, h.ID)
+		}
+		seen[h.ID] = true
+	}
+	return t.Handlers, nil
 }

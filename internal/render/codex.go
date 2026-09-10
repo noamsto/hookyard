@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/noamsto/hookyard/internal/atomicfile"
 )
 
 const (
@@ -73,7 +74,14 @@ func WriteCodex(path string, entries []Entry) error {
 	if _, err := toml.Decode(out, &probe); err != nil {
 		return fmt.Errorf("rendering %s would produce invalid TOML, refusing to write: %w", path, err)
 	}
-	return writeAtomic(path, []byte(out))
+	// This is a file render does not own, so a pre-existing one keeps its
+	// perm bits; one hookyard creates starts at 0600, matching how Codex
+	// ships its own.
+	mode := os.FileMode(0o600)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	return atomicfile.Write(path, []byte(out), mode)
 }
 
 // encodeCodexBlock assembles the block with explicit array-of-table headers

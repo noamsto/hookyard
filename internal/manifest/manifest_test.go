@@ -71,6 +71,18 @@ func TestLoadRejects(t *testing.T) {
 		body: `{"handlers":[{"id":"a","exec":"/nonexistent/guard","events":["pre_tool"],"engines":["cursor"]}]}`,
 		want: "exec",
 	}, {
+		// Would resolve at hook-fire time against whatever directory the
+		// agent's tool call runs in, not the installer's.
+		name: "exec that is a relative path",
+		body: `{"handlers":[{"id":"a","exec":"hooks/guard.sh","events":["pre_tool"],"engines":["cursor"]}]}`,
+		want: "must be an absolute path",
+	}, {
+		// A bare name goes through LookPath, resolving from the hook process's
+		// PATH — the very thing §9 refuses to trust.
+		name: "exec that is a bare name",
+		body: `{"handlers":[{"id":"a","exec":"guard.sh","events":["pre_tool"],"engines":["cursor"]}]}`,
+		want: "must be an absolute path",
+	}, {
 		name: "unknown engine",
 		body: `{"handlers":[{"id":"a","exec":"EXEC","events":["pre_tool"],"engines":["emacs"]}]}`,
 		want: "unknown engine",
@@ -112,6 +124,152 @@ func TestLoadAcceptsEngineScopedEventAlongsideOtherEngines(t *testing.T) {
 	   "engines":["cursor","codex"],"match":["Bash"]}]}`)
 	if _, err := Load(path); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWriteTableThenReadTableRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	exec := filepath.Join(dir, "guard.sh")
+	if err := os.WriteFile(exec, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "table.json")
+	handlers := []Handler{
+		{ID: "a", Exec: exec, Events: []string{"pre_tool"}, Engines: []string{"cursor"}, Match: []string{"Bash"}},
+		{ID: "b", Exec: exec, Events: []string{"post_tool"}, Engines: []string{"claude-code"}},
+	}
+
+	if err := WriteTable(path, handlers); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadTable(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(handlers) {
+		t.Fatalf("got %d handlers, want %d", len(got), len(handlers))
+	}
+	for i, h := range handlers {
+		if got[i].ID != h.ID {
+			t.Errorf("handler %d: id = %q, want %q", i, got[i].ID, h.ID)
+		}
+	}
+}
+
+func TestReadTableRejectsEngineNativeMatcherInMatchField(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "table.json")
+	body := `{"handlers":[{"id":"a","exec":"/nonexistent","events":["pre_tool"],"engines":["cursor"],"match":["Shell"]}]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ReadTable(path)
+	if err == nil {
+		t.Fatal("want an error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a normalized tool name") {
+		t.Errorf("got %v, want an error mentioning normalized tool name", err)
+	}
+}
+
+// ReadTable is the hook-time reader, so it is where a non-absolute exec has to
+// be caught: an install-time stat resolves against the installer's directory,
+// but the router runs the handler from the agent's.
+func TestReadTableRejectsNonAbsoluteExec(t *testing.T) {
+	for _, exec := range []string{"hooks/guard.sh", "guard.sh", "./guard.sh", ""} {
+		t.Run(exec, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "table.json")
+			body := `{"handlers":[{"id":"a","exec":"` + exec + `","events":["pre_tool"],"engines":["cursor"]}]}`
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := ReadTable(path)
+			if err == nil {
+				t.Fatal("want an error, got nil")
+			}
+			if !strings.Contains(err.Error(), "must be an absolute path") {
+				t.Errorf("got %v, want an error about an absolute path", err)
+			}
+		})
+	}
+}
+
+// The counterpart: an absolute exec is accepted at hook time even though
+// ReadTable never stats it.
+func TestReadTableAcceptsAbsoluteExec(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "table.json")
+	body := `{"handlers":[{"id":"a","exec":"/opt/hookyard/guard.sh","events":["pre_tool"],"engines":["cursor"]}]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadTable(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d handlers, want 1", len(got))
+	}
+}
+
+func TestReadTableAcceptsZeroHandlers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "table.json")
+	if err := os.WriteFile(path, []byte(`{"handlers":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadTable(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d handlers, want 0", len(got))
+	}
+}
+
+// ReadTable does not re-stat exec, so a table naming a handler hookyard could
+// never run is still accepted; Load is what catches that, at merge time.
+func TestReadTableAcceptsNonExistentExecButLoadRejectsIt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "table.json")
+	body := `{"handlers":[{"id":"a","exec":"/nonexistent/guard","events":["pre_tool"],"engines":["cursor"]}]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadTable(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d handlers, want 1", len(got))
+	}
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("want Load to reject the same table, got nil")
+	}
+}
+
+func TestWriteTableLandsFixed0600EvenOverALooserExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "table.json")
+	if err := os.WriteFile(path, []byte(`{"handlers":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := WriteTable(path, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v, want 0600", info.Mode().Perm())
 	}
 }
 

@@ -9,8 +9,6 @@ package render
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -50,7 +48,7 @@ type planKey struct {
 // per-event exec that fans out internally (§4) — so the emitted matcher is the
 // union of that event's handlers' matchers, and the router decides which
 // handlers a given call actually reaches.
-func BuildPlan(handlers []manifest.Handler, routerPath string) (Plan, error) {
+func BuildPlan(handlers []manifest.Handler, routerPath, stateDir string) (Plan, error) {
 	if !strings.Contains(routerPath, Marker) {
 		return nil, fmt.Errorf("router path %q does not contain the marker %q, so emitted entries "+
 			"could not be found again to strip", routerPath, Marker)
@@ -89,7 +87,7 @@ func BuildPlan(handlers []manifest.Handler, routerPath string) (Plan, error) {
 		native, _ := vocab.NativeEvent(k.engine, k.event)
 		entry := Entry{
 			Event:   native,
-			Command: command(routerPath, k.engine, k.event),
+			Command: command(routerPath, k.engine, k.event, stateDir),
 		}
 		if !everyTool[k] {
 			entry.Matcher = strings.Join(sorted(matchers[k]), "|")
@@ -111,8 +109,8 @@ func BuildPlan(handlers []manifest.Handler, routerPath string) (Plan, error) {
 // is the router's only way to spot a cross-registration delivery: Cursor reads
 // Claude Code's settings as a hook source, and no payload says which config
 // asked for the call (§8, sink 4).
-func command(routerPath string, engine vocab.Engine, event string) string {
-	return fmt.Sprintf("%s route --registered-for %s --event %s", routerPath, engine, event)
+func command(routerPath string, engine vocab.Engine, event, stateDir string) string {
+	return fmt.Sprintf("%s route --registered-for %s --event %s --state-dir %s", routerPath, engine, event, stateDir)
 }
 
 func planKeys(matchers map[planKey]map[string]bool, everyTool map[planKey]bool) []planKey {
@@ -137,37 +135,4 @@ func sorted(set map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// writeAtomic replaces path in one rename, so no reader sees a half-written
-// config. A file hookyard creates starts at 0600, matching how the engines
-// ship their own.
-func writeAtomic(path string, content []byte) error {
-	mode := os.FileMode(0o600)
-	if info, err := os.Stat(path); err == nil {
-		mode = info.Mode().Perm()
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".hookyard-*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	// A no-op once the rename below succeeds; the point is to leave nothing
-	// behind on any path that does not get that far.
-	defer func() { _ = os.Remove(name) }()
-
-	if _, err := tmp.Write(content); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(name, mode); err != nil {
-		return err
-	}
-	return os.Rename(name, path)
 }

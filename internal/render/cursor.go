@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/noamsto/hookyard/internal/atomicfile"
 )
 
 // cursorEntry is one row in ~/.cursor/hooks.json. matcher is omitted when the
@@ -71,5 +73,12 @@ func WriteCursor(path string, entries []Entry) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(path, out)
+	// This is a file render does not own, so a pre-existing one keeps its
+	// perm bits; one hookyard creates starts at 0600, matching how Cursor
+	// ships its own.
+	mode := os.FileMode(0o600)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	return atomicfile.Write(path, out, mode)
 }

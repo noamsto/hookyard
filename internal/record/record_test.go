@@ -206,3 +206,116 @@ func TestBuildLineFallsBackToMinimalRecord(t *testing.T) {
 		t.Errorf("minimal fallback must not include handlers")
 	}
 }
+
+func TestBuildLineAdviceBoundPreservesSiblings(t *testing.T) {
+	yes := true
+	e := Event{
+		Engine: vocab.Codex, SessionID: "s", Verdict: "ask", Router: RouterOK,
+		Handlers: []HandlerOutcome{
+			{
+				Name: "advisory-guard", Outcome: OutcomeAdvise, Elapsed: time.Millisecond,
+				Advice: strings.Repeat("a", 64*1024), Delivered: &yes,
+			},
+			{Name: "error-guard", Outcome: OutcomeError, Elapsed: time.Millisecond, Message: "exec: no such file or directory"},
+			{Name: "timeout-guard", Outcome: OutcomeTimeout, Elapsed: 5 * time.Second},
+			{Name: "abstain-guard", Outcome: OutcomeAbstain, Elapsed: time.Millisecond},
+		},
+	}
+	line, err := buildLine(toRecord(e, time.Now(), "k"))
+	if err != nil {
+		t.Fatalf("buildLine: %v", err)
+	}
+
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(line, &decoded); err != nil {
+		t.Fatalf("line is not valid JSON: %v", err)
+	}
+	var handlers []map[string]json.RawMessage
+	if err := json.Unmarshal(decoded["handlers"], &handlers); err != nil {
+		t.Fatalf("unmarshal handlers: %v", err)
+	}
+	if len(handlers) != 4 {
+		t.Fatalf("got %d handlers, want 4 (advice bound should prevent eviction)", len(handlers))
+	}
+
+	var advice string
+	if err := json.Unmarshal(handlers[0]["advice"], &advice); err != nil {
+		t.Fatalf("unmarshal advice: %v", err)
+	}
+	if len(advice) != maxReasonBytes {
+		t.Errorf("advice is %d bytes, want %d (truncated)", len(advice), maxReasonBytes)
+	}
+
+	wantOutcomes := []string{OutcomeAdvise, OutcomeError, OutcomeTimeout, OutcomeAbstain}
+	for i, want := range wantOutcomes {
+		var outcome string
+		if err := json.Unmarshal(handlers[i]["outcome"], &outcome); err != nil {
+			t.Fatalf("unmarshal handlers[%d].outcome: %v", i, err)
+		}
+		if outcome != want {
+			t.Errorf("handlers[%d].outcome = %q, want %q", i, outcome, want)
+		}
+	}
+}
+
+func TestHandlerMessageRoundTrip(t *testing.T) {
+	e := Event{
+		Engine: vocab.Codex, SessionID: "s", Verdict: "allow", Router: RouterOK,
+		Handlers: []HandlerOutcome{
+			{Name: "crashy-guard", Outcome: OutcomeError, Elapsed: time.Millisecond, Message: "exec: no such file or directory"},
+			{Name: "quiet-guard", Outcome: OutcomeAbstain, Elapsed: time.Millisecond},
+		},
+	}
+	line, err := buildLine(toRecord(e, time.Now(), "k"))
+	if err != nil {
+		t.Fatalf("buildLine: %v", err)
+	}
+
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(line, &decoded); err != nil {
+		t.Fatalf("line is not valid JSON: %v", err)
+	}
+	var handlers []map[string]json.RawMessage
+	if err := json.Unmarshal(decoded["handlers"], &handlers); err != nil {
+		t.Fatalf("unmarshal handlers: %v", err)
+	}
+
+	var msg string
+	if err := json.Unmarshal(handlers[0]["message"], &msg); err != nil {
+		t.Fatalf("unmarshal message: %v", err)
+	}
+	if msg != "exec: no such file or directory" {
+		t.Errorf("message = %q, want %q", msg, "exec: no such file or directory")
+	}
+	if _, ok := handlers[1]["message"]; ok {
+		t.Errorf("handlers[1] has message key, want omitted for empty Message")
+	}
+}
+
+func TestNonAdviseHandlerNoDeliveredKey(t *testing.T) {
+	// Confirms this still holds now that toRecord also truncates Advice and
+	// Message on every handler, not just Advise ones.
+	yes := true
+	e := Event{
+		Engine: vocab.Codex, SessionID: "s", Verdict: "deny", Router: RouterOK,
+		Handlers: []HandlerOutcome{
+			{Name: "deny-guard", Outcome: OutcomeDeny, Elapsed: time.Millisecond, Delivered: &yes},
+		},
+	}
+	line, err := buildLine(toRecord(e, time.Now(), "k"))
+	if err != nil {
+		t.Fatalf("buildLine: %v", err)
+	}
+
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(line, &decoded); err != nil {
+		t.Fatalf("line is not valid JSON: %v", err)
+	}
+	var handlers []map[string]json.RawMessage
+	if err := json.Unmarshal(decoded["handlers"], &handlers); err != nil {
+		t.Fatalf("unmarshal handlers: %v", err)
+	}
+	if _, ok := handlers[0]["delivered"]; ok {
+		t.Errorf("non-advise handler has delivered key, want omitted")
+	}
+}

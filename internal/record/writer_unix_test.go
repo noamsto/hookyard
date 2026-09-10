@@ -83,6 +83,31 @@ func TestAppendTightensPreexistingDir(t *testing.T) {
 	assertFileMode(t, streamDir, 0o700)
 }
 
+// TestAppendTightensPreexistingStreamFile is the same rule for the file that
+// actually holds the data: today's stream file already existing at a looser
+// mode must be tightened by the next append, not honoured until tomorrow's
+// rotation.
+func TestAppendTightensPreexistingStreamFile(t *testing.T) {
+	old := syscall.Umask(0)
+	t.Cleanup(func() { syscall.Umask(old) })
+
+	stateDir := filepath.Join(t.TempDir(), "hookyard")
+	w := &Writer{StateDir: stateDir}
+	path := StreamPath(stateDir, w.now())
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if err := w.Append(testEvent()); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	assertFileMode(t, path, 0o600)
+}
+
 // concurrentAppendWorkerEnv guards TestConcurrentAppendWorker so a normal
 // `go test` run skips it: it only does something when re-exec'd as a
 // subprocess by TestConcurrentAppendsAcrossProcesses.
