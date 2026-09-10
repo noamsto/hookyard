@@ -23,10 +23,9 @@ import (
 // two writers' markers collided on this machine and what it cost.
 const Marker = "/bin/hookyard"
 
-// EmittedTimeoutSeconds is the timeout every emitted entry carries. It is a
-// hang-containment budget, not a performance one (§4). Emitting it is not
-// optional: Codex applies no default at all when an entry declares none, so an
-// omitted timeout lets one stuck handler stall a turn indefinitely.
+// EmittedTimeoutSeconds bounds how long one stuck handler can hold a tool call
+// (§4). Emitting it is not optional: Codex applies no default at all when an
+// entry declares none, so an omitted timeout stalls the turn indefinitely.
 const EmittedTimeoutSeconds = 5
 
 // Entry is one hook registration in one engine's config.
@@ -140,10 +139,9 @@ func sorted(set map[string]bool) []string {
 	return out
 }
 
-// writeAtomic lands content at path through a temp file in the same directory
-// and one rename, so no reader ever sees a half-written config. It preserves
-// the existing file's mode; a file hookyard creates starts at 0600, matching
-// how the engines ship their own.
+// writeAtomic replaces path in one rename, so no reader sees a half-written
+// config. A file hookyard creates starts at 0600, matching how the engines
+// ship their own.
 func writeAtomic(path string, content []byte) error {
 	mode := os.FileMode(0o600)
 	if info, err := os.Stat(path); err == nil {
