@@ -1,0 +1,21 @@
+{
+  "conversation_id": "0d3d3f5d-11c5-4e0f-acf1-0712230c2be6",
+  "cursor_version": "2026.09.08-6caf4ff",
+  "cwd": "",
+  "generation_id": "0d3d3f5d-11c5-4e0f-acf1-0712230c2be6",
+  "hook_event_name": "preToolUse",
+  "model": "grok-4.6",
+  "session_id": "0d3d3f5d-11c5-4e0f-acf1-0712230c2be6",
+  "tool_input": {
+    "command": "echo hookyard-probe",
+    "cwd": "",
+    "timeout": 30000
+  },
+  "tool_name": "Shell",
+  "tool_use_id": "0dff9d45-8e29-4ec7-9bd9-6afc13352b3c",
+  "transcript_path": null,
+  "user_email": "<REDACTED-EMAIL>",
+  "workspace_roots": [
+    "<PROBE>/capture/cursor-probe"
+  ]
+}

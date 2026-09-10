@@ -1,0 +1,14 @@
+{
+  "cwd": "<PROBE>/capture/probe",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-6-astra",
+  "permission_mode": "bypassPermissions",
+  "session_id": "01a089e8-9198-7313-8951-aac85f9bdbc0",
+  "tool_input": {
+    "command": "echo hookyard-probe"
+  },
+  "tool_name": "Bash",
+  "tool_use_id": "exec-a3fb2b66-bfd2-4e15-b23f-9d81b11d74d9",
+  "transcript_path": null,
+  "turn_id": "01a089e8-91f9-7d71-9f8a-00a306f553b7"
+}

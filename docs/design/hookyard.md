@@ -560,7 +560,7 @@ is holding a tool call until the router exits.
 | Emitted timeout (native config, §8) | **5 s**, all three engines | This entry is on the synchronous deny path, so it is deliberately tighter than the 15–60 s fire-and-forget values deployed today. It is not a performance budget — §4.1 measures the whole shape at 16.1 ms worst case, 0.3% of it — it is a hang-containment budget: it bounds how long one stuck guard can freeze one tool call before the engine gives up on it. Five seconds is short enough that a human waiting on the call reads it as a stutter rather than a hang, and long enough that no guard doing honest work on a cold filesystem cache is cut off. houston's installer emits 5 per entry too (`hook/install.go:139`), which is prior art that the value is livable — it is not the reason for it |
 | Router's internal deadline | **4.5 s** | 500 ms under the emitted timeout. Two things have to fit in that margin, not one: the router process's own start and fan-out, which §4.1 measures at 16.1 ms worst case and which the margin therefore covers about 30-fold over; and — the part that matters more — the router's ability to *lose gracefully*. Hitting its own deadline first, rather than being killed by the engine's, is what lets the router print a fail-open verdict and append a `router: "timeout"` record before it exits (§5). A router that only ever died at the engine's timeout could never record the fact that it did |
 | Per-handler sub-budget | **4.3 s**, one shared deadline context, run concurrently | Handlers run as concurrent subprocesses under a single deadline context, not in sequence, so the sub-budget is the internal deadline minus a ~200 ms consolidation margin: the time the router needs after the slowest handler returns or is killed to build the verdict, write it, and append the record. §4.1's fan-out numbers are the evidence that concurrency is the right structure here — four guards cost what one costs — so the sub-budget is per-handler wall clock, not a share of a serial budget |
-| Engine default when no timeout is declared | **Unverified** | dispatcher's Codex plugin declares none today; what Codex falls back to was not confirmed this pass. hookyard's own installer always emits an explicit timeout precisely so this row never applies to a hookyard entry |
+| Engine default when no timeout is declared | **None on Codex — measured, and worse than an unknown default** | A Codex `UserPromptSubmit` entry declaring no `timeout`, running a hook that ticked once a second, was allowed to run for the full 180 s of its own loop and was never killed; Codex displayed `Working … Running hook` and waited. So the fallback is not a generous default, it is no bound at all: an undeclared timeout lets one hook stall a turn indefinitely. Measured to 180 s, which is where the probe stopped rather than where Codex did. This vindicates the rule that hookyard's installer always emits an explicit timeout, and upgrades the reason from "the default is unknown" to "there is no default to rely on" |
 
 What this chain buys over what exists piecemeal today is one number, emitted
 identically for three engines, that the router is designed to live inside —
@@ -1140,14 +1140,51 @@ first-hand config reads for its strongest two legs, with the
 `PermissionRequest`/`PermissionDenied` and Claude-Code-side-of-Subagent legs
 still carried rather than re-verified.
 
-Field shapes diverge too, in ways the envelope has to reconcile rather than
-paper over: the session identifier is called `session_id` (Claude Code),
-`conversation_id` (Codex), or `generation_id` (Cursor); working directory is
-a single `cwd` string for Claude Code and Codex but a `workspace_roots` array
-plus a per-event `cwd` for Cursor. This layer of the claim is carried from the
-prior pass's reading of each engine's own hook payload documentation — it was
-not re-checked against a live payload capture this pass, since no live traffic
-was captured for any engine here, only static config files.
+Field shapes diverge too — and this layer is no longer carried from
+documentation. One `pre_tool` payload per engine was captured live from a real
+tool call; the fixtures are in
+[`fixtures/hook-payloads/`](fixtures/hook-payloads/), and they correct the
+prior account in two places, one of which makes the envelope's job easier
+rather than harder.
+
+| | Claude Code 2.1.263 | Codex 0.153.4 | Cursor 2026.09.08 |
+|---|---|---|---|
+| session id | `session_id` | `session_id` | `session_id` |
+| second id | `prompt_id` | `turn_id` | `conversation_id` + `generation_id` |
+| working dir | `cwd`, populated | `cwd`, populated | `cwd` **empty**; real path in `workspace_roots[0]` |
+| tool name | `tool_name: "Bash"` | `tool_name: "Bash"` | `tool_name: "Shell"` |
+| tool args | `tool_input` (`command`, `description`) | `tool_input` (`command`) | `tool_input` (`command`, `cwd`, `timeout`) |
+| call id | `tool_use_id` | `tool_use_id: "exec-…"` | `tool_use_id` |
+| event name field | `hook_event_name: "PreToolUse"` | `hook_event_name: "PreToolUse"` | `hook_event_name: "preToolUse"` |
+| also present | `permission_mode`, `effort`, `transcript_path` | `permission_mode`, `model`, `transcript_path: null` | `model`, `cursor_version`, `user_email`, `workspace_roots` |
+
+**The correction that helps: all three engines send `session_id`.** The prior
+pass had the session identifier renamed per engine — `session_id`,
+`conversation_id`, `generation_id` respectively — and that is simply not what
+they send. `session_id` is universal; what differs is the *second*, narrower
+identifier, and it is `prompt_id`, `turn_id` and `generation_id` respectively.
+§6's correlation key gets a stable field across all three instead of a
+three-way rename.
+
+**The correction that hurts: Cursor's `cwd` is the empty string.** Not absent,
+not wrong — empty, with the real directory only in `workspace_roots[0]`. A
+guard that reads `cwd` to decide anything gets `""` on Cursor and a real path
+on the other two, which is the worst shape for a bug: it fails silently and
+only on one engine. `git-default-branch-guard`, which has to know which
+repository it is looking at, is exactly the kind of handler this breaks. The
+envelope must therefore populate its canonical `cwd` from
+`workspace_roots[0]` when the engine's own `cwd` is empty, and that fallback
+is a translation rule, not a nicety.
+
+**A third thing the capture settles, which no field table would show.** No
+engine's payload carries any indication of *which config source registered
+the hook* — no `source`, `origin`, `config_path`, or equivalent in any of the
+ten captured payloads. That is what decides §8's sink-4 question, and it is
+dealt with there. What the payloads do carry is an unambiguous *engine*
+discriminator: `cursor_version` appears only in Cursor's, `effort` and
+`prompt_id` only in Claude Code's, `turn_id` only in Codex's. The router can
+always tell which engine it is talking to; it cannot tell which file told the
+engine to call it.
 
 The prior pass also described Cursor as splitting tool events by protocol
 (shell, MCP, file) *instead of* exposing a generic pre/post-tool-use pair.
@@ -1636,6 +1673,33 @@ answer it: it can read the same settings sources and report whether hooks are
 gated off, rather than leaving the operator to infer coverage from an empty
 stream.
 
+**The trust gate is not a Claude Code quirk — all three engines have it, and
+the payload-capture run hit it on every one.** Cursor refused to run in a
+fresh directory until passed `--trust`, warning that the agent "can execute
+code and access files in this directory". Codex prompted before loading
+anything and said exactly what was at stake: "Trusting the directory allows
+project-local config, **hooks**, and exec policies to load." Claude Code's is
+the one read from code rather than met head-on, since its probe run was given
+a pre-seeded trust record. So "hooks do not run in an untrusted workspace" is
+a uniform property of all three engines rather than one engine's
+idiosyncrasy, and it is the likeliest way for a guard to be silently absent
+on a machine where it is correctly installed. `hookyard doctor` should report
+workspace trust per engine for the directory it runs in; that is the check,
+not an extra beside it.
+
+**Codex keeps directory trust in the same file hookyard writes, which
+constrains the installer.** `~/.codex/config.toml` holds both `[hooks.state]`
+(per-entry hook trust, §9) and `[projects."<dir>"] trust_level = "trusted"`
+(per-directory trust). This was confirmed the hard way during the capture
+run: rewriting that file wholesale dropped a directory trust granted minutes
+earlier, and Codex prompted for it again. An installer that regenerates
+`config.toml` would silently revoke every project the user has trusted and
+every hook they have reviewed — worse than losing a hook entry, and
+experienced by the user as Codex abruptly distrusting their machine.
+Preserving `[projects]` and `[hooks.state]` is therefore a hard requirement
+of the Codex writer, not the tidy option: the marker-scoped strip must carry
+both through the atomic rename untouched.
+
 houston's own installer is named here for exactly one reason: it is another
 writer to `~/.claude/settings.json` that hookyard must be able to coexist
 with — potential rather than pre-existing, since it has not actually written
@@ -1865,23 +1929,58 @@ the one double-firing case in this section that is a property of the *design*
 rather than of a migration window, so it does not age out when the last
 behavior migrates.
 
-Two ways out, and the choice is not obvious enough to settle here. Emit
-Cursor-native config only for Cursor and accept that Claude Code's file is
-read by both engines — which means hookyard must *not* register the same
-handler in `~/.claude/settings.json` for any handler it also registers for
-Cursor, collapsing the two engines into one registration and losing
-per-engine matcher control. Or keep both registrations and give the router a
-suppression rule: an inbound Cursor event whose registration provenance is
-the Claude import is dropped in favour of the native one. The second keeps
-§8's model intact and costs the router a provenance check it does not
-currently have. One further asymmetry bears on the choice:
-`hasFailClosedHooksForStep` consults only the enterprise, team, project,
-user, and runtime sources — **not** the Claude-imported ones — so a handler
-that reaches Cursor only via `claudeUserHooks` can never be fail-closed
-there, which matters for exactly the security-classed handlers §12's
-fail-open question is about. Whichever way this goes, it should be decided
-before Cursor and Claude Code are both live for one handler, which under
-§10's order is during the very first migration.
+**This is now decided, by the payload capture.** The two candidates were:
+collapse the engines into one registration and lose per-engine matcher
+control, or keep both registrations and have the router suppress the imported
+duplicate by its provenance. The second was the better design and depended on
+a fact nobody had checked — whether an inbound payload says which config
+source registered the hook. It does not. None of the ten captured payloads
+(§7) carries a `source`, `origin`, `config_path` or any equivalent, on any
+engine. Provenance-as-read-from-the-payload is not available, so the
+suppression rule as originally framed cannot be written.
+
+It survives in a different form, because hookyard does not need the engine to
+tell it something hookyard itself wrote. **The router supplies its own
+provenance through the command line it emits.** §8 already renders one entry
+per engine from one table row, so each rendering can carry its own engine tag
+in argv — the `~/.cursor/hooks.json` entry invokes the router with
+`--registered-for cursor`, the `~/.claude/settings.json` entry with
+`--registered-for claude-code`. The payloads then supply the other half: they
+carry an unambiguous engine discriminator even though they carry no
+provenance (`cursor_version` only on Cursor, `prompt_id`/`effort` only on
+Claude Code, `turn_id` only on Codex). The rule is one comparison:
+
+> **Cross-registration suppression.** If the engine detected from the payload
+> is not the engine this invocation was registered for, the router exits
+> without running handlers and appends a record with a `suppressed`
+> outcome. A Cursor event arriving through the Claude Code registration is
+> therefore dropped exactly once, by the invocation that should not have been
+> reached, and the native registration handles it normally.
+
+That keeps per-engine matcher control, needs nothing from the engines, and
+costs one string comparison on the critical path. The `suppressed` record
+matters as much as the suppression: a cross-registration hit is also the
+signal that an engine has started importing another engine's config, which is
+how this whole problem was found in the first place.
+
+One asymmetry constrains where hookyard registers rather than how it
+suppresses: `hasFailClosedHooksForStep` consults only Cursor's enterprise,
+team, project, user, and runtime sources — **not** the Claude-imported ones —
+so a handler that reaches Cursor *only* via `claudeUserHooks` can never be
+fail-closed there. Any handler hookyard may later want to fail closed on
+Cursor has to have a native Cursor registration, which the decision above
+already gives it.
+
+**A second, narrower double-fire lives entirely inside Cursor, and the
+capture found it too.** With both `preToolUse` and `beforeShellExecution`
+registered, a single shell call fired *both* — the generic event and the
+protocol-split one, one after the other. On the deny path only `preToolUse`
+fired, because denying there short-circuits before the protocol-split event
+runs. So the two families are not alternatives to choose between on taste:
+`preToolUse` is strictly earlier and gates the other. hookyard registers
+`preToolUse` alone for `pre_tool` on Cursor, and an entry that wants the
+narrower shell-only matcher takes `cursor:beforeShellExecution` as an
+engine-scoped name (§7) — never both for one handler.
 
 **Verdict: the self-healing half does not survive.** It was true of one
 sink under one merge that hookyard neither owns nor writes to. What replaces
@@ -2336,9 +2435,11 @@ its settings-merge path. `codex-cli` is a Rust binary, which gives the least —
 serde field names and validation strings — but those strings enumerate the
 accepted surface precisely, by naming everything outside it as unsupported.
 Reading an implementation's own rejection messages is stronger evidence than
-reading documentation about it, and weaker than watching it behave. Every status below that says
-*resolved* means resolved at that middle grade unless it says otherwise, and
-the one gap that only a live run can close is called out as still open.
+reading documentation about it, and weaker than watching it behave. A later
+pass added the top grade where it was needed: ten hook payloads captured from
+real tool calls across all three engines, each engine watched refusing a tool
+call, and Codex's undeclared-timeout behaviour timed. Statuses below say which
+grade they rest on where the difference matters.
 
 1. **The settings.json / Nix-overlay collision (§8).**
    **Resolved, and the risk is retired rather than mitigated.** Claude Code
@@ -2385,20 +2486,25 @@ the one gap that only a live run can close is called out as still open.
    among them, and those are the same "computed but not enforced" signal in a
    narrower form.
 
-   **What is left of this item is a live confirmation, not a design
-   question.** The contracts above are read off each engine's shipped
-   implementation, which is why the ruling flips on them, but neither engine
-   has been *watched* refusing a tool call on this machine. That check is
-   folded into the payload-capture item below, since both want the same one
-   run per engine.
+   **Both are now confirmed live as well.** The contracts above were read off
+   each engine's shipped implementation; each has since been watched refusing
+   a real tool call. Codex reported `Blocked by hook — hookyard probe deny`
+   and "The command was blocked by the PreToolUse hook … It did not run."
+   Cursor reported "The shell command did not run. The environment blocked it
+   (`hookyard probe deny`)." Claude Code, tested the same way for symmetry,
+   reported the block and declined to retry. In all three the handler's reason
+   string reached the model, which is what makes a deny legible rather than a
+   mysterious failure. This item is closed.
 4. **Codex's default hook timeout when an entry declares none (§4).**
-   **Still open.** Reconfirmed again that dispatcher's Codex plugin declares
-   no `timeout`, and that every `~/.codex/config.toml` entry deployed here
-   sets `timeout = 30` explicitly; the fallback when none is declared was not
-   found in the binary's strings and needs either Codex's own documentation or
-   a timed live run. It remains a non-issue for hookyard's own entries, which
-   always emit an explicit timeout (§4) precisely so this row never applies to
-   them.
+   **Resolved by measurement, and the answer is that there is no default.** A
+   `UserPromptSubmit` entry declaring no `timeout`, running a hook that ticked
+   once a second, ran for the full 180 s of its own loop and was never killed;
+   Codex sat at `Working … Running hook` and waited for it. The question
+   assumed a generous fallback and the reality is no bound at all, so an
+   undeclared timeout on Codex lets one hook stall a turn indefinitely. 180 s
+   is where the probe stopped, not where Codex did. §4's rule that hookyard
+   always emits an explicit timeout is vindicated, with its reason upgraded
+   from "the default is unknown" to "there is no default to rely on".
 5. **HookBus's Claude Code publisher license inconsistency (§2).**
    **Still open, carried without re-verification.** Every HookBus fact,
    licenses included, comes from the prior pass's check against the GitHub API
@@ -2451,21 +2557,19 @@ Six items the prior pass's own findings added, each with this pass's status:
   on one engine and fail open on two. The thing that should decide it is
   still a steered failure actually observed, not an argument in a document.
 
-- **No live hook payload has been captured, for any engine.** **Still open,
-  and now unambiguously the largest gap in the document.** Everything §7
-  verifies first-hand remains *static*: event keys, matcher strings, config
-  shapes, and — new this pass — each engine's own accepted-output contract
-  read off its shipped implementation. The inbound translation step itself has
-  still never been exercised against a real Codex or Cursor payload; §4.1's
-  end-to-end run used a Claude-Code-shaped payload only. The field-shape
-  divergences §7 lists (`conversation_id`, `generation_id`, Cursor's
-  `workspace_roots`) are still carried from documentation. Two other items on
-  this list now reduce to the same experiment — watching Codex and Cursor
-  actually refuse a call (item 3), and timing Codex's default timeout
-  (item 4) — so one capture run per engine closes three items at once. This
-  pass did not attempt it: each engine's capture needs a live agent session,
-  which is a decision about spending on the user's own accounts, not a
-  research step, and it was left to be asked.
+- **No live hook payload has been captured, for any engine.** **Resolved.**
+  Ten payloads were captured from real tool calls across all three engines and
+  are committed as fixtures under
+  [`fixtures/hook-payloads/`](fixtures/hook-payloads/). §7 now carries the
+  observed field table instead of a documentation-derived one, and it corrected
+  two things: all three engines send `session_id` (the prior three-way rename
+  was wrong, and this simplifies §6's correlation key), while Cursor's `cwd` is
+  the **empty string** with the real path only in `workspace_roots[0]` — a
+  one-engine silent failure for any guard that reads `cwd`, which the envelope
+  now has an explicit fallback rule for. The run also closed items 3 and 4 as
+  planned, and settled §8's sink-4 decision by establishing that no payload
+  carries registration provenance while every payload does carry an
+  unambiguous engine discriminator.
 - **Which Cursor keys does hookyard register for `pre_tool` and `post_tool`
   (§7)?** **Resolved: both families exist.** Cursor's shipped event enum
   carries the generic `preToolUse`/`postToolUse`/`postToolUseFailure`
@@ -2491,15 +2595,22 @@ Six items the prior pass's own findings added, each with this pass's status:
   compares an expected against a got hash. §9's decision to emit a stable
   profile path is therefore resting on a real mechanism, not a belief.
 
-  What is *not* determined is what the hash is taken over. Brute-forcing the
-  obvious candidates against a known entry — the command string, the
-  entry serialized as JSON or TOML with and without `timeout` and `type`, each
-  concatenated with the state key, the event name and the source path in both
-  orders and six separators — reproduced none of the deployed digests, and
-  three entries with byte-identical commands under different events hash
-  differently, so the key or event participates somehow. This matters only for
-  predicting *which* edits invalidate trust; that any edit to an entry does is
-  already established. One adjacent finding is worth carrying for §9: a
+  What is *not* determined is what the hash is taken over, and a second
+  attempt against a freshly-minted entry did not crack it either. The capture
+  run produced two hashes whose inputs were fully known — a config this
+  document wrote, trusted through Codex's own `/hooks` review — and roughly
+  two thousand candidate preimages (the command string; the entry serialized
+  as JSON or TOML with and without `timeout`, `type` and a null `matcher`;
+  each concatenated with the state key, the config path, and the event name in
+  snake and camel case, in both orders, across seven separators; and the whole
+  config file's text with and without its state section) reproduced neither.
+  Something not modelled here participates — a salt, a version prefix, or a
+  canonical form over an internal struct with fields the TOML never shows.
+
+  The behavioural half is settled, and it is the half that matters: editing an
+  entry invalidates that entry's trust and Codex re-prompts. Rewriting the
+  config announced "2 hooks are new or changed" for the two edited entries,
+  and trust had to be granted again before either would run. One adjacent finding is worth carrying for §9: a
   `bypass_hook_trust` config override exists, which is a lever for the
   first-activation problem §10 describes, and whose safety this document has
   not assessed.
@@ -2534,29 +2645,40 @@ Six items the prior pass's own findings added, each with this pass's status:
 engines' shipped implementations, and all four are consequences of engines
 being more capable than this document assumed rather than less.
 
-- **Newly opened: how does hookyard avoid double-firing on Cursor, given that
-  Cursor reads Claude Code's hook config (§8, sink 4)?** This is the one new
-  item that is a design decision rather than a verification, and it needs
-  settling before the first migration puts Claude Code and Cursor live for one
-  handler — which under §10's order is aeye, the first migration. §8 states
-  the two candidate resolutions: collapse the two engines into a single
-  registration and lose per-engine matcher control, or keep both and give the
-  router a provenance check that suppresses the imported duplicate. The
-  fail-closed asymmetry in the item above is one input to the choice; the
-  other is whether a provenance signal is even present in the inbound payload,
-  which is not known and which the payload-capture run would show.
-- **Newly opened: Claude Code can disable hooks wholesale, and hookyard cannot
-  see it (§8).** Hook capture is skipped entirely — not per entry — for an
-  untrusted workspace, `disableAllHooks` in user or flag settings, an
-  `allowManagedHooksOnly` policy, safe mode, a plugin-only restriction, bare
-  mode, or an unreadable policy file; `localSettings` hooks are dropped
-  separately when the workspace is untrusted or `settings.local.json` is
-  git-tracked. Every one of these yields guards that appear installed and
-  never run, and hookyard's record cannot distinguish that from a quiet
-  session, because a handler that was never invoked cannot abstain, error, or
-  time out. §8 proposes `hookyard doctor` read the same sources and report
-  whether hooks are gated off; what that check should cover for Codex and
-  Cursor is unexamined. A smaller loose end from the same reading:
+- **How does hookyard avoid double-firing on Cursor, given that Cursor reads
+  Claude Code's hook config (§8, sink 4)?** **Decided, and specified in §8.**
+  The capture settled the fact the choice hung on: no payload carries
+  registration provenance, so suppressing the imported duplicate by reading
+  provenance from the event is impossible. It is achievable by hookyard
+  supplying its own — an engine tag in the argv of each rendered entry — and
+  comparing it against the engine detected from the payload's own
+  discriminators (`cursor_version`, `prompt_id`/`effort`, `turn_id`). §8 states
+  the resulting cross-registration suppression rule and the `suppressed`
+  record it emits. The capture also found a second, narrower double-fire
+  inside Cursor: `preToolUse` and `beforeShellExecution` both fire for one
+  shell call on the allow path, while a deny at `preToolUse` short-circuits
+  before the protocol-split event runs — so hookyard registers `preToolUse`
+  alone, and the narrower event is available only as an engine-scoped name.
+- **All three engines can disable hooks wholesale, and hookyard cannot see it
+  (§8).** **Broadened from one engine to three, and given a concrete
+  `doctor` requirement.** The capture run met the trust gate on every engine —
+  Cursor refused a fresh directory without `--trust`, Codex prompted and
+  stated that trusting the directory is what allows hooks to load, and Claude
+  Code's equivalent was read from its code. So this is a uniform property, not
+  a Claude Code quirk, and §8 now says `hookyard doctor` must report workspace
+  trust per engine. What remains genuinely open is narrower: the full gate list
+  below is Claude Code's, and the equivalent lists for Codex and Cursor beyond
+  workspace trust have not been enumerated.
+
+  Claude Code's own list, for reference: hook capture is skipped entirely —
+  not per entry — for an untrusted workspace, `disableAllHooks` in user or
+  flag settings, an `allowManagedHooksOnly` policy, safe mode, a plugin-only
+  restriction, bare mode, or an unreadable policy file; `localSettings` hooks
+  are dropped separately when the workspace is untrusted or
+  `settings.local.json` is git-tracked. Every one of these yields guards that
+  appear installed and never run, and hookyard's record cannot distinguish
+  that from a quiet session, because a handler that was never invoked cannot
+  abstain, error, or time out. A smaller loose end from the same reading:
   `projectSettings` does not appear among Claude Code's hook sources at all,
   which would mean project-level `.claude/settings.json` hooks are not honoured
   — plausible, consistent with Cursor importing those separately, and not
@@ -2581,22 +2703,24 @@ being more capable than this document assumed rather than less.
   undecided, and it should be written down as one or the other rather than
   discovered when someone tries to register a `prompt` hook.
 
-Everything this pass left unverified is accounted for above. What is now
-**resolved** and no longer a risk anyone has to carry: Claude Code's settings
-merge (item 1), Codex's and Cursor's deny paths
-(item 3, which removes the coverage gap on two of three engines), Cursor's
-native consolidation rule (item 2, one of three), Cursor's tool mapping and
-event families (items 6 and the Cursor-keys item), Codex's trust mechanism in
-substance (its exact preimage excepted), and the profile-gate question, which
-retracted the §11 correction that raised it.
+Everything left unverified is accounted for above. **Resolved**, and no
+longer a risk anyone carries: Claude Code's settings merge (item 1); all three
+engines' deny paths, read off their implementations and then watched enforcing
+(item 3); Codex's undeclared-timeout behaviour, which turned out to be no
+bound at all rather than a generous default (item 4); the live payload
+capture, which also corrected §7's field table and simplified §6's correlation
+key; Cursor's native consolidation rule, tool mapping and event families
+(items 2 and 6); §8's sink-4 double-firing decision; Codex's trust mechanism
+in substance; and the profile-gate question, which retracted the §11
+correction that raised it.
 
-What is still **open**, in the order it should be closed: the payload-capture
-run, which is one live session per engine and which alone closes three items
-(the capture itself, live confirmation of the two deny paths, and Codex's
-default timeout); the Cursor-import double-firing decision, which §10's first
-migration forces; Claude Code's wholesale hook-disabling gates and what
-`hookyard doctor` should check; `defer`; whether the manifest models
-non-command handler types; Codex's `apply_patch` sub-tool; Claude Code's and
-Codex's native consolidation rules; whether fail-open should be conditional;
-the prior pass's drift-count arithmetic; and HookBus's carried facts. Nothing
-this pass found is unverified and undeclared.
+Still **open**, in the order it should be closed: the manifest's handling of
+non-command handler types, and Claude Code's `defer` verdict — both touch the
+envelope and want settling before the router is written; the per-engine gate
+lists for Codex and Cursor beyond workspace trust, and whether Claude Code
+honours `projectSettings` hooks at all; Codex's `apply_patch` sub-tool
+mapping; Claude Code's and Codex's native consolidation rules; whether
+fail-open should be conditional for security-classed handlers; the exact
+preimage of Codex's trust hash; the prior pass's drift-count arithmetic; and
+HookBus's carried facts. None of these blocks starting the implementation,
+which is a change from the previous state of this list.
