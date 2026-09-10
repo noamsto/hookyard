@@ -4,4 +4,4 @@ result-*
 .claude/settings.local.json
 .pre-commit-config.yaml
 /bin/
-hookyard
+/hookyard
