@@ -508,15 +508,17 @@ has to render to Codex is the one Codex takes. The engine with the poorest
 decision vocabulary is the engine whose vocabulary happens to be exactly the
 one this design uses.
 
-One thing about this evidence is worth stating precisely, because the rest of
-the document is careful about it. The confirmation is **static**: it comes
-from the validation strings compiled into the shipped `codex-cli 0.153.4`
-binary, which enumerate the accepted surface by naming everything outside it
-as unsupported. That is strong evidence about the contract — these are the
-messages Codex emits when it refuses a field — and it is not the same as
-having watched Codex refuse a tool call. §12 carries the live confirmation as
-a remaining item, downgraded from security-blocking to a behavioural check on
-a contract already read off the implementation.
+One thing about this evidence was worth stating precisely, because the rest
+of the document is careful about it. The confirmation had been **static**: it
+came from the validation strings compiled into the shipped `codex-cli
+0.153.4` binary, which enumerate the accepted surface by naming everything
+outside it as unsupported — strong evidence about the contract, since these
+are the messages Codex emits when it refuses a field, but not the same as
+having watched Codex refuse a tool call. That gap is closed:
+`codex-pre_tool_use-DENY.json` is a payload captured from a live call, and it
+reports `Blocked by hook — hookyard probe deny`. §12, item 3 carries the full
+record; the confirmation there is now first-hand, not read off the
+implementation.
 
 Note where that verdict goes. It goes to hookyard's own record, which exists
 on disk whether or not anything is subscribed to it (§5, §6). It does *not*
@@ -976,8 +978,9 @@ Four fields carry the weight of §5's argument, and one outcome value does.
 result; `enforced` is `false` exactly when the router computed a verdict the
 engine cannot act on. With Codex's `pre_tool` deny path confirmed (§4), no
 engine is wholesale observe-only any more, so this field now marks the
-narrower per-event cases — an `ask` rendered to Codex, which accepts only
-`deny`, or an event whose engine has no decision slot at all; `router` is `ok`, `error` or `timeout`, which is what
+narrower per-event cases — an `allow` rendered to Codex, which accepts only
+`deny` and rejects an explicit allow by name (§7), or an event whose engine
+has no decision slot at all; `router` is `ok`, `error` or `timeout`, which is what
 makes a router that failed *after starting* recoverable; `handlers`
 distinguishes `abstain` from `error` and from `timeout`, which is what makes a
 guard that has silently stopped working recoverable; and an `advise` outcome
@@ -1465,7 +1468,24 @@ on its own; an engine that can't surface that request synchronously should
 not have it silently resolved in the permissive direction. This applies to
 Cursor unless and until its `permission` field is confirmed to support a
 genuine third state, and it is the deliberately conservative default for any
-future engine whose decision shape turns out to be binary.
+future engine whose decision shape turns out to be binary. Codex's
+`pre_tool_use` channel, which accepts a deny and rejects everything else
+including `ask` (§4), sits squarely inside it: a consolidated `ask` targeting
+Codex renders as a deny, and the record marks it `enforced: true` — a
+rendered deny *is* enforcement, whatever verdict produced it.
+
+**This is not §5's fail-open case, and the two must not be conflated.** §5
+covers hookyard *failing* to produce an opinion at all — the router
+unreachable, a guard erroring or timing out — where proceeding is the
+least-bad response to an absence, argued at length there on a blast-radius
+comparison. Here a guard ran, and successfully decided a human should look at
+this call before it proceeds; that is not an absence of opinion, it is an
+opinion the router is fully equipped to act on. Discarding it because the
+channel it must render through happens to be narrow is not failing open, it
+is declining to enforce a verdict that was in fact computed — on the one
+engine where the call proceeding unreviewed is invisible until someone reads
+the stream, rather than a defensible degradation of a control that already
+has nothing to say.
 
 ## 8. Native config emission, registration, and coexistence
 
@@ -2513,7 +2533,7 @@ grade they rest on where the difference matters.
    surfacing a `deny` recorded with `enforced: false`, because it meant a
    guard would have stopped something and could not — is no longer needed for
    Codex. It is worth keeping as a `hookyard doctor` count anyway: §7 still
-   has verdict shapes an engine has no slot for, an `ask` rendered to Codex
+   has verdict shapes an engine has no slot for, an `allow` rendered to Codex
    among them, and those are the same "computed but not enforced" signal in a
    narrower form.
 

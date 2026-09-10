@@ -9,6 +9,7 @@ import (
 )
 
 const routerPath = "/nix/store/abc/bin/hookyard"
+const stateDir = "/nix/state/hookyard"
 
 func TestBuildPlanRendersOneEntryPerEngineEvent(t *testing.T) {
 	// Two handlers on the same event: the router is a single per-event exec, so
@@ -17,7 +18,7 @@ func TestBuildPlanRendersOneEntryPerEngineEvent(t *testing.T) {
 		{ID: "a", Events: []string{vocab.PreTool}, Engines: []string{"cursor"}, Match: []string{"Bash"}},
 		{ID: "b", Events: []string{vocab.PreTool}, Engines: []string{"cursor"}, Match: []string{"Read"}},
 	}
-	plan, err := BuildPlan(handlers, routerPath)
+	plan, err := BuildPlan(handlers, routerPath, stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +40,7 @@ func TestBuildPlanRegistersOnlyPreToolUseForCursor(t *testing.T) {
 	handlers := []manifest.Handler{
 		{ID: "a", Events: []string{vocab.PreTool}, Engines: []string{"cursor"}, Match: []string{"Bash"}},
 	}
-	plan, err := BuildPlan(handlers, routerPath)
+	plan, err := BuildPlan(handlers, routerPath, stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +55,7 @@ func TestBuildPlanTranslatesMatchersPerEngine(t *testing.T) {
 	handlers := []manifest.Handler{
 		{ID: "a", Events: []string{vocab.PreTool}, Engines: []string{"claude-code", "codex", "cursor"}, Match: []string{"Bash", "Write"}},
 	}
-	plan, err := BuildPlan(handlers, routerPath)
+	plan, err := BuildPlan(handlers, routerPath, stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +81,7 @@ func TestBuildPlanOmitsMatcherWhenAHandlerWatchesEveryTool(t *testing.T) {
 		{ID: "a", Events: []string{vocab.PreTool}, Engines: []string{"cursor"}, Match: []string{"Bash"}},
 		{ID: "b", Events: []string{vocab.PreTool}, Engines: []string{"cursor"}},
 	}
-	plan, err := BuildPlan(handlers, routerPath)
+	plan, err := BuildPlan(handlers, routerPath, stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +94,7 @@ func TestBuildPlanTagsEachRenderingWithItsEngine(t *testing.T) {
 	handlers := []manifest.Handler{
 		{ID: "a", Events: []string{vocab.PreTool}, Engines: []string{"claude-code", "cursor"}, Match: []string{"Bash"}},
 	}
-	plan, err := BuildPlan(handlers, routerPath)
+	plan, err := BuildPlan(handlers, routerPath, stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +112,7 @@ func TestBuildPlanRefusesARouterPathWithoutTheMarker(t *testing.T) {
 	handlers := []manifest.Handler{
 		{ID: "a", Events: []string{vocab.PreTool}, Engines: []string{"cursor"}},
 	}
-	if _, err := BuildPlan(handlers, "/usr/local/libexec/hooky"); err == nil {
+	if _, err := BuildPlan(handlers, "/usr/local/libexec/hooky", stateDir); err == nil {
 		t.Fatal("want an error for a router path missing the marker, got nil")
 	}
 }
@@ -120,7 +121,7 @@ func TestBuildPlanRoutesEngineScopedEventsToTheirOwnEngine(t *testing.T) {
 	handlers := []manifest.Handler{
 		{ID: "a", Events: []string{"cursor:beforeShellExecution"}, Engines: []string{"cursor", "codex"}, Match: []string{"Bash"}},
 	}
-	plan, err := BuildPlan(handlers, routerPath)
+	plan, err := BuildPlan(handlers, routerPath, stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}

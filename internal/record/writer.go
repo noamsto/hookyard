@@ -51,10 +51,10 @@ func (w *Writer) Append(e Event) error {
 	now := w.now()
 
 	streamDir := filepath.Join(w.StateDir, "stream")
-	if err := ensureDir(w.StateDir); err != nil {
+	if err := EnsureStateDir(w.StateDir); err != nil {
 		return fmt.Errorf("record: %w", err)
 	}
-	if err := ensureDir(streamDir); err != nil {
+	if err := EnsureStateDir(streamDir); err != nil {
 		return fmt.Errorf("record: %w", err)
 	}
 
@@ -66,11 +66,18 @@ func (w *Writer) Append(e Event) error {
 	if err != nil {
 		return fmt.Errorf("record: %w", err)
 	}
+	// Always tighten, never trust prior state — the same posture EnsureStateDir
+	// takes for directories. O_CREATE's mode applies only when this open
+	// created the file, so a stream file left looser by an earlier build or a
+	// manual touch would otherwise stay world-readable for the rest of the day,
+	// with every guarded call's cwd and tool name in it (§6). Through the
+	// descriptor rather than the path: chmod by path would follow whatever
+	// sits there when it runs, not the file this append is about to write.
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("record: %w", err)
+	}
 	if newDay {
-		if err := os.Chmod(path, 0o600); err != nil {
-			_ = f.Close()
-			return fmt.Errorf("record: %w", err)
-		}
 		sweep(streamDir, now)
 	}
 
@@ -89,11 +96,11 @@ func (w *Writer) Append(e Event) error {
 	return nil
 }
 
-// ensureDir creates dir at 0700 if missing, and always Chmods it to 0700
+// EnsureStateDir creates dir at 0700 if missing, and always Chmods it to 0700
 // afterward — whether it was just created or already existed — so a
 // pre-existing directory left looser by an earlier tool, an earlier run under
 // a permissive umask, or manual creation is tightened rather than trusted.
-func ensureDir(dir string) error {
+func EnsureStateDir(dir string) error {
 	if _, err := os.Stat(dir); err != nil {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err

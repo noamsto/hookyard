@@ -36,13 +36,15 @@ import (
 // Outcome vocabulary a handler can report, per §6. This is the transport's
 // vocabulary, not a pre-emption of #9's verdict lattice (§4).
 const (
-	OutcomeAllow      = "allow"
-	OutcomeDeny       = "deny"
-	OutcomeAsk        = "ask"
-	OutcomeAdvise     = "advise"
-	OutcomeAbstain    = "abstain"
-	OutcomeError      = "error"
-	OutcomeTimeout    = "timeout"
+	OutcomeAllow   = "allow"
+	OutcomeDeny    = "deny"
+	OutcomeAsk     = "ask"
+	OutcomeAdvise  = "advise"
+	OutcomeAbstain = "abstain"
+	OutcomeError   = "error"
+	OutcomeTimeout = "timeout"
+	// OutcomeSuppressed is also the top-level Verdict for a cross-registration
+	// drop, not only a per-handler outcome.
 	OutcomeSuppressed = "suppressed"
 )
 
@@ -91,6 +93,7 @@ type HandlerOutcome struct {
 	Outcome   string
 	Elapsed   time.Duration
 	Advice    string
+	Message   string
 	Delivered *bool
 }
 
@@ -102,6 +105,7 @@ type RecordHandler struct {
 	Outcome   string `json:"outcome"`
 	MS        int64  `json:"ms"`
 	Advice    string `json:"advice,omitempty"`
+	Message   string `json:"message,omitempty"`
 	Delivered *bool  `json:"delivered,omitempty"`
 }
 
@@ -172,7 +176,8 @@ func toRecord(e Event, now time.Time, key string) Record {
 			Name:      h.Name,
 			Outcome:   h.Outcome,
 			MS:        h.Elapsed.Milliseconds(),
-			Advice:    h.Advice,
+			Advice:    truncateUTF8(h.Advice, maxReasonBytes),
+			Message:   truncateUTF8(h.Message, maxReasonBytes),
 			Delivered: delivered,
 		})
 	}
