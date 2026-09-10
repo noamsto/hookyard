@@ -1,9 +1,11 @@
 # Evaluates the exported home-manager module against several scratch
-# configurations and then executes the rendered install command. Two
-# properties are silent when broken and nothing else in the repo checks
-# either: the emitted router path must be the rebuild-stable *profile* path,
-# never a store path, and `hookyard install` must be invoked exactly once
-# across the whole merged activation script. Self-contained like
+# configurations and then executes the rendered install command. Three
+# properties are silent when broken and nothing else in the repo checks any
+# of them: the emitted router path must be the rebuild-stable *profile* path,
+# never a store path; `hookyard install` must be invoked exactly once across
+# the whole merged activation script; and every interpolated path must reach
+# bash escaped, since the activation script runs with the user's own
+# privileges. Self-contained like
 # ../hm-module.nix (see its header comment) — takes the package as an
 # argument instead of importing flake.nix.
 {
