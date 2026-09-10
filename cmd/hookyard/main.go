@@ -114,10 +114,19 @@ func install(args []string) error {
 	codex := fs.String("codex-config", defaults.codex, "Codex config.toml to write")
 	cursor := fs.String("cursor-hooks", defaults.cursor, "Cursor hooks.json to write")
 	dryRun := fs.Bool("dry-run", false, "print what would be written and exit")
+	allowEmpty := fs.Bool("allow-empty", false, "render an empty table and strip every hookyard entry when no --manifest is given")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if len(paths) == 0 {
+	// A bare `hookyard install` with no --manifest is almost always a typo, so
+	// it stays an error. The home-manager module needs the opposite: an empty
+	// manifest list is a state it must be able to render, not skip.
+	// ReadTable already treats zero handlers as legitimate, distinct from the
+	// table being gone (manifest.go); install had no way to produce that
+	// state. Skipping the invocation instead would leave the previous
+	// generation's rows and table.json in place, so a handler the consumer
+	// just removed would keep firing with nothing registering it.
+	if len(paths) == 0 && !*allowEmpty {
 		return fmt.Errorf("no --manifest given")
 	}
 	return runInstall(paths, *routerPath, *stateDir, *claude, *codex, *cursor, *dryRun)
@@ -151,6 +160,13 @@ func runInstall(paths manifestPaths, routerPath, stateDir, claude, codex, cursor
 	if dryRun {
 		printPlan(plan)
 		return nil
+	}
+	// Checked here, over all three paths at once, rather than inside each
+	// writer: everything above this point is read-only, so this is the last
+	// moment an install is still all-or-nothing. A per-writer refusal would
+	// land after the table and the earlier engines were already written.
+	if err := render.CheckDestinations(claude, codex, cursor); err != nil {
+		return err
 	}
 	// The table must exist before any engine config can point at it: an
 	// entry pointing at a --state-dir whose table isn't there yet is a
@@ -212,7 +228,7 @@ func validate(args []string) error {
 func runDoctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 	dir := fs.String("dir", "", "directory to report on (defaults to the working directory)")
-	stateDir := fs.String("state-dir", "", "state directory to report on (defaults to record.DefaultStateDir)")
+	stateDir := fs.String("state-dir", "", "state directory to report on (defaults to the one recovered from the engines' configs, falling back to record.DefaultStateDir)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
