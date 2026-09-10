@@ -17,6 +17,18 @@ import (
 	"time"
 )
 
+// assertFileMode fails the test if path's permission bits aren't exactly want.
+func assertFileMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Errorf("%s mode = %o, want %o", path, got, want)
+	}
+}
+
 func TestAppendPermissionBits(t *testing.T) {
 	old := syscall.Umask(0)
 	t.Cleanup(func() { syscall.Umask(old) })
@@ -27,19 +39,50 @@ func TestAppendPermissionBits(t *testing.T) {
 		t.Fatalf("Append: %v", err)
 	}
 
-	assertMode := func(path string, want os.FileMode) {
-		t.Helper()
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatalf("stat %s: %v", path, err)
-		}
-		if got := info.Mode().Perm(); got != want {
-			t.Errorf("%s mode = %o, want %o", path, got, want)
-		}
+	assertFileMode(t, stateDir, 0o700)
+	assertFileMode(t, filepath.Join(stateDir, "stream"), 0o700)
+	assertFileMode(t, StreamPath(stateDir, w.now()), 0o600)
+}
+
+// TestAppendPermissionBitsRestrictiveUmask is §6's "not left to the ambient
+// umask" contract exercised in the direction that actually matters: a fully
+// restrictive umask would, without the explicit Chmod calls in ensureDir and
+// Append, silently produce an under-permissioned (possibly unusable) state
+// dir, stream dir, or stream file.
+func TestAppendPermissionBitsRestrictiveUmask(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "hookyard")
+
+	old := syscall.Umask(0o777)
+	t.Cleanup(func() { syscall.Umask(old) })
+
+	w := &Writer{StateDir: stateDir}
+	if err := w.Append(testEvent()); err != nil {
+		t.Fatalf("Append: %v", err)
 	}
-	assertMode(stateDir, 0o700)
-	assertMode(filepath.Join(stateDir, "stream"), 0o700)
-	assertMode(StreamPath(stateDir, w.now()), 0o600)
+
+	assertFileMode(t, stateDir, 0o700)
+	assertFileMode(t, filepath.Join(stateDir, "stream"), 0o700)
+	assertFileMode(t, StreamPath(stateDir, w.now()), 0o600)
+}
+
+// TestAppendTightensPreexistingDir is the regression test for ensureDir
+// leaving a directory that already existed at whatever permissions it was
+// created with: §6 requires the state directory be 0700 unconditionally, not
+// only on the first-created path.
+func TestAppendTightensPreexistingDir(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "hookyard")
+	streamDir := filepath.Join(stateDir, "stream")
+	if err := os.MkdirAll(streamDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	w := &Writer{StateDir: stateDir}
+	if err := w.Append(testEvent()); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	assertFileMode(t, stateDir, 0o700)
+	assertFileMode(t, streamDir, 0o700)
 }
 
 // concurrentAppendWorkerEnv guards TestConcurrentAppendWorker so a normal

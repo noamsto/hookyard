@@ -82,9 +82,10 @@ type Event struct {
 	Handlers       []HandlerOutcome
 }
 
-// HandlerOutcome is one handler's contribution to an Event. Delivered is nil
-// unless Outcome == OutcomeAdvise, so a non-advise handler never emits a
-// spurious delivered key on the wire.
+// HandlerOutcome is one handler's contribution to an Event. toRecord clears
+// Delivered unless Outcome == OutcomeAdvise, so a non-advise handler never
+// emits a spurious delivered key on the wire, regardless of what the caller
+// set here.
 type HandlerOutcome struct {
 	Name      string
 	Outcome   string
@@ -163,12 +164,16 @@ func computeKey(pane string, engine vocab.Engine, sessionID string) string {
 func toRecord(e Event, now time.Time, key string) Record {
 	handlers := make([]RecordHandler, 0, len(e.Handlers))
 	for _, h := range e.Handlers {
+		delivered := h.Delivered
+		if h.Outcome != OutcomeAdvise {
+			delivered = nil
+		}
 		handlers = append(handlers, RecordHandler{
 			Name:      h.Name,
 			Outcome:   h.Outcome,
 			MS:        h.Elapsed.Milliseconds(),
 			Advice:    h.Advice,
-			Delivered: h.Delivered,
+			Delivered: delivered,
 		})
 	}
 	return Record{
@@ -218,6 +223,7 @@ func buildLine(rec Record) ([]byte, error) {
 	rec.Reason = ""
 	rec.CWD = truncateUTF8(rec.CWD, maxFieldBytes)
 	rec.ToolName = truncateUTF8(rec.ToolName, maxFieldBytes)
+	rec.SessionID = truncateUTF8(rec.SessionID, maxFieldBytes)
 	line, err = marshalLine(rec)
 	if err != nil {
 		return nil, err

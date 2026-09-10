@@ -1,6 +1,7 @@
 package record
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -82,26 +83,21 @@ func (w *Writer) Append(e Event) error {
 
 	_, writeErr := f.Write(line)
 	closeErr := f.Close()
-	if writeErr != nil {
-		return fmt.Errorf("record: %w", writeErr)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("record: %w", closeErr)
+	if err := errors.Join(writeErr, closeErr); err != nil {
+		return fmt.Errorf("record: %w", err)
 	}
 	return nil
 }
 
-// ensureDir creates dir at 0700 if missing. The Chmod after MkdirAll is only
-// there to undo an over-restrictive ambient umask on creation — MkdirAll can
-// never produce bits looser than requested, only tighter or equal — and it
-// never runs against a directory that already existed, so it cannot silently
-// re-loosen a directory an operator deliberately tightened.
+// ensureDir creates dir at 0700 if missing, and always Chmods it to 0700
+// afterward — whether it was just created or already existed — so a
+// pre-existing directory left looser by an earlier tool, an earlier run under
+// a permissive umask, or manual creation is tightened rather than trusted.
 func ensureDir(dir string) error {
-	if _, err := os.Stat(dir); err == nil {
-		return nil
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+	if _, err := os.Stat(dir); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
 	}
 	return os.Chmod(dir, 0o700)
 }
