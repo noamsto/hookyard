@@ -8,14 +8,17 @@
 package doctor
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/noamsto/hookyard/internal/record"
 	"github.com/noamsto/hookyard/internal/render"
 	"github.com/noamsto/hookyard/internal/vocab"
 )
@@ -55,6 +58,7 @@ type Paths struct {
 	ClaudeConfigDir string
 	CodexHome       string
 	CursorHome      string
+	StateDir        string
 }
 
 func DefaultPaths() (Paths, error) {
@@ -70,7 +74,11 @@ func DefaultPaths() (Paths, error) {
 	if codex == "" {
 		codex = filepath.Join(home, ".codex")
 	}
-	return Paths{ClaudeConfigDir: claude, CodexHome: codex, CursorHome: filepath.Join(home, ".cursor")}, nil
+	stateDir, err := record.DefaultStateDir()
+	if err != nil {
+		return Paths{}, err
+	}
+	return Paths{ClaudeConfigDir: claude, CodexHome: codex, CursorHome: filepath.Join(home, ".cursor"), StateDir: stateDir}, nil
 }
 
 // Run reports on each engine for one working directory.
@@ -79,6 +87,7 @@ func Run(p Paths, dir string) []Finding {
 	findings = append(findings, claudeFindings(p, dir)...)
 	findings = append(findings, codexFindings(p, dir)...)
 	findings = append(findings, cursorFindings(p, dir)...)
+	findings = append(findings, streamFindings(p.StateDir, time.Now())...)
 	return findings
 }
 
@@ -221,4 +230,56 @@ func readJSON(path string, into any) error {
 		return err
 	}
 	return json.Unmarshal(raw, into)
+}
+
+// streamFindings counts, in today's event record, how many verdicts hookyard
+// computed but the engine had no way to enforce (§12) — an ask rendered to an
+// engine that only accepts deny is expected, not a misconfiguration, so this
+// is always Pass; only the count is informational. Engine is left at its zero
+// value since the finding isn't per-engine (it renders as a blank column in
+// hookyard doctor's %-12s output).
+func streamFindings(stateDir string, now time.Time) []Finding {
+	f := Finding{Check: "enforcement"}
+
+	path := record.StreamPath(stateDir, now)
+	file, err := os.Open(path)
+	if os.IsNotExist(err) {
+		f.Status = Unknown
+		f.Detail = "no events recorded yet today"
+		return []Finding{f}
+	}
+	if err != nil {
+		f.Status = Unknown
+		f.Detail = fmt.Sprintf("cannot read %s: %v", path, err)
+		return []Finding{f}
+	}
+	defer func() { _ = file.Close() }()
+
+	var total, enforcedFalse int
+	scanner := bufio.NewScanner(file)
+	// The default MaxScanTokenSize (64KiB) equals record's own maxRecordBytes
+	// cap, so a max-size record would fail Scan with ErrTooLong; raise it well
+	// above that cap.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for scanner.Scan() {
+		var line struct {
+			Enforced bool `json:"enforced"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+			continue
+		}
+		total++
+		if !line.Enforced {
+			enforcedFalse++
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		f.Status = Unknown
+		f.Detail = fmt.Sprintf("%s: %v (counted %d/%d before the error)", path, err, enforcedFalse, total)
+		return []Finding{f}
+	}
+
+	f.Status = Pass
+	f.Detail = fmt.Sprintf("%d/%d events today had a computed verdict the engine could not enforce", enforcedFalse, total)
+	return []Finding{f}
 }
