@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Capture hook for the hookyard payload probe.
-#   $1 engine label, $2 event label, $3 mode (observe|deny|sleep), $4 out file
+#   $1 engine label, $2 event label, $3 mode (observe|deny|tick), $4 out file
 # Appends one JSONL record per firing to $4, then answers per mode. The out file
 # is an argument, not just an env var: engines may not pass their own env to a
 # hook subprocess, and a capture that silently wrote nowhere would look like a
@@ -24,8 +24,7 @@ jq -c -n \
   --arg mode "$mode" \
   --arg cwd "$PWD" \
   --arg raw "$payload" \
-  --argjson env "$(jq -n '$ENV | with_entries(select(.key | test("^(CLAUDE|CODEX|CURSOR|AGENT|HOOK)")))')" \
-  '{engine: $engine, event: $event, mode: $mode, cwd: $cwd, env: $env, raw: $raw}' \
+  '{engine: $engine, event: $event, mode: $mode, cwd: $cwd, raw: $raw}' \
   >>"$out"
 
 case $mode in
