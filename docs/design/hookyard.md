@@ -444,6 +444,18 @@ simplest rule that can express a security control:
 > consolidated verdict turns out to be — a denied call and an allowed call can
 > both carry advice.
 
+**hookyard never emits Claude Code's `defer`.** The vocabulary this router
+actually renders is `allow | deny | ask`, with `abstain` as the lattice's
+identity element — the same vocabulary the consolidation rule above is stated
+over. Claude Code's own accepted value set is wider; the deny-capability table
+below records it as `allow | deny | ask | defer`, a fourth value this document
+did not previously carry. `defer` is not a synonym for any of the three and
+not a fourth lattice element: a router that consolidates security verdicts
+should emit only verdicts it can define, and "let another hook decide" is not
+a decision a deny-wins lattice has anywhere to put. That is a stated boundary,
+in the same spirit as §11's — a decision about what hookyard does not do, not
+an omission.
+
 The rule needs no priority weights, and this document deliberately avoids the
 **priority-weighted** vocabulary of the HookBus `NOTICE`'s pending
 application (§2). The avoidance is a consequence, not the motive: weights
@@ -1019,10 +1031,9 @@ correct, stable and useless to anyone who was not listening when it was
 created.
 
 And the fallback is engine-scoped because session identifiers are only unique
-within an engine — they are not even called the same thing across the three
-(§7 normalizes `session_id`, `conversation_id` and `generation_id` onto one
-field), so an unscoped session id could collide across engines and would carry
-no signal about which one it came from.
+within an engine: all three engines send the same field name, `session_id`
+(§7), so the name itself carries no signal about which engine minted the
+value — meaning an unscoped session id could collide across engines.
 
 Prior art, cited as evidence the shape works and nothing more: houston's
 `runs/registry.go:16` documents its correlation key as "the tmux pane id where
@@ -1243,8 +1254,8 @@ The envelope itself:
   "engine":         "claude-code" | "codex" | "cursor",
   "canonical_event": "pre_tool" | "" ,   // "" when this event has no canonical equivalent
   "native_event":    "PreToolUse",       // the engine's own literal event name, always present
-  "session_id":      "...",              // normalized from session_id / conversation_id / generation_id
-  "cwd":             "...",              // normalized from cwd, or Cursor's per-event cwd
+  "session_id":      "...",              // all three engines send session_id verbatim
+  "cwd":             "...",              // falls back to workspace_roots[0] when cwd is empty (Cursor)
   "protocol":        "shell" | "mcp" | "file" | "",  // set only when a protocol-split event fired; empty otherwise, including for Cursor's deployed preToolUse
   "tool_name":       "...",              // present on pre_tool / post_tool
   "tool_input":      { ... },            // engine-native shape, see handler-compatibility below
@@ -2420,6 +2431,24 @@ different kind of fix. Nothing found this pass contradicts that division, so
 hookyard's boundary holds where the brief expected it to: it handles the
 protocol problem and does not absorb the placement problem.
 
+**The manifest models `command` handlers only, and that is a stated boundary,
+not an omission.** hookyard's manifest registers executable handlers —
+binaries the router execs and whose exit code and stdout become a verdict.
+Claude Code supports two further hook types, `prompt` (an LLM evaluates a
+condition) and `agent` (an agent runs with tools), and Cursor's importer
+handles `prompt` as well. Both are deliberately absent from the manifest as
+specified here.
+
+The cost of that is stated rather than hidden: hookyard cannot express an
+entry that two of three engines support. Codex has no equivalent to either
+type, so any such entry would be engine-partial by construction — real on two
+engines, absent on the third — and that partiality would have to be declared
+at the same time the entry is registered, not discovered when someone tries
+to use it. The reversal trigger is filed as issue #12, the first real handler
+that genuinely needs `prompt` or `agent`; until one exists, modelling a
+handler type nothing uses is exactly the kind of generality this document
+argues against elsewhere.
+
 ## 12. Open questions
 
 The prior document's seven open questions are carried forward, each with an
@@ -2685,25 +2714,70 @@ being more capable than this document assumed rather than less.
   which would mean project-level `.claude/settings.json` hooks are not honoured
   — plausible, consistent with Cursor importing those separately, and not
   confirmed.
-- **Newly opened: what is Claude Code's `defer` permission decision, and does
-  hookyard ever render it (§7)?** The accepted value set is
-  `allow | deny | ask | defer`, and `defer` is a fourth verdict this document
-  has no concept for. §4's lattice has three plus `abstain`, and it is not
-  clear whether `defer` is a synonym for one of those, a distinct
+- **Settled by a ruling, not by new evidence: what is Claude Code's `defer`
+  permission decision, and does hookyard ever render it (§7)?** The accepted
+  value set is `allow | deny | ask | defer`, and `defer` was a fourth verdict
+  this document had no concept for. §4's lattice has three plus `abstain`, and
+  it was not clear whether `defer` was a synonym for one of those, a distinct
   "let another hook decide" state, or something the router should never emit.
-  If it is genuinely distinct, it is the first case of an engine having a
-  richer verdict vocabulary than hookyard's own, which is the opposite of the
-  Codex situation and would need a rule in §4 rather than a translation in §7.
-- **Newly opened: should the manifest model non-command handler types (§8)?**
-  Claude Code supports three hook types — `command`, `prompt` (an LLM
-  evaluates a condition) and `agent` (an agent runs with tools) — with the
-  latter two restricted to tool events, and Cursor's importer handles `prompt`
-  as well. §8's manifest names "the binary that gets executed", so it models
-  `command` only. That is defensible for guards, which are binaries, and it
-  means hookyard cannot express an entry that two of three engines support.
-  Whether that is a deliberate boundary (like §11's) or an omission is
-  undecided, and it should be written down as one or the other rather than
-  discovered when someone tries to register a `prompt` hook.
+  The repo owner has ruled: never emit it. §4 now states the boundary —
+  the outbound vocabulary stays `allow | deny | ask`, `defer` is neither a
+  synonym for one of those nor a fourth lattice element, and it sits outside
+  hookyard's vocabulary entirely. Nothing new was read off an engine to reach
+  this; the grounding is a decision, not a discovery.
+- **Settled by a ruling, not by new evidence: should the manifest model
+  non-command handler types (§8)?** Claude Code supports three hook types —
+  `command`, `prompt` (an LLM evaluates a condition) and `agent` (an agent
+  runs with tools) — with the latter two restricted to tool events, and
+  Cursor's importer handles `prompt` as well. §8's manifest names "the binary
+  that gets executed", so it models `command` only. That is defensible for
+  guards, which are binaries, and it means hookyard cannot express an entry
+  that two of three engines support. Whether that was a deliberate boundary
+  (like §11's) or an omission was undecided. The repo owner has ruled: it is
+  a deliberate boundary. §11 now states it in those terms and files the
+  reversal trigger as issue #12 — the first real handler that genuinely needs
+  `prompt` or `agent`. As with the item above, the grounding is a decision,
+  not a discovery.
+
+**Three items the normalized-envelope implementation itself adds, unverified
+because the captures don't reach them yet, not because they were missed.**
+
+- **Engine detection is unverified for `SessionStart` and `Stop` payloads.**
+  The three discriminators the router uses (`cursor_version`; `prompt_id` /
+  `effort`; `turn_id`) are observed only on `PreToolUse`, `PostToolUse`,
+  `UserPromptSubmit` and `beforeShellExecution` payloads. No `SessionStart` or
+  `Stop` payload has been captured for any engine. If those turn-scoped fields
+  are absent there, detection fails and those events fail open — a whole-event
+  outage no fixture can catch today. The envelope deliberately does not paper
+  over it with a `--registered-for` fallback, because a fallback that silently
+  rescues an undetectable payload also silently hides that detection does not
+  cover the event.
+- **Payload-level `hook_event_name` spellings are unverified for twelve of the
+  table's eighteen rows.** Only `PreToolUse`/`PostToolUse` (Claude Code),
+  `PreToolUse`/`UserPromptSubmit` (Codex) and `preToolUse`/`postToolUse`
+  (Cursor) are observed — six of eighteen. The rest are
+  taken from §7's convergence table, which is a config-key table for at least
+  one engine — and Codex demonstrably spells the same event three ways across
+  three surfaces (CamelCase `[[hooks.X]]` config keys, snake_case
+  `[hooks.state]` trust keys, CamelCase in the payload). A wrong assumed row
+  means `canonical_event` is empty for that event on that engine and a handler
+  subscribed to the canonical name never matches: silent, permanent, one
+  engine. It degrades to "no canonical name" rather than to a crash, which is
+  the same shape as a genuinely engine-only event.
+- **`tool_input` field spellings are unverified for non-shell tools.** §7's
+  compatibility claim covers seven guard-read fields: `tool_name`, and
+  `tool_input`'s `file_path` / `path` / `command` / `pattern` / `output_mode` /
+  `glob`. All ten fixtures are shell or prompt events, so the captures
+  exercise `command` alone and say nothing about how Cursor or Codex spell a
+  read tool's path argument. If Cursor's `Read` payload uses `path` where
+  `secret-read-guard.sh` reads `file_path`, that guard abstains on every
+  Cursor read, invisibly. The envelope passes `tool_input` through unchanged
+  precisely because reshaping it without a captured read-tool payload would be
+  guesswork with an extra layer of confidence on top.
+
+All three close the same way: one more capture run, against the events the
+first run did not cover. That is a stated prerequisite for issue #9, where
+detection and canonicalization first become load-bearing.
 
 Everything left unverified is accounted for above. **Resolved**, and no
 longer a risk anyone carries: Claude Code's settings merge (item 1); all three
@@ -2713,16 +2787,21 @@ bound at all rather than a generous default (item 4); the live payload
 capture, which also corrected §7's field table and simplified §6's correlation
 key; Cursor's native consolidation rule, tool mapping and event families
 (items 2 and 6); §8's sink-4 double-firing decision; Codex's trust mechanism
-in substance; and the profile-gate question, which retracted the §11
-correction that raised it.
+in substance; the profile-gate question, which retracted the §11 correction
+that raised it; and, settled by a ruling rather than new evidence, Claude
+Code's `defer` verdict and the manifest's handling of non-command handler
+types.
 
-Still **open**, in the order it should be closed: the manifest's handling of
-non-command handler types, and Claude Code's `defer` verdict — both touch the
-envelope and want settling before the router is written; the per-engine gate
-lists for Codex and Cursor beyond workspace trust, and whether Claude Code
-honours `projectSettings` hooks at all; Codex's `apply_patch` sub-tool
-mapping; Claude Code's and Codex's native consolidation rules; whether
-fail-open should be conditional for security-classed handlers; the exact
-preimage of Codex's trust hash; the prior pass's drift-count arithmetic; and
-HookBus's carried facts. None of these blocks starting the implementation,
-which is a change from the previous state of this list.
+Still **open**, in the order it should be closed: three residuals this pass's
+own code creates — engine detection unverified for `SessionStart` and `Stop`
+payloads, payload-level `hook_event_name` spellings unverified for twelve of
+the table's eighteen rows, and `tool_input` field spellings unverified for
+non-shell tools — all three closing the same way, one more capture run, and
+all three a stated prerequisite for issue #9; the per-engine gate lists for
+Codex and Cursor beyond workspace trust, and whether Claude Code honours
+`projectSettings` hooks at all; Codex's `apply_patch` sub-tool mapping; Claude
+Code's and Codex's native consolidation rules; whether fail-open should be
+conditional for security-classed handlers; the exact preimage of Codex's
+trust hash; the prior pass's drift-count arithmetic; and HookBus's carried
+facts. None of these blocks starting the implementation, which is a change
+from the previous state of this list.
