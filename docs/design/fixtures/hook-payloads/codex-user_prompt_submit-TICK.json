@@ -1,0 +1,10 @@
+{
+  "cwd": "<PROBE>/capture/probe",
+  "hook_event_name": "UserPromptSubmit",
+  "model": "gpt-6-astra",
+  "permission_mode": "default",
+  "prompt": "Run the shell command: echo hookyard-probe",
+  "session_id": "01a089ec-2ae1-7770-b809-df9da681887d",
+  "transcript_path": "<PROBE>/capture/codex-home/sessions/2026/09/10/rollout-2026-09-10T09-05-51-01a089ec-2ae1-7770-b809-df9da681887d.jsonl",
+  "turn_id": "01a089ed-1ae0-7db2-b16d-00dba726b345"
+}

@@ -1,0 +1,16 @@
+{
+  "command": "echo hookyard-probe",
+  "conversation_id": "b0d29f55-8780-4365-bbdd-10f82fc213ec",
+  "cursor_version": "2026.09.08-6caf4ff",
+  "cwd": "",
+  "generation_id": "b0d29f55-8780-4365-bbdd-10f82fc213ec",
+  "hook_event_name": "beforeShellExecution",
+  "model": "grok-4.6",
+  "sandbox": false,
+  "session_id": "b0d29f55-8780-4365-bbdd-10f82fc213ec",
+  "transcript_path": null,
+  "user_email": "<REDACTED-EMAIL>",
+  "workspace_roots": [
+    "<PROBE>/capture/cursor-probe"
+  ]
+}

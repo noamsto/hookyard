@@ -1,0 +1,14 @@
+{
+  "cwd": "<PROBE>/capture/probe",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-6-astra",
+  "permission_mode": "default",
+  "session_id": "01a089ec-2ae1-7770-b809-df9da681887d",
+  "tool_input": {
+    "command": "echo hookyard-probe"
+  },
+  "tool_name": "Bash",
+  "tool_use_id": "exec-27f5c829-d983-43d3-a35a-649282f00371",
+  "transcript_path": "<PROBE>/capture/codex-home/sessions/2026/09/10/rollout-2026-09-10T09-05-51-01a089ec-2ae1-7770-b809-df9da681887d.jsonl",
+  "turn_id": "01a089ed-1ae0-7db2-b16d-00dba726b345"
+}

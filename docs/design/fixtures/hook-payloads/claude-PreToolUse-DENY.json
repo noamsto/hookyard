@@ -1,0 +1,17 @@
+{
+  "cwd": "<PROBE>/capture/claude-probe",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PreToolUse",
+  "permission_mode": "default",
+  "prompt_id": "62f0826f-8e39-4aca-9363-45d18c09d965",
+  "session_id": "8c5dcb67-d63b-46f2-b61b-69258d354c49",
+  "tool_input": {
+    "command": "echo hookyard-probe",
+    "description": "Echo hookyard-probe"
+  },
+  "tool_name": "Bash",
+  "tool_use_id": "toolu_018uKtWoU2752c5uZHS47Q3e",
+  "transcript_path": "<PROBE>/capture/claude-home/projects/-tmp-claude-1000--home-noams-Data-git--worktrees-noamsto-hookyard-feat-1-design-spec-hookyard-as-a-standalone-cro-33cb05fe-2fe0-4094-841d-3c21fcc2dc5c-scratchpad-capture-claude-probe/8c5dcb67-d63b-46f2-b61b-69258d354c49.jsonl"
+}
