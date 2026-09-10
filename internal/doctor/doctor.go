@@ -58,7 +58,11 @@ type Paths struct {
 	ClaudeConfigDir string
 	CodexHome       string
 	CursorHome      string
-	StateDir        string
+	// StateDir is the operator's explicit --state-dir. Empty means none was
+	// given: Run recovers it from the --state-dir the three engines' emitted
+	// configs already name, rather than treating empty as shorthand for
+	// record.DefaultStateDir().
+	StateDir string
 }
 
 func DefaultPaths() (Paths, error) {
@@ -74,11 +78,7 @@ func DefaultPaths() (Paths, error) {
 	if codex == "" {
 		codex = filepath.Join(home, ".codex")
 	}
-	stateDir, err := record.DefaultStateDir()
-	if err != nil {
-		return Paths{}, err
-	}
-	return Paths{ClaudeConfigDir: claude, CodexHome: codex, CursorHome: filepath.Join(home, ".cursor"), StateDir: stateDir}, nil
+	return Paths{ClaudeConfigDir: claude, CodexHome: codex, CursorHome: filepath.Join(home, ".cursor")}, nil
 }
 
 // Run reports on each engine for one working directory.
@@ -87,7 +87,23 @@ func Run(p Paths, dir string) []Finding {
 	findings = append(findings, claudeFindings(p, dir)...)
 	findings = append(findings, codexFindings(p, dir)...)
 	findings = append(findings, cursorFindings(p, dir)...)
-	findings = append(findings, streamFindings(p.StateDir, time.Now())...)
+
+	stateDir := p.StateDir
+	var disagreement []string
+	if stateDir == "" {
+		switch recovered := recoverStateDir(p); len(recovered) {
+		case 1:
+			stateDir = recovered[0]
+		case 0:
+			// Run cannot propagate DefaultStateDir's error; falling through to
+			// an empty directory leaves streamFindings to report Unknown,
+			// which is already its answer for a missing stream.
+			stateDir, _ = record.DefaultStateDir()
+		default:
+			disagreement = recovered
+		}
+	}
+	findings = append(findings, streamFindings(stateDir, disagreement, time.Now())...)
 	return findings
 }
 
@@ -130,7 +146,7 @@ func claudeFindings(p Paths, dir string) []Finding {
 		gate.Detail = "not disabled in " + settings + " (a --settings overlay is not visible here)"
 	}
 
-	return []Finding{trust, gate, registration(vocab.ClaudeCode, settings)}
+	return []Finding{trust, gate, registration(vocab.ClaudeCode, settings), routerPath(vocab.ClaudeCode, settings)}
 }
 
 // Claude Code keeps per-directory trust in .claude.json, one entry per
@@ -178,7 +194,7 @@ func codexFindings(p Paths, dir string) []Finding {
 		}
 	}
 
-	return []Finding{trust, hookTrust, registration(vocab.Codex, config)}
+	return []Finding{trust, hookTrust, registration(vocab.Codex, config), routerPath(vocab.Codex, config)}
 }
 
 func cursorFindings(p Paths, dir string) []Finding {
@@ -194,7 +210,7 @@ func cursorFindings(p Paths, dir string) []Finding {
 		trust.Detail = fmt.Sprintf("no trust marker at %s, so hooks are skipped entirely", marker)
 	}
 
-	return []Finding{trust, registration(vocab.Cursor, hooks)}
+	return []Finding{trust, registration(vocab.Cursor, hooks), routerPath(vocab.Cursor, hooks)}
 }
 
 // cursorProjectSlug mirrors how Cursor names a project directory under
@@ -224,6 +240,128 @@ func registration(engine vocab.Engine, path string) Finding {
 	return f
 }
 
+// routerPathPattern recovers the absolute path hookyard's own emitted
+// command names, by scanning the raw config bytes rather than parsing three
+// different config formats: render.command puts the identical string in all
+// three verbatim (§9). The character class excludes both quote characters
+// as well as whitespace: every encoder wraps the whole command in "…", so a
+// quote is the delimiter, never part of the path, and checkShellSafe
+// (cmd/hookyard/main.go) already guarantees a legitimate router path
+// contains neither — the exclusion is exact, not heuristic. A whitespace-only
+// boundary would recover the opening quote along with the path and fail the
+// check on every engine, always (§9).
+var routerPathPattern = regexp.MustCompile(`/[^\s"']*` + regexp.QuoteMeta(render.Marker))
+
+// stateDirPattern recovers --state-dir from the same command line, in the
+// same character class and for the same reason.
+var stateDirPattern = regexp.MustCompile(`--state-dir\s+([^\s"']+)`)
+
+// routerPath reports whether the absolute path this
+// engine's emitted command names is actually there to exec. §9's closing
+// argument is why doctor, not the event record, has to catch this: a broken
+// profile symlink fails at exec, before any hookyard code runs, so there is
+// nothing running to write a record for streamFindings to read.
+func routerPath(engine vocab.Engine, configPath string) Finding {
+	f := Finding{Engine: engine, Check: "router path", Detail: configPath}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		f.Status = Unknown
+		f.Detail = fmt.Sprintf("cannot read %s: %v", configPath, err)
+		return f
+	}
+	paths := distinctStrings(routerPathPattern.FindAllString(string(raw), -1))
+	if len(paths) == 0 {
+		// registration() above already reports a missing hookyard entry as
+		// Fail; a second Fail here for the same cause would be duplicate
+		// noise.
+		f.Status = Unknown
+		f.Detail = "no hookyard entry in " + configPath + " to check"
+		return f
+	}
+
+	// Every writer strips each row carrying the marker regardless of its
+	// path, so hookyard's own re-render always leaves one form; a second
+	// path can only come from a hand-edit or a foreign writer, and is
+	// reported rather than collapsed.
+	var bad []string
+	for _, p := range paths {
+		if reason := notExecutable(p); reason != "" {
+			bad = append(bad, fmt.Sprintf("%s (%s)", p, reason))
+		}
+	}
+	if len(bad) > 0 {
+		f.Status = Fail
+		f.Detail = "not runnable: " + strings.Join(bad, "; ")
+		return f
+	}
+	f.Status = Pass
+	f.Detail = strings.Join(paths, ", ") + ": executable"
+	return f
+}
+
+// notExecutable reports why path cannot be run, or "" when it can. "Can be
+// run" means path stats, following symlinks, to a regular file with any
+// execute bit set — not identical to test -x, which asks about the calling
+// user's effective access, but the two agree for the 0555 store targets §9
+// enumerates, and the difference is not worth a unix.Access call that would
+// cost portability.
+func notExecutable(path string) string {
+	info, err := os.Stat(path)
+	switch {
+	case err != nil:
+		return "missing"
+	case info.IsDir():
+		return "a directory"
+	case !info.Mode().IsRegular() || info.Mode()&0o111 == 0:
+		return "not executable"
+	default:
+		return ""
+	}
+}
+
+// distinctStrings deduplicates a slice while preserving first-seen order.
+func distinctStrings(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	var out []string
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// recoverStateDir scans all three engines' config files for --state-dir and
+// returns the distinct values found, in first-seen order across Claude, then
+// Codex, then Cursor.
+//
+// doctor's own state directory otherwise resolves from
+// HOOKYARD_STATE_DIR/XDG_STATE_HOME/$HOME — the same untrusted chain the module
+// refuses for install — so an overridden state directory makes the
+// enforcement finding read a directory nothing writes to and report "no
+// events recorded yet today" forever on a healthy machine: a silent false
+// negative in the tool nominated to catch silent failures. The emitted
+// config is ground truth for what the router actually uses, and it is
+// already open in front of the router-path scan above.
+func recoverStateDir(p Paths) []string {
+	var found []string
+	for _, path := range []string{
+		filepath.Join(p.ClaudeConfigDir, "settings.json"),
+		filepath.Join(p.CodexHome, "config.toml"),
+		filepath.Join(p.CursorHome, "hooks.json"),
+	} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, m := range stateDirPattern.FindAllStringSubmatch(string(raw), -1) {
+			found = append(found, m[1])
+		}
+	}
+	return distinctStrings(found)
+}
+
 func readJSON(path string, into any) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -235,11 +373,24 @@ func readJSON(path string, into any) error {
 // streamFindings counts, in today's event record, how many verdicts hookyard
 // computed but the engine had no way to enforce (§12) — an ask rendered to an
 // engine that only accepts deny is expected, not a misconfiguration, so this
-// is always Pass; only the count is informational. Engine is left at its zero
-// value since the finding isn't per-engine (it renders as a blank column in
-// hookyard doctor's %-12s output).
-func streamFindings(stateDir string, now time.Time) []Finding {
+// is Pass whenever stateDir could be resolved unambiguously; only the count
+// is informational. It is Fail when disagreement names more than one
+// --state-dir recovered from the three engines' configs: runInstall writes
+// Cursor, then Claude, then Codex, and a later failure does not undo an
+// earlier write, so an activation aborted partway through a --state-dir
+// change genuinely leaves two configs naming different tables.
+// Silently picking one would reproduce exactly the false negative that
+// recovery exists to remove. Engine is left at its zero value since the
+// finding isn't per-engine (it renders as a blank column in hookyard
+// doctor's %-12s output).
+func streamFindings(stateDir string, disagreement []string, now time.Time) []Finding {
 	f := Finding{Check: "enforcement"}
+
+	if len(disagreement) > 0 {
+		f.Status = Fail
+		f.Detail = "engines disagree on --state-dir: " + strings.Join(disagreement, ", ")
+		return []Finding{f}
+	}
 
 	path := record.StreamPath(stateDir, now)
 	file, err := os.Open(path)
