@@ -20,9 +20,10 @@ type Input struct {
 }
 
 // Rendered is what the router prints and what it records. Enforced is false
-// exactly when a verdict was computed that the engine cannot act on — an ask
-// rendered to Codex, or any verdict on an event whose engine has no decision
-// slot — which is the distinction the record would otherwise lie about.
+// exactly when a verdict was computed that the engine cannot act on — an
+// allow rendered to Codex, or any verdict on an event whose engine has no
+// decision slot — which is the distinction the record would otherwise lie
+// about.
 type Rendered struct {
 	Stdout          []byte
 	Enforced        bool
@@ -87,21 +88,42 @@ func renderClaudeCode(in Input) Rendered {
 	return Rendered{Stdout: marshal(hookResponse{out}), Enforced: true, AdviceDelivered: in.Advice != ""}
 }
 
-// renderCodex renders the deny arm alone, and never an advisory field. An
+// renderCodex renders the deny arm, plus ask degraded to deny per §7's rule
+// for engines whose decision shape is binary, and never an advisory field. An
 // allow records Enforced false rather than true: Codex rejects an explicit
 // allow by name, so printing nothing leaves Codex's own permission flow to
 // run, which is not what an allow asked for — on Claude Code the same verdict
 // bypasses the prompt, and the record must not call both outcomes enforced.
 func renderCodex(in Input) Rendered {
-	if in.Verdict != Deny {
+	switch in.Verdict {
+	case Deny:
+		reason := in.Reason
+		if reason == "" {
+			reason = codexEmptyDenyReason
+		}
+		return renderCodexDeny(in.NativeEvent, reason)
+	case Ask:
+		return renderCodexDeny(in.NativeEvent, codexAskDegradedReason(in.Reason))
+	default:
 		return Rendered{Enforced: in.Verdict == Abstain}
 	}
-	reason := in.Reason
-	if reason == "" {
-		reason = codexEmptyDenyReason
+}
+
+// codexAskDegradedReason is the permissionDecisionReason Codex sees for a
+// degraded ask: Codex's decision channel has no ask arm (§4), so §7's
+// binary-engine rule denies instead. A handler's own reason for asking rides
+// along when it gave one.
+func codexAskDegradedReason(handlerReason string) string {
+	const degraded = "hookyard verdict was ask; Codex has no ask channel, so the call was denied"
+	if handlerReason == "" {
+		return degraded
 	}
+	return handlerReason + " — " + degraded
+}
+
+func renderCodexDeny(nativeEvent, reason string) Rendered {
 	out := hookSpecificOutput{
-		HookEventName:            in.NativeEvent,
+		HookEventName:            nativeEvent,
 		PermissionDecision:       string(Deny),
 		PermissionDecisionReason: reason,
 	}

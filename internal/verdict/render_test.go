@@ -86,8 +86,20 @@ func TestRenderOnDecisionCapableEvents(t *testing.T) {
 			in:   Input{Engine: vocab.Codex, CanonicalEvent: vocab.PreTool, NativeEvent: "PreToolUse", Verdict: Allow, Reason: "r"},
 		},
 		{
-			name: "codex ask prints nothing, unenforced",
-			in:   Input{Engine: vocab.Codex, CanonicalEvent: vocab.PreTool, NativeEvent: "PreToolUse", Verdict: Ask, Reason: "r"},
+			// §7: ask degrades to deny on Codex's binary channel, and a
+			// rendered deny is enforced — Codex can and does act on it.
+			name:     "codex ask degrades to deny, enforced",
+			in:       Input{Engine: vocab.Codex, CanonicalEvent: vocab.PreTool, NativeEvent: "PreToolUse", Verdict: Ask, Reason: "r"},
+			stdout:   `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"r — hookyard verdict was ask; Codex has no ask channel, so the call was denied"}}`,
+			enforced: true,
+		},
+		{
+			// Codex rejects a deny with an empty reason, so the degraded
+			// reason must be non-empty even when the handler gave none.
+			name:     "codex ask with no handler reason still gets a non-empty degraded reason",
+			in:       Input{Engine: vocab.Codex, CanonicalEvent: vocab.PreTool, NativeEvent: "PreToolUse", Verdict: Ask},
+			stdout:   `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"hookyard verdict was ask; Codex has no ask channel, so the call was denied"}}`,
+			enforced: true,
 		},
 		{
 			name:     "codex deny",

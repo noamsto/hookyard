@@ -978,8 +978,9 @@ Four fields carry the weight of §5's argument, and one outcome value does.
 result; `enforced` is `false` exactly when the router computed a verdict the
 engine cannot act on. With Codex's `pre_tool` deny path confirmed (§4), no
 engine is wholesale observe-only any more, so this field now marks the
-narrower per-event cases — an `ask` rendered to Codex, which accepts only
-`deny`, or an event whose engine has no decision slot at all; `router` is `ok`, `error` or `timeout`, which is what
+narrower per-event cases — an `allow` rendered to Codex, which accepts only
+`deny` and rejects an explicit allow by name (§7), or an event whose engine
+has no decision slot at all; `router` is `ok`, `error` or `timeout`, which is what
 makes a router that failed *after starting* recoverable; `handlers`
 distinguishes `abstain` from `error` and from `timeout`, which is what makes a
 guard that has silently stopped working recoverable; and an `advise` outcome
@@ -1467,25 +1468,24 @@ on its own; an engine that can't surface that request synchronously should
 not have it silently resolved in the permissive direction. This applies to
 Cursor unless and until its `permission` field is confirmed to support a
 genuine third state, and it is the deliberately conservative default for any
-future engine whose decision shape turns out to be binary.
+future engine whose decision shape turns out to be binary. Codex's
+`pre_tool_use` channel, which accepts a deny and rejects everything else
+including `ask` (§4), sits squarely inside it: a consolidated `ask` targeting
+Codex renders as a deny, and the record marks it `enforced: true` — a
+rendered deny *is* enforcement, whatever verdict produced it.
 
-**That default is now overridden for Codex, and the override is real rather
-than the rule aging out.** Cursor's tri-state is confirmed in §4 — `permission`
-accepts `allow`, `deny`, and `ask` — so the rule's first clause has already
-retired on its own terms. The second clause is the standing general default,
-and Codex's `pre_tool_use` channel, which accepts a deny and rejects
-everything else including `ask` (§4), sits squarely inside it: this is a rule
-still in force being overridden, not a rule that was already going to stop
-applying. Issue #9 overrides it anyway. It rules that a consolidated `ask` on
-Codex records as `enforced: false` — computed but not enforced — and
-rendering a deny to Codex *is* enforcing it, so the two cannot both be true of
-the same verdict. The consequence is stated plainly, because it sits on the
-permissive side of a security path: a guard's `ask` on a Codex tool call now
-results in the call proceeding, the exact outcome this rule exists to rule
-out everywhere else it applies. What the override buys back is visibility,
-not enforcement — the record marks the verdict `enforced: false`, so the loss
-is in the stream rather than silent, the same trade the advisory-slot
-paragraph above makes.
+**This is not §5's fail-open case, and the two must not be conflated.** §5
+covers hookyard *failing* to produce an opinion at all — the router
+unreachable, a guard erroring or timing out — where proceeding is the
+least-bad response to an absence, argued at length there on a blast-radius
+comparison. Here a guard ran, and successfully decided a human should look at
+this call before it proceeds; that is not an absence of opinion, it is an
+opinion the router is fully equipped to act on. Discarding it because the
+channel it must render through happens to be narrow is not failing open, it
+is declining to enforce a verdict that was in fact computed — on the one
+engine where the call proceeding unreviewed is invisible until someone reads
+the stream, rather than a defensible degradation of a control that already
+has nothing to say.
 
 ## 8. Native config emission, registration, and coexistence
 
@@ -2533,7 +2533,7 @@ grade they rest on where the difference matters.
    surfacing a `deny` recorded with `enforced: false`, because it meant a
    guard would have stopped something and could not — is no longer needed for
    Codex. It is worth keeping as a `hookyard doctor` count anyway: §7 still
-   has verdict shapes an engine has no slot for, an `ask` rendered to Codex
+   has verdict shapes an engine has no slot for, an `allow` rendered to Codex
    among them, and those are the same "computed but not enforced" signal in a
    narrower form.
 
