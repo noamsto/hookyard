@@ -1569,11 +1569,13 @@ That file is first-hand evidence for Codex's hook-block TOML syntax, its
 convergence table lists — stronger grounding than §7's own attribution to a
 documentation read.
 
-What is *not* materialized here is nix-config's own codex module:
-`home/ai/default.nix` gates it on `osConfig.profile == "work"` and this is a
-personal host, which is why `~/.codex/agents` and `~/.codex/AGENTS.md` are
-absent (§11, claims 2 and 3). That gate affects nix-config's Codex wiring, not
-the config file itself, which lazytmux writes regardless.
+nix-config's own codex module *is* materialized here, contrary to what an
+earlier pass recorded: `home/ai/default.nix` gates it on
+`osConfig.profile == "work"`, and this host is a work-profile host, so
+`~/.codex/agents` and `~/.codex/AGENTS.md` both resolve (§11, claims 2 and 3).
+On a personal-profile host the gate would close and those paths would be
+absent — but the gate affects nix-config's Codex wiring, not `config.toml`
+itself, which lazytmux writes either way.
 
 **Claude Code.** This is the engine with the most existing writers, and the
 only one where the choice of surface has a real failure mode rather than a

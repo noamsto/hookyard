@@ -36,7 +36,21 @@
           };
         };
 
+        packages.default = pkgs.buildGoModule {
+          pname = "hookyard";
+          version = "0.1.0";
+          src = ./.;
+          vendorHash = "sha256-pbA/AlBz3cQYRTMnQ/qBPcinYOKokrBLNhkbRTq54gE=";
+          subPackages = ["cmd/hookyard"];
+          meta = {
+            description = "Register agent hooks once, route them to every coding agent";
+            mainProgram = "hookyard";
+          };
+        };
+
         pre-commit.settings.hooks = {
+          golangci-lint.enable = true;
+          gotest.enable = true;
           statix.enable = true;
           deadnix.enable = true;
           alejandra.enable = true;
