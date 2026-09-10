@@ -1,0 +1,25 @@
+vars: { d2-config: { layout-engine: elk; sketch: true; pad: 16 } }
+direction: down
+
+classes: {
+  ext:   { style: { stroke: "#E65100"; stroke-width: 2; stroke-dash: 3 } }
+  core:  { style: { stroke: "#1565C0"; stroke-width: 2 } }
+  store: { shape: cylinder; style: { stroke: "#2E7D32"; stroke-width: 2 } }
+}
+
+claude: "Claude Code" { class: ext }
+codex: "Codex" { class: ext }
+cursor: "Cursor" { class: ext }
+envelope: "normalized\nenvelope" { class: core }
+handlers: "matching\nhandlers" { class: core }
+fold: "deny-wins fold" { class: core }
+render: "render for the\ncalling engine" { class: core }
+record: "event record" { class: store }
+
+claude -> envelope: decode\n(prompt_id)
+codex -> envelope: decode\n(turn_id)
+cursor -> envelope: decode\n(cursor_version)
+envelope -> handlers: select matches
+handlers -> fold: run concurrently,\none 4.5s deadline
+fold -> render
+render -> record: append,\nevery path

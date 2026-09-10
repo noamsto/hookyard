@@ -51,10 +51,13 @@
         config,
         ...
       }: {
-        checks.hm-module = import ./nix/checks/hm-module.nix {
-          inherit pkgs;
-          inherit (inputs) home-manager;
-          hookyardPackage = config.packages.hookyard;
+        checks = {
+          hm-module = import ./nix/checks/hm-module.nix {
+            inherit pkgs;
+            inherit (inputs) home-manager;
+            hookyardPackage = config.packages.hookyard;
+          };
+          diagrams = import ./nix/checks/diagrams.nix {inherit pkgs;};
         };
 
         treefmt = {
@@ -111,6 +114,7 @@
               pkgs.gopls
               pkgs.gotools
               pkgs.golangci-lint
+              pkgs.d2
               config.treefmt.build.wrapper
             ];
         };

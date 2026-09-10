@@ -2,3 +2,8 @@
 # This repo quotes a lot of git revisions and sha256 digests verbatim as
 # evidence, and hex runs read as misspellings ("6caf4ff" -> "calf").
 extend-ignore-re = ["\\b[0-9a-f]{7,64}\\b"]
+
+[files]
+# d2-rendered SVGs: mixed-case hex color fragments in generated CSS class
+# names (e.g. "f38BA8") aren't prose and aren't worth hand-tuning regexes for.
+extend-exclude = ["docs/diagrams/*.svg"]
