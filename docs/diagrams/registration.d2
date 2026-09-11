@@ -9,7 +9,7 @@ classes: {
 
 manifestA: "repo A's\nhookyard.json" { class: ext }
 manifestB: "repo B's\nhookyard.json" { class: ext }
-install: "hookyard install" { class: core }
+install: "hookyard install\n(marker-scoped strip)" { class: core }
 claudeCfg: "Claude Code\nsettings.json" { class: ext }
 codexCfg: "Codex\nconfig.toml" { class: ext }
 cursorCfg: "Cursor\nhooks.json" { class: ext }
@@ -17,7 +17,7 @@ table: "state table" { class: store }
 
 manifestA -> install
 manifestB -> install
-install -> claudeCfg: marker-scoped strip
-install -> codexCfg: marker-scoped strip
-install -> cursorCfg: marker-scoped strip
+install -> claudeCfg
+install -> codexCfg
+install -> cursorCfg
 install -> table: record handlers
