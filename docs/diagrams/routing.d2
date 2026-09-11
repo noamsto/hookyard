@@ -13,13 +13,20 @@ cursor: "Cursor" { class: ext }
 envelope: "normalized\nenvelope" { class: core }
 handlers: "matching\nhandlers" { class: core }
 fold: "deny-wins fold" { class: core }
-render: "render for the\ncalling engine" { class: core }
+ccOut: "Claude Code:\npermissionDecision +\nadditionalContext" { class: core }
+cxOut: "Codex:\npermissionDecision only\n(deny arm)" { class: core }
+cuOut: "Cursor:\npermission +\nuser_message" { class: core }
 record: "event record" { class: store }
 
 claude -> envelope: decode\n(prompt_id)
 codex -> envelope: decode\n(turn_id)
 cursor -> envelope: decode\n(cursor_version)
 envelope -> handlers: select matches
+envelope -> record: suppressed:\nanother engine's\nentry
 handlers -> fold: run concurrently,\none 4.5s deadline
-fold -> render
-render -> record: append,\nevery path
+fold -> ccOut
+fold -> cxOut: ask degrades to\nenforced deny
+fold -> cuOut: join reason + advice\ninto one field
+ccOut -> record: append
+cxOut -> record: append
+cuOut -> record: append
