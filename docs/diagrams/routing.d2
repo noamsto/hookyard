@@ -22,11 +22,11 @@ claude -> envelope: decode\n(prompt_id)
 codex -> envelope: decode\n(turn_id)
 cursor -> envelope: decode\n(cursor_version)
 envelope -> handlers: select matches
-envelope -> record: suppressed:\nanother engine's\nentry
+envelope -> record: append\n(suppressed)
 handlers -> fold: run concurrently,\none 4.5s deadline
 fold -> ccOut
 fold -> cxOut: ask degrades to\nenforced deny
-fold -> cuOut: join reason + advice\ninto one field
+fold -> cuOut: join reason + advice
 ccOut -> record: append
 cxOut -> record: append
 cuOut -> record: append
