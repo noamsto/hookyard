@@ -28,14 +28,20 @@ fires.
 Several repos' manifests fold into one `hookyard install` pass, out to three
 engines' native config plus hookyard's own state table:
 
-![Registration: repo A's and repo B's hookyard.json manifests fold into one hookyard install pass, which writes into Claude Code's settings.json, Codex's config.toml, and Cursor's hooks.json, and records the installed handlers in hookyard's state table.](docs/diagrams/registration.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/registration-dark.svg">
+  <img alt="Registration: repo A's and repo B's hookyard.json manifests fold into one hookyard install pass, which writes into Claude Code's settings.json, Codex's config.toml, and Cursor's hooks.json, and records the installed handlers in hookyard's state table." src="docs/diagrams/registration.svg">
+</picture>
 
 An engine firing a hook decodes its native payload into one normalized
 envelope, fans out to the matching handlers under a shared deadline, folds
 their verdicts deny-wins, and renders the result for the calling engine
 before the record is appended:
 
-![Routing: Claude Code, Codex, and Cursor each decode their own native hook payload into a normalized envelope; the matching handlers run concurrently under one 4.5s deadline; their verdicts fold deny-wins; the result renders for the calling engine; and the event record is appended on every path.](docs/diagrams/routing.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/routing-dark.svg">
+  <img alt="Routing: Claude Code, Codex, and Cursor each decode their own native hook payload into a normalized envelope; the matching handlers run concurrently under one 4.5s deadline; their verdicts fold deny-wins; the result renders for the calling engine; and the event record is appended on every path." src="docs/diagrams/routing.svg">
+</picture>
 
 A few things worth calling out because they're not visible from the
 `hookyard` label alone: each engine's writer strips only its own

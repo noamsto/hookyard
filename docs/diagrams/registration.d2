@@ -17,7 +17,7 @@ table: "state table" { class: store }
 
 manifestA -> install
 manifestB -> install
-install -> claudeCfg
-install -> codexCfg
-install -> cursorCfg
+install -> claudeCfg: marker-scoped strip
+install -> codexCfg: marker-scoped strip
+install -> cursorCfg: marker-scoped strip
 install -> table: record handlers
