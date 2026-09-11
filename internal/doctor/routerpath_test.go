@@ -208,7 +208,12 @@ func TestRunUsesTheSingleRecoveredStateDir(t *testing.T) {
 	claudeConfig(t, claudeDir, routedCommand(router, vocab.ClaudeCode, stateDir))
 	writeTodaysStream(t, stateDir, `{"enforced":true}`+"\n")
 
-	p := Paths{ClaudeConfigDir: claudeDir, CodexHome: filepath.Join(root, "codex"), CursorHome: filepath.Join(root, "cursor")}
+	p := Paths{
+		ClaudeConfigDir: claudeDir,
+		CodexHome:       filepath.Join(root, "codex"),
+		CursorHome:      filepath.Join(root, "cursor"),
+		PiAgentDir:      filepath.Join(root, "pi"),
+	}
 	f := enforcementFinding(t, Run(p, root))
 	if f.Status != Pass {
 		t.Errorf("status = %v, want Pass; detail=%q", f.Status, f.Detail)
@@ -232,6 +237,7 @@ func TestRunExplicitStateDirBeatsARecoveredOne(t *testing.T) {
 		ClaudeConfigDir: claudeDir,
 		CodexHome:       filepath.Join(root, "codex"),
 		CursorHome:      filepath.Join(root, "cursor"),
+		PiAgentDir:      filepath.Join(root, "pi"),
 		StateDir:        explicit,
 	}
 	f := enforcementFinding(t, Run(p, root))
@@ -265,7 +271,12 @@ func TestRunFailsWhenEnginesDisagreeOnStateDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := Paths{ClaudeConfigDir: claudeDir, CodexHome: codexHome, CursorHome: cursorHome}
+	p := Paths{
+		ClaudeConfigDir: claudeDir,
+		CodexHome:       codexHome,
+		CursorHome:      cursorHome,
+		PiAgentDir:      filepath.Join(root, "pi"),
+	}
 	f := enforcementFinding(t, Run(p, root))
 	if f.Status != Fail {
 		t.Fatalf("status = %v, want Fail; detail=%q", f.Status, f.Detail)
@@ -290,6 +301,7 @@ func TestRunFallsBackToDefaultStateDirWhenNoneRecovered(t *testing.T) {
 		ClaudeConfigDir: filepath.Join(root, "claude"),
 		CodexHome:       filepath.Join(root, "codex"),
 		CursorHome:      filepath.Join(root, "cursor"),
+		PiAgentDir:      filepath.Join(root, "pi"),
 	}
 	f := enforcementFinding(t, Run(p, root))
 	if f.Status != Pass {

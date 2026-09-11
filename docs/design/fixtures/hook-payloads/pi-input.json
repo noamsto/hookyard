@@ -1,0 +1,8 @@
+{
+  "cwd": "<PROBE>/work",
+  "hook_event_name": "input",
+  "pi_version": "0.85.1",
+  "prompt": "Run the shell command: echo hookyard-probe",
+  "session_id": "01a090c3-49a5-74cf-a396-9a9823c3143b",
+  "source": "interactive"
+}

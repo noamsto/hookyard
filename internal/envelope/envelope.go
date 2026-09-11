@@ -43,14 +43,22 @@ var ErrUnknownEngine = errors.New("envelope: unknown engine")
 //  1. cursor_version present -> Cursor
 //  2. prompt_id or effort present -> Claude Code
 //  3. turn_id present -> Codex
+//  4. pi_version present -> Pi
 //
 // "Present" means the key exists and is not JSON null: a null discriminator
 // is an absent value, not evidence of an engine.
 //
-// The order is load-bearing only if the rules ever overlap. Across the ten
-// captured fixtures they are disjoint, so first-match-wins picks the same
-// engine any order would; an engine that later grows another's discriminator
-// would silently be claimed by whichever rule sits higher.
+// The order is load-bearing only if the rules ever overlap. Across the
+// sixteen captured fixtures they are disjoint, so first-match-wins picks the
+// same engine any order would; an engine that later grows another's
+// discriminator would silently be claimed by whichever rule sits higher.
+//
+// pi_version is unlike the other three discriminators: Pi sends no version
+// field of its own, so this key is one hookyard's own bridge injects into
+// every payload it authors, not one read off the engine (§7). It is still
+// safe as a rule 4 fallthrough because every path that resolves the value
+// lands on a non-empty string: cmd/hookyard's piVersion falls back to
+// "unknown" at install time, and the bridge falls back again at emit time.
 //
 // Known residual: these discriminators are observed only on
 // PreToolUse/PostToolUse/UserPromptSubmit/beforeShellExecution payloads. No
@@ -65,6 +73,9 @@ func Detect(native map[string]json.RawMessage) (vocab.Engine, error) {
 	}
 	if present(native, "turn_id") {
 		return vocab.Codex, nil
+	}
+	if present(native, "pi_version") {
+		return vocab.Pi, nil
 	}
 	return "", ErrUnknownEngine
 }
@@ -88,8 +99,8 @@ func From(engine vocab.Engine, native map[string]json.RawMessage) *Envelope {
 		// branch, no error.
 		CanonicalEvent: canonicalEvent,
 		NativeEvent:    nativeEvent,
-		// session_id, not prompt_id/turn_id/generation_id: all three engines
-		// send it, and the narrower per-engine id would leave two engines
+		// session_id, not prompt_id/turn_id/generation_id: all four engines
+		// send it, and the narrower per-engine id would leave three engines
 		// unhandled.
 		SessionID: stringField(native, "session_id"),
 		Cwd:       cwd(native),
@@ -113,6 +124,11 @@ func From(engine vocab.Engine, native map[string]json.RawMessage) *Envelope {
 // instead of panicking. A panicking router exits 2, which Cursor treats as a
 // BLOCK with stderr as the reason — a fail-closed crash where the design
 // wants fail-open.
+//
+// Pi needs no workspace_roots-style fallback here: hookyard authors Pi's
+// payload shape, and its bridge always populates ctx.cwd (verified live —
+// no captured Pi event has an empty cwd), so the plain stringField read below
+// already covers it without a Cursor-style second branch.
 func cwd(native map[string]json.RawMessage) string {
 	if c := stringField(native, "cwd"); c != "" {
 		return c
@@ -144,6 +160,12 @@ func cwd(native map[string]json.RawMessage) string {
 // Only beforeShellExecution is fixture-backed; afterShellExecution may nest
 // its command differently, so the guard conditions below degrade to no
 // synthesis rather than a hollow one whenever they don't hold exactly.
+//
+// Pi has no analogue of this function to write, and that is a consequence of
+// the same fact as the cwd note above rather than an oversight: hookyard
+// authors Pi's payload shape, so tool_call always carries tool_name and
+// tool_input directly — there is no split protocol event whose command lives
+// somewhere else to reconstruct.
 func synthesizeShell(e *Envelope, native map[string]json.RawMessage) {
 	if e.Protocol != "shell" {
 		return

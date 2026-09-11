@@ -16,9 +16,10 @@ const (
 	ClaudeCode Engine = "claude-code"
 	Codex      Engine = "codex"
 	Cursor     Engine = "cursor"
+	Pi         Engine = "pi"
 )
 
-var Engines = []Engine{ClaudeCode, Codex, Cursor}
+var Engines = []Engine{ClaudeCode, Codex, Cursor, Pi}
 
 func ParseEngine(s string) (Engine, error) {
 	for _, e := range Engines {
@@ -37,7 +38,7 @@ func engineNames() []string {
 	return names
 }
 
-// The six canonical events, one per concept that all three engines share.
+// The six canonical events, one per concept that all four engines share.
 const (
 	SessionStart = "session_start"
 	PromptSubmit = "prompt_submit"
@@ -78,6 +79,21 @@ var nativeEvents = map[Engine]map[string]string{
 		PreCompact:   "preCompact",
 		TurnEnd:      "stop",
 	},
+	// hookyard authors both the config spelling and the payload shape for Pi:
+	// extensions subscribe with pi.on(event, handler), so there is no separate
+	// config-key vocabulary to diverge from the wire spelling the way Codex's
+	// does (§8). PreCompact is inferred from Pi's documented lifecycle rather
+	// than captured: no session_before_compact fixture exists, and Pi also
+	// exposes session_compact/session_compact_failed, so which of the three
+	// actually fires — and whether a handler there can act — is unverified.
+	Pi: {
+		SessionStart: "session_start",
+		PromptSubmit: "input",
+		PreTool:      "tool_call",
+		PostTool:     "tool_result",
+		PreCompact:   "session_before_compact", // inferred, not captured
+		TurnEnd:      "turn_end",
+	},
 }
 
 // NormalizedTools is Claude Code's own tool vocabulary, which §7 normalizes
@@ -97,6 +113,11 @@ var nativeTools = map[Engine]map[string]string{
 	},
 	Cursor: {
 		"Read": "Read", "Write": "Write", "Bash": "Shell", "Grep": "Grep",
+	},
+	// Pi is the first engine with no gaps: read live off pi.getAllTools(),
+	// whose own description for find is "Search for files by glob pattern."
+	Pi: {
+		"Read": "read", "Write": "write", "Bash": "bash", "Grep": "grep", "Glob": "find",
 	},
 }
 

@@ -9,9 +9,11 @@ package doctor
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -58,8 +60,9 @@ type Paths struct {
 	ClaudeConfigDir string
 	CodexHome       string
 	CursorHome      string
+	PiAgentDir      string
 	// StateDir is the operator's explicit --state-dir. Empty means none was
-	// given: Run recovers it from the --state-dir the three engines' emitted
+	// given: Run recovers it from the --state-dir the four engines' emitted
 	// configs already name, rather than treating empty as shorthand for
 	// record.DefaultStateDir().
 	StateDir string
@@ -78,7 +81,19 @@ func DefaultPaths() (Paths, error) {
 	if codex == "" {
 		codex = filepath.Join(home, ".codex")
 	}
-	return Paths{ClaudeConfigDir: claude, CodexHome: codex, CursorHome: filepath.Join(home, ".cursor")}, nil
+	// PI_CODING_AGENT_DIR replaces ~/.pi/agent rather than ~/.pi (verified
+	// against a live pi, and mirrored in cmd/hookyard's defaultTargets), so
+	// doctor and install agree on where Pi's config lives.
+	piAgentDir := os.Getenv("PI_CODING_AGENT_DIR")
+	if piAgentDir == "" {
+		piAgentDir = filepath.Join(home, ".pi", "agent")
+	}
+	return Paths{
+		ClaudeConfigDir: claude,
+		CodexHome:       codex,
+		CursorHome:      filepath.Join(home, ".cursor"),
+		PiAgentDir:      piAgentDir,
+	}, nil
 }
 
 // Run reports on each engine for one working directory.
@@ -87,6 +102,7 @@ func Run(p Paths, dir string) []Finding {
 	findings = append(findings, claudeFindings(p, dir)...)
 	findings = append(findings, codexFindings(p, dir)...)
 	findings = append(findings, cursorFindings(p, dir)...)
+	findings = append(findings, piFindings(p)...)
 
 	stateDir := p.StateDir
 	var disagreement []string
@@ -222,6 +238,165 @@ func cursorProjectSlug(dir string) string {
 	return strings.Trim(slugSeparators.ReplaceAllString(dir, "-"), "-")
 }
 
+// piFindings has no per-directory trust check, unlike the other three: Pi's
+// gate (~/.pi/agent/trust.json + defaultProjectTrust) covers only
+// project-local .pi/ resources, and hookyard registers a global extension,
+// which that gate does not touch at all. Reporting that is the finding.
+func piFindings(p Paths) []Finding {
+	settings := filepath.Join(p.PiAgentDir, "settings.json")
+	bridge := render.PiBridgePath(settings)
+	trustFile := filepath.Join(p.PiAgentDir, "trust.json")
+
+	trust := Finding{
+		Engine: vocab.Pi,
+		Check:  "workspace trust",
+		Status: Pass,
+		Detail: fmt.Sprintf(
+			"%s is a global extension; Pi's project trust gate (%s) does not gate global extensions, so it runs regardless of trust state",
+			bridge, trustFile,
+		),
+	}
+
+	return []Finding{
+		trust,
+		danglingExtensions(settings),
+		registration(vocab.Pi, settings),
+		// The router path lives in the bridge, not settings.json: settings.json
+		// only names the bridge file, and routerPathPattern run against it would
+		// match the bridge path itself truncated at "hookyard" — reporting a
+		// router that does not exist (routerpath_test.go documents the trap).
+		routerPath(vocab.Pi, bridge),
+		piLauncherFindings(),
+	}
+}
+
+// danglingExtensions is Pi's own gap: pi tolerates an extensions[] entry
+// whose file is missing by silently skipping it, starting, running and
+// exiting 0 with no warning of its own. doctor is the only thing that can
+// surface it.
+func danglingExtensions(settingsPath string) Finding {
+	f := Finding{Engine: vocab.Pi, Check: "extensions targets exist", Detail: settingsPath}
+	var settings struct {
+		Extensions []string `json:"extensions"`
+	}
+	if err := readJSON(settingsPath, &settings); err != nil {
+		if os.IsNotExist(err) {
+			// registration() above already reports a missing settings.json as
+			// Fail; a second Fail here for the same cause would be duplicate
+			// noise.
+			f.Status = Unknown
+			f.Detail = "no " + settingsPath + " to check"
+			return f
+		}
+		f.Status = Unknown
+		f.Detail = fmt.Sprintf("cannot read %s: %v", settingsPath, err)
+		return f
+	}
+
+	// Absence is the only error that means what this check reports. A stat can
+	// also fail on an unreadable parent directory or a dead mount, and calling
+	// that "pi cannot find it" would send the reader off to recreate a file
+	// that is already there — a wrong answer from the tool whose whole job is
+	// to be believed about silent failures.
+	var missing, unreadable []string
+	for _, e := range settings.Extensions {
+		_, err := os.Stat(e)
+		switch {
+		case err == nil:
+		case os.IsNotExist(err):
+			missing = append(missing, e)
+		default:
+			unreadable = append(unreadable, fmt.Sprintf("%s (%v)", e, err))
+		}
+	}
+	if len(missing) > 0 {
+		f.Status = Fail
+		f.Detail = "extensions[] names a file pi cannot find, and pi loads silently without it: " + strings.Join(missing, ", ")
+		return f
+	}
+	if len(unreadable) > 0 {
+		f.Status = Unknown
+		f.Detail = "cannot tell whether every extensions[] entry resolves: " + strings.Join(unreadable, ", ")
+		return f
+	}
+	f.Status = Pass
+	f.Detail = "every extensions[] entry in " + settingsPath + " resolves to a file"
+	return f
+}
+
+// piLauncherHooksPattern and piLauncherExtensionPattern recover what a
+// wrapper script injects into a pi invocation. os.Getenv("PI_AGENT_HOOKS")
+// cannot do this: the variable is exported inside the launcher, not in the
+// ambient environment doctor runs in, so a finding wired to it would never
+// fire on the one machine the hazard was found on. Scanning the launcher's
+// own source is what actually found it.
+var (
+	piLauncherHooksPattern     = regexp.MustCompile(`PI_AGENT_HOOKS=(\S+)`)
+	piLauncherExtensionPattern = regexp.MustCompile(`-e\s+(\S+)`)
+)
+
+// piLauncherFindings resolves pi on PATH, follows symlinks to the real
+// target, and — only if that target is a text script rather than a compiled
+// binary — scans it for injected guard paths and extensions. This machine's
+// own wrapper injects a bridge plus four guard paths that already enforce on
+// Pi, so the same guard can fire twice per tool_call; hookyard cannot rewrite
+// a Nix store script, so naming the injection is the whole of its honest
+// response.
+func piLauncherFindings() Finding {
+	f := Finding{Engine: vocab.Pi, Check: "launcher wrapper", Detail: "pi (PATH)"}
+
+	path, err := exec.LookPath("pi")
+	if err != nil {
+		f.Status = Unknown
+		f.Detail = "no pi on PATH to check for an injected launcher"
+		return f
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		f.Status = Unknown
+		f.Detail = fmt.Sprintf("cannot resolve %s: %v", path, err)
+		return f
+	}
+	f.Detail = resolved
+
+	raw, err := os.ReadFile(resolved)
+	if err != nil {
+		f.Status = Unknown
+		f.Detail = fmt.Sprintf("cannot read %s: %v", resolved, err)
+		return f
+	}
+	// A compiled binary can contain byte sequences that coincidentally match
+	// these patterns; a NUL byte in the first slice is the standard signal
+	// that a file isn't text, the same heuristic git and file(1) use.
+	probe := raw
+	if len(probe) > 512 {
+		probe = probe[:512]
+	}
+	if bytes.IndexByte(probe, 0) != -1 {
+		f.Status = Pass
+		f.Detail = resolved + " is a compiled binary, not a wrapper script"
+		return f
+	}
+
+	var injected []string
+	for _, m := range piLauncherHooksPattern.FindAllStringSubmatch(string(raw), -1) {
+		injected = append(injected, strings.Split(m[1], ":")...)
+	}
+	for _, m := range piLauncherExtensionPattern.FindAllStringSubmatch(string(raw), -1) {
+		injected = append(injected, m[1])
+	}
+	injected = distinctStrings(injected)
+
+	if len(injected) == 0 {
+		f.Status = Pass
+		f.Detail = resolved + " does not inject PI_AGENT_HOOKS or -e extensions"
+		return f
+	}
+	f.Status = Fail
+	f.Detail = fmt.Sprintf("%s injects registrations hookyard did not write and cannot strip: %s", resolved, strings.Join(injected, ", "))
+	return f
+}
+
 func registration(engine vocab.Engine, path string) Finding {
 	f := Finding{Engine: engine, Check: "hookyard registered", Detail: path}
 	raw, err := os.ReadFile(path)
@@ -332,9 +507,9 @@ func distinctStrings(in []string) []string {
 	return out
 }
 
-// recoverStateDir scans all three engines' config files for --state-dir and
+// recoverStateDir scans all four engines' config files for --state-dir and
 // returns the distinct values found, in first-seen order across Claude, then
-// Codex, then Cursor.
+// Codex, then Cursor, then Pi.
 //
 // doctor's own state directory otherwise resolves from
 // HOOKYARD_STATE_DIR/XDG_STATE_HOME/$HOME — the same untrusted chain the module
@@ -350,6 +525,12 @@ func recoverStateDir(p Paths) []string {
 		filepath.Join(p.ClaudeConfigDir, "settings.json"),
 		filepath.Join(p.CodexHome, "config.toml"),
 		filepath.Join(p.CursorHome, "hooks.json"),
+		// Pi's settings.json only names the bridge file; the router command,
+		// and the --state-dir stateDirPattern is after, is data spliced into
+		// the bridge itself (render.WritePi). Scanning settings.json here
+		// would recover nothing and reproduce the exact silent-fallback bug
+		// this function exists to close.
+		render.PiBridgePath(filepath.Join(p.PiAgentDir, "settings.json")),
 	} {
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -375,10 +556,13 @@ func readJSON(path string, into any) error {
 // engine that only accepts deny is expected, not a misconfiguration, so this
 // is Pass whenever stateDir could be resolved unambiguously; only the count
 // is informational. It is Fail when disagreement names more than one
-// --state-dir recovered from the three engines' configs: runInstall writes
-// Cursor, then Claude, then Codex, and a later failure does not undo an
-// earlier write, so an activation aborted partway through a --state-dir
-// change genuinely leaves two configs naming different tables.
+// --state-dir recovered from the four engines' registrations: runInstall
+// writes Cursor, then Claude, then Pi, then Codex, and a later failure does
+// not undo an earlier write, so an activation aborted partway through a
+// --state-dir change genuinely leaves two of them naming different tables.
+// Pi's is recovered from its bridge rather than its config, because its
+// settings.json names only the bridge file — the --state-dir text lives
+// inside the bridge's spliced data.
 // Silently picking one would reproduce exactly the false negative that
 // recovery exists to remove. Engine is left at its zero value since the
 // finding isn't per-engine (it renders as a blank column in hookyard

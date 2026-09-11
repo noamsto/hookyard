@@ -55,6 +55,14 @@ type cursorResponse struct {
 	UserMessage string `json:"user_message,omitempty"`
 }
 
+// piResponse is the bridge's wire shape: binary and reason-only, with no
+// decision field at all — the bridge blocks by returning this, and returns
+// nothing (allow) otherwise (§7).
+type piResponse struct {
+	Block  bool   `json:"block"`
+	Reason string `json:"reason,omitempty"`
+}
+
 // Render turns a consolidated decision into the bytes one engine expects on
 // one event. It is total: an (engine, event) pair with no decision slot prints
 // nothing rather than failing, so no caller needs a fallback on this path.
@@ -70,6 +78,8 @@ func Render(in Input) Rendered {
 		return renderCodex(in)
 	case vocab.Cursor:
 		return renderCursor(in)
+	case vocab.Pi:
+		return renderPi(in)
 	}
 	return Rendered{Enforced: in.Verdict == Abstain}
 }
@@ -148,6 +158,50 @@ func renderCursor(in Input) Rendered {
 	}
 	out := cursorResponse{Permission: string(in.Verdict), UserMessage: strings.Join(message, "\n\n")}
 	return Rendered{Stdout: marshal(out), Enforced: true, AdviceDelivered: in.Advice != ""}
+}
+
+// renderPi renders the deny arm, plus ask degraded to deny per §7's rule for
+// binary-channel engines — Pi has no ask arm and no wire form for allow at
+// all, so an explicit allow falls through to the default case below exactly
+// as Codex's does, printing nothing and recording Enforced false: not
+// blocking already is allow, so there is nothing this render step could add.
+func renderPi(in Input) Rendered {
+	switch in.Verdict {
+	case Deny:
+		return renderPiDeny(in.Reason, in.Advice)
+	case Ask:
+		return renderPiDeny(piAskDegradedReason(in.Reason), in.Advice)
+	default:
+		return Rendered{Enforced: in.Verdict == Abstain}
+	}
+}
+
+// piAskDegradedReason is Pi's own text for a degraded ask. It must not reuse
+// codexAskDegradedReason verbatim: the string names the engine that has no
+// ask channel, and printing "Codex" into a Pi deny would mislead about which
+// engine's response this is.
+func piAskDegradedReason(handlerReason string) string {
+	const degraded = "hookyard verdict was ask; Pi has no ask channel, so the call was denied"
+	if handlerReason == "" {
+		return degraded
+	}
+	return handlerReason + " — " + degraded
+}
+
+// renderPiDeny joins reason and advice into Pi's one reason field, the same
+// way renderCursor joins them into user_message: the block reason is the only
+// slot observed reaching the model, and standalone advice has no path of its
+// own (§7), so advice only reaches the model riding along a block.
+func renderPiDeny(reason, advice string) Rendered {
+	var message []string
+	if reason != "" {
+		message = append(message, reason)
+	}
+	if advice != "" {
+		message = append(message, advice)
+	}
+	out := piResponse{Block: true, Reason: strings.Join(message, "\n\n")}
+	return Rendered{Stdout: marshal(out), Enforced: true, AdviceDelivered: advice != ""}
 }
 
 // marshal cannot fail here: every field of every response struct is a string.

@@ -42,6 +42,14 @@ func TestWritersMode(t *testing.T) {
 				return WriteCursor(path, []Entry{{Event: "preToolUse", Command: "/x/bin/hookyard route"}})
 			},
 		},
+		// The mode under test is the settings file's; the bridge beside it
+		// follows the same policy, pinned separately in pi_test.go.
+		"WritePi": {
+			fixture: "{}",
+			write: func(path string) error {
+				return WritePi(path, []Entry{{Event: "tool_call", Command: "/x/bin/hookyard route"}}, "0.85.1")
+			},
+		},
 	}
 
 	for name, tc := range tests {

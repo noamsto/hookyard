@@ -186,3 +186,100 @@ func TestWriteClaudeIsIdempotentAndStaysValid(t *testing.T) {
 		t.Errorf("want one hookyard entry, got %d", n)
 	}
 }
+
+// Pi's settings.json is hand-edited like Claude Code's, and the key hookyard
+// touches is a flat array of paths rather than a nested hook table — so the
+// shared shape is the same three questions, asked of extensions[].
+const piInherited = `{
+  "model": "kimi-k2",
+  "extensions": [
+    "/home/noams/.pi/agent/extensions/foreign-extension.ts"
+  ],
+  "defaultProjectTrust": "ask"
+}
+`
+
+func TestWritePiLeavesOtherExtensionsAndKeysAlone(t *testing.T) {
+	path := writeFixture(t, "settings.json", piInherited)
+	entries := []Entry{{Event: "tool_call", Matcher: "bash", Command: "/nix/store/x/bin/hookyard route --registered-for pi --event pre_tool"}}
+	if err := WritePi(path, entries, "0.85.1"); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, path)
+
+	for _, want := range []string{"foreign-extension.ts", `"model"`, `"defaultProjectTrust"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("write dropped inherited content %q\n--- got ---\n%s", want, got)
+		}
+	}
+	if !strings.Contains(got, PiBridgePath(path)) {
+		t.Errorf("the bridge is not registered\n--- got ---\n%s", got)
+	}
+	if !strings.Contains(readFile(t, PiBridgePath(path)), "--registered-for pi") {
+		t.Error("the bridge carries no hookyard entry")
+	}
+}
+
+// The settings file is hand-edited, so registering an extension should not
+// reshuffle it.
+func TestWritePiPreservesTopLevelKeyOrder(t *testing.T) {
+	path := writeFixture(t, "settings.json", piInherited)
+	if err := WritePi(path, []Entry{{Event: "tool_call", Command: "/x/bin/hookyard route"}}, "0.85.1"); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, path)
+
+	model := strings.Index(got, `"model"`)
+	extensions := strings.Index(got, `"extensions"`)
+	trust := strings.Index(got, `"defaultProjectTrust"`)
+	if model > extensions || extensions > trust {
+		t.Errorf("top-level keys were reordered (model=%d extensions=%d defaultProjectTrust=%d)\n--- got ---\n%s",
+			model, extensions, trust, got)
+	}
+}
+
+func TestWritePiIsIdempotentAndStaysValid(t *testing.T) {
+	path := writeFixture(t, "settings.json", piInherited)
+	entries := []Entry{{Event: "tool_call", Matcher: "bash", Command: "/x/bin/hookyard route --event pre_tool"}}
+	if err := WritePi(path, entries, "0.85.1"); err != nil {
+		t.Fatal(err)
+	}
+	first := readFile(t, path)
+	firstBridge := readFile(t, PiBridgePath(path))
+	if err := WritePi(path, entries, "0.85.1"); err != nil {
+		t.Fatal(err)
+	}
+	second := readFile(t, path)
+
+	if first != second {
+		t.Errorf("second write differs\n--- first ---\n%s\n--- second ---\n%s", first, second)
+	}
+	if secondBridge := readFile(t, PiBridgePath(path)); firstBridge != secondBridge {
+		t.Error("the second write produced a different bridge")
+	}
+	var probe map[string]any
+	if err := json.Unmarshal([]byte(second), &probe); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, second)
+	}
+	if n := strings.Count(second, Marker); n != 1 {
+		t.Errorf("want one hookyard entry, got %d", n)
+	}
+}
+
+// Refusing to parse must also mean refusing to write the bridge: the bridge
+// goes first precisely so no entry ever names a missing file, which would
+// otherwise leave executable code behind for a settings write that never
+// happened.
+func TestWritePiRefusesMalformedJSONAndWritesNoBridge(t *testing.T) {
+	path := writeFixture(t, "settings.json", "{not json")
+	before := readFile(t, path)
+	if err := WritePi(path, []Entry{{Event: "tool_call", Command: "/x/bin/hookyard route"}}, "0.85.1"); err == nil {
+		t.Fatal("want an error for a malformed inherited file, got nil")
+	}
+	if got := readFile(t, path); got != before {
+		t.Error("refusing to parse still modified the file")
+	}
+	if _, err := os.Stat(PiBridgePath(path)); !os.IsNotExist(err) {
+		t.Errorf("want no bridge written by the refused install, got stat err: %v", err)
+	}
+}

@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +24,7 @@ const liveE2EBudget = 90 * time.Second
 
 // liveProbePrompt is the exact prompt
 // docs/design/fixtures/hook-payloads/README.md records using to capture live
-// payloads from all three engines. It is reused verbatim here because it is
+// payloads from all four engines. It is reused verbatim here because it is
 // already known to reliably produce one Bash tool call, not because the
 // wording matters on its own.
 const liveProbePrompt = "Run the shell command: echo hookyard-probe"
@@ -100,6 +102,10 @@ func TestLiveClaudeCodeRefusesTheDeniedToolCall(t *testing.T) {
 		"--claude-settings", filepath.Join(claudeConfigDir, "settings.json"),
 		"--codex-config", filepath.Join(root, "unused-codex", "config.toml"),
 		"--cursor-hooks", filepath.Join(root, "unused-cursor", "hooks.json"),
+		// Without this, install() resolves the real $PI_CODING_AGENT_DIR (or
+		// ~/.pi/agent) default before this test's flags are even parsed, and
+		// this arm would rewrite the developer's actual Pi settings.json.
+		"--pi-settings", filepath.Join(root, "unused-pi", "settings.json"),
 	)
 	if out, err := install.CombinedOutput(); err != nil {
 		t.Fatalf("hookyard install: %v\n%s", err, out)
@@ -258,4 +264,350 @@ func liveFindBashDenyRecord(t *testing.T, stateDir string) (record.Record, bool)
 		}
 	}
 	return record.Record{}, false
+}
+
+// The Pi arm. Unlike Claude Code above, Pi's capture runs fully offline
+// against a local model with no credentials and no API cost
+// (docs/design/fixtures/hook-payloads/README.md, "How they were captured"),
+// which is what makes it automatable at all rather than manual PR evidence.
+
+// livePiModelEndpoint is the local Lemonade server the fixture capture run
+// used and this arm reuses: no credentials, no API cost, and reachable
+// without any network access beyond localhost even under PI_OFFLINE=1.
+const livePiModelEndpoint = "http://127.0.0.1:13305/v1"
+
+// livePiProbeModel names one model this arm's scratch models.json points at.
+// It must already be pulled by the local server; the arm has no way to pull
+// one itself and skips rather than guessing if the server is unreachable.
+const livePiProbeModel = "Qwen3-Coder-30B-A3B-Instruct-GGUF"
+
+// livePiBudget is wider than liveE2EBudget: Claude Code answers a hosted API,
+// this arm answers a local model server, and observed latency against it
+// ranged from single-digit seconds to well over two minutes under load. A
+// tight budget here would flake on exactly the machines this arm exists to
+// run on without a hosted API key.
+const livePiBudget = 5 * time.Minute
+
+// livePiProbePrompt asks for a real filesystem side effect rather than
+// liveProbePrompt's echo, because two of this arm's three assertions are read
+// off whether a file exists afterward, not off captured stdout.
+const livePiProbePrompt = "Run the shell command: touch SIDE-EFFECT.txt"
+
+// liveRequirePi skips on any of three conditions, each with its own message:
+// HOOKYARD_E2E alone would make this arm fail outright, and HOOKYARD_E2E plus
+// pi-on-PATH alone would still burn the whole per-test budget spawning pi
+// against a model server that was never started. It returns pi's resolved
+// path once all three hold.
+func liveRequirePi(t *testing.T) string {
+	t.Helper()
+	if os.Getenv("HOOKYARD_E2E") != "1" {
+		t.Skip("set HOOKYARD_E2E=1 to run this test against a live pi binary")
+	}
+	piBin, err := exec.LookPath("pi")
+	if err != nil {
+		t.Skip("pi binary not found on PATH")
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(livePiModelEndpoint + "/models")
+	if err != nil {
+		t.Skipf("no local model endpoint at %s/models: %v", livePiModelEndpoint, err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Skipf("local model endpoint at %s/models returned %s", livePiModelEndpoint, resp.Status)
+	}
+	return piBin
+}
+
+// livePiSetup builds the scratch layout every test below shares: a hookyard
+// binary, a scratch PI_CODING_AGENT_DIR seeded with a local-provider
+// settings.json and models.json, a project directory to run pi from, and a
+// state directory for hookyard's own records. Each caller still runs its own
+// install with its own --router-path, since that is the one thing the three
+// tests vary.
+func livePiSetup(t *testing.T) (hookyardBin, root, agentDir, projectDir, stateDir string) {
+	t.Helper()
+	hookyardBin = liveBuildHookyard(t)
+	root = t.TempDir()
+	agentDir = filepath.Join(root, "pi-agent")
+	projectDir = filepath.Join(root, "project")
+	stateDir = filepath.Join(root, "state")
+	liveSeedPiAgentDir(t, agentDir)
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", projectDir, err)
+	}
+	return hookyardBin, root, agentDir, projectDir, stateDir
+}
+
+// liveSeedPiAgentDir writes a settings.json and models.json shaped like
+// ~/.pi/agent's own (README, "How they were captured"), pointing at the local
+// Lemonade server. It is a from-scratch seed, never a read of the developer's
+// real config: the local provider needs no real credential, so apiKey is the
+// literal string the server itself accepts, and ~/.pi/agent/auth.json is
+// never opened.
+func liveSeedPiAgentDir(t *testing.T, agentDir string) {
+	t.Helper()
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", agentDir, err)
+	}
+	livePiWriteJSON(t, filepath.Join(agentDir, "settings.json"), map[string]string{
+		"defaultModel":    livePiProbeModel,
+		"defaultProvider": "Lemonade",
+	})
+	livePiWriteJSON(t, filepath.Join(agentDir, "models.json"), map[string]any{
+		"providers": map[string]any{
+			"Lemonade": map[string]any{
+				"api":     "openai-completions",
+				"apiKey":  "lemonade",
+				"baseUrl": livePiModelEndpoint,
+				"models":  []map[string]string{{"id": livePiProbeModel}},
+			},
+		},
+	})
+}
+
+func livePiWriteJSON(t *testing.T, path string, v any) {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// livePiEnv is the environment every pi invocation in this arm runs under:
+// PI_OFFLINE=1 keeps it off the network beyond the local model server, and
+// PI_AGENT_HOOKS is forced empty rather than merely unset — a machine running
+// this arm may have the Nix wrapper's own guard list live in its ambient
+// environment (docs/design/hookyard.md §8's coexistence hazard), and
+// inheriting it would let that bridge fire alongside hookyard's own and make
+// which one produced a given record ambiguous. Both env.Environ() entries are
+// filtered out first because a duplicate key's winner is unspecified.
+func livePiEnv(agentDir string) []string {
+	base := os.Environ()
+	env := make([]string, 0, len(base)+3)
+	for _, kv := range base {
+		if strings.HasPrefix(kv, "PI_CODING_AGENT_DIR=") ||
+			strings.HasPrefix(kv, "PI_OFFLINE=") ||
+			strings.HasPrefix(kv, "PI_AGENT_HOOKS=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env,
+		"PI_CODING_AGENT_DIR="+agentDir,
+		"PI_OFFLINE=1",
+		"PI_AGENT_HOOKS=",
+	)
+}
+
+// livePiWriteManifest mirrors liveWriteManifest, scoped to Pi's own tool
+// vocabulary rather than Claude Code's — the manifest itself still declares
+// Bash in the normalized spelling, same as every engine's manifest, and
+// vocab.NativeMatcher is what lowercases it to "bash" for Pi (§7).
+func livePiWriteManifest(t *testing.T, dir, handlerPath string) string {
+	t.Helper()
+	m := manifest.Manifest{Handlers: []manifest.Handler{{
+		ID:      "e2e-pi-deny",
+		Exec:    handlerPath,
+		Events:  []string{"pre_tool"},
+		Engines: []string{"pi"},
+		Match:   []string{"Bash"},
+	}}}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	path := filepath.Join(dir, "hookyard-pi.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	return path
+}
+
+// livePiInstall runs `hookyard install` with routerPath as the one path each
+// test varies, and every other destination pointed at scratch files under
+// root so no real engine config is ever touched.
+func livePiInstall(t *testing.T, hookyardBin, root, agentDir, stateDir, manifestPath, routerPath string) {
+	t.Helper()
+	install := exec.Command(hookyardBin, "install",
+		"--manifest", manifestPath,
+		"--router-path", routerPath,
+		"--state-dir", stateDir,
+		"--pi-settings", filepath.Join(agentDir, "settings.json"),
+		"--claude-settings", filepath.Join(root, "unused-claude", "settings.json"),
+		"--codex-config", filepath.Join(root, "unused-codex", "config.toml"),
+		"--cursor-hooks", filepath.Join(root, "unused-cursor", "hooks.json"),
+	)
+	if out, err := install.CombinedOutput(); err != nil {
+		t.Fatalf("hookyard install: %v\n%s", err, out)
+	}
+}
+
+// TestLivePiRefusesTheDeniedToolCall is the deny-enforcement half of §5's
+// guarantee: an install with a handler that unconditionally denies, run
+// against a real pi process, must actually stop the shell command from
+// running — not just render a verdict hookyard's own tests already check the
+// shape of.
+func TestLivePiRefusesTheDeniedToolCall(t *testing.T) {
+	piBin := liveRequirePi(t)
+	hookyardBin, root, agentDir, projectDir, stateDir := livePiSetup(t)
+
+	reasonToken := fmt.Sprintf("hookyard-e2e-pi-deny-%d", time.Now().UnixNano())
+	handlerPath := liveWriteDenyHandler(t, root, filepath.Join(root, "handler-fired"), reasonToken)
+	manifestPath := livePiWriteManifest(t, root, handlerPath)
+	livePiInstall(t, hookyardBin, root, agentDir, stateDir, manifestPath, hookyardBin)
+
+	sideEffect := filepath.Join(projectDir, "SIDE-EFFECT.txt")
+
+	ctx, cancel := context.WithTimeout(context.Background(), livePiBudget)
+	defer cancel()
+	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", livePiProbePrompt)
+	probe.Dir = projectDir
+	probe.Env = livePiEnv(agentDir)
+	output, runErr := probe.CombinedOutput()
+
+	if _, statErr := os.Stat(sideEffect); statErr == nil {
+		t.Fatalf("the denied tool call ran anyway: %s exists\n--- pi output ---\n%s", sideEffect, output)
+	}
+
+	rec, ok := liveFindBashDenyRecord(t, stateDir)
+	if !ok {
+		t.Fatalf("hookyard's own record has no Bash pre_tool entry for the probe call "+
+			"(pi run error: %v)\n--- pi output ---\n%s", runErr, output)
+	}
+	if rec.Verdict != record.OutcomeDeny || !rec.Enforced {
+		t.Fatalf("hookyard did not render an enforced deny for the probe call (verdict=%q enforced=%v)\n"+
+			"--- pi output ---\n%s", rec.Verdict, rec.Enforced, output)
+	}
+
+	t.Logf("pi refused the probe call; full output:\n%s", output)
+}
+
+// TestLivePiFailsOpenWhenTheRouterBinaryIsAbsent proves §5's fail-open
+// guarantee against a real pi process rather than a unit test's mocked
+// execFile: a router path that does not exist must not block the tool call.
+// Getting this backwards would mean hookyard fails closed on its fourth
+// engine, which is the one inversion design doc §5 exists to rule out.
+func TestLivePiFailsOpenWhenTheRouterBinaryIsAbsent(t *testing.T) {
+	piBin := liveRequirePi(t)
+	hookyardBin, root, agentDir, projectDir, stateDir := livePiSetup(t)
+
+	handlerPath := liveWriteDenyHandler(t, root, filepath.Join(root, "handler-fired"), "unused-if-fail-open-holds")
+	manifestPath := livePiWriteManifest(t, root, handlerPath)
+	// Contains render.Marker, so BuildPlan accepts it as a router path, but
+	// nothing is ever written there — the absent-router case §5 governs.
+	missingRouter := filepath.Join(root, "does-not-exist", "bin", "hookyard")
+	livePiInstall(t, hookyardBin, root, agentDir, stateDir, manifestPath, missingRouter)
+
+	sideEffect := filepath.Join(projectDir, "SIDE-EFFECT.txt")
+
+	ctx, cancel := context.WithTimeout(context.Background(), livePiBudget)
+	defer cancel()
+	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", livePiProbePrompt)
+	probe.Dir = projectDir
+	probe.Env = livePiEnv(agentDir)
+	output, err := probe.CombinedOutput()
+	if err != nil {
+		t.Fatalf("pi run: %v\n--- pi output ---\n%s", err, output)
+	}
+
+	if _, statErr := os.Stat(sideEffect); statErr != nil {
+		t.Fatalf("the tool call did not run with the router binary absent — hookyard failed CLOSED on Pi, "+
+			"inverting §5's guarantee (stat: %v)\n--- pi output ---\n%s", statErr, output)
+	}
+}
+
+// liveWritePiCaptureRouter writes a router that is not hookyard at all: it
+// only records the exact bytes the bridge piped to its stdin, so this test
+// can compare what the bridge actually sends against the committed fixture
+// without going through hookyard's own decode/render round trip, which would
+// hide a drift between the two. Its path still has to satisfy
+// render.BuildPlan's Marker check, the same requirement any real router path
+// meets.
+func liveWritePiCaptureRouter(t *testing.T, root, capturePath string) string {
+	t.Helper()
+	path := filepath.Join(root, "capture-router", "bin", "hookyard")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	script := "#!/bin/sh\ncat > " + capturePath + "\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatalf("write capture router: %v", err)
+	}
+	return path
+}
+
+// TestLivePiPayloadMatchesTheCommittedFixtureShape is the automated binding
+// between the generated bridge (internal/render/pi_bridge.ts's tool_call
+// entry in the `extras` table) and the committed fixtures: without it the
+// generator can drift from docs/design/fixtures/hook-payloads/pi-tool_call.json
+// with go build, go vet, go test and the nix syntax gate all green, since none
+// of those runs the bridge against a real pi process.
+func TestLivePiPayloadMatchesTheCommittedFixtureShape(t *testing.T) {
+	piBin := liveRequirePi(t)
+	hookyardBin, root, agentDir, projectDir, stateDir := livePiSetup(t)
+
+	handlerPath := liveWriteDenyHandler(t, root, filepath.Join(root, "handler-fired"), "unused-not-invoked")
+	manifestPath := livePiWriteManifest(t, root, handlerPath)
+	capturePath := filepath.Join(root, "captured-payload.json")
+	captureRouter := liveWritePiCaptureRouter(t, root, capturePath)
+	livePiInstall(t, hookyardBin, root, agentDir, stateDir, manifestPath, captureRouter)
+
+	ctx, cancel := context.WithTimeout(context.Background(), livePiBudget)
+	defer cancel()
+	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", livePiProbePrompt)
+	probe.Dir = projectDir
+	probe.Env = livePiEnv(agentDir)
+	output, err := probe.CombinedOutput()
+	if err != nil {
+		t.Fatalf("pi run: %v\n--- pi output ---\n%s", err, output)
+	}
+
+	captured, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatalf("the capture router was never invoked: %v\n--- pi output ---\n%s", err, output)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(captured, &got); err != nil {
+		t.Fatalf("captured payload is not valid JSON: %v\n%s", err, captured)
+	}
+
+	fixturePath := filepath.Join("..", "..", "docs", "design", "fixtures", "hook-payloads", "pi-tool_call.json")
+	fixtureRaw, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", fixturePath, err)
+	}
+	var want map[string]json.RawMessage
+	if err := json.Unmarshal(fixtureRaw, &want); err != nil {
+		t.Fatalf("%s is not valid JSON: %v", fixturePath, err)
+	}
+
+	if diff := liveKeySetDiff(got, want); diff != "" {
+		t.Fatalf("bridge payload key set does not match %s: %s\ncaptured: %s", fixturePath, diff, captured)
+	}
+}
+
+// liveKeySetDiff reports the symmetric difference between two payloads' key
+// sets, or "" when they match exactly.
+func liveKeySetDiff(got, want map[string]json.RawMessage) string {
+	var missing, extra []string
+	for k := range want {
+		if _, ok := got[k]; !ok {
+			missing = append(missing, k)
+		}
+	}
+	for k := range got {
+		if _, ok := want[k]; !ok {
+			extra = append(extra, k)
+		}
+	}
+	if len(missing) == 0 && len(extra) == 0 {
+		return ""
+	}
+	sort.Strings(missing)
+	sort.Strings(extra)
+	return fmt.Sprintf("missing %v, extra %v", missing, extra)
 }

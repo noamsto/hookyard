@@ -10,23 +10,28 @@ classes: {
 claude: "Claude Code" { class: ext }
 codex: "Codex" { class: ext }
 cursor: "Cursor" { class: ext }
+pi: "Pi" { class: ext }
 envelope: "normalized\nenvelope" { class: core }
 handlers: "matching\nhandlers" { class: core }
 fold: "deny-wins fold" { class: core }
 ccOut: "Claude Code:\npermissionDecision +\nadditionalContext" { class: core }
 cxOut: "Codex:\npermissionDecision only\n(deny arm)" { class: core }
 cuOut: "Cursor:\npermission +\nuser_message" { class: core }
+piOut: "Pi:\n{block, reason}\n(deny arm only)" { class: core }
 record: "event record" { class: store }
 
 claude -> envelope: decode\n(prompt_id)
 codex -> envelope: decode\n(turn_id)
 cursor -> envelope: decode\n(cursor_version)
+pi -> envelope: decode\n(pi_version, injected)
 envelope -> handlers: select matches
 envelope -> record: append\n(suppressed)
 handlers -> fold: run concurrently,\none 4.5s deadline
 fold -> ccOut
 fold -> cxOut: ask degrades to\nenforced deny
 fold -> cuOut: join reason + advice
+fold -> piOut: ask degrades to\nenforced deny
 ccOut -> record: append
 cxOut -> record: append
 cuOut -> record: append
+piOut -> record: append

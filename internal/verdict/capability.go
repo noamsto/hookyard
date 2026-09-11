@@ -25,9 +25,13 @@ var cursorScopedDecisionEvents = map[string]bool{
 // takes a different wire shape (decision.behavior) that no captured payload
 // covers, so a verdict on it is computed and recorded unenforced rather than
 // rendered half-confirmed.
+//
+// Pi's input event (prompt_submit) can suppress a turn, but it carries no
+// reason channel back to the model — unlike pre_tool's block reason — so it
+// is deliberately not a decision slot rather than an oversight left for later.
 func HasDecisionSlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bool {
 	switch engine {
-	case vocab.ClaudeCode, vocab.Codex:
+	case vocab.ClaudeCode, vocab.Codex, vocab.Pi:
 		return canonicalEvent == vocab.PreTool
 	case vocab.Cursor:
 		return canonicalEvent == vocab.PreTool || cursorScopedDecisionEvents[nativeEvent]
@@ -39,12 +43,15 @@ func HasDecisionSlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bo
 // string on this event. Codex has none at all. Cursor's is the user_message
 // field of the decision object itself, so its advisory set is exactly its
 // decision set — and advice only rides there alongside a rendered permission,
-// which Render is what enforces.
+// which Render is what enforces. Pi's is its single reason field, riding the
+// same way: the block reason was observed reaching the model as the tool
+// outcome, but only alongside a block, so Pi's advisory set is its decision
+// set too.
 func HasAdvisorySlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bool {
 	switch engine {
 	case vocab.ClaudeCode:
 		return canonicalEvent == vocab.PreTool
-	case vocab.Cursor:
+	case vocab.Cursor, vocab.Pi:
 		return HasDecisionSlot(engine, canonicalEvent, nativeEvent)
 	}
 	return false

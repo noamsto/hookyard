@@ -1,0 +1,20 @@
+{
+  "cwd": "<PROBE>/work",
+  "hook_event_name": "tool_result",
+  "pi_version": "0.85.1",
+  "session_id": "01a090c3-49a5-74cf-a396-9a9823c3143b",
+  "tool_input": {
+    "command": "echo hookyard-probe"
+  },
+  "tool_name": "bash",
+  "tool_response": {
+    "content": [
+      {
+        "text": "hookyard-probe\n",
+        "type": "text"
+      }
+    ],
+    "is_error": false
+  },
+  "tool_use_id": "2Stst3p7r0XzBPIvdApJBlSO42LUMGXV"
+}

@@ -3,6 +3,7 @@ package render
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // CheckDestinations refuses to render into a destination that is a symlink.
@@ -20,19 +21,58 @@ import (
 // package cannot handle rather than clobbering it is the discipline §8
 // already sets for the writers themselves.
 //
-// The caller runs this over all three paths before the first write, so a
-// refusal on one engine cannot leave the other two already rewritten.
-func CheckDestinations(claude, codex, cursor string) error {
-	for _, d := range []struct{ flag, path string }{
-		{"--claude-settings", claude},
-		{"--codex-config", codex},
-		{"--cursor-hooks", cursor},
-	} {
-		if err := checkNotSymlink(d.flag, d.path); err != nil {
+// The caller runs this over every destination before the first write, so a
+// refusal on one engine cannot leave the others already rewritten. Pi alone
+// contributes two of them: its settings.json and the bridge beside it.
+func CheckDestinations(destinations ...Destination) error {
+	for _, d := range destinations {
+		if err := checkNotSymlink(d.Flag, d.Path); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// Destination is one path the pre-flight guards, carrying the flag that moves
+// it so a refusal can name what to change.
+type Destination struct {
+	Flag string
+	Path string
+}
+
+// CheckPiBridgeDir refuses to reach the bridge through a symlinked bin/.
+//
+// checkNotSymlink guards the final path, but the write reaches it through
+// os.MkdirAll, which walks an existing symlinked directory transparently and
+// reports success. So a link at bin/ silently redirects the one artifact
+// hookyard lands that is executable code — pi loads it in-process — and the
+// final-path check never sees it, because the file it Lstats is the one inside
+// the link's target.
+//
+// bin/ only, and Pi's only. ~/.claude, ~/.codex and ~/.cursor are directories a
+// user legitimately links into a dotfiles repo, so a blanket parent check would
+// refuse installs that work today. This segment is different in kind: hookyard
+// invents it and creates it, so nothing a user manages lives there, and a link
+// found at it was put there for this write to follow.
+func CheckPiBridgeDir(flagName, bridgePath string) error {
+	dir := filepath.Dir(bridgePath)
+	info, err := os.Lstat(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return nil
+	}
+	target, err := os.Readlink(dir)
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("%s is a symlink to %s, refusing to write through it: hookyard creates that directory "+
+		"itself and puts executable code in it, so a link there redirects the file pi loads; either remove "+
+		"the link or pass %s to point hookyard at a directory it can own", dir, target, flagName)
 }
 
 func checkNotSymlink(flagName, path string) error {

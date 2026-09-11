@@ -2,21 +2,24 @@
 
 Register agent hooks once, route them to every coding agent.
 
-Claude Code, Codex and Cursor each declare hooks in their own config format,
-under their own event names, with their own payload shape. hookyard is a
-standalone static binary that holds one declarative table of which handler
-runs on which event on which engine, renders that table into each engine's
-native config, and — when an engine fires a hook — decodes the payload into a
-normalized shape, runs the matching handlers concurrently under a shared
-deadline, folds their verdicts with a deny-wins consolidation, and renders the
-result in the shape the calling engine accepts. All three engines have a
-confirmed deny path, so a guard enforces on all three; a decision only has
-somewhere to land on `pre_tool` (plus a handful of Cursor-scoped events), so a
-verdict on any other event is recorded but not enforced, and an `allow`
-rendered to Codex is recorded rather than enforced too — Codex rejects an
-explicit allow by name, so nothing is printed and its own permission flow
-runs instead. An `ask` is not one of those cases: on Codex, whose decision
-shape is binary, a consolidated `ask` degrades to an enforced `deny` with a
+Claude Code, Codex, Cursor and Pi each declare hooks in their own config
+format, under their own event names, with their own payload shape — Pi has
+no config-level hook at all, and gets a generated bridge extension instead
+(more below). hookyard is a standalone static binary that holds one
+declarative table of which handler runs on which event on which engine,
+renders that table into each engine's native config, and — when an engine
+fires a hook — decodes the payload into a normalized shape, runs the
+matching handlers concurrently under a shared deadline, folds their
+verdicts with a deny-wins consolidation, and renders the result in the
+shape the calling engine accepts. All four engines have a confirmed deny
+path, so a guard enforces on all four; a decision only has somewhere to
+land on `pre_tool` (plus a handful of Cursor-scoped events), so a verdict on
+any other event is recorded but not enforced, and an `allow` rendered to
+Codex or Pi is recorded rather than enforced too — Codex rejects an explicit
+allow by name, and Pi's decision channel has no allow wire form at all, so
+on both nothing is printed and the engine's own default flow runs instead.
+An `ask` is not one of those cases: on Codex and Pi, whose decision shapes
+are binary, a consolidated `ask` degrades to an enforced `deny` with a
 reason explaining why.
 
 ## How it works
@@ -25,12 +28,12 @@ Two passes. `hookyard install` writes the table down into every engine's
 config; `hookyard route` is what an engine actually invokes when a hook
 fires.
 
-Several repos' manifests fold into one `hookyard install` pass, out to three
+Several repos' manifests fold into one `hookyard install` pass, out to four
 engines' native config plus hookyard's own state table:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/registration-dark.svg">
-  <img alt="Registration: repo A's and repo B's hookyard.json manifests fold into one hookyard install pass, which writes into Claude Code's settings.json, Codex's config.toml, and Cursor's hooks.json, and records the installed handlers in hookyard's state table." src="docs/diagrams/registration.svg">
+  <img alt="Registration: repo A's and repo B's hookyard.json manifests fold into one hookyard install pass, which writes into Claude Code's settings.json, Codex's config.toml, Cursor's hooks.json, and Pi's two artifacts — a generated bridge extension file and an extensions[] entry in Pi's own settings.json — and records the installed handlers in hookyard's state table." src="docs/diagrams/registration.svg">
 </picture>
 
 An engine firing a hook decodes its native payload into one normalized
@@ -40,7 +43,7 @@ before the record is appended:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/routing-dark.svg">
-  <img alt="Routing: Claude Code, Codex, and Cursor each decode their own native hook payload into a normalized envelope; the matching handlers run concurrently under one 4.5s deadline; their verdicts fold deny-wins; the result renders for the calling engine; and the event record is appended on every path." src="docs/diagrams/routing.svg">
+  <img alt="Routing: Claude Code, Codex, Cursor, and Pi each decode their own native hook payload into a normalized envelope; the matching handlers run concurrently under one 4.5s deadline; their verdicts fold deny-wins; the result renders for the calling engine, including Pi's binary block-or-nothing verdict; and the event record is appended on every path." src="docs/diagrams/routing.svg">
 </picture>
 
 A few things worth calling out because they're not visible from the
@@ -49,9 +52,12 @@ marker-tagged entries out of a config file it shares with other writers, and
 refuses to touch a file it cannot parse rather than clobbering it — on Codex
 that matters because `config.toml` also holds the per-project trust store.
 Each engine's payload and rendered verdict are genuinely different shapes,
-not the same JSON dressed up three ways — Codex's `hookSpecificOutput` has no
-`ask` or advisory field at all, and Cursor folds a reason and any advice into
-one `user_message` string because it has exactly one text slot. And the
+not the same JSON dressed up four ways — Codex's `hookSpecificOutput` has no
+`ask` or advisory field at all, Cursor folds a reason and any advice into one
+`user_message` string because it has exactly one text slot, and Pi has no
+subprocess payload to dress up in the first place: hookyard's own bridge
+extension authors what looks like one, and renders its verdict as a bare
+`{block, reason}` return value rather than any wire format Pi defines. And the
 record is appended on every path through `route`, including a call that
 belongs to another engine's config entirely (`route` and its `--registered-for`
 flag disagree, so nothing runs and the record says `suppressed`) — the record
@@ -73,7 +79,7 @@ hookyard install  --manifest path/to/hookyard.json [--manifest ...]
 hookyard doctor
 ```
 
-`install` renders every manifest it is given into all three engines' native
+`install` renders every manifest it is given into all four engines' native
 config in one pass — it takes the full list, never one repo at a time,
 because its strip is keyed on a marker that does not record which manifest
 produced a row.
@@ -102,7 +108,7 @@ module:
 
 `manifests` is the whole of a consumer's contribution, and it is a shared
 list: every module that sets it contributes paths to the same list, rendered
-into all three engines' native config by one `hookyard install` invocation,
+into all four engines' native config by one `hookyard install` invocation,
 owned by hookyard's own module and run from `home.activation.hookyardInstall`.
 A consumer never pins its own hookyard input and never adds its own
 activation entry that calls `hookyard install` directly: the strip that
@@ -124,27 +130,29 @@ checked-in JSON file naming a path Nix had no chance to fill in.
 
 Turning hookyard off goes in a specific order: empty `manifests`, activate,
 *then* set `enable = false`. Flipping `enable` off first removes the binary
-from the profile while the three engines' configs still name it, so the path
+from the profile while the four engines' configs still name it, so the path
 each config points at now fails at `exec` instead of resolving — exactly the
 fail-open §9 of the design doc spends its argument on. Emptying
 `manifests` first runs `install` with nothing registered, which strips
-hookyard's rows from all three configs while the binary is still there to do
+hookyard's rows from all four configs while the binary is still there to do
 it; only then is it safe to drop the package itself. `hookyard doctor`'s
 `router path` check is what catches a machine left in the wrong order — it
 confirms the path each engine's config names is actually there to exec,
 alongside the trust and confirmed-deny checks it already runs.
 
-The three destination files — Claude Code's `settings.json`, Codex's
-`config.toml`, Cursor's `hooks.json` — must be plain files that hookyard
-itself owns, not symlinks placed by another Nix module. `install` refuses to
-render into one rather than replace it, because replacing it would silently
-detach whatever manages the link with no warning at the next switch. On this
-machine `~/.claude/settings.json` is itself a home-manager-managed symlink
-today, so registering Claude Code hooks needs one of the two ways out:
-`programs.hookyard.claudeSettings` pointed at a file hookyard can own, or the
-module that currently manages that symlink stepping aside for hookyard. The
-same option exists for the other two engines as `codexConfig` and
-`cursorHooks`.
+The destination files hookyard writes into — Claude Code's `settings.json`,
+Codex's `config.toml`, Cursor's `hooks.json`, and Pi's `settings.json` — must
+be plain files that hookyard itself owns, not symlinks placed by another Nix
+module. Pi also gets a generated bridge extension file, written wholesale
+rather than merged into, and that gets the same symlink refusal. `install`
+refuses to render into any of these rather than replace it, because replacing
+it would silently detach whatever manages the link with no warning at the
+next switch. On this machine `~/.claude/settings.json` is itself a
+home-manager-managed symlink today, so registering Claude Code hooks needs
+one of the two ways out: `programs.hookyard.claudeSettings` pointed at a file
+hookyard can own, or the module that currently manages that symlink stepping
+aside for hookyard. The same option exists for the other three engines as
+`codexConfig`, `cursorHooks`, and `piSettings`.
 
 ## The manifest
 
@@ -215,5 +223,7 @@ The six canonical events are `session_start`, `prompt_submit`, `pre_tool`,
 
 The design, and the verification behind it, is in
 [`docs/design/hookyard.md`](docs/design/hookyard.md). Real captured hook
-payloads for all three engines are in
-[`docs/design/fixtures/hook-payloads/`](docs/design/fixtures/hook-payloads/).
+payloads for all four engines are in
+[`docs/design/fixtures/hook-payloads/`](docs/design/fixtures/hook-payloads/) —
+Pi's are hookyard's own bridge output rather than a native payload, and the
+fixtures' own README says so.

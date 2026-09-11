@@ -79,6 +79,36 @@ func TestDecodeEveryFixture(t *testing.T) {
 			toolName: "Bash", toolInputJSON: `{"command":"echo hookyard-probe"}`,
 			cwd: "<PROBE>/capture/cursor-probe",
 		},
+		"pi-session_start.json": {
+			engine: vocab.Pi, canonicalEvent: vocab.SessionStart, nativeEvent: "session_start",
+			toolName: "", toolInputJSON: "",
+			cwd: "<PROBE>/work",
+		},
+		"pi-input.json": {
+			engine: vocab.Pi, canonicalEvent: vocab.PromptSubmit, nativeEvent: "input",
+			toolName: "", toolInputJSON: "",
+			cwd: "<PROBE>/work",
+		},
+		"pi-tool_call.json": {
+			engine: vocab.Pi, canonicalEvent: vocab.PreTool, nativeEvent: "tool_call",
+			toolName: "Bash", toolInputJSON: `{"command":"echo hookyard-probe"}`,
+			cwd: "<PROBE>/work",
+		},
+		"pi-tool_call-DENY.json": {
+			engine: vocab.Pi, canonicalEvent: vocab.PreTool, nativeEvent: "tool_call",
+			toolName: "Bash", toolInputJSON: `{"command":"touch SIDE-EFFECT.txt"}`,
+			cwd: "<PROBE>/work",
+		},
+		"pi-tool_result.json": {
+			engine: vocab.Pi, canonicalEvent: vocab.PostTool, nativeEvent: "tool_result",
+			toolName: "Bash", toolInputJSON: `{"command":"echo hookyard-probe"}`,
+			cwd: "<PROBE>/work",
+		},
+		"pi-turn_end.json": {
+			engine: vocab.Pi, canonicalEvent: vocab.TurnEnd, nativeEvent: "turn_end",
+			toolName: "", toolInputJSON: "",
+			cwd: "<PROBE>/work",
+		},
 	}
 
 	for name, w := range tests {
@@ -209,7 +239,7 @@ func TestMarshalledShapeOmitsOnlyToolInputWhenEmpty(t *testing.T) {
 }
 
 // The drift pin: every fixture's hook_event_name must resolve either through
-// InboundEvent (nine of ten) or as a known engine-only protocol-split
+// InboundEvent (fifteen of sixteen) or as a known engine-only protocol-split
 // spelling (beforeShellExecution). A spelling in neither set means the
 // fixture and vocab's tables have drifted apart, and must fail loudly rather
 // than being patched by inventing a fake canonical mapping (§7, §8's
@@ -236,7 +266,7 @@ func TestEveryFixtureEventIsKnownToVocab(t *testing.T) {
 	}
 }
 
-// Each fixture must match exactly one of Detect's three rules, not merely
+// Each fixture must match exactly one of Detect's four rules, not merely
 // the first one checked. The likeliest future overlap is Codex growing an
 // effort field of its own; this turns that into a red test here rather than
 // a silent misdetection.
@@ -262,8 +292,11 @@ func TestEachFixtureMatchesExactlyOneDetectionRule(t *testing.T) {
 			if present(native, "turn_id") {
 				matches++
 			}
+			if present(native, "pi_version") {
+				matches++
+			}
 			if matches != 1 {
-				t.Errorf("%s matched %d of Detect's three rules, want exactly 1", name, matches)
+				t.Errorf("%s matched %d of Detect's four rules, want exactly 1", name, matches)
 			}
 		})
 	}
