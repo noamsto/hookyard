@@ -38,6 +38,11 @@ func TestInboundToolMapsKnownNativesPerEngine(t *testing.T) {
 		{ClaudeCode, "Bash", "Bash"},
 		{ClaudeCode, "Grep", "Grep"},
 		{ClaudeCode, "Glob", "Glob"},
+		{Pi, "read", "Read"},
+		{Pi, "write", "Write"},
+		{Pi, "bash", "Bash"},
+		{Pi, "grep", "Grep"},
+		{Pi, "find", "Glob"},
 	}
 	for _, tt := range tests {
 		if got := InboundTool(tt.engine, tt.native); got != tt.want {

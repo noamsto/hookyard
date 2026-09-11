@@ -174,6 +174,58 @@ func TestRenderOnDecisionCapableEvents(t *testing.T) {
 			enforced:  true,
 			delivered: true,
 		},
+		{
+			name:     "pi abstain",
+			in:       Input{Engine: vocab.Pi, CanonicalEvent: vocab.PreTool, NativeEvent: "tool_call", Verdict: Abstain},
+			enforced: true,
+		},
+		{
+			// Pi's decision channel is binary with no wire form for allow at
+			// all: not blocking already is allow, so an explicit allow prints
+			// nothing, same as Codex.
+			name: "pi allow prints nothing, unenforced",
+			in:   Input{Engine: vocab.Pi, CanonicalEvent: vocab.PreTool, NativeEvent: "tool_call", Verdict: Allow, Reason: "r"},
+		},
+		{
+			name:     "pi ask degrades to deny, enforced",
+			in:       Input{Engine: vocab.Pi, CanonicalEvent: vocab.PreTool, NativeEvent: "tool_call", Verdict: Ask, Reason: "r"},
+			stdout:   `{"block":true,"reason":"r — hookyard verdict was ask; Pi has no ask channel, so the call was denied"}`,
+			enforced: true,
+		},
+		{
+			name:     "pi ask with no handler reason still gets a non-empty degraded reason",
+			in:       Input{Engine: vocab.Pi, CanonicalEvent: vocab.PreTool, NativeEvent: "tool_call", Verdict: Ask},
+			stdout:   `{"block":true,"reason":"hookyard verdict was ask; Pi has no ask channel, so the call was denied"}`,
+			enforced: true,
+		},
+		{
+			name:     "pi deny",
+			in:       Input{Engine: vocab.Pi, CanonicalEvent: vocab.PreTool, NativeEvent: "tool_call", Verdict: Deny, Reason: "r"},
+			stdout:   `{"block":true,"reason":"r"}`,
+			enforced: true,
+		},
+		{
+			name:     "pi deny with neither reason nor advice",
+			in:       Input{Engine: vocab.Pi, CanonicalEvent: vocab.PreTool, NativeEvent: "tool_call", Verdict: Deny},
+			stdout:   `{"block":true}`,
+			enforced: true,
+		},
+		{
+			// Same shape as Cursor: one text slot, so reason and advice riding
+			// together on a block are joined into it.
+			name:      "pi deny joins reason and advice into the one reason field",
+			in:        Input{Engine: vocab.Pi, CanonicalEvent: vocab.PreTool, NativeEvent: "tool_call", Verdict: Deny, Reason: "r", Advice: "a"},
+			stdout:    `{"block":true,"reason":"r\n\na"}`,
+			enforced:  true,
+			delivered: true,
+		},
+		{
+			// No advisory-only response Pi honours has been confirmed, so
+			// standalone advice is dropped rather than claimed as delivered.
+			name:     "pi standalone advice is not delivered",
+			in:       Input{Engine: vocab.Pi, CanonicalEvent: vocab.PreTool, NativeEvent: "tool_call", Verdict: Abstain, Advice: "a"},
+			enforced: true,
+		},
 	}
 
 	for _, c := range cases {

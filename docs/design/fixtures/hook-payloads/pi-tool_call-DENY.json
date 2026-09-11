@@ -1,0 +1,11 @@
+{
+  "cwd": "<PROBE>/work",
+  "hook_event_name": "tool_call",
+  "pi_version": "0.85.1",
+  "session_id": "01a090c3-a055-77c5-9f6e-c53f636de7c1",
+  "tool_input": {
+    "command": "touch SIDE-EFFECT.txt"
+  },
+  "tool_name": "bash",
+  "tool_use_id": "C6FEUYjmmJ0qVPAJfxkxGBHUnDnqRQtZ"
+}

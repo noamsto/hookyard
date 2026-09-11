@@ -571,14 +571,14 @@ is holding a tool call until the router exits.
 
 | Layer | Budget | Rationale |
 |---|---|---|
-| Emitted timeout (native config, §8) | **5 s**, all three engines | This entry is on the synchronous deny path, so it is deliberately tighter than the 15–60 s fire-and-forget values deployed today. It is not a performance budget — §4.1 measures the whole shape at 16.1 ms worst case, 0.3% of it — it is a hang-containment budget: it bounds how long one stuck guard can freeze one tool call before the engine gives up on it. Five seconds is short enough that a human waiting on the call reads it as a stutter rather than a hang, and long enough that no guard doing honest work on a cold filesystem cache is cut off. houston's installer emits 5 per entry too (`hook/install.go:139`), which is prior art that the value is livable — it is not the reason for it |
+| Emitted timeout (native config, §8) | **5 s**, all four engines — Claude Code, Codex and Cursor via an emitted config field, Pi via the generated bridge's own hardcoded timeout, since Pi has no native timeout field to emit into | This entry is on the synchronous deny path, so it is deliberately tighter than the 15–60 s fire-and-forget values deployed today. It is not a performance budget — §4.1 measures the whole shape at 16.1 ms worst case, 0.3% of it — it is a hang-containment budget: it bounds how long one stuck guard can freeze one tool call before the engine gives up on it. Five seconds is short enough that a human waiting on the call reads it as a stutter rather than a hang, and long enough that no guard doing honest work on a cold filesystem cache is cut off. houston's installer emits 5 per entry too (`hook/install.go:139`), which is prior art that the value is livable — it is not the reason for it |
 | Router's internal deadline | **4.5 s** | 500 ms under the emitted timeout. Two things have to fit in that margin, not one: the router process's own start and fan-out, which §4.1 measures at 16.1 ms worst case and which the margin therefore covers about 30-fold over; and — the part that matters more — the router's ability to *lose gracefully*. Hitting its own deadline first, rather than being killed by the engine's, is what lets the router print a fail-open verdict and append a `router: "timeout"` record before it exits (§5). A router that only ever died at the engine's timeout could never record the fact that it did |
 | Per-handler sub-budget | **4.3 s**, one shared deadline context, run concurrently | Handlers run as concurrent subprocesses under a single deadline context, not in sequence, so the sub-budget is the internal deadline minus a ~200 ms consolidation margin: the time the router needs after the slowest handler returns or is killed to build the verdict, write it, and append the record. §4.1's fan-out numbers are the evidence that concurrency is the right structure here — four guards cost what one costs — so the sub-budget is per-handler wall clock, not a share of a serial budget |
 | Engine default when no timeout is declared | **None on Codex — measured, and worse than an unknown default** | A Codex `UserPromptSubmit` entry declaring no `timeout`, running a hook that ticked once a second, was allowed to run for the full 180 s of its own loop and was never killed; Codex displayed `Working … Running hook` and waited. So the fallback is not a generous default, it is no bound at all: an undeclared timeout lets one hook stall a turn indefinitely. Measured to 180 s, which is where the probe stopped rather than where Codex did. This vindicates the rule that hookyard's installer always emits an explicit timeout, and upgrades the reason from "the default is unknown" to "there is no default to rely on" |
 
-What this chain buys over what exists piecemeal today is one number, emitted
-identically for three engines, that the router is designed to live inside —
-rather than three engines' worth of values chosen for hooks that nothing waits
+What this chain buys over what exists piecemeal today is one number, held
+identically across four engines, that the router is designed to live inside —
+rather than four engines' worth of values chosen for hooks that nothing waits
 on.
 
 ## 4.1 What this costs, measured
@@ -721,7 +721,7 @@ machine-wide outage caused by the infrastructure that was supposed to be
 protecting the code, not by the code it was protecting. Both are bad; the
 question is which is worse *given where this router sits*, and the answer
 comes from that placement rather than from a general preference. hookyard is
-in front of every guarded tool call across three engines at once, so its
+in front of every guarded tool call across four engines at once, so its
 fail-closed blast radius is the whole machine's agent capacity, while its
 fail-open blast radius is the subset of calls a guard would have denied — a
 small subset, since §4.1's all-abstain path is the overwhelmingly common one.
@@ -887,7 +887,7 @@ The choice is forced by the two hard requirements together. It must work with
 zero subscribers, which rules out anything requiring a listener — a Unix
 socket has no one to connect to on a machine with no subscriber installed, and
 a connect attempt on the router's path is a stall the design cannot afford.
-And there are many concurrent writers by construction: three engines, many
+And there are many concurrent writers by construction: four engines, many
 tmux panes, several hook events in flight at once, each a separate short-lived
 process. `O_APPEND` is the mechanism that makes many independent writers safe
 without a lock or a coordinator, which is exactly the shape a per-event exec
@@ -1075,14 +1075,29 @@ to append to.
 
 The six event concepts already line up across engines almost exactly:
 
-| Concept | Claude Code | Codex | Cursor |
-|---|---|---|---|
-| session start | `SessionStart` | `SessionStart` | `sessionStart` |
-| prompt submit | `UserPromptSubmit` | `UserPromptSubmit` | `beforeSubmitPrompt` |
-| pre tool | `PreToolUse` | `PreToolUse` | `preToolUse` |
-| post tool | `PostToolUse` | `PostToolUse` | `postToolUse` |
-| pre compact | `PreCompact` | `PreCompact` | `preCompact` |
-| turn end | `Stop` | `Stop` | `stop` |
+| Concept | Claude Code | Codex | Cursor | Pi |
+|---|---|---|---|---|
+| session start | `SessionStart` | `SessionStart` | `sessionStart` | `session_start` |
+| prompt submit | `UserPromptSubmit` | `UserPromptSubmit` | `beforeSubmitPrompt` | `input` |
+| pre tool | `PreToolUse` | `PreToolUse` | `preToolUse` | `tool_call` |
+| post tool | `PostToolUse` | `PostToolUse` | `postToolUse` | `tool_result` |
+| pre compact | `PreCompact` | `PreCompact` | `preCompact` | `session_before_compact` (inferred) |
+| turn end | `Stop` | `Stop` | `stop` | `turn_end` |
+
+Five of Pi's six cells are captured, live, in
+[`fixtures/hook-payloads/`](fixtures/hook-payloads/): `pi-session_start.json`,
+`pi-input.json`, `pi-tool_call.json`, `pi-tool_result.json`,
+`pi-turn_end.json`. The sixth, `session_before_compact`, is **not** — no
+capture run triggered a compaction, so that cell is inferred from Pi's event
+name and its documented session lifecycle, not observed, and this document
+does not claim otherwise (§12). Pi's own event vocabulary also exposes
+`session_compact` and `session_compact_failed`, names that read like the
+completion and failure of a compaction rather than the pre-compact moment
+this row wants; which of the three, if any, actually fires before hookyard
+would need to act is exactly what an uncaptured event leaves open. `pre_tool`
+and `post_tool` also carry a caveat the table doesn't show: on a Pi deny, no
+`tool_result` fires at all (below), so `post_tool` on Pi only ever means
+"the tool ran".
 
 The Cursor column of this table is not read off documentation. The live
 `~/.cursor/hooks.json` on this machine was inspected directly this pass: its
@@ -1161,16 +1176,27 @@ tool call; the fixtures are in
 prior account in two places, one of which makes the envelope's job easier
 rather than harder.
 
-| | Claude Code 2.1.263 | Codex 0.153.4 | Cursor 2026.09.08 |
-|---|---|---|---|
-| session id | `session_id` | `session_id` | `session_id` |
-| second id | `prompt_id` | `turn_id` | `conversation_id` + `generation_id` |
-| working dir | `cwd`, populated | `cwd`, populated | `cwd` **empty**; real path in `workspace_roots[0]` |
-| tool name | `tool_name: "Bash"` | `tool_name: "Bash"` | `tool_name: "Shell"` |
-| tool args | `tool_input` (`command`, `description`) | `tool_input` (`command`) | `tool_input` (`command`, `cwd`, `timeout`) |
-| call id | `tool_use_id` | `tool_use_id: "exec-…"` | `tool_use_id` |
-| event name field | `hook_event_name: "PreToolUse"` | `hook_event_name: "PreToolUse"` | `hook_event_name: "preToolUse"` |
-| also present | `permission_mode`, `effort`, `transcript_path` | `permission_mode`, `model`, `transcript_path: null` | `model`, `cursor_version`, `user_email`, `workspace_roots` |
+| | Claude Code 2.1.263 | Codex 0.153.4 | Cursor 2026.09.08 | Pi 0.85.1 |
+|---|---|---|---|---|
+| session id | `session_id` | `session_id` | `session_id` | `session_id` |
+| second id | `prompt_id` | `turn_id` | `conversation_id` + `generation_id` | none — no per-turn or per-prompt id was observed anywhere in the five captures; `turn_index` (a plain integer, `turn_end` only) is the nearest thing, not a correlation key |
+| working dir | `cwd`, populated | `cwd`, populated | `cwd` **empty**; real path in `workspace_roots[0]` | `cwd`, populated — checked on all five captured events, no Cursor-style empty-`cwd` trap |
+| tool name | `tool_name: "Bash"` | `tool_name: "Bash"` | `tool_name: "Shell"` | `tool_name: "bash"` — lowercase |
+| tool args | `tool_input` (`command`, `description`) | `tool_input` (`command`) | `tool_input` (`command`, `cwd`, `timeout`) | `tool_input` (`command`) |
+| call id | `tool_use_id` | `tool_use_id: "exec-…"` | `tool_use_id` | `tool_use_id` |
+| event name field | `hook_event_name: "PreToolUse"` | `hook_event_name: "PreToolUse"` | `hook_event_name: "preToolUse"` | `hook_event_name: "tool_call"` |
+| also present | `permission_mode`, `effort`, `transcript_path` | `permission_mode`, `model`, `transcript_path: null` | `model`, `cursor_version`, `user_email`, `workspace_roots` | `pi_version` — **not Pi's own field**; hookyard's bridge injects it (below) |
+
+Pi's `session_id` is `ctx.sessionManager.getSessionId()`, read directly off
+the live `ctx` object rather than off a fixture alone, and it stayed
+identical across all five of that session's captured events, the same
+stability §6's correlation key already assumes for the other three. Pi is
+the outlier on the second-id row rather than a fourth variant of it: where
+the other three each narrow `session_id` to one call or one prompt, nothing
+in Pi's five captured payloads does. §6's correlation key rests on
+`session_id` alone; a handler that needs to distinguish two tool calls in
+the same Pi session has no field to do it with except `tool_use_id`, which
+identifies the call, not the turn.
 
 **The correction that helps: all three engines send `session_id`.** The prior
 pass had the session identifier renamed per engine — `session_id`,
@@ -1199,6 +1225,20 @@ discriminator: `cursor_version` appears only in Cursor's, `effort` and
 `prompt_id` only in Claude Code's, `turn_id` only in Codex's. The router can
 always tell which engine it is talking to; it cannot tell which file told the
 engine to call it.
+
+**Pi's discriminator is not evidence about Pi — it is a promise hookyard
+makes to itself.** Pi sends no payload of its own at all: it has no
+subprocess hook protocol (below), so there is no wire format for it to author
+a `pi_version` field into in the first place. The field exists because
+hookyard's own bridge extension writes it, mirroring `cursor_version`'s shape
+on the one engine that actually needs a discriminator invented for it. It
+does not collide with `cursor_version`, `prompt_id`/`effort`, or `turn_id` —
+none of the other three engines has a reason to ever emit a `pi_version` key
+— but the collision-freedom is a property of a field hookyard controls both
+ends of, not an independent confirmation the way the other three are. If a
+future engine also lacks a native payload, this is the pattern that repeats:
+the discriminator becomes a claim about the bridge that authored the
+envelope, not about the engine that fired it.
 
 The prior pass also described Cursor as splitting tool events by protocol
 (shell, MCP, file) *instead of* exposing a generic pre/post-tool-use pair.
@@ -1254,10 +1294,10 @@ The envelope itself:
 
 ```
 {
-  "engine":         "claude-code" | "codex" | "cursor",
+  "engine":         "claude-code" | "codex" | "cursor" | "pi",
   "canonical_event": "pre_tool" | "" ,   // "" when this event has no canonical equivalent
   "native_event":    "PreToolUse",       // the engine's own literal event name, always present
-  "session_id":      "...",              // all three engines send session_id verbatim
+  "session_id":      "...",              // all four engines send session_id verbatim
   "cwd":             "...",              // falls back to workspace_roots[0] when cwd is empty (Cursor)
   "protocol":        "shell" | "mcp" | "file" | "",  // set only when a protocol-split event fired; empty otherwise, including for Cursor's deployed preToolUse
   "tool_name":       "...",              // present on pre_tool / post_tool
@@ -1275,7 +1315,7 @@ expect to exist for the events it subscribed to.
 ### The handler-side compatibility requirement
 
 The cross-engine reuse case rests entirely on reusing the four `agent-hooks`
-guard binaries across all three engines, not just keeping them working on
+guard binaries across all four engines, not just keeping them working on
 Claude Code. That requirement forces a specific decision on both the inbound
 and outbound schema above, not just a compatibility footnote.
 
@@ -1305,7 +1345,7 @@ is ever printed, and the guard simply stops protecting anything. This is
 exactly the dangerous combination this section has to resolve, not just name.
 
 **Resolution: Claude Code's own PreToolUse JSON shape *is* the handler wire
-protocol, for all three engines, unmodified.** Concretely, and scoped
+protocol, for all four engines, unmodified.** Concretely, and scoped
 precisely to what the claim can actually deliver:
 
 - The envelope is a superset of **the specific fields the guards actually
@@ -1395,6 +1435,29 @@ precisely to what the claim can actually deliver:
   because the failure mode is otherwise exactly §5's fail-open with no record:
   a handler that was never registered cannot abstain, error, or time out, and
   so leaves no trace in the stream at all.
+- **Pi is the first engine whose tool vocabulary has no gap at all.** Read
+  live off `pi.getAllTools()`, not documentation: `read`, `bash`, `powershell`,
+  `edit`, `write`, `grep`, `find`, `ls`. Every one of the five
+  `NormalizedTools` has a Pi tool behind it, with no collapse and no drop:
+
+  | Native tool identifier | Engine | → Claude-Code-shaped `tool_name` |
+  |---|---|---|
+  | `read` | Pi | `Read` |
+  | `write` | Pi | `Write` |
+  | `bash` | Pi | `Bash` |
+  | `grep` | Pi | `Grep` |
+  | `find` | Pi | `Glob` |
+
+  Unlike Codex's `apply_patch` collapse or Cursor's dropped `Glob`, this is a
+  rename, not a mapping decision — every Pi tool name is lowercase, so the
+  translation is a case change plus, for `find`, a rename to the word the
+  other three engines settled on for the same operation (`find`'s own
+  description, read live, is "Search for files by glob pattern.", which is
+  what makes the `Glob` target unambiguous rather than a guess). No manifest
+  `match` entry naming any of the five normalized tools ever renders empty
+  for Pi, which means §7's validation rule above — reject or warn on a
+  `match` that renders empty for a claimed engine — has nothing to catch on
+  this engine.
 - **The outbound schema is the same reuse — and it has three arms, not two.**
   Rather than inventing a second verdict format that handlers must learn, the
   handler-facing wire protocol *is* `hookSpecificOutput` on stdout: a
@@ -1453,6 +1516,7 @@ strings it collected have to ride alongside it:
 | Claude Code | `hookSpecificOutput.permissionDecision` = `allow`/`deny`/`ask`, `permissionDecisionReason` = reason | `hookSpecificOutput.additionalContext`, the concatenation of every advisory collected | Verdict yes — documented field, tri-state including `ask`. Advisory arm confirmed by an existing guard emitting it |
 | Codex | Unconfirmed | Unconfirmed | Only fire-and-forget hooks observed deployed; Codex's deny path, its advisory slot if any, and its default timeout when an entry declares none were none of them verified this pass |
 | Cursor | `permission` field | Unconfirmed | Field name confirmed; exact accepted value set (binary vs. tri-state) not confirmed this pass, and no advisory slot identified |
+| Pi | return `{block: true, reason: string}` from the extension's `tool_call` handler; there is no `allow` wire form — not blocking *is* allow, so an explicit allow renders nothing | `reason` reaches the model, but only riding with a block; standalone advice has no path to the model at all (`ctx.ui.notify` reaches the *user*, and only when `ctx.ui.hasUI`) | **Confirmed live, twice, including a filesystem side effect**: `touch SIDE-EFFECT.txt` was denied and the file did not exist afterward; a second denied `bash` call produced no `tool_result` event while the reason string still reached the model as the tool's outcome. Decision vocabulary is binary — no `ask` arm was found |
 
 **Where an engine has no advisory slot, the advice is recorded (§6) and not
 delivered.** That is a real loss and is stated rather than hidden: a handler
@@ -1472,7 +1536,13 @@ future engine whose decision shape turns out to be binary. Codex's
 `pre_tool_use` channel, which accepts a deny and rejects everything else
 including `ask` (§4), sits squarely inside it: a consolidated `ask` targeting
 Codex renders as a deny, and the record marks it `enforced: true` — a
-rendered deny *is* enforcement, whatever verdict produced it.
+rendered deny *is* enforcement, whatever verdict produced it. Pi's `tool_call`
+handler sits inside it too, and on stronger footing than Codex's: Codex's
+binary shape is read off its own validation rejecting every other value,
+where Pi's was watched directly — block or nothing, twice, with no third
+return value found anywhere in the extension API's types. A consolidated
+`ask` targeting Pi renders as a deny with `enforced: true`, the same rule,
+for the same reason.
 
 **This is not §5's fail-open case, and the two must not be conflated.** §5
 covers hookyard *failing* to produce an opinion at all — the router
@@ -1526,13 +1596,14 @@ whole list to one hookyard invocation. That is still nix-config wiring paths
 rather than owning logic — the list is paths, and the table is hookyard's —
 but it is a shared list rather than four independent blocks, and a fifth repo
 joins by adding its path to it. §9 covers what path the command and its
-emitted entries carry. The three targets, and what already lives in each:
+emitted entries carry. The four targets, and what already lives in each:
 
 | Engine | Target file | Mechanism | Pre-existing writers |
 |---|---|---|---|
 | Cursor | `~/.cursor/hooks.json` | `jq` merge: validate, marker-scoped strip, append, atomic rename | four declared, three live |
 | Codex | `~/.codex/config.toml` | marker-guarded `sed`/heredoc append | lazytmux only, two blocks |
 | Claude Code | `~/.claude/settings.json` | JSON merge under the same marker discipline | hand edits, the Nix `--settings` overlay, plugin `--plugin-dir` trees, and houston's installer as a *potential* writer (it has never run here) |
+| Pi | `<config dir>/bin/hookyard-bridge.ts` (generated, hookyard's own template) **and** the `extensions` array in `~/.pi/agent/settings.json` | write the bridge file whole (it is not merged with anything); JSON merge of the `extensions` entry under the same marker-scoped-strip discipline as the other three | the Nix wrapper's `-e`/`PI_AGENT_HOOKS` injection (below); pi itself, into the same `settings.json` |
 
 **Cursor.** Independent `jq` mergers already write `~/.cursor/hooks.json`,
 and this pass counts **four declared, three currently live** (§1): aeye's
@@ -1706,19 +1777,33 @@ answer it: it can read the same settings sources and report whether hooks are
 gated off, rather than leaving the operator to infer coverage from an empty
 stream.
 
-**The trust gate is not a Claude Code quirk — all three engines have it, and
-the payload-capture run hit it on every one.** Cursor refused to run in a
-fresh directory until passed `--trust`, warning that the agent "can execute
-code and access files in this directory". Codex prompted before loading
-anything and said exactly what was at stake: "Trusting the directory allows
-project-local config, **hooks**, and exec policies to load." Claude Code's is
-the one read from code rather than met head-on, since its probe run was given
-a pre-seeded trust record. So "hooks do not run in an untrusted workspace" is
-a uniform property of all three engines rather than one engine's
-idiosyncrasy, and it is the likeliest way for a guard to be silently absent
-on a machine where it is correctly installed. `hookyard doctor` should report
-workspace trust per engine for the directory it runs in; that is the check,
-not an extra beside it.
+**The trust gate is not a Claude Code quirk — three of the four engines have
+it, and the payload-capture run hit it on every one of those three.** Cursor
+refused to run in a fresh directory until passed `--trust`, warning that the
+agent "can execute code and access files in this directory". Codex prompted
+before loading anything and said exactly what was at stake: "Trusting the
+directory allows project-local config, **hooks**, and exec policies to
+load." Claude Code's is the one read from code rather than met head-on,
+since its probe run was given a pre-seeded trust record.
+
+**Pi breaks the pattern, and it breaks it exactly where hookyard registers.**
+Pi does gate project-local resources: decisions live in
+`~/.pi/agent/trust.json`, falling back to `defaultProjectTrust` (`ask` by
+default; `always` and `never` are also accepted), and non-interactive modes
+(`-p`, `--mode json`, `--mode rpc`) never prompt, they just fall through to
+that default. But Pi's **global** extensions directory
+(`~/.pi/agent/extensions/`) and any path an `extensions[]` entry names via
+`-e` are not gated by project trust at all — confirmed this pass, and it is
+why the bridge above is registered as a global extension rather than a
+project-local one. So "hooks do not run in an untrusted workspace" is a
+property of three of the four engines, not a uniform one, and the fourth is
+not an oversight this document carries forward unstated: hookyard's own
+choice of registration point is what keeps its Pi hooks outside the gate.
+`hookyard doctor` should still report workspace trust per engine for the
+directory it runs in, Pi's project-local trust state included — a handler
+that reads `ctx.cwd`-scoped project resources on Pi is still subject to it
+even though hookyard's own bridge is not — that is the check, not an extra
+beside it.
 
 **Codex keeps directory trust in the same file hookyard writes, which
 constrains the installer.** `~/.codex/config.toml` holds both `[hooks.state]`
@@ -1746,6 +1831,113 @@ hook` invocation anywhere (checked this pass, no matches). Second, because
 hookyard's writer is marker-scoped like every other writer in this section,
 coexistence with houston's entries needs no negotiation — the same property
 that lets four unrelated Cursor writers share one file.
+
+**Pi.** Pi has no subprocess hook protocol at all, which makes it
+structurally unlike the other three from the start. There is no native
+config key that names an executable per event; Pi's hook surface is its
+**extension API** — in-process TypeScript modules, loaded by the `pi`
+process itself, that subscribe with `pi.on(event, handler)`. hookyard cannot
+register with Pi by writing config alone, the way it does for the other
+three. It has to emit a second kind of artifact: a **bridge extension**, a
+generated `.ts` file that shells out to `hookyard route` the same way the
+other three engines' hook entries do, converting Pi's own verdict shape
+(`{block, reason}`) on the way back. Registering that bridge is then the
+familiar problem — an entry in Pi's own config naming a path — but the
+bridge itself is new: nothing else in this design generates a script, only
+JSON, TOML and settings entries.
+
+This is not speculative. The pattern is already live on this machine, for a
+different purpose: the Nix wrapper at `/nix/store/…-pi/bin/pi` injects
+`-e /nix/store/…-hook-bridge.ts` and `PI_AGENT_HOOKS=<colon-separated guard
+paths>`, and that bridge pipes a Claude-Code-shaped `PreToolUse` payload to
+each guard on stdin, converting a `permissionDecision: deny` into Pi's
+`{block: true, reason}`. Four `agent-hooks` guards enforce on Pi today
+through exactly this shape, independently of hookyard.
+
+**The registration path took two passes to get right, and the wrong first
+answer is worth keeping rather than quietly fixing.** The first attempt
+concluded that Pi's config-directory auto-discovery — loading every
+extension under `<config dir>/extensions/` with no matching `extensions[]`
+entry — did not work. That conclusion was wrong. Its probe extension wrote
+its "I loaded" marker via `process.env.PROBE_MARK`, which was unset on some
+runs, so the handler threw; Pi reports that as `Extension error (<path>): …`
+on stderr, and the harness redirecting stderr to `/dev/null` made a loaded,
+throwing extension look identical to one that never loaded at all. Re-run
+with stderr visible and a marker path that cannot be undefined, both
+registration paths load: an extension in `<config dir>/extensions/`, listed
+in `extensions[]` or not; one in `<config dir>/bin/`, or entirely outside the
+config directory, as long as it *is* listed. And Pi **de-duplicates** —
+verified by having the module write a file named after a per-instance random
+id and counting the files: an extension both auto-discovered and explicitly
+registered loads exactly once. The double-fire hazard this pass was checking
+for does not exist.
+
+**What that settles: the bridge goes outside `extensions/`, at `<config
+dir>/bin/hookyard-bridge.ts`, registered solely through an `extensions[]`
+entry.** Not because sharing the auto-discovery directory would double-fire
+— it would not — but because a bridge placed there would keep running even
+after hookyard stripped its `extensions[]` entry: auto-discovery does not
+consult that array, so the file itself, not the entry naming it, would have
+to be deleted to actually uninstall. Keeping the bridge outside
+`extensions/` makes the `extensions[]` entry the single source of
+registration truth, so stripping it really is the uninstall — the same
+property the marker-scoped strip already gives the other three engines. The
+bridge's path also carries hookyard's marker (`/bin/hookyard`) as a
+substring by construction, so doctor's existing registration check and the
+other writers' marker-scoped strip both work on Pi with no new mechanism.
+
+**A missing bridge is tolerated silently, which cuts both ways.**
+`extensions: ["/nonexistent/hookyard-bridge.ts"]` and nothing else: Pi
+started, answered normally, exited 0, and printed no warning. That is good
+for write ordering — a half-finished install (the `extensions[]` entry
+written before the bridge file lands) cannot brick Pi the way a malformed
+Cursor `hooks.json` would refuse to load — but it is bad for visibility: a
+dangling entry, or a bridge that has silently drifted out of sync with the
+router's argument contract, is invisible from Pi's own behavior. That is a
+`doctor` concern, in the same family as the trust-gate gap below, not a
+writer one: the writer's job is to land both artifacts consistently as far
+as it controls, not to make Pi notice when they drift apart.
+
+**Coexistence is real, on both artifacts.** `~/.pi/agent/settings.json` has
+other writers: pi itself writes `theme`, `defaultModel`, `defaultProvider`
+and `lastChangelogVersion` — via `/settings`, Ctrl+S in `/model`, and
+changelog tracking — and `pi install`/`pi remove` also write `extensions`.
+The marker-scoped strip that already has to coexist with hand edits and the
+Nix overlay on Claude Code's `settings.json` has the same duty here: strip
+only the one `extensions` array entry whose path is hookyard's own, leave
+every other key and every other `extensions` entry untouched. The bridge
+file itself has no coexistence problem the other artifacts don't — it is
+hookyard's alone, never hand-edited, so a whole-file write is safe precisely
+because nothing else claims that path.
+
+**One coexistence hazard has no writer-side fix, because there is no config
+file to strip it from.** The Nix wrapper described above already runs four
+`agent-hooks` guards on Pi today, through an env var (`PI_AGENT_HOOKS`)
+baked into a wrapper script in the Nix store — a mechanism hookyard cannot
+see, cannot strip, and did not write. If hookyard registers its own bridge
+on a machine where that wrapper is still in place, the same four guard
+binaries can fire twice per `tool_call`: once via `PI_AGENT_HOOKS`, once via
+hookyard's manifest. Unlike the other three engines, this is not a config
+file hookyard's install can inspect and de-duplicate against — it is an
+environment variable set outside any file hookyard touches. hookyard can
+only detect it (a `doctor` check: is `PI_AGENT_HOOKS` set in the environment
+Pi runs under, and does it name a path hookyard also renders) and report it;
+it cannot resolve it by writing, which is a first for this section — every
+other coexistence case above ends in a strip rule, and this one cannot.
+
+**Pi imposes no timeout on an extension handler, which makes the bridge's
+own timeout load-bearing rather than a nicety.** Pi `await`s the handler's
+promise with no bound; the bridge is what has to cut it off. The existing
+`hook-bridge.ts` already does, at 5000 ms, which happens to match §4's
+emitted-timeout budget (5 s, above) — but that is the bridge's own
+discipline, not anything Pi provides, and hookyard's generated bridge has to
+carry the same timeout itself rather than assume Pi will enforce one.
+
+Config dir override: `PI_CODING_AGENT_DIR` replaces `~/.pi/agent`, not
+`~/.pi` as a whole — confirmed by reading `$PI_CODING_AGENT_DIR/settings.json`
+and `.../models.json` directly from the override root. Whatever path form §9
+gives the other three engines' entries, the Pi writer resolves relative to
+this override the same way.
 
 ### Registration interface
 
@@ -1808,7 +2000,7 @@ have, and hookyard neither weakens nor strengthens it: it performs no
 signature check, no integrity check, and no provenance check beyond parsing.
 It is worth saying out loud because manifests are now the mechanism by which
 new subprocess executions get wired into a gate that fires on every tool call
-across three engines — the review that admits one is the whole of the
+across four engines — the review that admits one is the whole of the
 control.
 
 **Validation is on entry, and failure is loud.** Every manifest is validated
@@ -1816,7 +2008,7 @@ before it reaches the table: fields hookyard does not recognize are ignored,
 so a manifest written against a newer hookyard degrades rather than breaks,
 but a manifest that cannot be parsed, or whose `exec` does not resolve to an
 executable path, fails the install outright. An install that half-succeeds
-would leave three engines' configs describing a table that never existed.
+would leave four engines' configs describing a table that never existed.
 
 **Handler ids are unique, and collisions fail the install.** Manifests come
 from independently maintained repos, so two of them can name the same
@@ -2136,7 +2328,7 @@ item. But the decision does not rest on it alone. Two further costs fall out
 of the store path regardless:
 
 - **Config churn.** A store path changes on every build, so every hookyard
-  bump rewrites three engines' config even when the guard × event × engine
+  bump rewrites four engines' config even when the guard × event × engine
   table has not changed at all. That makes the installer's correctness
   load-bearing on every rebuild rather than at install and at table changes.
   A profile path changes only when the table does.
@@ -2150,7 +2342,7 @@ What the store path would buy is exactness: the emitted config names one
 immutable build, so the binary that runs is provably the one the generation
 pinned. The profile path instead names whatever the active generation puts
 there, which means a rollback silently changes which hookyard runs. That is
-the honest cost of this choice, and it is accepted: a hook wired into three
+the honest cost of this choice, and it is accepted: a hook wired into four
 engines' config has to keep working across rebuilds more than it has to be
 byte-pinned, and a rollback changing behaviour is the same thing every other
 binary on the profile already does.
@@ -2182,7 +2374,7 @@ module, not an operator's responsibility.
 Native config is re-rendered on **every home-manager activation**, so an
 emitted path is always the one the current generation pins. With the profile
 path form the emitted string does not even change between versions, so the
-common case is that a hookyard bump rewrites nothing at all in three engines'
+common case is that a hookyard bump rewrites nothing at all in four engines'
 config: the path stays `${profileDirectory}/bin/hookyard` and only the binary
 behind it moves. A consumer repo that has not migrated is untouched by any of
 this — its old wiring is an independent entry under its own marker, and
@@ -2325,6 +2517,18 @@ already accepts — and it stays last for the unchanged reason that it is the
 only migration where getting it wrong disables a security control rather
 than a convenience.
 
+**Pi changes the shape of that fourth item without changing its position.**
+The two guards named above already enforce on Pi today, through a path hookyard
+did not build: the Nix wrapper exports `PI_AGENT_HOOKS` and injects its own
+bridge extension, and four `agent-hooks` guards run behind it. So Pi's half of
+the guard migration is not "add a fourth engine" but "retire a bridge that
+already works", and it is the only engine where the migration removes a
+mechanism rather than adding one. That also makes it the only engine where a
+half-finished migration double-fires: until the wrapper's `PI_AGENT_HOOKS` is
+emptied, hookyard's bridge and the wrapper's both run, and the same guard sees
+the same tool call twice. §8 records why hookyard cannot resolve that itself,
+and doctor reports it rather than silently tolerating it.
+
 The revised order: **aeye, lazytmux, dispatcher, then the guard migration** —
 unchanged at the top, dispatcher promoted from "blocked behind a from-scratch
 gap" to "next in line" now that the gap it was blocked behind turns out to
@@ -2433,9 +2637,10 @@ miniature: even placement's own coexistence failure mode is native to
 placement's own toolkit.
 
 The conclusion, stated as the outcome of this check rather than its premise:
-hooks are a **protocol** problem. Three engines declare hooks in three
-different config formats, under three different event vocabularies, carrying
-three different payload shapes, and a guard's verdict has to return inside a
+hooks are a **protocol** problem. Four engines declare hooks four different
+ways — three in three different config formats, Pi as an in-process
+extension API — under four different event vocabularies, carrying four
+different payload shapes, and a guard's verdict has to return inside a
 timeout on the tool-call critical path before the engine proceeds — none of
 that is solved by putting a file somewhere an engine already looks, because
 the engines do not already agree on what to read or how to interpret it.
@@ -2721,6 +2926,16 @@ being more capable than this document assumed rather than less.
   below is Claude Code's, and the equivalent lists for Codex and Cursor beyond
   workspace trust have not been enumerated.
 
+  A later pass narrows "uniform" back down. Pi has the trust gate for
+  project-local resources, but hookyard registers into Pi's **global**
+  extensions directory, which sits outside it entirely (§8) — so the gate
+  itself is still a property of every engine checked, but whether *hookyard's
+  own hooks* are subject to it is not, and Pi is the counterexample. The
+  `doctor` requirement stands regardless, for the same reason it already did
+  for Codex's `[projects]` trust: an operator still needs to know whether Pi
+  will run project-scoped things at all, even on the one engine where that
+  answer has no bearing on hookyard's own bridge.
+
   Claude Code's own list, for reference: hook capture is skipped entirely —
   not per entry — for an untrusted workspace, `disableAllHooks` in user or
   flag settings, an `allowManagedHooksOnly` policy, safe mode, a plugin-only
@@ -2799,6 +3014,36 @@ All three close the same way: one more capture run, against the events the
 first run did not cover. That is a stated prerequisite for issue #9, where
 detection and canonicalization first become load-bearing.
 
+**Three items the Pi investigation adds, two resolved and one left open.**
+
+- **Pi's `pre_compact` mapping (`session_before_compact`) is inferred, not
+  observed.** No capture run triggered a compaction, so this is read off
+  Pi's event name and its documented session lifecycle rather than watched.
+  Pi's event vocabulary also exposes `session_compact` and
+  `session_compact_failed`, either of which could turn out to be the event
+  that actually matters to a handler that wants to act *before* a compaction
+  rather than react to its outcome — the mapping above is a guess at which
+  of the three is the pre-compact analog, and it stays a guess until a
+  session actually compacts under capture. Closes the same way as the three
+  residuals above it: one more capture run.
+- **Whether Pi's config-directory auto-discovery loads an unregistered
+  extension is resolved, and the resolution corrects a wrong first answer
+  this document keeps rather than erases (§8).** The first pass concluded it
+  did not work; the failure was in the probe, not in Pi — an undefined
+  `process.env` read threw inside the handler, Pi logged it to stderr as
+  `Extension error (<path>): …`, and the harness had stderr pointed at
+  `/dev/null`, so a loaded-but-throwing extension was indistinguishable from
+  one Pi never loaded at all. Re-run with stderr visible, both
+  auto-discovery and explicit `extensions[]` registration load, from any of
+  three directory locations, and a doubly-registered extension loads exactly
+  once. §8 explains what this settles for where the bridge lives.
+- **Whether Pi has Cursor's empty-`cwd` trap is resolved: no.** `ctx.cwd`
+  was checked directly against the live object, not only read off a fixture,
+  and it is populated on every one of the five captured events. Pi joins
+  Claude Code and Codex as engines whose `cwd` needs no
+  `workspace_roots[0]`-style fallback; Cursor stays the one exception §7's
+  envelope decode has to special-case.
+
 Everything left unverified is accounted for above. **Resolved**, and no
 longer a risk anyone carries: Claude Code's settings merge (item 1); all three
 engines' deny paths, read off their implementations and then watched enforcing
@@ -2810,14 +3055,17 @@ key; Cursor's native consolidation rule, tool mapping and event families
 in substance; the profile-gate question, which retracted the §11 correction
 that raised it; and, settled by a ruling rather than new evidence, Claude
 Code's `defer` verdict and the manifest's handling of non-command handler
-types.
+types. Also resolved, from the Pi investigation: whether Pi's
+auto-discovery loads an unregistered extension (yes, after a wrong first
+reading corrected above), and whether Pi has Cursor's empty-`cwd` trap (no).
 
 Still **open**, in the order it should be closed: three residuals this pass's
 own code creates — engine detection unverified for `SessionStart` and `Stop`
 payloads, payload-level `hook_event_name` spellings unverified for twelve of
 the table's eighteen rows, and `tool_input` field spellings unverified for
 non-shell tools — all three closing the same way, one more capture run, and
-all three a stated prerequisite for issue #9; the per-engine gate lists for
+all three a stated prerequisite for issue #9; Pi's `pre_compact` mapping,
+closing the same way; the per-engine gate lists for
 Codex and Cursor beyond workspace trust, and whether Claude Code honours
 `projectSettings` hooks at all; Codex's `apply_patch` sub-tool mapping; Claude
 Code's and Codex's native consolidation rules; whether fail-open should be

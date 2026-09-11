@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -23,7 +24,7 @@ import (
 
 const usage = `hookyard — register agent hooks once, route them to every coding agent
 
-  hookyard install   render every manifest into all three engines' native config
+  hookyard install   render every manifest into every engine's native config
   hookyard validate  check manifests without writing anything
   hookyard doctor    report whether each engine will actually run the hooks
   hookyard route     dispatch one hook event to every handler that matches it
@@ -74,6 +75,7 @@ type targets struct {
 	claude string
 	codex  string
 	cursor string
+	pi     string
 }
 
 func defaultTargets() (targets, error) {
@@ -89,10 +91,17 @@ func defaultTargets() (targets, error) {
 	if codexHome == "" {
 		codexHome = filepath.Join(home, ".codex")
 	}
+	// PI_CODING_AGENT_DIR replaces ~/.pi/agent rather than ~/.pi (verified
+	// against a live pi), so the settings file is a direct join onto it.
+	piAgentDir := os.Getenv("PI_CODING_AGENT_DIR")
+	if piAgentDir == "" {
+		piAgentDir = filepath.Join(home, ".pi", "agent")
+	}
 	return targets{
 		claude: filepath.Join(claudeDir, "settings.json"),
 		codex:  filepath.Join(codexHome, "config.toml"),
 		cursor: filepath.Join(home, ".cursor", "hooks.json"),
+		pi:     filepath.Join(piAgentDir, "settings.json"),
 	}, nil
 }
 
@@ -113,6 +122,7 @@ func install(args []string) error {
 	claude := fs.String("claude-settings", defaults.claude, "Claude Code settings.json to write")
 	codex := fs.String("codex-config", defaults.codex, "Codex config.toml to write")
 	cursor := fs.String("cursor-hooks", defaults.cursor, "Cursor hooks.json to write")
+	pi := fs.String("pi-settings", defaults.pi, "Pi settings.json to write; the bridge lands in bin/ beside it")
 	dryRun := fs.Bool("dry-run", false, "print what would be written and exit")
 	allowEmpty := fs.Bool("allow-empty", false, "render an empty table and strip every hookyard entry when no --manifest is given")
 	if err := fs.Parse(args); err != nil {
@@ -129,12 +139,12 @@ func install(args []string) error {
 	if len(paths) == 0 && !*allowEmpty {
 		return fmt.Errorf("no --manifest given")
 	}
-	return runInstall(paths, *routerPath, *stateDir, *claude, *codex, *cursor, *dryRun)
+	return runInstall(paths, *routerPath, *stateDir, *claude, *codex, *cursor, *pi, *dryRun)
 }
 
 // runInstall is install's pipeline, split out so tests can drive it with
 // explicit paths instead of os.Args.
-func runInstall(paths manifestPaths, routerPath, stateDir, claude, codex, cursor string, dryRun bool) error {
+func runInstall(paths manifestPaths, routerPath, stateDir, claude, codex, cursor, pi string, dryRun bool) error {
 	handlers, err := loadAll(paths)
 	if err != nil {
 		return err
@@ -158,14 +168,26 @@ func runInstall(paths manifestPaths, routerPath, stateDir, claude, codex, cursor
 	}
 
 	if dryRun {
-		printPlan(plan)
+		printPlan(plan, pi)
 		return nil
 	}
-	// Checked here, over all three paths at once, rather than inside each
-	// writer: everything above this point is read-only, so this is the last
-	// moment an install is still all-or-nothing. A per-writer refusal would
-	// land after the table and the earlier engines were already written.
-	if err := render.CheckDestinations(claude, codex, cursor); err != nil {
+	// Checked here, over every path at once, rather than inside each writer:
+	// everything above this point is read-only, so this is the last moment an
+	// install is still all-or-nothing. A per-writer refusal would land after
+	// the table and the earlier engines were already written.
+	if err := render.CheckDestinations(
+		render.Destination{Flag: "--claude-settings", Path: claude},
+		render.Destination{Flag: "--codex-config", Path: codex},
+		render.Destination{Flag: "--cursor-hooks", Path: cursor},
+		render.Destination{Flag: "--pi-settings", Path: pi},
+		// The bridge's location follows --pi-settings, so that is still the
+		// flag to name when the refusal is about the bridge.
+		render.Destination{Flag: "--pi-settings", Path: render.PiBridgePath(pi)},
+	); err != nil {
+		return err
+	}
+	// Separate from the check above, which cannot see a link one segment up.
+	if err := render.CheckPiBridgeDir("--pi-settings", render.PiBridgePath(pi)); err != nil {
 		return err
 	}
 	// The table must exist before any engine config can point at it: an
@@ -186,6 +208,11 @@ func runInstall(paths manifestPaths, routerPath, stateDir, claude, codex, cursor
 	if err := render.WriteClaude(claude, plan[vocab.ClaudeCode]); err != nil {
 		return err
 	}
+	// More consequential than the two config-only writers above it: this one
+	// also lands executable code.
+	if err := render.WritePi(pi, plan[vocab.Pi], piVersion()); err != nil {
+		return err
+	}
 	if err := render.WriteCodex(codex, plan[vocab.Codex]); err != nil {
 		return err
 	}
@@ -193,6 +220,27 @@ func runInstall(paths manifestPaths, routerPath, stateDir, claude, codex, cursor
 		fmt.Printf("%-12s %d entries\n", engine, len(plan[engine]))
 	}
 	return nil
+}
+
+// piVersion is the value envelope.Detect keys on to recognise a Pi payload at
+// all. Pi exposes no version to an extension, so it is resolved here, at
+// install time, and written into the bridge's data constant.
+//
+// Every failure — pi absent, pi wedged past the timeout, pi printing nothing
+// — has to land on a non-empty string: an empty one would be dropped by
+// JSON.stringify, Detect would fall through every rule, and every Pi hook
+// would become a silent no-op.
+func piVersion() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "pi", "--version").Output()
+	if err != nil {
+		return "unknown"
+	}
+	if version := strings.TrimSpace(string(out)); version != "" {
+		return version
+	}
+	return "unknown"
 }
 
 // shellUnsafe are characters render.command's caller must keep out of the
@@ -479,7 +527,7 @@ func loadAll(paths []string) ([]manifest.Handler, error) {
 	return manifest.Merge(manifests)
 }
 
-func printPlan(plan render.Plan) {
+func printPlan(plan render.Plan, piSettings string) {
 	for _, engine := range vocab.Engines {
 		fmt.Printf("%s\n", engine)
 		if len(plan[engine]) == 0 {
@@ -494,4 +542,7 @@ func printPlan(plan render.Plan) {
 			fmt.Printf("  %-22s %-24s %s\n", e.Event, matcher, e.Command)
 		}
 	}
+	// Pi is the one engine whose install writes a second file, and it is the
+	// executable half.
+	fmt.Printf("pi writes two files\n  %s\n  %s\n", piSettings, render.PiBridgePath(piSettings))
 }

@@ -13,6 +13,8 @@ install: "hookyard install\n(marker-scoped strip)" { class: core }
 claudeCfg: "Claude Code\nsettings.json" { class: ext }
 codexCfg: "Codex\nconfig.toml" { class: ext }
 cursorCfg: "Cursor\nhooks.json" { class: ext }
+piBridge: "Pi bridge\nextension (.ts)" { class: ext }
+piCfg: "Pi settings.json\nextensions[] entry" { class: ext }
 table: "state table" { class: store }
 
 manifestA -> install
@@ -20,4 +22,6 @@ manifestB -> install
 install -> claudeCfg
 install -> codexCfg
 install -> cursorCfg
+install -> piBridge: generate\n(whole file)
+install -> piCfg: register bridge path
 install -> table: record handlers

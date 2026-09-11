@@ -58,6 +58,7 @@
             hookyardPackage = config.packages.hookyard;
           };
           diagrams = import ./nix/checks/diagrams.nix {inherit pkgs;};
+          pi-bridge = import ./nix/checks/pi_bridge.nix {inherit pkgs;};
         };
 
         treefmt = {
@@ -115,6 +116,9 @@
               pkgs.gotools
               pkgs.golangci-lint
               pkgs.d2
+              # For running the bridge's `node --check` by hand, and for the
+              # bridge runtime tests, which skip when node is absent.
+              pkgs.nodejs
               config.treefmt.build.wrapper
             ];
         };

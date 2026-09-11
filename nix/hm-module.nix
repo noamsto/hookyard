@@ -58,6 +58,7 @@
       "--claude-settings ${lib.escapeShellArg cfg.claudeSettings}"
       "--codex-config ${lib.escapeShellArg cfg.codexConfig}"
       "--cursor-hooks ${lib.escapeShellArg cfg.cursorHooks}"
+      "--pi-settings ${lib.escapeShellArg cfg.piSettings}"
     ]
   );
 in {
@@ -74,7 +75,7 @@ in {
       type = lib.types.listOf lib.types.path;
       default = [];
       description = ''
-        The shared list of handler manifests, rendered into all three
+        The shared list of handler manifests, rendered into all four
         engines' native config by one `hookyard install` invocation (§9).
         Consumer modules contribute their own paths here; contributions
         merge across modules. A consumer contributes data, and never its own
@@ -113,6 +114,12 @@ in {
       type = lib.types.str;
       default = "${config.home.homeDirectory}/.cursor/hooks.json";
       description = "Cursor hooks.json to render hookyard's registration into.";
+    };
+
+    piSettings = lib.mkOption {
+      type = lib.types.str;
+      default = "${config.home.homeDirectory}/.pi/agent/settings.json";
+      description = "Pi settings.json to render hookyard's registration into; the bridge lands in bin/ beside it.";
     };
 
     # No default: evalOptionValue prepends a default to the definition list

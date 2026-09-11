@@ -98,6 +98,17 @@ var inboundEvents = map[Engine]map[string]string{
 		"preCompact":         PreCompact,   // assumed
 		"stop":               TurnEnd,      // assumed
 	},
+	// Pi's payload spelling is nativeEvents' Pi column verbatim, because
+	// hookyard authors both — unlike Codex, there is no second surface to
+	// diverge from.
+	Pi: {
+		"session_start":          SessionStart, // observed: pi-session_start.json
+		"input":                  PromptSubmit, // observed: pi-input.json
+		"tool_call":              PreTool,      // observed: pi-tool_call.json
+		"tool_result":            PostTool,     // observed: pi-tool_result.json
+		"session_before_compact": PreCompact,   // inferred, not captured
+		"turn_end":               TurnEnd,      // observed: pi-turn_end.json
+	},
 }
 
 // InboundEvent resolves a payload's hook_event_name to hookyard's canonical
