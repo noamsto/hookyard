@@ -175,6 +175,51 @@ func TestWriteCursorStillStripsItsOwnRowsAmongForeignOnes(t *testing.T) {
 	}
 }
 
+// hooks.json is Cursor's own file: an empty plan with nothing to strip must
+// take no rename over it at all, not even one that reproduces the same JSON
+// with different formatting.
+func TestWriteCursorOnAnEmptyPlanWithNoMarkerLeavesTheFileByteIdentical(t *testing.T) {
+	path := writeFixture(t, "hooks.json", cursorInherited)
+	before := readFile(t, path)
+
+	if err := WriteCursor(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, path); got != before {
+		t.Errorf("file was rewritten with nothing to add or strip\n--- before ---\n%s\n--- got ---\n%s", before, got)
+	}
+}
+
+// The first --allow-empty install a machine ever runs has no hooks.json at
+// all yet. That must not conjure one into existence just to hold an empty
+// hooks key.
+func TestWriteCursorOnAnEmptyPlanWithNoFileWritesNothing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+
+	if err := WriteCursor(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("want no hooks.json created, got stat err: %v", err)
+	}
+}
+
+// The skip requires *both* halves of the condition: zero entries is not
+// enough on its own when a prior hookyard marker row is still registered,
+// since leaving it behind would keep firing against a router that no longer
+// wants it.
+func TestWriteCursorOnAnEmptyPlanStillStripsAStaleMarkerEvenWithNoNewEntries(t *testing.T) {
+	const stale = `{"hooks":{"stop":[{"command":"/x/bin/hookyard route --event stop"}]}}`
+	path := writeFixture(t, "hooks.json", stale)
+
+	if err := WriteCursor(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, path); strings.Contains(got, Marker) {
+		t.Errorf("stale hookyard row survived\n--- got ---\n%s", got)
+	}
+}
+
 const claudeInherited = `{
   "permissions": {
     "allow": [

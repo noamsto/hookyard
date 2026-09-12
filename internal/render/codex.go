@@ -43,6 +43,15 @@ func WriteCodex(path string, entries []Entry) error {
 		return err
 	}
 	existing := string(raw)
+
+	// config.toml is Codex's own file, carrying trust stores hookyard must
+	// never touch un-asked. A zero-entry plan with no prior hookyard block to
+	// strip has nothing to add and nothing to remove, so it takes no rename
+	// at all and leaves the file exactly as Codex last wrote it.
+	if len(entries) == 0 && !strings.Contains(existing, codexBegin) {
+		return nil
+	}
+
 	if strings.TrimSpace(existing) != "" {
 		var probe map[string]any
 		if _, err := toml.Decode(existing, &probe); err != nil {
