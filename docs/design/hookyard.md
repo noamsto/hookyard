@@ -987,8 +987,8 @@ guard that has silently stopped working recoverable; and an `advise` outcome
 carries the advisory text itself plus a `delivered` flag, so an advisory the
 target engine had no slot for (§7) is visible as *written but not delivered*
 rather than disappearing. In the example above `delivered` is `false` because
-the engine is Codex, which has no confirmed advisory slot — the advice
-happened, the model never saw it, and the record says both.
+the engine is Codex, which has no advisory slot — the advice happened, the
+model never saw it, and the record says both.
 
 One thing is deliberately absent: the record carries `tool_name` but not
 `tool_input`, and not §7's raw `native` blob. The envelope handlers see is an
@@ -1513,8 +1513,8 @@ strings it collected have to ride alongside it:
 
 | Engine | Verdict rendering | Advisory rendering | Confirmed? |
 |---|---|---|---|
-| Claude Code | `hookSpecificOutput.permissionDecision` = `allow`/`deny`/`ask`, `permissionDecisionReason` = reason | `hookSpecificOutput.additionalContext`, the concatenation of every advisory collected | Verdict yes — documented field, tri-state including `ask`. Advisory arm confirmed by an existing guard emitting it |
-| Codex | Unconfirmed | Unconfirmed | Only fire-and-forget hooks observed deployed; Codex's deny path, its advisory slot if any, and its default timeout when an entry declares none were none of them verified this pass |
+| Claude Code | `hookSpecificOutput.permissionDecision` = `allow`/`deny`/`ask`, `permissionDecisionReason` = reason, on `pre_tool` only | `hookSpecificOutput.additionalContext`, the concatenation of every advisory collected, delivered on `pre_tool`, `session_start`, and `post_tool` — the latter two have no decision slot, only the advisory one | Verdict yes — documented field, tri-state including `ask`. Advisory arm confirmed on `pre_tool` by an existing guard emitting it, and confirmed live in production on `session_start` and `post_tool` by aeye's `diagram-guidance.sh` and `diagrams.sh` respectively |
+| Codex | Unconfirmed | No advisory slot on any event | Only fire-and-forget hooks observed deployed; Codex's deny path and its default timeout when an entry declares none were not verified this pass. Codex has no advisory channel at all — a settled boundary, not an open question |
 | Cursor | `permission` field | Unconfirmed | Field name confirmed; exact accepted value set (binary vs. tri-state) not confirmed this pass, and no advisory slot identified |
 | Pi | return `{block: true, reason: string}` from the extension's `tool_call` handler; there is no `allow` wire form — not blocking *is* allow, so an explicit allow renders nothing | `reason` reaches the model, but only riding with a block; standalone advice has no path to the model at all (`ctx.ui.notify` reaches the *user*, and only when `ctx.ui.hasUI`) | **Confirmed live, twice, including a filesystem side effect**: `touch SIDE-EFFECT.txt` was denied and the file did not exist afterward; a second denied `bash` call produced no `tool_result` event while the reason string still reached the model as the tool's outcome. Decision vocabulary is binary — no `ask` arm was found |
 

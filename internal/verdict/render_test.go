@@ -235,6 +235,11 @@ func TestRenderOnDecisionCapableEvents(t *testing.T) {
 
 func TestRenderOffADecisionSlotPrintsNothing(t *testing.T) {
 	for _, engine := range vocab.Engines {
+		if engine == vocab.ClaudeCode {
+			// Claude Code has an advisory slot on post_tool: see
+			// TestRenderAdvisoryOnlyEvents.
+			continue
+		}
 		native, ok := vocab.NativeEvent(engine, vocab.PostTool)
 		if !ok {
 			t.Fatalf("%s has no native post_tool event", engine)
@@ -245,6 +250,72 @@ func TestRenderOffADecisionSlotPrintsNothing(t *testing.T) {
 			// and cannot be acted on, which is what the record must show.
 			checkRendered(t, fmt.Sprintf("%s post_tool %s", engine, v), Render(in), "", v == Abstain, false)
 		}
+	}
+}
+
+func TestRenderAdvisoryOnlyEvents(t *testing.T) {
+	cases := []struct {
+		name      string
+		in        Input
+		stdout    string
+		enforced  bool
+		delivered bool
+	}{
+		{
+			name:     "session_start abstain, no advice",
+			in:       Input{Engine: vocab.ClaudeCode, CanonicalEvent: vocab.SessionStart, NativeEvent: "SessionStart", Verdict: Abstain},
+			enforced: true,
+		},
+		{
+			name: "post_tool abstain, no advice",
+			in:   Input{Engine: vocab.ClaudeCode, CanonicalEvent: vocab.PostTool, NativeEvent: "PostToolUse", Verdict: Abstain},
+			// Abstain plus no advice asks for nothing, so it's enforced.
+			enforced: true,
+		},
+		{
+			// The wire shape the linked GitHub issue reproduces against.
+			name:      "session_start abstain with advice",
+			in:        Input{Engine: vocab.ClaudeCode, CanonicalEvent: vocab.SessionStart, NativeEvent: "SessionStart", Verdict: Abstain, Advice: "a"},
+			stdout:    `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"a"}}`,
+			enforced:  true,
+			delivered: true,
+		},
+		{
+			name:      "post_tool abstain with advice",
+			in:        Input{Engine: vocab.ClaudeCode, CanonicalEvent: vocab.PostTool, NativeEvent: "PostToolUse", Verdict: Abstain, Advice: "a"},
+			stdout:    `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"a"}}`,
+			enforced:  true,
+			delivered: true,
+		},
+		{
+			// No decision channel here, so a computed deny is recorded
+			// unenforced even though its advice still rides additionalContext —
+			// and no permissionDecision leaks in, since there's nowhere for it.
+			name:      "session_start deny with advice renders advice only, unenforced",
+			in:        Input{Engine: vocab.ClaudeCode, CanonicalEvent: vocab.SessionStart, NativeEvent: "SessionStart", Verdict: Deny, Reason: "r", Advice: "a"},
+			stdout:    `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"a"}}`,
+			delivered: true,
+		},
+		{
+			name:      "post_tool deny with advice renders advice only, unenforced",
+			in:        Input{Engine: vocab.ClaudeCode, CanonicalEvent: vocab.PostTool, NativeEvent: "PostToolUse", Verdict: Deny, Reason: "r", Advice: "a"},
+			stdout:    `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"a"}}`,
+			delivered: true,
+		},
+		{
+			// Reason has no channel here and must not leak into additionalContext
+			// or anywhere else — a deliberate boundary, not an oversight.
+			name: "session_start deny with reason only drops the reason silently",
+			in:   Input{Engine: vocab.ClaudeCode, CanonicalEvent: vocab.SessionStart, NativeEvent: "SessionStart", Verdict: Deny, Reason: "r"},
+		},
+		{
+			name: "post_tool deny with reason only drops the reason silently",
+			in:   Input{Engine: vocab.ClaudeCode, CanonicalEvent: vocab.PostTool, NativeEvent: "PostToolUse", Verdict: Deny, Reason: "r"},
+		},
+	}
+
+	for _, c := range cases {
+		checkRendered(t, c.name, Render(c.in), c.stdout, c.enforced, c.delivered)
 	}
 }
 
@@ -270,6 +341,9 @@ func TestCapabilityTable(t *testing.T) {
 			}
 			// Codex has no advisory slot on any event.
 			wantAdvisory := want && engine != vocab.Codex
+			if engine == vocab.ClaudeCode {
+				wantAdvisory = event == vocab.PreTool || event == vocab.SessionStart || event == vocab.PostTool
+			}
 			if got := HasAdvisorySlot(engine, event, native); got != wantAdvisory {
 				t.Errorf("HasAdvisorySlot(%s, %s) = %v, want %v", engine, event, got, wantAdvisory)
 			}
