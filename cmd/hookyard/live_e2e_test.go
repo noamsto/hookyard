@@ -23,12 +23,15 @@ import (
 // fails this test instead of the suite.
 const liveE2EBudget = 90 * time.Second
 
-// liveProbePrompt is the exact prompt
-// docs/design/fixtures/hook-payloads/README.md records using to capture live
-// payloads from all four engines. It is reused verbatim here because it is
-// already known to reliably produce one Bash tool call, not because the
-// wording matters on its own.
-const liveProbePrompt = "Run the shell command: echo hookyard-probe"
+// liveProbePrompt asks for the same single Bash tool call
+// docs/design/fixtures/hook-payloads/README.md records capturing live payloads
+// with, but names a filesystem side effect rather than an echo, so whether the
+// denied call actually ran is a file that either exists or does not.
+const liveProbePrompt = "Run the shell command: touch SIDE-EFFECT.txt"
+
+// liveProbeSideEffect is the file liveProbePrompt would create, relative to
+// the directory the probe runs in.
+const liveProbeSideEffect = "SIDE-EFFECT.txt"
 
 // TestLiveClaudeCodeRefusesTheDeniedToolCall proves enforcement rather than
 // verdict shape. Every other test here asserts that hookyard renders the JSON
@@ -166,10 +169,17 @@ func TestLiveClaudeCodeRefusesTheDeniedToolCall(t *testing.T) {
 			"a hookyard-side problem, not an engine one\n--- claude output ---\n%s", rec.Verdict, rec.Enforced, output)
 	}
 
-	if !strings.Contains(string(output), reasonToken) {
-		t.Fatalf("hookyard recorded an enforced deny, but claude's own output never surfaced the deny "+
-			"reason (%s): the shell call may have run anyway despite the recorded deny\n"+
-			"--- claude output ---\n%s", reasonToken, output)
+	if rec.Reason != reasonToken {
+		t.Fatalf("hookyard recorded the deny with reason %q, want the handler's own %q — the reason the "+
+			"engine was handed is not the one the handler returned\n--- claude output ---\n%s",
+			rec.Reason, reasonToken, output)
+	}
+
+	// Enforcement, not verdict shape: every assertion above would still hold
+	// if claude had recorded the deny and run the command anyway.
+	if _, statErr := os.Stat(filepath.Join(projectDir, liveProbeSideEffect)); statErr == nil {
+		t.Fatalf("the denied shell command ran anyway: %s exists despite an enforced deny\n"+
+			"--- claude output ---\n%s", liveProbeSideEffect, output)
 	}
 
 	// The load-bearing assertion (see the test's doc comment): the base's own
