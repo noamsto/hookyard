@@ -13,6 +13,7 @@ import (
 	"sort"
 
 	"github.com/noamsto/hookyard/internal/atomicfile"
+	"github.com/noamsto/hookyard/internal/verdict"
 	"github.com/noamsto/hookyard/internal/vocab"
 )
 
@@ -21,6 +22,14 @@ import (
 // honoured, so it is refused rather than silently clamped.
 const MaxHandlerTimeoutMS = 4300
 
+// Lane vocabulary: which of the two ways the router runs a handler. No
+// omitempty on the field below — the table states the lane explicitly rather
+// than leaving a reader to know that absent means verdict.
+const (
+	LaneVerdict       = "verdict"
+	LaneFireAndForget = "fire_and_forget"
+)
+
 type Handler struct {
 	ID        string   `json:"id"`
 	Exec      string   `json:"exec"`
@@ -28,7 +37,11 @@ type Handler struct {
 	Engines   []string `json:"engines"`
 	Match     []string `json:"match"`
 	TimeoutMS int      `json:"timeout_ms"`
+	Lane      string   `json:"lane"`
 }
+
+// FireAndForget reports whether the router starts h and never waits for it.
+func (h Handler) FireAndForget() bool { return h.Lane == LaneFireAndForget }
 
 type Manifest struct {
 	Handlers []Handler `json:"handlers"`
@@ -58,6 +71,11 @@ func Load(path string) (*Manifest, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	m.Source = path
+	for i := range m.Handlers {
+		if m.Handlers[i].Lane == "" {
+			m.Handlers[i].Lane = LaneVerdict
+		}
+	}
 	if err := m.validate(); err != nil {
 		return nil, err
 	}
@@ -94,9 +112,11 @@ func (m *Manifest) validateHandler(h Handler) error {
 
 // validateStatic runs every rule that does not touch the filesystem: id
 // pattern, exec path form, event and engine vocabulary, match vocabulary, the
-// timeout_ms bound, and coverage. ReadTable calls this alone, on the critical
-// path of every guarded tool call, because re-statting an exec there buys
-// nothing the exec attempt does not already report as a handler error.
+// timeout_ms bound, lane, and coverage. ReadTable calls this alone, on the
+// critical path of every guarded tool call, because re-statting an exec there
+// buys nothing the exec attempt does not already report as a handler error.
+// Callers normalize an empty Lane to LaneVerdict before reaching here, so this
+// treats "" as invalid rather than re-normalizing it a second place.
 func validateStatic(where string, h Handler) error {
 	if !idPattern.MatchString(h.ID) {
 		return fmt.Errorf("%s: id must match %s", where, idPattern)
@@ -110,6 +130,17 @@ func validateStatic(where string, h Handler) error {
 		return fmt.Errorf("%s: exec %q must be an absolute path, because it is resolved at "+
 			"hook-fire time against the agent's working directory and PATH, not the installer's",
 			where, h.Exec)
+	}
+	if h.Lane != LaneVerdict && h.Lane != LaneFireAndForget {
+		return fmt.Errorf("%s: lane %q must be %q or %q", where, h.Lane, LaneVerdict, LaneFireAndForget)
+	}
+	// Non-zero, not "present": TimeoutMS is a plain int with no omitempty, so
+	// WriteTable emits "timeout_ms":0 on every entry. A presence check would
+	// make hookyard's own table fail ReadTable on the critical path of every
+	// hook fire.
+	if h.FireAndForget() && h.TimeoutMS != 0 {
+		return fmt.Errorf("%s: timeout_ms %d set on a fire-and-forget handler, but nothing waits "+
+			"for it so a timeout could not be enforced", where, h.TimeoutMS)
 	}
 	if h.TimeoutMS < 0 || h.TimeoutMS > MaxHandlerTimeoutMS {
 		return fmt.Errorf("%s: timeout_ms %d outside 0..%d", where, h.TimeoutMS, MaxHandlerTimeoutMS)
@@ -143,7 +174,10 @@ func validateStatic(where string, h Handler) error {
 	if err != nil {
 		return err
 	}
-	return validateCoverage(where, h, engines)
+	if err := validateCoverage(where, h, engines); err != nil {
+		return err
+	}
+	return validateLane(where, h, engines)
 }
 
 func parseEngines(where string, names []string) ([]vocab.Engine, error) {
@@ -183,6 +217,51 @@ func validateCoverage(where string, h Handler, engines []vocab.Engine) error {
 		}
 	}
 	return nil
+}
+
+// validateLane refuses a fire-and-forget handler registered on an event where
+// the engine would hand it a decision slot. The router never waits for a
+// fire-and-forget handler (§4), so a verdict computed
+// there has nowhere to go — the handler's author would reasonably believe it
+// guards a call it in fact never can.
+func validateLane(where string, h Handler, engines []vocab.Engine) error {
+	if !h.FireAndForget() {
+		return nil
+	}
+	for _, engine := range engines {
+		for _, event := range h.Events {
+			canonical, native := resolveEvent(engine, event)
+			if canonical == "" && native == "" {
+				continue
+			}
+			if verdict.HasDecisionSlot(engine, canonical, native) {
+				return fmt.Errorf("%s: event %q on %s has a decision slot, but a fire-and-forget "+
+					"handler never returns a verdict so it cannot guard this event", where, event, engine)
+			}
+		}
+	}
+	return nil
+}
+
+// resolveEvent fills both halves of a manifest event name for engine.
+// HasDecisionSlot asks about a canonical name and a native one, and a
+// manifest carries only ever one of them.
+func resolveEvent(engine vocab.Engine, event string) (canonical, native string) {
+	if scoped, n, ok := vocab.SplitEngineScoped(event); ok {
+		if scoped != engine {
+			return "", "" // another engine's event, skipped as validateCoverage skips it
+		}
+		// ok is deliberately ignored: Cursor's scoped decision events have no
+		// inbound mapping, and returning early on !ok would drop exactly the
+		// entries HasDecisionSlot's native arm catches.
+		canonical, _ = vocab.InboundEvent(engine, n)
+		return canonical, n
+	}
+	native, ok := vocab.NativeEvent(engine, event)
+	if !ok {
+		return "", ""
+	}
+	return event, native
 }
 
 func execIsRunnable(path string) error {
@@ -246,6 +325,11 @@ func ReadTable(path string) ([]Handler, error) {
 	var t Manifest
 	if err := json.Unmarshal(raw, &t); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	for i := range t.Handlers {
+		if t.Handlers[i].Lane == "" {
+			t.Handlers[i].Lane = LaneVerdict
+		}
 	}
 	seen := map[string]bool{}
 	for _, h := range t.Handlers {

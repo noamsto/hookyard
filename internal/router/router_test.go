@@ -1,6 +1,7 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -299,5 +300,131 @@ func TestPanicInHandlerGoroutineIsRecordedAsError(t *testing.T) {
 	}
 	if res.DeadlineExpired {
 		t.Error("DeadlineExpired = true, want false: a handler panic is not a router timeout")
+	}
+}
+
+// bigEnvelope pads ToolInput so json.Marshal(env) exceeds the 64 KiB pipe
+// buffer stageStdin's unlinked-temp-file staging exists for.
+func bigEnvelope() *envelope.Envelope {
+	env := testEnvelope()
+	env.ToolInput = json.RawMessage(`{"command":"` + strings.Repeat("x", 70000) + `"}`)
+	return env
+}
+
+// pollSentinel waits until path holds at least len(want) bytes, then returns
+// what it read. cat > path creates the file at open and fills it after, so a
+// loop that stops at the first non-empty read can still catch a partial
+// write; waiting for the full length keeps the equality assertion below the
+// loop meaningful.
+func pollSentinel(t *testing.T, path string, want []byte, timeout time.Duration) []byte {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(path); err == nil && len(b) >= len(want) {
+			return b
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("sentinel %s did not receive %d bytes within %v", path, len(want), timeout)
+	return nil
+}
+
+// TestFireAndForgetHandlerReturnsWithoutWaiting proves the router does not
+// wait for a fire-and-forget handler: the handler prints a well-formed deny,
+// then sleeps 5x the whole run budget before it ever touches the sentinel, so
+// Run returning well inside that budget is only possible if it never waited.
+// The deny going unheard (not overridden) is the point: stdout was wired to
+// /dev/null, so there was nothing to disbelieve.
+func TestFireAndForgetHandlerReturnsWithoutWaiting(t *testing.T) {
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "sentinel")
+	h := writeHandler(t, dir, "detached",
+		"printf '%s' '{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"unheard\"}}'\n"+
+			"sleep 1\n"+
+			"cat > '"+sentinel+"'")
+	h.Lane = manifest.LaneFireAndForget
+
+	budget := Budget{Deadline: 200 * time.Millisecond, Handler: 200 * time.Millisecond}
+	env := testEnvelope()
+
+	start := time.Now()
+	res := Run(context.Background(), []manifest.Handler{h}, env, budget)
+	elapsed := time.Since(start)
+
+	if elapsed >= budget.Deadline {
+		t.Errorf("Run took %v, want well inside the %v deadline", elapsed, budget.Deadline)
+	}
+	if len(res.Handlers) != 1 {
+		t.Fatalf("got %d handler results, want 1", len(res.Handlers))
+	}
+	if res.Handlers[0].Outcome != record.OutcomeDispatched {
+		t.Errorf("outcome = %q, want %q", res.Handlers[0].Outcome, record.OutcomeDispatched)
+	}
+	if res.Handlers[0].Verdict != verdict.Abstain {
+		t.Errorf("verdict = %q, want %q: the deny on stdout is unheard, not disbelieved", res.Handlers[0].Verdict, verdict.Abstain)
+	}
+	if res.DeadlineExpired {
+		t.Error("DeadlineExpired = true, want false")
+	}
+
+	want, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	got := pollSentinel(t, sentinel, want, 5*time.Second)
+	if !bytes.Equal(got, want) {
+		t.Errorf("sentinel bytes = %q, want the marshaled envelope %q", got, want)
+	}
+}
+
+// TestFireAndForgetHandlerDeliversPayloadPastPipeBuffer covers delivery of a
+// payload larger than the 64 KiB pipe buffer. It does not discriminate
+// stageStdin's staging from a pipe — in-process the test binary never exits,
+// so a pipe's copier goroutine always finishes. Only a router that exits can
+// tell those apart, which is what the cmd/hookyard e2e of the same name does.
+func TestFireAndForgetHandlerDeliversPayloadPastPipeBuffer(t *testing.T) {
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "sentinel")
+	h := writeHandler(t, dir, "detached", "cat > '"+sentinel+"'")
+	h.Lane = manifest.LaneFireAndForget
+
+	env := bigEnvelope()
+	want, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	if len(want) <= 65536 {
+		t.Fatalf("marshaled payload is %d bytes, want over 65536 so this test still exercises the pipe-buffer boundary", len(want))
+	}
+
+	res := Run(context.Background(), []manifest.Handler{h}, env,
+		Budget{Deadline: 2 * time.Second, Handler: time.Second})
+	if len(res.Handlers) != 1 {
+		t.Fatalf("got %d handler results, want 1", len(res.Handlers))
+	}
+	if res.Handlers[0].Outcome != record.OutcomeDispatched {
+		t.Fatalf("outcome = %q, want %q", res.Handlers[0].Outcome, record.OutcomeDispatched)
+	}
+
+	got := pollSentinel(t, sentinel, want, 5*time.Second)
+	if !bytes.Equal(got, want) {
+		t.Errorf("sentinel bytes (%d) != marshaled envelope bytes (%d)", len(got), len(want))
+	}
+}
+
+// TestFireAndForgetHandlerWithMissingExecIsError pins the lane's other
+// outcome: a start failure is a failure hookyard witnessed, so it is recorded
+// as error, never as the dispatched success it never reached.
+func TestFireAndForgetHandlerWithMissingExecIsError(t *testing.T) {
+	h := manifest.Handler{
+		ID:   "missing",
+		Exec: filepath.Join(t.TempDir(), "does-not-exist"),
+		Lane: manifest.LaneFireAndForget,
+	}
+
+	res := runSingle(t, h, scaledBudget)
+
+	if res.Outcome != record.OutcomeError {
+		t.Errorf("outcome = %q, want %q", res.Outcome, record.OutcomeError)
 	}
 }

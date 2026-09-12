@@ -43,6 +43,11 @@ const (
 	OutcomeAbstain = "abstain"
 	OutcomeError   = "error"
 	OutcomeTimeout = "timeout"
+	// OutcomeDispatched is the fire-and-forget lane's outcome: hookyard
+	// started this handler and deliberately never waited for it. It is not
+	// abstain — a handler that abstained ran and declined, this one never
+	// had an opinion — and ms is the dispatch cost, not the work.
+	OutcomeDispatched = "dispatched"
 	// OutcomeSuppressed is also the top-level Verdict for a cross-registration
 	// drop, not only a per-handler outcome.
 	OutcomeSuppressed = "suppressed"

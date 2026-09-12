@@ -168,6 +168,7 @@ tool names to filter on:
       "exec": "/home/you/bin/guard-secrets",
       "events": ["pre_tool"],
       "engines": ["claude-code", "codex", "cursor"],
+      "lane": "verdict",
       "match": ["Bash"],
       "timeout_ms": 2000
     }
@@ -182,6 +183,12 @@ tool names to filter on:
 - `events` are one of the six canonical events, or `engine:NativeName` for an
   event only one engine has.
 - `engines` is any of `claude-code`, `codex`, `cursor`.
+- `lane` is `"verdict"` (the default, safe to omit) or `"fire_and_forget"`,
+  for a handler with no verdict to give (design doc §4). A fire-and-forget
+  handler can never guard, so `validate` refuses one declared on a decision
+  event or carrying a non-zero `timeout_ms`. Using `lane` at all needs the
+  hookyard version that introduced it — an older binary silently drops the
+  field and runs the entry in the verdict lane instead.
 - `match` filters by normalized tool name; an empty list matches every tool.
   A tool with no equivalent on a claimed engine — Codex has no `Grep` or
   `Glob`, Cursor has no `Glob` — fails validation rather than installing a

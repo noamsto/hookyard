@@ -300,6 +300,11 @@ func TestNonAdviseHandlerNoDeliveredKey(t *testing.T) {
 		Engine: vocab.Codex, SessionID: "s", Verdict: "deny", Router: RouterOK,
 		Handlers: []HandlerOutcome{
 			{Name: "deny-guard", Outcome: OutcomeDeny, Elapsed: time.Millisecond, Delivered: &yes},
+			// dispatched is the fire-and-forget lane's outcome; toRecord clears
+			// Delivered for any non-advise outcome rather than special-casing
+			// it, so this pins that the new outcome inherits that behaviour
+			// too.
+			{Name: "notify-guard", Outcome: OutcomeDispatched, Elapsed: time.Millisecond, Delivered: &yes},
 		},
 	}
 	line, err := buildLine(toRecord(e, time.Now(), "k"))
@@ -317,5 +322,15 @@ func TestNonAdviseHandlerNoDeliveredKey(t *testing.T) {
 	}
 	if _, ok := handlers[0]["delivered"]; ok {
 		t.Errorf("non-advise handler has delivered key, want omitted")
+	}
+
+	if string(handlers[1]["outcome"]) != `"dispatched"` {
+		t.Errorf("handlers[1].outcome = %s, want \"dispatched\"", handlers[1]["outcome"])
+	}
+	if _, ok := handlers[1]["delivered"]; ok {
+		t.Errorf("dispatched handler has delivered key, want omitted")
+	}
+	if _, ok := handlers[1]["advice"]; ok {
+		t.Errorf("dispatched handler has advice key, want omitted")
 	}
 }

@@ -42,6 +42,13 @@ type HandlerResult struct {
 var runOne = runHandler
 
 func runHandler(ctx context.Context, h manifest.Handler, payload []byte, budget time.Duration) HandlerResult {
+	// The branch sits behind runOne rather than beside it so the lane keeps the
+	// panic guard, the table ordering and the record path the verdict lane has.
+	// ctx and budget are unused past here by construction (§4): the router
+	// neither waits for this child nor lets its deadline reach it.
+	if h.FireAndForget() {
+		return dispatch(h, payload)
+	}
 	started := time.Now()
 	// cancel doubles as the capped writer's kill: exec.CommandContext already
 	// watches this context, and the ctx.Err() a cap kill leaves behind —
