@@ -311,3 +311,92 @@ func TestOtherEnginesFindingsAreUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// withClaudeOnPath points PATH at a fresh directory holding only a "claude"
+// symlink to target, mirroring withPiOnPath: the launcher scan must never
+// reach the developer's real claude, whose wrapper does pass --settings and
+// would make every case below pass for the wrong reason.
+func withClaudeOnPath(t *testing.T, target string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(dir, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+}
+
+func writeClaudeLauncher(t *testing.T, dir, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, "claude-real")
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The reason strings are the whole point of the second return: doctor's Unknown
+// arm is the one place an operator learns why hookyard cannot see the overlay,
+// and "this machine has no Nix wrapper" and "your overlay is not wired" send
+// them to different places. Asserting only that *a* reason arrives would pass
+// with all five collapsed to one string, which is the defect this covers.
+func TestClaudeLauncherSettingsNamesWhyItFoundNothing(t *testing.T) {
+	t.Run("absent from PATH", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+
+		values, reason := claudeLauncherSettings()
+		if values != nil {
+			t.Fatalf("values = %q, want none", values)
+		}
+		if !strings.Contains(reason, "PATH") {
+			t.Errorf("reason = %q, want it to say claude is not on PATH", reason)
+		}
+	})
+
+	t.Run("a compiled binary", func(t *testing.T) {
+		dir := t.TempDir()
+		// The NUL byte is the "not text" signal; the rest deliberately looks
+		// like a wrapper so this fails if the binary check is skipped.
+		target := writeClaudeLauncher(t, dir, "\x00\x01\x02exec claude --settings /nix/store/x.json")
+		withClaudeOnPath(t, target)
+
+		values, reason := claudeLauncherSettings()
+		if values != nil {
+			t.Fatalf("values = %q, want none from a compiled binary", values)
+		}
+		if !strings.Contains(reason, "compiled binary") {
+			t.Errorf("reason = %q, want it to name the compiled binary", reason)
+		}
+	})
+
+	t.Run("a wrapper passing no --settings", func(t *testing.T) {
+		dir := t.TempDir()
+		target := writeClaudeLauncher(t, dir, "#!/bin/sh\nexec /opt/example/real-claude \"$@\"\n")
+		withClaudeOnPath(t, target)
+
+		values, reason := claudeLauncherSettings()
+		if values != nil {
+			t.Fatalf("values = %q, want none", values)
+		}
+		if !strings.Contains(reason, "--settings") {
+			t.Errorf("reason = %q, want it to say the wrapper passes no --settings", reason)
+		}
+		if !strings.Contains(reason, target) {
+			t.Errorf("reason = %q, want it to name the resolved launcher %q", reason, target)
+		}
+	})
+
+	t.Run("a wrapper that does pass one", func(t *testing.T) {
+		dir := t.TempDir()
+		target := writeClaudeLauncher(t, dir, "#!/bin/sh\n"+
+			`exec -a claude /opt/example/real-claude --settings /nix/store/overlay.json --plugin-dir /p "$@"`+"\n")
+		withClaudeOnPath(t, target)
+
+		values, reason := claudeLauncherSettings()
+		if reason != "" {
+			t.Fatalf("reason = %q, want none when the overlay was found", reason)
+		}
+		if len(values) != 1 || values[0] != "/nix/store/overlay.json" {
+			t.Errorf("values = %q, want the one --settings path", values)
+		}
+	})
+}

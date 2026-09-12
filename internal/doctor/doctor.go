@@ -156,8 +156,13 @@ type claudeSources struct {
 	settingsPath string
 	settings     []byte // nil when settings.json could not be read
 	overlays     []claudeSource
-	// unresolved names each source doctor knows exists but could not read, so
-	// a Pass on the disableAllHooks gate can say what it did not see (§4.4).
+	// unresolved says what doctor could not see, so a Pass on the
+	// disableAllHooks gate names what it did not read rather than implying it
+	// read everything (§4.4). Two different shapes land here and the label
+	// below has to hold both: a source that exists and would not open, and the
+	// launcher reasons, which say there is no source to open at all. Rendering
+	// the second under "not read" would send an operator hunting for a
+	// permissions problem on a file that was never named.
 	unresolved []string
 }
 
@@ -273,7 +278,7 @@ func claudeHooksEnabled(c claudeSources) Finding {
 		f.Detail = "not disabled in " + strings.Join(checked, ", ")
 	}
 	if len(blind) > 0 {
-		f.Detail += " (not read: " + strings.Join(blind, ", ") + ")"
+		f.Detail += " (" + strings.Join(blind, ", ") + ")"
 	}
 	return f
 }
@@ -318,7 +323,7 @@ func claudeRegistration(c claudeSources) Finding {
 	f.Status = Unknown
 	f.Detail = "hookyard cannot see which settings file claude is started with"
 	if len(c.unresolved) > 0 {
-		f.Detail += " (not read: " + strings.Join(c.unresolved, ", ") + ")"
+		f.Detail += " (" + strings.Join(c.unresolved, ", ") + ")"
 	}
 	return f
 }

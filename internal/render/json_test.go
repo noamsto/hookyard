@@ -340,9 +340,14 @@ func TestClaudeSettingsDoesNotAddATimeoutToAnInheritedHookMissingOne(t *testing.
 }
 
 // The other half of the timeout rule, and the one the whole emit change turns
-// on: hookyard's own row must always declare one (§4), so dropping the field —
-// by tag, by omitempty, or by zeroing the constant — has to fail here rather
-// than silently hand every router invocation the engine's own default.
+// on: hookyard's own row must always declare one (§4), so removing the field
+// from the encoding has to fail here rather than silently hand every router
+// invocation the engine's own default.
+//
+// Scoped deliberately to the field's presence. Adding omitempty would not
+// change this document, because the value is never zero, and zeroing
+// EmittedTimeoutSeconds is caught in internal/router — this test compares
+// against the same constant, so it cannot see that.
 func TestClaudeSettingsGivesItsOwnRowTheMandatoryTimeout(t *testing.T) {
 	command := "/nix/store/x/bin/hookyard route --registered-for claude-code --event pre_tool"
 	out, err := ClaudeSettings([]byte(claudeOverlayInherited), []Entry{{Event: "PreToolUse", Matcher: "Bash", Command: command}})
