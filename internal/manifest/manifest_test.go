@@ -101,6 +101,41 @@ func TestLoadRejects(t *testing.T) {
 		  {"id":"a","exec":"EXEC","events":["pre_tool"],"engines":["cursor"]},
 		  {"id":"a","exec":"EXEC","events":["post_tool"],"engines":["cursor"]}]}`,
 		want: "declared twice",
+	}, {
+		name: "fire-and-forget on the canonical decision event",
+		body: `{"handlers":[{"id":"a","exec":"EXEC","events":["pre_tool"],"engines":["cursor"],
+		  "lane":"fire_and_forget"}]}`,
+		want: "cannot guard this event",
+	}, {
+		name: "fire-and-forget on claude-code's scoped decision event",
+		body: `{"handlers":[{"id":"a","exec":"EXEC","events":["claude-code:PreToolUse"],
+		  "engines":["claude-code"],"lane":"fire_and_forget"}]}`,
+		want: "cannot guard this event",
+	}, {
+		name: "fire-and-forget on cursor's scoped decision event",
+		body: `{"handlers":[{"id":"a","exec":"EXEC","events":["cursor:preToolUse"],
+		  "engines":["cursor"],"lane":"fire_and_forget"}]}`,
+		want: "cannot guard this event",
+	}, {
+		name: "fire-and-forget on cursor's other scoped decision event",
+		body: `{"handlers":[{"id":"a","exec":"EXEC","events":["cursor:beforeShellExecution"],
+		  "engines":["cursor"],"lane":"fire_and_forget"}]}`,
+		want: "cannot guard this event",
+	}, {
+		name: "fire-and-forget on codex's scoped decision event",
+		body: `{"handlers":[{"id":"a","exec":"EXEC","events":["codex:PreToolUse"],
+		  "engines":["codex"],"lane":"fire_and_forget"}]}`,
+		want: "cannot guard this event",
+	}, {
+		name: "fire-and-forget on pi's scoped decision event",
+		body: `{"handlers":[{"id":"a","exec":"EXEC","events":["pi:tool_call"],
+		  "engines":["pi"],"lane":"fire_and_forget"}]}`,
+		want: "cannot guard this event",
+	}, {
+		name: "unknown lane value",
+		body: `{"handlers":[{"id":"a","exec":"EXEC","events":["post_tool"],"engines":["cursor"],
+		  "lane":"detached"}]}`,
+		want: `lane "detached" must be`,
 	}}
 
 	for _, tc := range cases {
@@ -111,6 +146,110 @@ func TestLoadRejects(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("want an error mentioning %q, got: %v", tc.want, err)
+			}
+		})
+	}
+}
+
+// The lane's timeout_ms rule must run before the 0..4300 range check, or the
+// exact manifest issue #28 quotes would be refused with "outside 0..4300", a
+// message that says nothing about the lane the author just declared.
+func TestLoadRejectsFireAndForgetTimeoutBeforeRangeCheck(t *testing.T) {
+	body := `{"handlers":[{"id":"a","exec":"EXEC","events":["post_tool"],"engines":["cursor"],
+	  "lane":"fire_and_forget","timeout_ms":30000}]}`
+	_, err := Load(writeManifest(t, body))
+	if err == nil {
+		t.Fatal("want an error, got nil")
+	}
+	if !strings.Contains(err.Error(), "fire-and-forget") {
+		t.Errorf("want an error mentioning the lane, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "outside 0..4300") {
+		t.Errorf("want the lane rule to fire first, got the range message instead: %v", err)
+	}
+}
+
+func TestLoadAcceptsFireAndForgetOnPostToolAcrossAllEngines(t *testing.T) {
+	path := writeManifest(t, `{"handlers":[
+	  {"id":"a","exec":"EXEC","events":["post_tool"],
+	   "engines":["claude-code","codex","cursor","pi"],"lane":"fire_and_forget"}]}`)
+	if _, err := Load(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// WriteTable emits "timeout_ms":0 on every entry, so an explicit zero must be
+// accepted on a fire-and-forget handler: 0 already means "no override" in
+// this schema and is not a claim to have bounded anything.
+func TestLoadAcceptsFireAndForgetWithExplicitZeroTimeout(t *testing.T) {
+	path := writeManifest(t, `{"handlers":[
+	  {"id":"a","exec":"EXEC","events":["post_tool"],
+	   "engines":["claude-code","codex","cursor","pi"],"lane":"fire_and_forget","timeout_ms":0}]}`)
+	if _, err := Load(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An event scoped to an engine the handler does not declare is skipped by the
+// lane check, exactly as validateCoverage already skips it: the handler here
+// declares only cursor, so claude-code:PreToolUse is not this handler's
+// problem even though it names a decision event.
+func TestLoadAcceptsFireAndForgetWithDecisionEventScopedToUndeclaredEngine(t *testing.T) {
+	path := writeManifest(t, `{"handlers":[
+	  {"id":"a","exec":"EXEC","events":["claude-code:PreToolUse","post_tool"],
+	   "engines":["cursor"],"lane":"fire_and_forget"}]}`)
+	if _, err := Load(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadNormalizesAbsentLaneToVerdict(t *testing.T) {
+	path := writeManifest(t, `{"handlers":[
+	  {"id":"a","exec":"EXEC","events":["pre_tool"],"engines":["cursor"]},
+	  {"id":"b","exec":"EXEC","events":["post_tool"],"engines":["codex"]}]}`)
+	m, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range m.Handlers {
+		if h.Lane != LaneVerdict {
+			t.Errorf("handler %q: lane = %q, want %q", h.ID, h.Lane, LaneVerdict)
+		}
+	}
+}
+
+func TestLaneSurvivesWriteTableReadTableRoundTrip(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		lane string
+	}{
+		{"absent lane normalizes to verdict", ""},
+		{"fire_and_forget survives explicitly", LaneFireAndForget},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			handlers := []Handler{
+				{ID: "a", Exec: filepath.Join(dir, "guard.sh"), Events: []string{"post_tool"},
+					Engines: []string{"cursor"}, Lane: tc.lane},
+			}
+			want := tc.lane
+			if want == "" {
+				want = LaneVerdict
+			}
+
+			path := filepath.Join(dir, "table.json")
+			if err := WriteTable(path, handlers); err != nil {
+				t.Fatal(err)
+			}
+			got, err := ReadTable(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("got %d handlers, want 1", len(got))
+			}
+			if got[0].Lane != want {
+				t.Errorf("lane = %q, want %q", got[0].Lane, want)
 			}
 		})
 	}

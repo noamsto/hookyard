@@ -581,6 +581,166 @@ identically across four engines, that the router is designed to live inside —
 rather than four engines' worth of values chosen for hooks that nothing waits
 on.
 
+### The fire-and-forget lane
+
+The chain above assumes every handler is answering a question: it runs inside
+the shared deadline, its stdout is parsed for a verdict, and its failure to
+finish is recorded as `timeout`. Some handlers are not answering a question at
+all. aeye's `session-backfill.sh` needs about 20 s — four `jq` spawns per
+transcript line over a 2048-line transcript — and has no verdict to give at
+the end of it; `validate` refuses it outright, with `timeout_ms 30000 outside
+0..4300`. A user-space `setsid` wrapper around it does return fast, but it is
+the wrong answer for two reasons. The measured one: aeye takes an untimed
+`flock 9` and holds it across its whole rebuild, so a detached backfill blocks
+its own siblings until the router kills them at the 4.3 s sub-budget, and
+every capture in that window is lost. The structural one is why this belongs
+in hookyard rather than in a wrapper: **a detached handler that merely looks
+fast is indistinguishable from one that abstained.** The record cannot tell
+them apart, and neither can a human reading it. Most handlers fit the
+existing budget comfortably — a d2 render is 0.35 s per theme variant — so
+this is a lane for the exception, not a replacement for the default one.
+
+**A new manifest field, `lane`, with two values: `"verdict"` (the default) and
+`"fire_and_forget"`.** A named field with a named default makes both kinds
+visible in the table (§8) and in the manifest, where a `fire_and_forget: true`
+boolean would name only the exception and leave the ordinary case unnamed; it
+also keeps the invalid state unrepresentable if a third lane is ever added,
+since two values of one field cannot both be true the way two independent
+booleans could. `lane` is optional in a hand-authored manifest — absent means
+`"verdict"` — but always explicit in the rendered table, so hookyard's own
+file on the critical path never leaves a reader to infer it. Any other value
+is refused by name, the same way an unknown engine or an unnormalized tool
+name already is.
+
+A fire-and-forget entry may not carry a non-zero `timeout_ms`. Nothing waits
+for this handler, so a timeout on it could not be enforced by anything, and
+letting the field through would leave its author believing they had bounded a
+handler no one is watching — the exact failure this lane exists to remove. A
+literal `timeout_ms: 0` is accepted and means nothing, because `0` already
+means "no override" in this schema, and the rendered table (§8) writes it onto
+every entry whether or not the field was ever set; refusing the field's mere
+presence rather than a non-zero value would make hookyard's own generated
+table fail to load. Repurposing the field as a kill deadline for the detached
+child was considered and rejected: nothing is alive to enforce it once the
+router has exited, and enforcing a deadline on a child that outlives the
+router would mean leaving a supervising process behind — a daemon by another
+name, which this router shape rules out for reasons that apply here
+unchanged.
+
+**A deny is not possible in this lane, and two independent layers make that
+true rather than one.** A handler that cannot answer inside the deadline
+cannot guard; this lane is for side effects, never for enforcement.
+Statically, a fire-and-forget entry may not declare an event on which its
+engines have anywhere to land a decision — the same decision-slot notion §6
+already leans on to explain why `enforced` is sometimes `false` — so
+validation (§8) refuses `pre_tool` and its engine-scoped spellings on all four
+engines, including Cursor's other scoped decision events
+(`beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`,
+`beforeTabFileRead`, `subagentStart`). That is a real cost: it also bans a
+fire-and-forget audit or logging handler on `pre_tool` that could never deny
+even if it wanted to, and `post_tool` is not an exact substitute, since it
+fires after the effect and not at all for a call another handler denied. It is
+accepted because the alternative is a manifest that cannot tell "declared on
+the decision event as a guard" from "declared on the decision event as an
+observer", and the first of those is the mistake this rule exists to catch.
+Structurally, the router hands the child `/dev/null` for stdout and never
+reads it, so a fire-and-forget handler that prints a deny anyway is not
+disbelieved — it is unheard. Its contribution to the fold is `abstain`,
+unconditionally, whether or not the static rule above ever runs.
+
+**The child outlives both the router and the engine, and that is the point.**
+The router starts it with `exec.Command`, not `exec.CommandContext` — the
+router's own deadline must not kill it — and never calls `Wait`. It runs in
+its own session (`Setsid`), so when the engine gives up on the router at the
+5 s emitted timeout above and signals the router's process group, a child in
+that group would die with it; a child in its own session does not, and it has
+no controlling terminal to write to either. Its stdin is delivered through a
+temp file rather than a pipe — written, reopened read-only, and unlinked
+before the child starts — so the payload survives past the router's exit
+byte-exact rather than being truncated at a pipe buffer the router is no
+longer around to drain. When the router exits, milliseconds later, the child
+is reparented to init or the user's subreaper, which eventually reaps it.
+**The orphan is intended, not a leak**: nothing needs to reap it, and nothing
+could, because the entire point of the lane is that no hookyard process is
+alive when the work finishes. The consequence a reader must keep in view:
+hookyard learns nothing about this handler after it starts. Its exit status,
+its runtime and its output are all outside the record by construction. A
+fire-and-forget handler that needs to be observable must say so itself,
+somewhere hookyard is not.
+
+**The record gets a new outcome, `dispatched`, because `abstain` cannot carry
+this distinction.** `abstain` means the handler ran and declined; a
+fire-and-forget handler never had an opinion to decline with, so recording it
+as `abstain` — which is what a detached wrapper outside hookyard would look
+like — is exactly the confusion this lane exists to remove. `dispatched`
+tells a reader three things `abstain` could not: that the handler was started
+at all; that its `ms` is dispatch cost, not work — two milliseconds means
+hookyard spent two milliseconds forking, not that the handler finished in two
+milliseconds, where §6's `ms` is the handler's own wall clock everywhere else;
+and that no further outcome is ever coming for this handler on this fire,
+which is a property of the lane rather than something lost. `error` still
+means what it means: if starting the handler itself fails — the exec
+vanished, the temp file could not be created — hookyard does know, and
+records `error` with the reason. `dispatched` is a success hookyard witnessed
+the start of; `error` is a failure hookyard witnessed outright.
+
+Two hazards follow directly from giving the router nothing to wait for, and
+both are documented as constraints on the handler author rather than fixed,
+because hookyard has deliberately given itself no way to enforce either:
+there is no deadline, no supervisor and no reaper in this lane, and adding one
+would be the daemon this router shape already rules out.
+
+- **The lock hazard.** aeye's untimed `flock 9`, held across its whole
+  clear-and-rebuild, is aeye's own bug — this lane does not fix it, and the
+  documented pattern must not walk an author into it. So it says: a
+  fire-and-forget handler must not hold a lock that its sibling handlers on
+  the same event contend for. Being in this lane does not make a long hold
+  cheap; it moves the cost from "the router waits" to "everything else
+  waits, invisibly, for as long as the work takes, with no deadline anywhere
+  to cut it short." A handler that needs a lock takes it with a timeout and
+  abandons the run when it cannot get it.
+- **The pile-up hazard.** The permitted event set includes `post_tool`, which
+  fires once per tool call, and `prompt_submit`, once per turn. A 20 s
+  handler declared on `post_tool` accumulates overlapping detached children
+  for as long as the agent keeps working, and nothing in hookyard can cut
+  them short. So the documented pattern says: a fire-and-forget handler on a
+  per-tool-call or per-turn event is responsible for its own single-instance
+  discipline — a timed lock it abandons rather than queues on, or a cheap
+  "already running, and my inputs have not changed" exit — and hookyard
+  neither dedupes, queues, nor bounds concurrent instances. Restricting the
+  declarable set to once-per-session events instead was considered and
+  rejected: the manifest cannot know how long a handler takes, so the
+  restriction would ban a 50 ms `post_tool` side effect to protect against a
+  20 s one, while an author who genuinely needs the 20 s `session_start` case
+  could still pile up by other means. The constraint belongs where the
+  knowledge is, which is the handler.
+
+  Pile-up is not only reachable by an author who under-thinks single-instance
+  discipline. Whoever controls the agent's tool-call rate controls how fast
+  fire-and-forget children get spawned, and prompt injection is exactly
+  that kind of control — it needs no access to the manifest to make a
+  `post_tool` handler fork children faster than they finish. Those children
+  compete for the same CPU and process budget as the synchronous guards the
+  router is running under its own 4.5 s deadline, so sustained pile-up can
+  starve a guard the ordinary way, through scheduling rather than through
+  any fault of the guard's own: slower, then `timeout`, then `abstain`,
+  then whatever the manifest's fail-open posture does with an abstaining
+  guard — precisely the moment an attacker profits from a guard going quiet.
+
+  hookyard does not bound this itself, and that is a considered limit, not an
+  oversight. §4's shape is a per-event exec with no daemon: a cap enforced
+  inside one router process could only ever bound the handlers of the single
+  event that process is answering, which is already a handful and already
+  bounded by the manifest's own handler count for that event. Bounding
+  pile-up across events — which is what this hazard actually needs,
+  since the children outlive the router that spawned them — would mean
+  knowing about children from router invocations that have already exited,
+  which needs state shared across processes, which means a daemon or a lock
+  file: the exact thing §4 rules out, for the reasons that apply here
+  unchanged. So the constraint stays with the handler author not because
+  hookyard forgot to write the cap, but because writing it would cost the
+  daemon this design spent §4 arguing against.
+
 ## 4.1 What this costs, measured
 
 Everything in this section was measured on this machine during this pass:
@@ -797,7 +957,8 @@ file is exactly as available with zero subscribers as with one.
 What that record makes recoverable is precisely the fail-open failure. Each
 record carries the consolidated verdict, whether it was enforced, and a
 per-handler breakdown with each handler's outcome distinguished as
-`allow`/`deny`/`ask`/`advise`/`abstain`/`error`/`timeout`. So "a guard
+`allow`/`deny`/`ask`/`advise`/`abstain`/`error`/`timeout`/`dispatched` (§4's
+fire-and-forget lane). So "a guard
 silently stopped
 firing" is not an inference from absence of harm: a guard that is erroring
 appears in every record with `outcome: "error"` and its message, and a guard
@@ -983,7 +1144,10 @@ narrower per-event cases — an `allow` rendered to Codex, which accepts only
 has no decision slot at all; `router` is `ok`, `error` or `timeout`, which is what
 makes a router that failed *after starting* recoverable; `handlers`
 distinguishes `abstain` from `error` and from `timeout`, which is what makes a
-guard that has silently stopped working recoverable; and an `advise` outcome
+guard that has silently stopped working recoverable — and, since §4's
+fire-and-forget lane, from `dispatched`, a handler that was started and
+nothing more, whose `ms` is dispatch cost rather than the wall clock every
+other outcome's `ms` reports; and an `advise` outcome
 carries the advisory text itself plus a `delivered` flag, so an advisory the
 target engine had no slot for (§7) is visible as *written but not delivered*
 rather than disappearing. In the example above `delivered` is `false` because
@@ -1476,7 +1640,8 @@ precisely to what the claim can actually deliver:
 
   So `additionalContext` is a first-class outcome, carried end to end: the
   handler outcome vocabulary is `allow`/`deny`/`ask`/`advise`/`abstain`/
-  `error`/`timeout`; `advise` does not participate in the deny-wins lattice at
+  `error`/`timeout`/`dispatched` (§4); `advise` does not participate in the
+  deny-wins lattice at
   all (it is not a verdict), and the router concatenates every advisory string
   it collected into the native response alongside the consolidated decision,
   in whatever slot the engine offers for it. Where an engine has no such slot,
@@ -1564,9 +1729,10 @@ has nothing to say.
 The registry's source of truth is a single table — **guard × event ×
 engine** — owned by hookyard and by nothing else. Each row names a handler
 id, the canonical or engine-scoped event it subscribes to (per §7's naming
-rule), the engines it applies to, the binary that gets executed, and an
-optional per-handler timeout override that must fit under §4's sub-budget.
-That table is the only thing in this design that knows the full picture; the
+rule), the engines it applies to, the binary that gets executed, its lane
+(§4) and an optional per-handler timeout override that must fit under §4's
+sub-budget. That table is the only thing in this design that knows the full
+picture; the
 three native config formats are *renderings* of it, not independent sources
 of truth, and no engine's file is ever read back to reconstruct what the
 table says.
@@ -2412,8 +2578,21 @@ What that does **not** cover is the honest half:
   against a newer hookyard than the one nix-config pins is the realistic
   skew, and it is a *parsing* problem, not a path problem: the rule is that
   hookyard ignores manifest fields it does not recognize and fails the
-  install loudly on a manifest it cannot parse at all. Nothing here makes
-  an unknown field silently change a handler's routing.
+  install loudly on a manifest it cannot parse at all. That stays true of
+  *routing* in its own terms — an entry still fires on exactly the events and
+  engines it declared — but §4's `lane` field is the first one whose absence
+  changes how the router *treats* a handler it still runs, so the sentence
+  this bullet used to end on is no longer the whole story. An older hookyard
+  drops the unrecognized `lane` key and runs a fire-and-forget entry the only
+  way it has: synchronously, in the verdict lane. For a handler slower than
+  the 4.3 s sub-budget — the case §4's lane exists for — that is loud: it
+  appears as `timeout` on every fire, which is exactly the signal the outcome
+  vocabulary (§6) exists to give. For one faster than the sub-budget it is
+  not loud at all: the entry degrades to a plain `abstain`, indistinguishable
+  from a guard that ran and declined. That silent case is precisely the
+  confusion §4's lane exists to remove, and on an older binary it is not
+  removed — the lane's legibility is a property of the binary reading the
+  manifest, not of the manifest itself.
 - **The window inside an activation.** Between strip and atomic rename, a
   hook can fire against the pre-rename file. That is safe — the profile path
   it names resolves throughout — and it is the reason the
