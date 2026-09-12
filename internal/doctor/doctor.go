@@ -67,6 +67,11 @@ type Paths struct {
 	// Empty means doctor cannot see which settings file the engine starts
 	// with. Tests set it directly.
 	ClaudeSettingsFlags []string
+	// ClaudeLauncherUnread says why ClaudeSettingsFlags came back empty, and
+	// is itself empty when it did not. Without it every launcher failure — no
+	// claude on PATH, an unresolvable or unreadable script, a compiled binary,
+	// a wrapper passing no --settings — renders as the same Unknown.
+	ClaudeLauncherUnread string
 	// StateDir is the operator's explicit --state-dir. Empty means none was
 	// given: Run recovers it from the --state-dir the four engines' emitted
 	// configs already name, rather than treating empty as shorthand for
@@ -94,12 +99,14 @@ func DefaultPaths() (Paths, error) {
 	if piAgentDir == "" {
 		piAgentDir = filepath.Join(home, ".pi", "agent")
 	}
+	settingsFlags, launcherUnread := claudeLauncherSettings()
 	return Paths{
-		ClaudeConfigDir:     claude,
-		CodexHome:           codex,
-		CursorHome:          filepath.Join(home, ".cursor"),
-		PiAgentDir:          piAgentDir,
-		ClaudeSettingsFlags: claudeLauncherSettings(),
+		ClaudeConfigDir:      claude,
+		CodexHome:            codex,
+		CursorHome:           filepath.Join(home, ".cursor"),
+		PiAgentDir:           piAgentDir,
+		ClaudeSettingsFlags:  settingsFlags,
+		ClaudeLauncherUnread: launcherUnread,
 	}, nil
 }
 
@@ -162,6 +169,9 @@ func resolveClaudeSources(p Paths) claudeSources {
 		c.settings = raw
 	} else if !os.IsNotExist(err) {
 		c.unresolved = append(c.unresolved, fmt.Sprintf("%s (%v)", c.settingsPath, err))
+	}
+	if p.ClaudeLauncherUnread != "" {
+		c.unresolved = append(c.unresolved, p.ClaudeLauncherUnread)
 	}
 
 	for _, v := range p.ClaudeSettingsFlags {
@@ -577,25 +587,35 @@ var claudeSettingsPattern = regexp.MustCompile(`--settings[=\s]+('[^']*'|"[^"]*"
 // script. It is the only way to read them — hookyard no longer writes
 // ~/.claude/settings.json, and the overlay Nix passes is named nowhere else on
 // the machine (§4.4).
-func claudeLauncherSettings() []string {
+// The second return is why nothing was recovered, empty when something was.
+// Collapsing the cases loses the distinction the operator needs: a compiled
+// binary means this delivery path does not apply on that machine, while a
+// wrapper that passes no --settings means the overlay is simply not wired.
+func claudeLauncherSettings() ([]string, string) {
 	path, err := exec.LookPath("claude")
 	if err != nil {
-		return nil
+		return nil, "no claude on PATH to read --settings from"
 	}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return nil
+		return nil, fmt.Sprintf("cannot resolve %s: %v", path, err)
 	}
 	raw, err := os.ReadFile(resolved)
-	if err != nil || looksBinary(raw) {
-		return nil
+	if err != nil {
+		return nil, fmt.Sprintf("cannot read %s: %v", resolved, err)
+	}
+	if looksBinary(raw) {
+		return nil, resolved + " is a compiled binary, not a wrapper script"
 	}
 
 	var values []string
 	for _, m := range claudeSettingsPattern.FindAllStringSubmatch(string(raw), -1) {
 		values = append(values, strings.Trim(m[1], `'"`))
 	}
-	return distinctStrings(values)
+	if len(values) == 0 {
+		return nil, resolved + " passes no --settings"
+	}
+	return distinctStrings(values), ""
 }
 
 func registration(engine vocab.Engine, path string) Finding {

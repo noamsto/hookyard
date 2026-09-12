@@ -339,6 +339,48 @@ func TestClaudeSettingsDoesNotAddATimeoutToAnInheritedHookMissingOne(t *testing.
 	}
 }
 
+// The other half of the timeout rule, and the one the whole emit change turns
+// on: hookyard's own row must always declare one (§4), so dropping the field —
+// by tag, by omitempty, or by zeroing the constant — has to fail here rather
+// than silently hand every router invocation the engine's own default.
+func TestClaudeSettingsGivesItsOwnRowTheMandatoryTimeout(t *testing.T) {
+	command := "/nix/store/x/bin/hookyard route --registered-for claude-code --event pre_tool"
+	out, err := ClaudeSettings([]byte(claudeOverlayInherited), []Entry{{Event: "PreToolUse", Matcher: "Bash", Command: command}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var probe struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+				Timeout *int   `json:"timeout"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(out, &probe); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, out)
+	}
+
+	found := 0
+	for _, group := range probe.Hooks["PreToolUse"] {
+		for _, hook := range group.Hooks {
+			if hook.Command != command {
+				continue
+			}
+			found++
+			if hook.Timeout == nil {
+				t.Errorf("hookyard's own row declares no timeout\n--- got ---\n%s", out)
+			} else if *hook.Timeout != EmittedTimeoutSeconds {
+				t.Errorf("hookyard's own row has timeout %d, want %d", *hook.Timeout, EmittedTimeoutSeconds)
+			}
+		}
+	}
+	if found != 1 {
+		t.Fatalf("want one hookyard row under PreToolUse, got %d\n--- got ---\n%s", found, out)
+	}
+}
+
 // The other half of §4.2b: the typed decode dropped every field the structs
 // did not declare, one on a group and one on a hook here.
 func TestClaudeSettingsPreservesForeignFieldsOnInheritedGroupsAndHooks(t *testing.T) {

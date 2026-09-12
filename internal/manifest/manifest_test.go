@@ -469,19 +469,22 @@ func TestLoadStaticRejectsDuplicateIDInsideOneManifest(t *testing.T) {
 	}
 }
 
-func TestLoadStaticAcceptsZeroHandlers(t *testing.T) {
+// An empty handlers array is not `install --allow-empty`, which is about a
+// caller passing no --manifest at all. Were LoadStatic to accept this file the
+// Nix build would succeed and home-manager activation would then fail on
+// Load's refusal of the same bytes, after the store paths are realised.
+func TestLoadStaticRejectsZeroHandlersLikeLoadDoes(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "hookyard.json")
 	if err := os.WriteFile(path, []byte(`{"handlers":[]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	m, err := LoadStatic(path)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := LoadStatic(path); err == nil || !strings.Contains(err.Error(), "no handlers declared") {
+		t.Errorf("LoadStatic: got %v, want an error about no handlers", err)
 	}
-	if len(m.Handlers) != 0 {
-		t.Errorf("got %d handlers, want 0", len(m.Handlers))
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "no handlers declared") {
+		t.Errorf("Load: got %v, want an error about no handlers", err)
 	}
 }
 

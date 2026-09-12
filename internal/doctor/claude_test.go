@@ -124,6 +124,20 @@ func TestClaudeRegistrationUnknownWhenTheLauncherIsUnreadable(t *testing.T) {
 		}
 	})
 
+	// The four launcher cases are distinct repairs, so the detail has to say
+	// which one it hit rather than leaving the operator to guess.
+	t.Run("the launcher case is named", func(t *testing.T) {
+		p := claudePaths(t)
+		p.ClaudeLauncherUnread = "/nix/store/x/bin/claude is a compiled binary, not a wrapper script"
+		f := claudeRegistration(resolveClaudeSources(p))
+		if f.Status != Unknown {
+			t.Fatalf("status = %v, want Unknown; detail=%q", f.Status, f.Detail)
+		}
+		if !strings.Contains(f.Detail, "compiled binary") {
+			t.Errorf("detail = %q, want it to name why the launcher was not read", f.Detail)
+		}
+	})
+
 	t.Run("value resolves to neither a file nor JSON", func(t *testing.T) {
 		value := filepath.Join(t.TempDir(), "never-written.json")
 		f := claudeRegistration(resolveClaudeSources(claudePaths(t, value)))

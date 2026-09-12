@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -331,7 +332,8 @@ func liveEmitClaudeOverlay(t *testing.T, hookyardBin, root, manifestPath, router
 	out, err := emit.Output()
 	if err != nil {
 		stderr := ""
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
 			stderr = string(exitErr.Stderr)
 		}
 		t.Fatalf("hookyard emit: %v\n%s", err, stderr)

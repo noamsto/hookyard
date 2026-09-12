@@ -117,6 +117,20 @@ func TestBuildPlanRefusesARouterPathWithoutTheMarker(t *testing.T) {
 	}
 }
 
+// §9's rule, and the one `emit` makes reachable by default: install falls back
+// to an absolute os.Executable(), emit forces the caller to name the path. A
+// relative one resolves at hook-fire time against the agent's own working
+// directory, so a file that happens to sit there stands in for the router.
+func TestBuildPlanRefusesARelativeRouterPath(t *testing.T) {
+	handlers := []manifest.Handler{
+		{ID: "a", Events: []string{vocab.PreTool}, Engines: []string{"cursor"}},
+	}
+	_, err := BuildPlan(handlers, "result/bin/hookyard", stateDir)
+	if err == nil || !strings.Contains(err.Error(), "absolute path") {
+		t.Fatalf("got %v, want an error about an absolute path", err)
+	}
+}
+
 func TestBuildPlanRoutesEngineScopedEventsToTheirOwnEngine(t *testing.T) {
 	handlers := []manifest.Handler{
 		{ID: "a", Events: []string{"cursor:beforeShellExecution"}, Engines: []string{"cursor", "codex"}, Match: []string{"Bash"}},
