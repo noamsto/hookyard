@@ -39,6 +39,12 @@ func cursorRowCommand(row json.RawMessage) (string, error) {
 // WriteCursor renders entries into ~/.cursor/hooks.json as one more
 // independent writer beside the ones already there (§8).
 //
+// It does not order itself against those writers, and deliberately so: each
+// one strips only its own marker, so marker-disjoint writers commute and no
+// ordering is load-bearing. What is load-bearing is that no handler appears
+// under two markers at once — the §8 same-commit swap and doctor's
+// competing-writer check both exist for exactly that.
+//
 // The strip is whole-file rather than scoped to the event keys hookyard is
 // about to write: the table can legitimately move a handler from one event to
 // another between versions, and a key-scoped strip would leave the old entry
