@@ -10,18 +10,21 @@ classes: {
 manifestA: "repo A's\nhookyard.json" { class: ext }
 manifestB: "repo B's\nhookyard.json" { class: ext }
 install: "hookyard install\n(marker-scoped strip)" { class: core }
-claudeCfg: "Claude Code\nsettings.json" { class: ext }
+emit: "hookyard emit\n(opaque-JSON merge)" { class: core }
 codexCfg: "Codex\nconfig.toml" { class: ext }
 cursorCfg: "Cursor\nhooks.json" { class: ext }
 piBridge: "Pi bridge\nextension (.ts)" { class: ext }
 piCfg: "Pi settings.json\nextensions[] entry" { class: ext }
+overlay: "Claude Code\n--settings overlay" { class: store }
 table: "state table" { class: store }
 
 manifestA -> install
 manifestB -> install
-install -> claudeCfg
+manifestA -> emit
+manifestB -> emit
 install -> codexCfg
 install -> cursorCfg
 install -> piBridge: generate\n(whole file)
 install -> piCfg: register bridge path
 install -> table: record handlers
+emit -> overlay: Nix places

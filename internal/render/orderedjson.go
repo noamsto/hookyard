@@ -125,3 +125,30 @@ func (o *object) marshalIndent() ([]byte, error) {
 	buf.WriteString("}\n")
 	return buf.Bytes(), nil
 }
+
+// marshalCompact is how one object nests inside another. object's fields are
+// unexported and it has no MarshalJSON, so set would render it as {}; feeding
+// these bytes back as a json.RawMessage round-trips them verbatim instead.
+// marshalIndent cannot serve here — it is top-level-only, writing a trailing
+// newline and an indent fixed at two spaces — and marshalIndent's json.Indent
+// over each value is what re-indents these compact bytes on the outer encode.
+func (o *object) marshalCompact() ([]byte, error) {
+	var buf bytes.Buffer
+	buf.WriteString("{")
+	for i, key := range o.keys {
+		name, err := json.Marshal(key)
+		if err != nil {
+			return nil, err
+		}
+		if i > 0 {
+			buf.WriteString(",")
+		}
+		buf.Write(name)
+		buf.WriteString(":")
+		if err := json.Compact(&buf, o.values[key]); err != nil {
+			return nil, err
+		}
+	}
+	buf.WriteString("}")
+	return buf.Bytes(), nil
+}

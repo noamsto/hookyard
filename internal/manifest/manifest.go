@@ -71,25 +71,45 @@ func Load(path string) (*Manifest, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	m.Source = path
-	for i := range m.Handlers {
-		if m.Handlers[i].Lane == "" {
-			m.Handlers[i].Lane = LaneVerdict
-		}
-	}
-	if err := m.validate(); err != nil {
+	m.normalizeLanes()
+	if err := m.validateAll(validateExec); err != nil {
 		return nil, err
 	}
 	return &m, nil
 }
 
-func (m *Manifest) validate() error {
+// normalizeLanes fills in the lane every reader defaults to, so validateStatic
+// can treat "" as invalid rather than normalizing a second time. Every entry
+// point that parses handlers calls it, because a manifest one of them accepts
+// and another rejects is exactly the build-time/activation-time split
+// validateAll exists to prevent.
+func (m *Manifest) normalizeLanes() {
+	for i := range m.Handlers {
+		if m.Handlers[i].Lane == "" {
+			m.Handlers[i].Lane = LaneVerdict
+		}
+	}
+}
+
+// validateAll holds every rule Load and LoadStatic share, so the two cannot
+// drift into disagreeing about which manifest files are legal — a build that
+// accepts one activation then refuses fails after the store paths are already
+// realised. extra runs per handler on top of the shared rules; it is nil for
+// the caller that cannot afford to touch the filesystem.
+func (m *Manifest) validateAll(extra func(where string, h Handler) error) error {
 	if len(m.Handlers) == 0 {
 		return fmt.Errorf("%s: no handlers declared", m.Source)
 	}
 	seen := map[string]bool{}
 	for _, h := range m.Handlers {
-		if err := m.validateHandler(h); err != nil {
+		where := fmt.Sprintf("%s: handler %q", m.Source, h.ID)
+		if err := validateStatic(where, h); err != nil {
 			return err
+		}
+		if extra != nil {
+			if err := extra(where, h); err != nil {
+				return err
+			}
 		}
 		if seen[h.ID] {
 			return fmt.Errorf("%s: handler id %q declared twice in one manifest", m.Source, h.ID)
@@ -99,11 +119,7 @@ func (m *Manifest) validate() error {
 	return nil
 }
 
-func (m *Manifest) validateHandler(h Handler) error {
-	where := fmt.Sprintf("%s: handler %q", m.Source, h.ID)
-	if err := validateStatic(where, h); err != nil {
-		return err
-	}
+func validateExec(where string, h Handler) error {
 	if err := execIsRunnable(h.Exec); err != nil {
 		return fmt.Errorf("%s: exec %q: %w", where, h.Exec, err)
 	}
@@ -281,6 +297,42 @@ func execIsRunnable(path string) error {
 	return nil
 }
 
+// LoadStatic reads and validates one manifest the way Load does, minus
+// execIsRunnable: it runs validateStatic alone, the same carve-out ReadTable
+// already makes. `emit` runs inside a Nix build sandbox, where a manifest's
+// `exec` may be an ordinary absolute path like `/home/you/bin/guard` that
+// simply does not exist yet — it will, at activation, when `install` runs and
+// re-validates through Load. So `emit` must not fail a build over a manifest
+// `install` would accept minutes later in the same activation.
+//
+// The narrowing is exactly one check wide, and every other rule stays shared
+// through validateAll. validateStatic still refuses a relative or bare exec —
+// that rule lives there, not in the stat, so nothing about §9's hook-fire-time
+// argument is given up. A file declaring zero handlers is still refused, as it
+// is under Load: `install --allow-empty` is about a caller passing no
+// `--manifest` flag at all, not about a manifest file whose handlers array is
+// empty, so accepting one here would let a Nix build succeed over a manifest
+// set activation then rejects. Duplicate ids within one file are still
+// refused, matching both Load and ReadTable — only Merge's cross-manifest
+// check is left to the caller, who must still run it: LoadStatic dedupes
+// one file, not a caller's whole --manifest list.
+func LoadStatic(path string) (*Manifest, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var m Manifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	m.Source = path
+	m.normalizeLanes()
+	if err := m.validateAll(nil); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
 // Merge combines validated manifests into one table. A duplicate id across
 // repos is an error rather than a last-writer-wins override, because that is
 // the case where one repo's change silently replaces another repo's guard.
@@ -326,11 +378,7 @@ func ReadTable(path string) ([]Handler, error) {
 	if err := json.Unmarshal(raw, &t); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	for i := range t.Handlers {
-		if t.Handlers[i].Lane == "" {
-			t.Handlers[i].Lane = LaneVerdict
-		}
-	}
+	t.normalizeLanes()
 	seen := map[string]bool{}
 	for _, h := range t.Handlers {
 		where := fmt.Sprintf("%s: handler %q", path, h.ID)

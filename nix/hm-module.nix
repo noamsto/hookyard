@@ -20,6 +20,17 @@
   # cannot express a second invocation.
   manifestFlags = lib.concatMapStringsSep " " (p: "--manifest ${lib.escapeShellArg p}") cfg.manifests;
 
+  # §9: the profile path is what every engine calls at hook-fire time —
+  # never the store path, which would churn all four engines' config on
+  # every hookyard bump and invalidate Codex's per-entry hook trust hash.
+  # `claudeHooks`/`claudeOverlay.merged` below render this same value into
+  # Claude's `command` fields, and `installCommand` passes it as
+  # `--router-path` for the router table `install` writes — one router path,
+  # two renderers of it, and that is precisely the invariant that both read it
+  # from the same `cfg.manifests`/`cfg.stateDir` so the table and the emitted
+  # commands never disagree about what they name.
+  routerPath = "${config.home.profileDirectory}/bin/hookyard";
+
   # §9: hookyard is invoked by its **store** path here, because a store path
   # is a dependency of the generation and so is always present during
   # activation, while the **profile** path is what gets emitted via
@@ -38,10 +49,7 @@
     # with nothing registering them any more.
     ++ lib.optional (cfg.manifests == []) "--allow-empty"
     ++ [
-      # Never a store path here (§9): it would churn three engines' config on
-      # every hookyard bump and invalidate Codex's per-entry hook trust hash.
-      # The profile path changes only when the guard x event x engine table
-      # does.
+      # Never a store path here (§9): see routerPath's comment above.
       #
       # Every path below goes through escapeShellArg. These values come from
       # the operator and from consumer modules, and they are interpolated into
@@ -53,15 +61,58 @@
       # Double quotes would stop only the second of those; single-quoting is
       # what stops both. checkShellSafe in the binary cannot help here: it runs
       # after bash has already parsed the line.
-      "--router-path ${lib.escapeShellArg "${config.home.profileDirectory}/bin/hookyard"}"
+      "--router-path ${lib.escapeShellArg routerPath}"
       "--state-dir ${lib.escapeShellArg cfg.stateDir}"
-      "--claude-settings ${lib.escapeShellArg cfg.claudeSettings}"
       "--codex-config ${lib.escapeShellArg cfg.codexConfig}"
       "--cursor-hooks ${lib.escapeShellArg cfg.cursorHooks}"
       "--pi-settings ${lib.escapeShellArg cfg.piSettings}"
     ]
   );
+
+  # Gated on `enable`, and that gate is the whole of what makes turning
+  # hookyard off safe. `home.packages` is inside `mkIf cfg.enable`, so a
+  # disabled generation has no binary at the profile path — while the two
+  # Claude options stay defined regardless, because the consumer's `claude`
+  # wrapper interpolates `merged` on every evaluation. Emitting a consumer's
+  # manifests anyway would leave Claude Code started with entries naming a
+  # path that no longer resolves, failing at exec on every tool call.
+  # Relying on `manifests` merely happening to be empty would not do: a
+  # consumer can contribute handlers and disable hookyard in one generation.
+  emittedManifestFlags = lib.optionalString cfg.enable manifestFlags;
+
+  # No import-from-derivation: this only ever produces a derivation, never
+  # `builtins.readFile`/`fromJSON` over it, so a consumer referencing it does
+  # not force a build at eval time. That matters for a darwin host evaluated
+  # from a linux machine — forcing a build would need an aarch64-darwin
+  # hookyard, which a linux machine cannot produce without a remote builder.
+  emitClaudeHooks = extraArgs:
+    pkgs.runCommand "hookyard-claude-hooks.json" {} ''
+      ${cfg.package}/bin/hookyard emit --engine claude-code \
+        ${emittedManifestFlags} \
+        --router-path ${lib.escapeShellArg routerPath} \
+        --state-dir ${lib.escapeShellArg cfg.stateDir} \
+        ${extraArgs} \
+        > $out
+    '';
+
+  claudeHooksDrv = emitClaudeHooks "";
+
+  claudeOverlayMergedDrv =
+    if cfg.claudeOverlay.base == null
+    then claudeHooksDrv
+    else emitClaudeHooks "--base ${lib.escapeShellArg cfg.claudeOverlay.base}";
 in {
+  imports = [
+    (lib.mkRemovedOptionModule ["programs" "hookyard" "claudeSettings"]
+      ''
+        hookyard no longer writes Claude Code's settings.json itself
+        (noamsto/hookyard#29). Point Claude Code's own `--settings` flag at
+        `config.programs.hookyard.claudeOverlay.merged`, optionally setting
+        `programs.hookyard.claudeOverlay.base` to an existing overlay file
+        for it to merge hookyard's entries into.
+      '')
+  ];
+
   options.programs.hookyard = {
     enable = lib.mkEnableOption "hookyard, the cross-engine agent hook router";
 
@@ -98,12 +149,6 @@ in {
     # the operator's lever: a user who genuinely sets CLAUDE_CONFIG_DIR, or
     # whose settings.json is managed by another Nix module, needs somewhere
     # to point hookyard, and this is it.
-    claudeSettings = lib.mkOption {
-      type = lib.types.str;
-      default = "${config.home.homeDirectory}/.claude/settings.json";
-      description = "Claude Code settings.json to render hookyard's registration into.";
-    };
-
     codexConfig = lib.mkOption {
       type = lib.types.str;
       default = "${config.home.homeDirectory}/.codex/config.toml";
@@ -122,6 +167,59 @@ in {
       description = "Pi settings.json to render hookyard's registration into; the bridge lands in bin/ beside it.";
     };
 
+    # Claude never gets a `claudeSettings`-shaped destination string:
+    # hookyard cannot write settings.json for Claude Code by construction, so
+    # there is nothing here for an operator to point at a real file the way
+    # codexConfig/cursorHooks/piSettings do. What Claude gets instead is a
+    # store path the consumer's own Nix wires in as the `--settings` overlay.
+    claudeHooks = lib.mkOption {
+      type = lib.types.package;
+      readOnly = true;
+      description = ''
+        The store file holding only hookyard's own `{"hooks": {...}}` block,
+        rendered from this module's `manifests`. Do **not** wire this as
+        Claude Code's `--settings` overlay: it carries none of the consumer's
+        `statusLine`, `enabledPlugins`, `extraKnownMarketplaces` or
+        `permissions` — that overlay is `claudeOverlay.merged`. This
+        option exists so `claudeOverlay.merged` has something to fall back to
+        when `claudeOverlay.base` is unset, and for a consumer that wants the
+        raw hooks block for some other purpose.
+      '';
+    };
+
+    claudeOverlay = {
+      base = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = ''
+          An existing Claude Code `--settings` overlay — the file already
+          carrying the consumer's `statusLine`, `enabledPlugins`,
+          `extraKnownMarketplaces` and `permissions` — for `claudeOverlay.merged`
+          to merge hookyard's hook entries into, preserving every other key
+          untouched. Leave unset and `claudeOverlay.merged` falls back
+          to `claudeHooks` verbatim.
+        '';
+      };
+
+      merged = lib.mkOption {
+        type = lib.types.package;
+        readOnly = true;
+        description = ''
+          The option to wire as Claude Code's `--settings` overlay.
+          `claudeOverlay.base` with hookyard's entries merged in, or
+          `claudeHooks` when `base` is unset (wiring `claudeHooks` here
+          instead would silently drop the rest of the overlay). Defined
+          unconditionally — including with `enable = false` or an empty
+          `manifests` — because the consumer's `claude` wrapper interpolates
+          this on every evaluation, whether hookyard is enabled or not; a
+          read-only option with no definition in that state throws, and the
+          failure would land in the consumer's module rather than here.
+          `enable = false` therefore yields `base` verbatim, not a missing
+          option — turning hookyard off must leave a working Claude Code.
+        '';
+      };
+    };
+
     # No default: evalOptionValue prepends a default to the definition list
     # before the readOnly arity check runs, so a default here plus the
     # `config` definition below would throw "read-only, set multiple times".
@@ -136,29 +234,42 @@ in {
     };
   };
 
-  config = lib.mkIf cfg.enable {
-    # §9: putting the binary in the profile is this module's job, because a
-    # profile path only resolves if it is there. §10's first-deployment
-    # failure is precisely config wired without the binary installed.
-    home.packages = [cfg.package];
+  # `claudeHooks` and `claudeOverlay.merged` sit outside `mkIf cfg.enable`
+  # Unlike `installCommand`, which only activation ever reads and only
+  # when hookyard is enabled, these two are read by the consumer's `claude`
+  # wrapper on every evaluation regardless of `cfg.enable`. Everything else
+  # keeps the shape it had — gated on `cfg.enable`, because nothing reads it
+  # otherwise.
+  config = lib.mkMerge [
+    {
+      programs.hookyard.claudeHooks = claudeHooksDrv;
+      programs.hookyard.claudeOverlay.merged = claudeOverlayMergedDrv;
+    }
 
-    assertions = [
-      {
-        assertion = lib.hasPrefix "/" cfg.stateDir;
-        message = "programs.hookyard.stateDir must be an absolute path, got ${cfg.stateDir}";
-      }
-    ];
+    (lib.mkIf cfg.enable {
+      # §9: putting the binary in the profile is this module's job, because a
+      # profile path only resolves if it is there. §10's first-deployment
+      # failure is precisely config wired without the binary installed.
+      home.packages = [cfg.package];
 
-    programs.hookyard.installCommand = installCommand;
+      assertions = [
+        {
+          assertion = lib.hasPrefix "/" cfg.stateDir;
+          message = "programs.hookyard.stateDir must be an absolute path, got ${cfg.stateDir}";
+        }
+      ];
 
-    # Ordered after writeBoundary per the task, and after installPackages
-    # because writeBoundary alone lets the config naming the profile path be
-    # written before the profile that resolves it exists — home-manager's own
-    # comment on installPackages gives this exact reason, and dconf, xfconf
-    # and vicinae all depend on it the same way. `run` is home-manager's own
-    # wrapper, so `home-manager switch -n` does not install for real.
-    home.activation.hookyardInstall = lib.hm.dag.entryAfter ["writeBoundary" "installPackages"] ''
-      run ${installCommand}
-    '';
-  };
+      programs.hookyard.installCommand = installCommand;
+
+      # Ordered after writeBoundary per the task, and after installPackages
+      # because writeBoundary alone lets the config naming the profile path be
+      # written before the profile that resolves it exists — home-manager's own
+      # comment on installPackages gives this exact reason, and dconf, xfconf
+      # and vicinae all depend on it the same way. `run` is home-manager's own
+      # wrapper, so `home-manager switch -n` does not install for real.
+      home.activation.hookyardInstall = lib.hm.dag.entryAfter ["writeBoundary" "installPackages"] ''
+        run ${installCommand}
+      '';
+    })
+  ];
 }

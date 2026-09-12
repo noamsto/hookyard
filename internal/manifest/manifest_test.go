@@ -412,6 +412,118 @@ func TestWriteTableLandsFixed0600EvenOverALooserExistingFile(t *testing.T) {
 	}
 }
 
+// emit's sandbox does not have the exec a manifest names,
+// but LoadStatic must accept the manifest anyway because install will
+// re-validate it, with a stat, at activation.
+func TestLoadStaticAcceptsNonExistentExecButLoadRejectsIt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hookyard.json")
+	body := `{"handlers":[{"id":"a","exec":"/nonexistent/guard","events":["pre_tool"],"engines":["cursor"]}]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := LoadStatic(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Handlers) != 1 {
+		t.Fatalf("got %d handlers, want 1", len(m.Handlers))
+	}
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("want Load to reject the same manifest, got nil")
+	}
+}
+
+// The absolute-path rule lives in validateStatic, not in the exec stat, so
+// LoadStatic gives up nothing about it.
+func TestLoadStaticRejectsRelativeExecLikeLoadDoes(t *testing.T) {
+	body := `{"handlers":[{"id":"a","exec":"hooks/guard.sh","events":["pre_tool"],"engines":["cursor"]}]}`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hookyard.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadStatic(path); err == nil || !strings.Contains(err.Error(), "must be an absolute path") {
+		t.Errorf("LoadStatic: got %v, want an error about an absolute path", err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "must be an absolute path") {
+		t.Errorf("Load: got %v, want an error about an absolute path", err)
+	}
+}
+
+func TestLoadStaticRejectsDuplicateIDInsideOneManifest(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hookyard.json")
+	body := `{"handlers":[
+	  {"id":"a","exec":"/nonexistent/guard","events":["pre_tool"],"engines":["cursor"]},
+	  {"id":"a","exec":"/nonexistent/guard","events":["post_tool"],"engines":["cursor"]}]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadStatic(path); err == nil || !strings.Contains(err.Error(), "declared twice") {
+		t.Errorf("got %v, want an error about a duplicate id", err)
+	}
+}
+
+// An empty handlers array is not `install --allow-empty`, which is about a
+// caller passing no --manifest at all. Were LoadStatic to accept this file the
+// Nix build would succeed and home-manager activation would then fail on
+// Load's refusal of the same bytes, after the store paths are realised.
+func TestLoadStaticRejectsZeroHandlersLikeLoadDoes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hookyard.json")
+	if err := os.WriteFile(path, []byte(`{"handlers":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadStatic(path); err == nil || !strings.Contains(err.Error(), "no handlers declared") {
+		t.Errorf("LoadStatic: got %v, want an error about no handlers", err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "no handlers declared") {
+		t.Errorf("Load: got %v, want an error about no handlers", err)
+	}
+}
+
+// LoadStatic's shape composes with Merge, which is the caller's separate,
+// later call that catches a duplicate id across manifests — the case
+// LoadStatic itself cannot see because it only dedupes within one file.
+func TestLoadStaticComposesWithMergeAcrossManifests(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	body := `{"handlers":[{"id":"shared","exec":"/nonexistent/guard","events":["pre_tool"],"engines":["cursor"]}]}`
+	path1 := filepath.Join(dir1, "hookyard.json")
+	path2 := filepath.Join(dir2, "hookyard.json")
+	if err := os.WriteFile(path1, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path2, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := LoadStatic(path1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := LoadStatic(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Merge([]*Manifest{first, second})
+	if err == nil {
+		t.Fatal("want an error for a duplicate id across manifests, got nil")
+	}
+	for _, want := range []string{first.Source, second.Source} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should name both manifests, missing %q: %v", want, err)
+		}
+	}
+}
+
 func TestMergeRejectsDuplicateIDAcrossManifests(t *testing.T) {
 	body := `{"handlers":[{"id":"shared","exec":"EXEC","events":["pre_tool"],"engines":["cursor"]}]}`
 	first, err := Load(writeManifest(t, body))

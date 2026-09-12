@@ -1768,7 +1768,7 @@ emitted entries carry. The four targets, and what already lives in each:
 |---|---|---|---|
 | Cursor | `~/.cursor/hooks.json` | `jq` merge: validate, marker-scoped strip, append, atomic rename | four declared, three live |
 | Codex | `~/.codex/config.toml` | marker-guarded `sed`/heredoc append | lazytmux only, two blocks |
-| Claude Code | `~/.claude/settings.json` | JSON merge under the same marker discipline | hand edits, the Nix `--settings` overlay, plugin `--plugin-dir` trees, and houston's installer as a *potential* writer (it has never run here) |
+| Claude Code | Nix `--settings` overlay | `hookyard emit` prints the merged `hooks` block on stdout; Nix places it, hookyard writes nothing | hand edits to `~/.claude/settings.json` (a separate file the overlay's union does not touch), plugin `--plugin-dir` trees, and houston's installer as a *potential* writer of that separate file (it has never run here) |
 | Pi | `<config dir>/bin/hookyard-bridge.ts` (generated, hookyard's own template) **and** the `extensions` array in `~/.pi/agent/settings.json` | write the bridge file whole (it is not merged with anything); JSON merge of the `extensions` entry under the same marker-scoped-strip discipline as the other three | the Nix wrapper's `-e`/`PI_AGENT_HOOKS` injection (below); pi itself, into the same `settings.json` |
 
 **Cursor.** Independent `jq` mergers already write `~/.cursor/hooks.json`,
@@ -1846,28 +1846,38 @@ absent — but the gate affects nix-config's Codex wiring, not `config.toml`
 itself, which lazytmux writes either way.
 
 **Claude Code.** This is the engine with the most existing writers, and the
-only one where the choice of surface has a real failure mode rather than a
-stylistic preference. Three surfaces already exist. The first is
-`~/.claude/settings.json`, which is hand-edited and which houston's installer
-self-installs into. The second is the Nix `--settings` overlay, which
-deep-merges object-valued keys **with the overlay winning per top-level event
-key, not per array entry**. The third is the plugin `hooks.json` directories
-loaded via `--plugin-dir`, which is where lazytmux's and aeye's Claude Code
-hooks actually live.
+only one whose destination is chosen for it rather than by preference. Three
+surfaces exist. The first is `~/.claude/settings.json`, which is hand-edited
+and which houston's installer self-installs into. The second is the Nix
+`--settings` overlay, which deep-merges object-valued keys **with the overlay
+winning per top-level event key, not per array entry**. The third is the
+plugin `hooks.json` directories loaded via `--plugin-dir`, which is where
+lazytmux's and aeye's Claude Code hooks actually live. hookyard's own
+registration point is the second, and not by choice among equals: on this
+machine `~/.claude/settings.json` is a home-manager `mkOutOfStoreSymlink`, and
+`render.CheckDestinations` refuses every symlinked destination, because every
+writer here lands through a rename that would replace the link rather than
+write through it. So hookyard emits its block for Nix to place in the overlay
+instead of ever writing to that file (#29) — the `emit` subcommand below,
+not a writer in this section's usual sense.
 
 The overlay's hook inventory, re-counted first-hand this pass:
-`home/ai/claude-code/default.nix` declares **11 hook entries** —
-`SessionStart` 1, `PreToolUse` 9 across three matcher groups (Bash 6, Read
-2, Grep 1), `PostToolUse` 1 — of which **6 invoke the four shared
-`agent-hooks` guards**: `nix-stage-guard`, `git-commit-autostage-guard` and
-`git-default-branch-guard` once each on the Bash matcher, and
-`secret-read-guard` three times, on the Bash, Read and Grep matchers. The
-brief's figure of ~15 is not it.
+`home/ai/claude-code/default.nix` declares **twelve hook entries** —
+`SessionStart` 1, `PreToolUse` 10 across three matcher groups (Bash 7, Read
+2, Grep 1), `PostToolUse` 1 — of which **7 invoke five distinct shared
+`agent-hooks` guards**: `secret-read-guard` three times, on the Bash, Read
+and Grep matchers, and `nix-stage-guard`, `git-commit-autostage-guard`,
+`git-default-branch-guard` and `tmux-live-server-guard` once each on the
+Bash matcher. None of the twelve declares a `timeout`. The brief's figure of
+~15 is not it, and this pass's own count of eleven from before is not either
+— the difference is one guard invocation, `tmux-live-server-guard`, added to
+the Bash matcher in nix-config since that count was taken.
 
 This pass can be more precise about where ~15 came from than the prior pass
 was, and the correction is worth recording because it is mechanically
-reproducible. `grep -c 'command = '` over that file returns exactly **15**:
-the 11 hook entries plus the `statusLine` command and three
+reproducible, against the eleven-entry count it was checked against at the
+time. `grep -c 'command = '` over that file returns exactly **15**: the
+eleven hook entries then present plus the `statusLine` command and three
 language-server commands (`nixd`, `bash-language-server`,
 `pyright-langserver`) that are not hooks at all. That is the likeliest
 source of the overcount — a whole-file count of `command =` in a file where
@@ -1883,10 +1893,27 @@ likely cause and the plugin-directory one as the standing fact about the
 surface, rather than asserting either as the proven origin of a number
 neither pass observed being produced.
 
+**Two facts were established by running the real `claude` binary this pass,
+not inferred from its documentation.** First, a `PreToolUse` entry that
+declares `"timeout": 0` is not run at all. Two fixtures, differing only in
+that field: with the field omitted, the handler was invoked; with `"timeout":
+0`, it was not, and the command proceeded as if no hook existed. This is a
+fact about the engine, not about this change, and it is exactly why hookyard's
+emit merge carries every inherited hook entry through as opaque JSON, rather
+than re-encoding it through typed structs: a struct field declared as a plain
+`int` with no `omitempty` would stamp a `0` onto every inherited entry that
+had omitted `timeout`, silently disabling every hook the overlay's base
+already carried. Second, a registration present *only* in a `--settings`
+overlay reaches a real `claude` process and enforces: the handler ran,
+hookyard recorded `verdict=deny enforced=true`, and claude reported "The
+command was blocked by a hook with the response: `overlay-probe-deny-42`."
+That is the fact the emit direction — hookyard printing its block for Nix to
+place in the overlay, rather than writing `settings.json` itself — rests on.
+
 **The collision risk does not exist in the form this document feared, and the
 correction is a reversal rather than a refinement.** The feared behaviour was
 that a `PreToolUse` entry written into `settings.json`, competing with the
-overlay's nine entries across three matchers, would be discarded outright and
+overlay's ten entries across three matchers, would be discarded outright and
 silently by the overlay. That is not what Claude Code does. Its hook-capture
 step enumerates three settings sources — `userSettings`, `localSettings`,
 `flagSettings` (the `--settings` overlay) — and **flat-maps** their `hooks`
@@ -1894,30 +1921,43 @@ objects into one list. Hooks *union* across sources; no source overrides
 another's entries. The only de-duplication applied is by the *resolved real
 path of the settings file*, so two sources that turn out to be the same file
 on disk are counted once — and `flagSettings` is explicitly exempt even from
-that. Ten entries would be registered from the case above, and all ten would
-run.
+that. Eleven entries would be registered from the case above, and all eleven
+would run.
 
-Both halves of the earlier conclusion therefore fall. Nothing is silently
-discarded, so there is no data-loss risk to mitigate; and the operational
-rule that followed from it — that nix-config must cede the top-level event
-keys **before** hookyard's installer may be pointed at `settings.json` — is
-not required by the merge semantics and is withdrawn. The honest status of
-the Claude Code `settings.json` path on a Nix-managed machine is **not
-blocked**: hookyard can write there while the overlay keeps its own entries,
-and neither writer needs to know about the other. That is the same
-"coexist as one more independent writer" property §8 already relies on for
-`~/.cursor/hooks.json`, and it turns out to hold for Claude Code for a
-different underlying reason — a union rather than a marker-scoped strip.
+Both halves of the earlier conclusion therefore fall, as a general statement
+about Claude Code's own merge semantics. Nothing is silently discarded, so
+there is no data-loss risk to mitigate; and the operational rule that
+followed from it — that nix-config must cede the top-level event keys
+**before** hookyard's installer may be pointed at `settings.json` — is not
+required by the merge semantics.
 
-What replaces the retired risk is the *other* failure mode a union produces,
-which is the one §8's dedup discipline is already built for: if hookyard is
-registered in the overlay **and** in `settings.json`, it is registered twice
-and runs twice per event. Marker-scoped single ownership — one writer owns
-hookyard's entry, wherever it chooses to put it — is what keeps that from
-happening, and it is now the only thing that has to be true, rather than a
-precondition on nix-config dropping keys. `~/.claude/settings.json` still has
-**no `hooks` key at all** today (`jq 'has("hooks")'` → `false`), so no entry
-of either kind exists yet.
+**That general finding is historically true and operationally wrong here,
+and it is worth being explicit about which.** It answers whether the *merge*
+would clobber an entry, not whether hookyard's installer can reach the file
+at all — and on this machine it cannot, for the reason given above: this is
+what #29 is. `~/.claude/settings.json` here is a home-manager
+`mkOutOfStoreSymlink`, and `render.CheckDestinations` refuses every
+symlinked destination for exactly this reason, regardless of what the merge
+would have done with an entry once written. So the earlier "**not blocked**"
+verdict is not a live description of this deployment; the settings.json path
+is blocked here, by the symlink rather than by the merge. The resolution is
+not to point the installer at that file once the merge risk is retired — it
+is to stop trying to write it at all: hookyard emits its block instead, and
+Nix places it in the overlay, which is a plain store-generated file rather
+than a symlink and which the merge semantics above already show can coexist
+with the overlay's own ten entries without anyone ceding a key.
+
+What remains true is the *other* failure mode a union produces, which is the
+one §8's dedup discipline is already built for: if hookyard's block is
+registered in the overlay **and** a stale copy survives in `settings.json`
+from an older, pre-#29 install, it is registered twice and runs twice per
+event. Marker-scoped single ownership is what keeps that from happening, and
+under emit it is `hookyard doctor`'s job to catch a stale copy: a marker
+found in `settings.json` is a `Fail`, not evidence of a working registration,
+because the overlay is now the only place a current install can put one, and
+its repair advice says to remove the stale entry rather than to reinstall.
+`~/.claude/settings.json` still has **no `hooks` key at all**
+today (`jq 'has("hooks")'` → `false`), so no entry of either kind exists yet.
 
 The plugin `--plugin-dir` surface remains worth evaluating, but for a reason
 that has shrunk: it is a fourth hook source that does not participate in the
@@ -1942,6 +1982,25 @@ nothing dangerous was attempted. `hookyard doctor` is the right place to
 answer it: it can read the same settings sources and report whether hooks are
 gated off, rather than leaving the operator to infer coverage from an empty
 stream.
+
+**The emit path costs something the user-settings path did not, and that
+belongs beside the fail-open list above rather than only in an acceptance
+test.** `claude --help` declares `--settings <file-or-json>` as singular, not
+variadic, and it is last-wins: a second `--settings` passed after the
+launcher's own replaces it outright — verified by giving a nonexistent path
+second, which produced `Error: Settings file not found` for *that* path,
+proving the later flag is the one consulted. Under the old user-settings
+path, nothing on a command line could displace hookyard's registration;
+under emit, any caller that invokes `claude --settings …` itself silently
+unregisters every hookyard hook. Nothing on this machine does that today —
+only the wrapper passes `--settings`, checked across the consumer repo — but
+a future wrapper, script, or agent harness could, and `hookyard doctor` would
+still report `Pass`, because it reads the flag baked into the launcher and
+cannot see a per-invocation one. This is a genuine robustness regression
+against the user-settings path, accepted because the user-settings path is
+unavailable here rather than fixed, and it is why `doctor`'s `Pass` detail has
+to say the narrower thing: the launcher on PATH passes an overlay carrying
+hookyard's block, not that a given `claude` invocation will use it.
 
 **The trust gate is not a Claude Code quirk — three of the four engines have
 it, and the payload-capture run hit it on every one of those three.** Cursor
@@ -1984,19 +2043,19 @@ Preserving `[projects]` and `[hooks.state]` is therefore a hard requirement
 of the Codex writer, not the tidy option: the marker-scoped strip must carry
 both through the atomic rename untouched.
 
-houston's own installer is named here for exactly one reason: it is another
-writer to `~/.claude/settings.json` that hookyard must be able to coexist
-with — potential rather than pre-existing, since it has not actually written
-here. It is not hookyard's installer, it is not kept and generalized, and
-nothing in this design extends it. **The installer is hookyard's own
-command**, shipped in hookyard's own binary. Two observations follow from
-treating houston as a co-writer rather than a host. First, it has not
-written here: the absence of a `hooks` key is also evidence that houston's
-installer has never run on this machine, and nix-config wires no `houston
-hook` invocation anywhere (checked this pass, no matches). Second, because
-hookyard's writer is marker-scoped like every other writer in this section,
-coexistence with houston's entries needs no negotiation — the same property
-that lets four unrelated Cursor writers share one file.
+houston's own installer is named here for exactly one reason: it is a
+potential writer of the same file, `~/.claude/settings.json`, that hookyard's
+emit path now deliberately never touches — potential rather than
+pre-existing, since it has not actually written here. It is not hookyard's
+installer, it is not kept and generalized, and nothing in this design extends
+it. Under emit there is no coexistence question left to resolve between the
+two: hookyard's registration lands in the overlay, a different file Nix
+places, so nothing hookyard does can collide with whatever houston writes
+into `settings.json`. The absence of a `hooks` key today is also evidence
+that houston's installer has never run on this machine, and nix-config wires
+no `houston hook` invocation anywhere (checked this pass, no matches) —
+houston is carried here as a fact about the surface hookyard has chosen not
+to use, not as a writer hookyard has to negotiate with.
 
 **Pi.** Pi has no subprocess hook protocol at all, which makes it
 structurally unlike the other three from the start. There is no native
@@ -2877,16 +2936,28 @@ call, and Codex's undeclared-timeout behaviour timed. Statuses below say which
 grade they rest on where the difference matters.
 
 1. **The settings.json / Nix-overlay collision (§8).**
-   **Resolved, and the risk is retired rather than mitigated.** Claude Code
-   2.1.263 collects hooks from `userSettings`, `localSettings` and
-   `flagSettings` by flat-mapping all three — hooks **union** across sources,
-   with de-duplication only by the resolved real path of the settings file,
-   and `flagSettings` exempt even from that. The overlay therefore cannot
-   silently discard an entry in `~/.claude/settings.json`, which is the
-   specific failure this item existed to track. §8 is corrected, §10's
-   dependence on this item is removed, and what remains is the ordinary
-   duplicate-registration case that marker-scoped single ownership already
-   covers. `~/.claude/settings.json` still has no `hooks` key
+   **Resolved as a merge question, and then overtaken by a blocking one — the
+   two are separate findings, and only the second decides how Claude Code is
+   actually wired.** Claude Code 2.1.263 collects hooks from `userSettings`,
+   `localSettings` and `flagSettings` by flat-mapping all three — hooks
+   **union** across sources, with de-duplication only by the resolved real
+   path of the settings file, and `flagSettings` exempt even from that. The
+   overlay therefore cannot silently discard an entry in
+   `~/.claude/settings.json`, which is the specific failure this item existed
+   to track, and that half stays retired rather than mitigated. But
+   `~/.claude/settings.json` on this machine is a home-manager
+   `mkOutOfStoreSymlink`, and `render.CheckDestinations` refuses every
+   symlinked destination regardless of what the merge would have done with an
+   entry once written — so the file was never reachable for hookyard's
+   installer to begin with, merge risk aside. That is #29: the item resolves
+   not by writing `settings.json` once the collision fear turned out to be
+   unfounded, but by hookyard emitting its hooks block for Nix to place in the
+   `--settings` overlay directly, and never attempting the write at all. §8 is
+   corrected to describe the emit path, §10's dependence on this item is
+   removed, and the ordinary duplicate-registration case — a stale entry
+   surviving in `settings.json` from a pre-#29 install — is what marker-scoped
+   single ownership and `doctor`'s stale-marker check now cover instead.
+   `~/.claude/settings.json` still has no `hooks` key
    (`jq 'has("hooks")'` → `false`), so nothing is deployed either way.
 2. **The exact native multi-hook consolidation rule, per engine (§4).**
    **One of three resolved.** Cursor's reducer folds two hooks' `permission`

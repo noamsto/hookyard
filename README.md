@@ -24,16 +24,20 @@ reason explaining why.
 
 ## How it works
 
-Two passes. `hookyard install` writes the table down into every engine's
-config; `hookyard route` is what an engine actually invokes when a hook
-fires.
+Two passes. `hookyard install` writes the table down into Codex's, Cursor's
+and Pi's config and hookyard's own state table; `hookyard emit` prints
+Claude Code's hooks block as JSON on stdout, for Nix to place — Claude
+Code's own destination is Nix-managed on this machine and unwriteable by
+`install`'s usual rename-based strip (more below). `hookyard route` is what
+an engine actually invokes when a hook fires.
 
-Several repos' manifests fold into one `hookyard install` pass, out to four
-engines' native config plus hookyard's own state table:
+Several repos' manifests fold into one `hookyard install` pass, out to
+Codex's, Cursor's and Pi's native config plus hookyard's own state table,
+and into one `hookyard emit` pass Nix runs at build time for Claude Code:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/registration-dark.svg">
-  <img alt="Registration: repo A's and repo B's hookyard.json manifests fold into one hookyard install pass, which writes into Claude Code's settings.json, Codex's config.toml, Cursor's hooks.json, and Pi's two artifacts — a generated bridge extension file and an extensions[] entry in Pi's own settings.json — and records the installed handlers in hookyard's state table." src="docs/diagrams/registration.svg">
+  <img alt="Registration: repo A's and repo B's hookyard.json manifests fold into one hookyard install pass, which writes into Codex's config.toml, Cursor's hooks.json, and Pi's two artifacts — a generated bridge extension file and an extensions[] entry in Pi's own settings.json — and records the installed handlers in hookyard's state table; the same manifests also feed a hookyard emit pass that Nix places into Claude Code's --settings overlay." src="docs/diagrams/registration.svg">
 </picture>
 
 An engine firing a hook decodes its native payload into one normalized
@@ -76,13 +80,18 @@ Once you have a binary on `PATH`:
 ```
 hookyard validate --manifest path/to/hookyard.json
 hookyard install  --manifest path/to/hookyard.json [--manifest ...]
+hookyard emit     --engine claude-code --manifest path/to/hookyard.json [--manifest ...] --router-path <path> --state-dir <path> [--base <file>]
 hookyard doctor
 ```
 
-`install` renders every manifest it is given into all four engines' native
-config in one pass — it takes the full list, never one repo at a time,
-because its strip is keyed on a marker that does not record which manifest
-produced a row.
+`install` renders every manifest it is given into Codex's, Cursor's and
+Pi's native config in one pass — it takes the full list, never one repo at a
+time, because its strip is keyed on a marker that does not record which
+manifest produced a row. `emit` covers Claude Code instead: it is
+Claude-Code-only (`--engine claude-code` is required), prints the merged
+`hooks` block to stdout rather than writing a file, and is meant to run
+inside a Nix build rather than at activation time — Nix is what places its
+output into the `--settings` overlay.
 
 `doctor` answers the question the event record cannot: every engine skips
 hooks entirely in a directory the user has not trusted, and a handler that
@@ -108,15 +117,20 @@ module:
 
 `manifests` is the whole of a consumer's contribution, and it is a shared
 list: every module that sets it contributes paths to the same list, rendered
-into all four engines' native config by one `hookyard install` invocation,
-owned by hookyard's own module and run from `home.activation.hookyardInstall`.
-A consumer never pins its own hookyard input and never adds its own
-activation entry that calls `hookyard install` directly: the strip that
-removes hookyard's rows on re-render is keyed on a marker that does not
-record which manifest produced a row, so a second invocation would silently
-delete the first one's rows rather than merge with them. One input, one
-binary, one rendering pass, and consumers contribute data to it rather than a
-second copy of the mechanism.
+into Codex's, Cursor's and Pi's native config by one `hookyard install`
+invocation, owned by hookyard's own module and run from
+`home.activation.hookyardInstall`. The same list also feeds
+`programs.hookyard.claudeOverlay.merged`, a build-time `hookyard emit`
+derivation the consumer wires into Claude Code's `--settings` overlay itself
+— Claude Code's destination is Nix-managed, not something hookyard's own
+activation entry can reach (more below). A consumer never pins its own
+hookyard input and never adds its own activation entry that calls `hookyard
+install` directly: the strip that removes hookyard's rows on re-render is
+keyed on a marker that does not record which manifest produced a row, so a
+second invocation would silently delete the first one's rows rather than
+merge with them. One input, one binary, one rendering pass per destination,
+and consumers contribute data to it rather than a second copy of the
+mechanism.
 
 A manifest's `exec` must be an absolute path that already exists at
 activation time — `install` stats it, and a manifest that fails the stat
@@ -128,31 +142,43 @@ handler built by the same flake needs a manifest generated with
 `pkgs.writeText`, embedding the handler's own store path, rather than a
 checked-in JSON file naming a path Nix had no chance to fill in.
 
-Turning hookyard off goes in a specific order: empty `manifests`, activate,
-*then* set `enable = false`. Flipping `enable` off first removes the binary
-from the profile while the four engines' configs still name it, so the path
-each config points at now fails at `exec` instead of resolving — exactly the
-fail-open §9 of the design doc spends its argument on. Emptying
-`manifests` first runs `install` with nothing registered, which strips
-hookyard's rows from all four configs while the binary is still there to do
-it; only then is it safe to drop the package itself. `hookyard doctor`'s
+Turning hookyard off goes in a specific order for Codex, Cursor and Pi: empty
+`manifests`, activate, *then* set `enable = false`. Flipping `enable` off
+first removes the binary from the profile while those three engines' configs
+still name it, so the path each config points at now fails at `exec` instead
+of resolving — exactly the fail-open §9 of the design doc spends its argument
+on. Emptying `manifests` first runs `install` with nothing registered, which
+strips hookyard's rows from all three configs while the binary is still there
+to do it; only then is it safe to drop the package itself. `hookyard doctor`'s
 `router path` check is what catches a machine left in the wrong order — it
 confirms the path each engine's config names is actually there to exec,
-alongside the trust and confirmed-deny checks it already runs.
+alongside the trust and confirmed-deny checks it already runs. This ordering
+rule does not apply to Claude Code: it has no rows in a hookyard-owned file
+to strip, since `emit` never writes one, so emptying `manifests` just
+regenerates the overlay without hookyard's block and `enable = false` is safe
+in any order.
 
-The destination files hookyard writes into — Claude Code's `settings.json`,
-Codex's `config.toml`, Cursor's `hooks.json`, and Pi's `settings.json` — must
-be plain files that hookyard itself owns, not symlinks placed by another Nix
-module. Pi also gets a generated bridge extension file, written wholesale
-rather than merged into, and that gets the same symlink refusal. `install`
-refuses to render into any of these rather than replace it, because replacing
-it would silently detach whatever manages the link with no warning at the
-next switch. On this machine `~/.claude/settings.json` is itself a
-home-manager-managed symlink today, so registering Claude Code hooks needs
-one of the two ways out: `programs.hookyard.claudeSettings` pointed at a file
-hookyard can own, or the module that currently manages that symlink stepping
-aside for hookyard. The same option exists for the other three engines as
-`codexConfig`, `cursorHooks`, and `piSettings`.
+The destination files hookyard writes into — Codex's `config.toml`, Cursor's
+`hooks.json`, and Pi's `settings.json` — must be plain files that hookyard
+itself owns, not symlinks placed by another Nix module. Pi also gets a
+generated bridge extension file, written wholesale rather than merged into,
+and that gets the same symlink refusal. `install` refuses to render into any
+of these rather than replace it, because replacing it would silently detach
+whatever manages the link with no warning at the next switch. The same
+escape hatch exists for these three engines as `codexConfig`, `cursorHooks`,
+and `piSettings`, each pointed at a file hookyard can own instead of the
+default path.
+
+Claude Code has no such option, and needs none: `programs.hookyard.claudeHooks`
+is the package holding hookyard's own emitted block, and
+`programs.hookyard.claudeOverlay.merged` is that block merged into an
+optional `claudeOverlay.base` the consumer already places as the `--settings`
+overlay — both read-only outputs of `emit`, not files `install` writes, so
+there is no destination for a symlink to collide with. On this machine
+`~/.claude/settings.json`
+is itself a home-manager-managed symlink, which is exactly why Claude Code's
+registration goes through the overlay rather than through a destination
+option at all (#29).
 
 ## The manifest
 

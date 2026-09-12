@@ -220,22 +220,100 @@ func TestWriteCursorOnAnEmptyPlanStillStripsAStaleMarkerEvenWithNoNewEntries(t *
 	}
 }
 
-const claudeInherited = `{
+// Shaped after the consumer's real --settings overlay, counted from the file:
+// twelve entries, ten of them PreToolUse across three matcher groups (Bash 7,
+// Read 2, Grep 1), and not one declaring a timeout. The event keys are
+// deliberately not in alphabetical order, so re-encoding through a Go map is
+// visible; so are the two foreign fields, one on a group and one on a hook.
+const claudeOverlayInherited = `{
   "permissions": {
     "allow": [
       "Bash(git status)"
     ]
   },
-  "theme": "dark",
+  "statusLine": {
+    "type": "command",
+    "command": "/nix/store/statusline/bin/statusline"
+  },
+  "enabledPlugins": {
+    "superpowers@marketplace": true
+  },
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/nix/store/guards/bin/session-start-guard"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
+            "command": "/nix/store/guards/bin/nix-stage-guard"
+          },
+          {
+            "type": "command",
+            "command": "/nix/store/guards/bin/git-commit-autostage-guard"
+          },
+          {
+            "type": "command",
+            "command": "/nix/store/guards/bin/git-default-branch-guard"
+          },
+          {
+            "type": "command",
+            "command": "/nix/store/guards/bin/tmux-live-server-guard"
+          },
+          {
+            "type": "command",
             "command": "/nix/store/guards/bin/secret-read-guard",
-            "timeout": 5
+            "statusMessage": "checking for secrets"
+          },
+          {
+            "type": "command",
+            "command": "/nix/store/guards/bin/deslop-guard"
+          },
+          {
+            "type": "command",
+            "command": "/nix/store/guards/bin/gtrash-guard"
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "description": "shared agent-hooks guards",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/nix/store/guards/bin/secret-read-guard"
+          },
+          {
+            "type": "command",
+            "command": "/nix/store/guards/bin/claude-read-skeleton-guard"
+          }
+        ]
+      },
+      {
+        "matcher": "Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/nix/store/guards/bin/secret-read-guard"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/nix/store/guards/bin/stop-guard"
           }
         ]
       }
@@ -244,62 +322,227 @@ const claudeInherited = `{
 }
 `
 
-func TestWriteClaudeLeavesOtherHooksAndKeysAlone(t *testing.T) {
-	path := writeFixture(t, "settings.json", claudeInherited)
-	entries := []Entry{{Event: "PreToolUse", Matcher: "Bash", Command: "/nix/store/x/bin/hookyard route --registered-for claude-code --event pre_tool"}}
-	if err := WriteClaude(path, entries); err != nil {
+// A "timeout": 0 added to an entry that declared none stops that hook firing
+// at all — measured twice against the live claude binary, on two runs of one
+// fixture differing only in that field. Every entry in the overlay this is
+// shaped after would go dead, silently, including seven invocations of the
+// shared guards hookyard exists to route.
+func TestClaudeSettingsDoesNotAddATimeoutToAnInheritedHookMissingOne(t *testing.T) {
+	out, err := ClaudeSettings([]byte(claudeOverlayInherited), nil)
+	if err != nil {
 		t.Fatal(err)
 	}
-	got := readFile(t, path)
+	got := string(out)
 
-	for _, want := range []string{"secret-read-guard", `"theme"`, "Bash(git status)"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("write dropped inherited content %q\n--- got ---\n%s", want, got)
+	if strings.Contains(got, "timeout") {
+		t.Errorf("an inherited hook that declared no timeout gained one\n--- got ---\n%s", got)
+	}
+}
+
+// The other half of the timeout rule, and the one the whole emit change turns
+// on: hookyard's own row must always declare one (§4), so removing the field
+// from the encoding has to fail here rather than silently hand every router
+// invocation the engine's own default.
+//
+// Scoped deliberately to the field's presence. Adding omitempty would not
+// change this document, because the value is never zero, and zeroing
+// EmittedTimeoutSeconds is caught in internal/router — this test compares
+// against the same constant, so it cannot see that.
+func TestClaudeSettingsGivesItsOwnRowTheMandatoryTimeout(t *testing.T) {
+	command := "/nix/store/x/bin/hookyard route --registered-for claude-code --event pre_tool"
+	out, err := ClaudeSettings([]byte(claudeOverlayInherited), []Entry{{Event: "PreToolUse", Matcher: "Bash", Command: command}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var probe struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+				Timeout *int   `json:"timeout"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(out, &probe); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, out)
+	}
+
+	found := 0
+	for _, group := range probe.Hooks["PreToolUse"] {
+		for _, hook := range group.Hooks {
+			if hook.Command != command {
+				continue
+			}
+			found++
+			if hook.Timeout == nil {
+				t.Errorf("hookyard's own row declares no timeout\n--- got ---\n%s", out)
+			} else if *hook.Timeout != EmittedTimeoutSeconds {
+				t.Errorf("hookyard's own row has timeout %d, want %d", *hook.Timeout, EmittedTimeoutSeconds)
+			}
 		}
+	}
+	if found != 1 {
+		t.Fatalf("want one hookyard row under PreToolUse, got %d\n--- got ---\n%s", found, out)
+	}
+}
+
+// The other half of §4.2b: the typed decode dropped every field the structs
+// did not declare, one on a group and one on a hook here.
+func TestClaudeSettingsPreservesForeignFieldsOnInheritedGroupsAndHooks(t *testing.T) {
+	out, err := ClaudeSettings([]byte(claudeOverlayInherited), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+
+	for _, want := range []string{`"description": "shared agent-hooks guards"`, `"statusMessage": "checking for secrets"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("an inherited entry lost a foreign field %q\n--- got ---\n%s", want, got)
+		}
+	}
+}
+
+func TestClaudeSettingsLeavesOtherHooksAndKeysAlone(t *testing.T) {
+	entries := []Entry{{Event: "PreToolUse", Matcher: "Bash", Command: "/nix/store/x/bin/hookyard route --registered-for claude-code --event pre_tool"}}
+	out, err := ClaudeSettings([]byte(claudeOverlayInherited), entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+
+	for _, want := range []string{
+		"session-start-guard", "gtrash-guard", "claude-read-skeleton-guard", "stop-guard",
+		`"statusLine"`, `"enabledPlugins"`, "Bash(git status)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the merge dropped inherited content %q\n--- got ---\n%s", want, got)
+		}
+	}
+	if n := strings.Count(got, "secret-read-guard"); n != 3 {
+		t.Errorf("want the three inherited secret-read-guard invocations, got %d\n--- got ---\n%s", n, got)
 	}
 	if !strings.Contains(got, "--registered-for claude-code") {
 		t.Errorf("hookyard entry missing\n--- got ---\n%s", got)
 	}
 }
 
-// settings.json is hand-edited, so a hook change should not reshuffle it.
-func TestWriteClaudePreservesTopLevelKeyOrder(t *testing.T) {
-	path := writeFixture(t, "settings.json", claudeInherited)
-	if err := WriteClaude(path, []Entry{{Event: "PreToolUse", Command: "/x/bin/hookyard route"}}); err != nil {
+// The base is hand-edited above and Nix-generated below, so a hook change must
+// reshuffle neither its top level nor hooks' own event keys. Both key
+// sequences here are deliberately non-alphabetical, which is what a Go map
+// would have re-sorted them into.
+func TestClaudeSettingsPreservesKeyOrder(t *testing.T) {
+	out, err := ClaudeSettings([]byte(claudeOverlayInherited), []Entry{{Event: "PreToolUse", Command: "/x/bin/hookyard route"}})
+	if err != nil {
 		t.Fatal(err)
 	}
-	got := readFile(t, path)
+	got := string(out)
 
-	permissions := strings.Index(got, `"permissions"`)
-	theme := strings.Index(got, `"theme"`)
-	hooks := strings.Index(got, `"hooks"`)
-	if permissions > theme || theme > hooks {
-		t.Errorf("top-level keys were reordered (permissions=%d theme=%d hooks=%d)\n--- got ---\n%s",
-			permissions, theme, hooks, got)
+	for _, ordered := range [][]string{
+		{`"permissions"`, `"statusLine"`, `"enabledPlugins"`, `"hooks"`},
+		{`"SessionStart"`, `"PreToolUse"`, `"Stop"`},
+	} {
+		for i := 1; i < len(ordered); i++ {
+			if strings.Index(got, ordered[i-1]) > strings.Index(got, ordered[i]) {
+				t.Errorf("%s and %s were reordered\n--- got ---\n%s", ordered[i-1], ordered[i], got)
+			}
+		}
 	}
 }
 
-func TestWriteClaudeIsIdempotentAndStaysValid(t *testing.T) {
-	path := writeFixture(t, "settings.json", claudeInherited)
+func TestClaudeSettingsIsIdempotentAndStaysValid(t *testing.T) {
 	entries := []Entry{{Event: "PreToolUse", Matcher: "Bash", Command: "/x/bin/hookyard route --event pre_tool"}}
-	if err := WriteClaude(path, entries); err != nil {
+	first, err := ClaudeSettings([]byte(claudeOverlayInherited), entries)
+	if err != nil {
 		t.Fatal(err)
 	}
-	first := readFile(t, path)
-	if err := WriteClaude(path, entries); err != nil {
+	second, err := ClaudeSettings(first, entries)
+	if err != nil {
 		t.Fatal(err)
 	}
-	second := readFile(t, path)
 
-	if first != second {
-		t.Errorf("second write differs\n--- first ---\n%s\n--- second ---\n%s", first, second)
+	if string(first) != string(second) {
+		t.Errorf("the second merge differs\n--- first ---\n%s\n--- second ---\n%s", first, second)
 	}
 	var probe map[string]any
-	if err := json.Unmarshal([]byte(second), &probe); err != nil {
+	if err := json.Unmarshal(second, &probe); err != nil {
 		t.Fatalf("output is not valid JSON: %v\n%s", err, second)
 	}
-	if n := strings.Count(second, Marker); n != 1 {
+	if n := strings.Count(string(second), Marker); n != 1 {
 		t.Errorf("want one hookyard entry, got %d", n)
+	}
+}
+
+// Moving a handler between events must not leave the old registration behind,
+// which is why the strip spans every event key rather than only the ones being
+// written.
+func TestClaudeSettingsStripsHookyardEntriesUnderEveryEvent(t *testing.T) {
+	first, err := ClaudeSettings([]byte(claudeOverlayInherited), []Entry{{Event: "PreToolUse", Command: "/x/bin/hookyard route --event pre_tool"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ClaudeSettings(first, []Entry{{Event: "Stop", Command: "/x/bin/hookyard route --event stop"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(second)
+
+	if strings.Contains(got, "--event pre_tool") {
+		t.Errorf("the old registration survived the move\n--- got ---\n%s", got)
+	}
+	if !strings.Contains(got, "--event stop") {
+		t.Errorf("the new registration is missing\n--- got ---\n%s", got)
+	}
+	if !strings.Contains(got, "stop-guard") {
+		t.Errorf("the inherited Stop hook was stripped alongside hookyard's own\n--- got ---\n%s", got)
+	}
+}
+
+// An event key whose only content was hookyard's own goes away entirely, so a
+// removal leaves neither an empty group nor an empty array behind — and with
+// nothing left under hooks, the key itself is gone.
+func TestClaudeSettingsDropsGroupsAndEventKeysItEmpties(t *testing.T) {
+	registered, err := ClaudeSettings([]byte("{}"), []Entry{{Event: "Notification", Command: "/x/bin/hookyard route --event notify"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(registered), `"Notification"`) {
+		t.Fatalf("the entry was never registered\n--- got ---\n%s", registered)
+	}
+
+	out, err := ClaudeSettings(registered, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+
+	if strings.Contains(got, `"Notification"`) {
+		t.Errorf("an emptied event key survived\n--- got ---\n%s", got)
+	}
+	if strings.Contains(got, `"hooks"`) {
+		t.Errorf("an emptied hooks key survived\n--- got ---\n%s", got)
+	}
+}
+
+// A refusal must return no document at all: emit redirects stdout into $out,
+// so half a document written before the error would be captured as the build's
+// result.
+func TestClaudeSettingsRefusesAMalformedBase(t *testing.T) {
+	for name, base := range map[string]string{
+		"not JSON at all":         "{not json",
+		"a JSON array":            `[]`,
+		"an unreadable hooks key": `{"hooks": 7}`,
+		"an unreadable group":     `{"hooks": {"PreToolUse": [7]}}`,
+		"an unreadable hook":      `{"hooks": {"PreToolUse": [{"hooks": [7]}]}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			out, err := ClaudeSettings([]byte(base), []Entry{{Event: "PreToolUse", Command: "/x/bin/hookyard route"}})
+			if err == nil {
+				t.Fatalf("want a refusal, got\n%s", out)
+			}
+			if out != nil {
+				t.Errorf("a refusal still returned a document\n%s", out)
+			}
+		})
 	}
 }
 

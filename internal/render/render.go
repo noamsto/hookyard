@@ -5,10 +5,15 @@
 // own: it strips only entries carrying hookyard's own marker, leaves every
 // other writer's entries untouched, refuses a file it cannot parse rather than
 // clobbering it, and lands its result through a single rename.
+//
+// Claude Code is the exception, and by construction: ClaudeSettings is a pure
+// function over bytes, because the file its result belongs in is a Nix store
+// link that hookyard must never be able to name for writing (#29).
 package render
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -52,6 +57,15 @@ func BuildPlan(handlers []manifest.Handler, routerPath, stateDir string) (Plan, 
 	if !strings.Contains(routerPath, Marker) {
 		return nil, fmt.Errorf("router path %q does not contain the marker %q, so emitted entries "+
 			"could not be found again to strip", routerPath, Marker)
+	}
+	// The rule validateStatic applies to a handler's exec, applied to the
+	// command every engine is handed. `emit` has no os.Executable() fallback
+	// to make absolute, so a relative path reaches the config as written and
+	// resolves at hook-fire time against whatever directory the agent's tool
+	// call runs in — the repo under review.
+	if !filepath.IsAbs(routerPath) {
+		return nil, fmt.Errorf("router path %q must be an absolute path, because it is resolved at "+
+			"hook-fire time against the agent's working directory, not the installer's", routerPath)
 	}
 
 	matchers := map[planKey]map[string]bool{}

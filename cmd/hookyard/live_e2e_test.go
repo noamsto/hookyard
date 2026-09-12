@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -22,20 +23,36 @@ import (
 // fails this test instead of the suite.
 const liveE2EBudget = 90 * time.Second
 
-// liveProbePrompt is the exact prompt
-// docs/design/fixtures/hook-payloads/README.md records using to capture live
-// payloads from all four engines. It is reused verbatim here because it is
-// already known to reliably produce one Bash tool call, not because the
-// wording matters on its own.
-const liveProbePrompt = "Run the shell command: echo hookyard-probe"
+// liveProbePrompt asks for the same single Bash tool call
+// docs/design/fixtures/hook-payloads/README.md records capturing live payloads
+// with, but names a filesystem side effect rather than an echo, so whether the
+// denied call actually ran is a file that either exists or does not.
+const liveProbePrompt = "Run the shell command: touch SIDE-EFFECT.txt"
+
+// liveProbeSideEffect is the file liveProbePrompt would create, relative to
+// the directory the probe runs in.
+const liveProbeSideEffect = "SIDE-EFFECT.txt"
 
 // TestLiveClaudeCodeRefusesTheDeniedToolCall proves enforcement rather than
 // verdict shape. Every other test here asserts that hookyard renders the JSON
 // bytes an engine is documented to read; none drives a real engine, so none
 // can tell a correct rendering from one the engine happens to ignore. This
-// installs hookyard into a scratch Claude Code configuration with a handler
-// that unconditionally denies, runs the real claude binary on
-// liveProbePrompt, and checks that the shell call was actually refused.
+// builds the overlay by running `hookyard emit --base` over a base carrying
+// its own, non-hookyard PreToolUse hook — the artifact this change actually
+// ships, not a hand-written equivalent of it — passes it to a real claude
+// binary as --settings, and checks two things: that the deny handler's tool
+// call was actually refused, and that the base's own hook still fired.
+//
+// That second assertion is the load-bearing half. A version of this test that
+// only checked hookyard's own hook would pass against the exact merge bug
+// #29 exists to fix: the old merge decoded and re-encoded every inherited
+// hook through a struct that always writes a timeout field, and an entry
+// carrying `"timeout": 0` is — measured twice against the live claude
+// binary — silently never run. The base file below deliberately declares no
+// timeout on its own hook, the shape any hand-written settings.json actually
+// has, so a regression back to that merge would leave hookyard's own deny
+// firing (proving nothing wrong with hookyard) while the base's hook goes
+// silently dead (the actual bug).
 //
 // It is gated behind HOOKYARD_E2E because the repo gate has no credentials to
 // authenticate a real API call, and behind claude's presence on PATH because
@@ -51,6 +68,11 @@ const liveProbePrompt = "Run the shell command: echo hookyard-probe"
 // they are. The shape below — scratch config, a deny handler, a probe prompt,
 // checking both hookyard's own record and the engine's own output —
 // generalizes to either once that groundwork exists.
+//
+// Not accounted for below: claude on PATH here may itself be a launcher that
+// passes its own `--plugin-dir` trees, each with hooks of its own. That is
+// pre-existing exposure in this test, not something emit changes, so it is
+// noted rather than controlled for.
 func TestLiveClaudeCodeRefusesTheDeniedToolCall(t *testing.T) {
 	if os.Getenv("HOOKYARD_E2E") != "1" {
 		t.Skip("set HOOKYARD_E2E=1 to run this test against a live claude binary")
@@ -95,11 +117,15 @@ func TestLiveClaudeCodeRefusesTheDeniedToolCall(t *testing.T) {
 	handlerPath := liveWriteDenyHandler(t, root, firedMarker, reasonToken)
 	manifestPath := liveWriteManifest(t, root, handlerPath)
 
+	// install still sets up the router's own state (table.json under
+	// stateDir) and the three engines that stay on install (§4.2); it is
+	// never given anywhere to put a Claude Code settings.json, because that
+	// flag no longer exists — emit below is the only path that produces
+	// Claude Code's overlay.
 	install := exec.Command(hookyardBin, "install",
 		"--manifest", manifestPath,
 		"--router-path", hookyardBin,
 		"--state-dir", stateDir,
-		"--claude-settings", filepath.Join(claudeConfigDir, "settings.json"),
 		"--codex-config", filepath.Join(root, "unused-codex", "config.toml"),
 		"--cursor-hooks", filepath.Join(root, "unused-cursor", "hooks.json"),
 		// Without this, install() resolves the real $PI_CODING_AGENT_DIR (or
@@ -111,9 +137,19 @@ func TestLiveClaudeCodeRefusesTheDeniedToolCall(t *testing.T) {
 		t.Fatalf("hookyard install: %v\n%s", err, out)
 	}
 
+	baseMarker := filepath.Join(root, "base-hook-fired")
+	basePath := liveWriteClaudeBaseWithOwnHook(t, root, baseMarker)
+	overlayPath := liveEmitClaudeOverlay(t, hookyardBin, root, manifestPath, hookyardBin, stateDir, basePath)
+
+	// claudeConfigDir/settings.json is never written: emit's whole point is
+	// that Claude Code's overlay comes from --settings rather than from
+	// anything hookyard puts under CLAUDE_CONFIG_DIR, so "carries no
+	// hookyard entry" holds simply because nothing here ever creates the
+	// file at all.
 	ctx, cancel := context.WithTimeout(context.Background(), liveE2EBudget)
 	defer cancel()
-	probe := exec.CommandContext(ctx, claudeBin, "-p", "--model", "claude-haiku-4-5-20251001", liveProbePrompt)
+	probe := exec.CommandContext(ctx, claudeBin, "-p", "--model", "claude-haiku-4-5-20251001",
+		"--settings", overlayPath, liveProbePrompt)
 	probe.Dir = projectDir
 	probe.Env = append(os.Environ(), "CLAUDE_CONFIG_DIR="+claudeConfigDir)
 	output, runErr := probe.CombinedOutput()
@@ -133,13 +169,30 @@ func TestLiveClaudeCodeRefusesTheDeniedToolCall(t *testing.T) {
 			"a hookyard-side problem, not an engine one\n--- claude output ---\n%s", rec.Verdict, rec.Enforced, output)
 	}
 
-	if !strings.Contains(string(output), reasonToken) {
-		t.Fatalf("hookyard recorded an enforced deny, but claude's own output never surfaced the deny "+
-			"reason (%s): the shell call may have run anyway despite the recorded deny\n"+
-			"--- claude output ---\n%s", reasonToken, output)
+	if rec.Reason != reasonToken {
+		t.Fatalf("hookyard recorded the deny with reason %q, want the handler's own %q — the reason the "+
+			"engine was handed is not the one the handler returned\n--- claude output ---\n%s",
+			rec.Reason, reasonToken, output)
 	}
 
-	t.Logf("claude refused the probe call; full output:\n%s", output)
+	// Enforcement, not verdict shape: every assertion above would still hold
+	// if claude had recorded the deny and run the command anyway.
+	if _, statErr := os.Stat(filepath.Join(projectDir, liveProbeSideEffect)); statErr == nil {
+		t.Fatalf("the denied shell command ran anyway: %s exists despite an enforced deny\n"+
+			"--- claude output ---\n%s", liveProbeSideEffect, output)
+	}
+
+	// The load-bearing assertion (see the test's doc comment): the base's own
+	// PreToolUse hook, carrying no timeout field of its own, must have fired
+	// too. If emit's merge regressed to re-encoding inherited hooks through a
+	// struct that always writes timeout, this hook would have gone dead at
+	// timeout:0 while every assertion above still passed.
+	if _, statErr := os.Stat(baseMarker); os.IsNotExist(statErr) {
+		t.Fatalf("the base's own PreToolUse hook never fired: emit's merge is dropping or disabling an "+
+			"inherited hook it did not write itself\n--- claude output ---\n%s", output)
+	}
+
+	t.Logf("claude refused the probe call and the base's own hook still fired; full output:\n%s", output)
 }
 
 // liveBuildHookyard compiles cmd/hookyard at a path containing
@@ -237,6 +290,67 @@ func liveWriteManifest(t *testing.T, dir, handlerPath string) string {
 	path := filepath.Join(dir, "hookyard.json")
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatalf("write manifest: %v", err)
+	}
+	return path
+}
+
+// liveWriteClaudeBaseWithOwnHook writes a settings.json-shaped file carrying
+// one PreToolUse hook of its own, matched on Bash and touching marker,
+// deliberately declaring no timeout field — the shape a hand-written
+// settings.json actually has, and the shape whose absence the old merge used
+// to fill in as 0 (§4.2b). This is the base emit merges hookyard's own entry
+// into, standing in for the consumer's real settings.json.
+func liveWriteClaudeBaseWithOwnHook(t *testing.T, dir, marker string) string {
+	t.Helper()
+	base := map[string]any{
+		"hooks": map[string]any{
+			"PreToolUse": []map[string]any{{
+				"matcher": "Bash",
+				"hooks": []map[string]any{{
+					"type":    "command",
+					"command": "touch " + marker,
+				}},
+			}},
+		},
+	}
+	raw, err := json.Marshal(base)
+	if err != nil {
+		t.Fatalf("marshal base settings: %v", err)
+	}
+	path := filepath.Join(dir, "claude-base-settings.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write base settings: %v", err)
+	}
+	return path
+}
+
+// liveEmitClaudeOverlay runs the real `hookyard emit` subcommand — the
+// artifact a Nix derivation would place at Claude Code's --settings path —
+// over basePath, and saves its stdout to a file so it can be passed to claude
+// as --settings itself. Driving emit rather than calling render.ClaudeSettings
+// directly is the point of this test: a hand-written overlay would pass
+// against bugs the CLI's own flag wiring could still have.
+func liveEmitClaudeOverlay(t *testing.T, hookyardBin, root, manifestPath, routerPath, stateDir, basePath string) string {
+	t.Helper()
+	emit := exec.Command(hookyardBin, "emit",
+		"--engine", "claude-code",
+		"--manifest", manifestPath,
+		"--router-path", routerPath,
+		"--state-dir", stateDir,
+		"--base", basePath,
+	)
+	out, err := emit.Output()
+	if err != nil {
+		stderr := ""
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			stderr = string(exitErr.Stderr)
+		}
+		t.Fatalf("hookyard emit: %v\n%s", err, stderr)
+	}
+	path := filepath.Join(root, "claude-settings-overlay.json")
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatalf("write emitted overlay: %v", err)
 	}
 	return path
 }
@@ -437,7 +551,6 @@ func livePiInstall(t *testing.T, hookyardBin, root, agentDir, stateDir, manifest
 		"--router-path", routerPath,
 		"--state-dir", stateDir,
 		"--pi-settings", filepath.Join(agentDir, "settings.json"),
-		"--claude-settings", filepath.Join(root, "unused-claude", "settings.json"),
 		"--codex-config", filepath.Join(root, "unused-codex", "config.toml"),
 		"--cursor-hooks", filepath.Join(root, "unused-cursor", "hooks.json"),
 	)
