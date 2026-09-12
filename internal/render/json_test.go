@@ -104,6 +104,77 @@ func TestWriteCursorRefusesMalformedJSON(t *testing.T) {
 	}
 }
 
+// Cursor's native converter fills in fields cursorEntry does not declare
+// (loop_limit, failClosed), so a foreign row carrying them must round-trip
+// byte-identically, even when hookyard registers nothing at all.
+const cursorForeignFieldsInherited = `{
+  "version": 1,
+  "hooks": {
+    "stop": [
+      {
+        "command": "/some/other/writer/hook",
+        "loop_limit": 3,
+        "failClosed": true
+      }
+    ]
+  }
+}
+`
+
+func TestWriteCursorPreservesForeignFieldsOnEmptyInstall(t *testing.T) {
+	path := writeFixture(t, "hooks.json", cursorForeignFieldsInherited)
+	if err := WriteCursor(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, path)
+
+	for _, want := range []string{`"loop_limit": 3`, `"failClosed": true`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("foreign row lost a field %q\n--- got ---\n%s", want, got)
+		}
+	}
+}
+
+func TestWriteCursorDoesNotAddTimeoutToAForeignRowMissingOne(t *testing.T) {
+	path := writeFixture(t, "hooks.json", cursorForeignFieldsInherited)
+	if err := WriteCursor(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, path)
+
+	if strings.Contains(got, "timeout") {
+		t.Errorf("foreign row without a timeout gained one\n--- got ---\n%s", got)
+	}
+}
+
+// The strip must still find hookyard's own rows by command alone, even though
+// rows now round-trip as raw JSON instead of a decoded struct.
+func TestWriteCursorStillStripsItsOwnRowsAmongForeignOnes(t *testing.T) {
+	path := writeFixture(t, "hooks.json", cursorForeignFieldsInherited)
+	entries := []Entry{{Event: "stop", Command: "/x/bin/hookyard route --event stop"}}
+	if err := WriteCursor(path, entries); err != nil {
+		t.Fatal(err)
+	}
+	afterInstall := readFile(t, path)
+	if !strings.Contains(afterInstall, "--event stop") {
+		t.Fatalf("hookyard's own row is missing\n--- got ---\n%s", afterInstall)
+	}
+	if !strings.Contains(afterInstall, `"loop_limit": 3`) {
+		t.Fatalf("foreign row was dropped alongside the install\n--- got ---\n%s", afterInstall)
+	}
+
+	if err := WriteCursor(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	afterRemoval := readFile(t, path)
+	if strings.Contains(afterRemoval, Marker) {
+		t.Errorf("hookyard's own row survived removal\n--- got ---\n%s", afterRemoval)
+	}
+	if !strings.Contains(afterRemoval, `"loop_limit": 3`) {
+		t.Errorf("the foreign row was stripped alongside hookyard's own\n--- got ---\n%s", afterRemoval)
+	}
+}
+
 const claudeInherited = `{
   "permissions": {
     "allow": [
