@@ -76,6 +76,11 @@
             src = ./.;
             vendorHash = "sha256-pbA/AlBz3cQYRTMnQ/qBPcinYOKokrBLNhkbRTq54gE=";
             subPackages = ["cmd/hookyard"];
+            # dispatch_e2e_test.go asks `ps -o sid=` whether a dispatched
+            # handler got a session of its own. stdenv has no ps, so without
+            # this the probe writes an empty file and the one assertion that
+            # pins Setsid fails in the sandbox while passing in a devshell.
+            nativeCheckInputs = [pkgs.procps];
             meta = {
               description = "Register agent hooks once, route them to every coding agent";
               mainProgram = "hookyard";
