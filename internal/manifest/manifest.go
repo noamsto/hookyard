@@ -298,15 +298,12 @@ func execIsRunnable(path string) error {
 }
 
 // LoadStatic reads and validates one manifest the way Load does, minus
-// execIsRunnable: it runs validateStatic alone, the same rule ReadTable
-// already carves out and for the same reason (its doc comment explains the
-// stat is redundant on the critical path; here the stat is worse than
-// redundant, it is wrong). `emit` runs inside a Nix build sandbox, where a
-// manifest's `exec` may be an ordinary absolute path like `/home/you/bin/
-// guard` that simply does not exist yet — it will, at activation, when
-// `install` runs and re-validates through Load. So `emit` must not fail a
-// build over a manifest `install` would accept minutes later in the same
-// activation (R7).
+// execIsRunnable: it runs validateStatic alone, the same carve-out ReadTable
+// already makes. `emit` runs inside a Nix build sandbox, where a manifest's
+// `exec` may be an ordinary absolute path like `/home/you/bin/guard` that
+// simply does not exist yet — it will, at activation, when `install` runs and
+// re-validates through Load. So `emit` must not fail a build over a manifest
+// `install` would accept minutes later in the same activation.
 //
 // The narrowing is exactly one check wide, and every other rule stays shared
 // through validateAll. validateStatic still refuses a relative or bare exec —
@@ -317,7 +314,7 @@ func execIsRunnable(path string) error {
 // empty, so accepting one here would let a Nix build succeed over a manifest
 // set activation then rejects. Duplicate ids within one file are still
 // refused, matching both Load and ReadTable — only Merge's cross-manifest
-// check is left to the caller, who must still run it (R7): LoadStatic dedupes
+// check is left to the caller, who must still run it: LoadStatic dedupes
 // one file, not a caller's whole --manifest list.
 func LoadStatic(path string) (*Manifest, error) {
 	raw, err := os.ReadFile(path)

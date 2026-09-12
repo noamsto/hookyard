@@ -427,7 +427,7 @@ func TestClaudeSettingsLeavesOtherHooksAndKeysAlone(t *testing.T) {
 }
 
 // The base is hand-edited above and Nix-generated below, so a hook change must
-// reshuffle neither its top level nor hooks' own event keys (A3). Both key
+// reshuffle neither its top level nor hooks' own event keys. Both key
 // sequences here are deliberately non-alphabetical, which is what a Go map
 // would have re-sorted them into.
 func TestClaudeSettingsPreservesKeyOrder(t *testing.T) {
@@ -499,7 +499,7 @@ func TestClaudeSettingsStripsHookyardEntriesUnderEveryEvent(t *testing.T) {
 
 // An event key whose only content was hookyard's own goes away entirely, so a
 // removal leaves neither an empty group nor an empty array behind — and with
-// nothing left under hooks, the key itself is gone (R1).
+// nothing left under hooks, the key itself is gone.
 func TestClaudeSettingsDropsGroupsAndEventKeysItEmpties(t *testing.T) {
 	registered, err := ClaudeSettings([]byte("{}"), []Entry{{Event: "Notification", Command: "/x/bin/hookyard route --event notify"}})
 	if err != nil {
@@ -525,7 +525,7 @@ func TestClaudeSettingsDropsGroupsAndEventKeysItEmpties(t *testing.T) {
 
 // A refusal must return no document at all: emit redirects stdout into $out,
 // so half a document written before the error would be captured as the build's
-// result (R1).
+// result.
 func TestClaudeSettingsRefusesAMalformedBase(t *testing.T) {
 	for name, base := range map[string]string{
 		"not JSON at all":         "{not json",

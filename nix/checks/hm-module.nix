@@ -6,11 +6,11 @@
 # the whole merged activation script; and every interpolated path must reach
 # bash escaped, since the activation script runs with the user's own
 # privileges. Two more join them now that the Claude Code emit options exist
-# (R4): `claudeOverlay.merged` must still evaluate — and be buildable — with
+# `claudeOverlay.merged` must still evaluate — and be buildable — with
 # hookyard disabled or with no manifests at all, since a consumer's `claude`
 # wrapper reads it unconditionally regardless of `enable`; and `emit` itself
 # must accept a manifest whose `exec` does not exist in the build sandbox
-# (R7), since a consumer's checked-in manifest routinely names one under
+# since a consumer's checked-in manifest routinely names one under
 # their own $HOME. Self-contained like
 # ../hm-module.nix (see its header comment) — takes the package as an
 # argument instead of importing flake.nix.
@@ -32,7 +32,7 @@
           # Chosen so the rendered plan is non-empty on both engines a check
           # below exercises: Bash -> Cursor's native Shell matcher (the
           # dry-run/expansion checks, unchanged from before) and Bash ->
-          # Claude Code's PreToolUse (the emit checks added alongside R4). An
+          # Claude Code's PreToolUse (the emit checks added alongside). An
           # empty plan on either engine would make its grep below pass
           # vacuously against a literal "(nothing)".
           events = ["pre_tool"];
@@ -108,7 +108,7 @@
     stateDir = "/build/hookyard-check-hostile/state $(touch ${pwnedMarker}) dir";
   };
 
-  # A8/R4: the two states in which `claudeOverlay.merged` must still evaluate
+  # The two states in which `claudeOverlay.merged` must still evaluate
   # even though `installCommand` — and everything scratchChecks below asserts
   # about it — is undefined. Both go through mkScratch rather than a
   # hand-rolled homeManagerConfiguration, so they exercise the exact same
@@ -117,7 +117,7 @@
   disabled = mkScratch "disabled" {} {enable = false;};
   emptyManifests = mkScratch "empty-manifests" {} {manifests = [];};
 
-  # Item 5 (A9/R7): the manifest shape `emit` must not refuse — an absolute,
+  # The manifest shape `emit` must not refuse — an absolute,
   # non-store exec that is simply absent from the sandbox, the same shape a
   # consumer's own checked-in manifest uses when it names a path under their
   # $HOME. `install`'s refusal of this exact shape is already unit-tested in
@@ -219,7 +219,7 @@
       }
     ];
 
-  # Item 2/A8: `merged`'s readOnly-with-no-default shape means a reference to
+  # `merged`'s readOnly-with-no-default shape means a reference to
   # it throws immediately, before `cond` is even compared, if it regresses to
   # being defined only under `mkIf cfg.enable` — there is no false `cond` to
   # report in that world, only a build that aborts with a raw nixpkgs
@@ -311,14 +311,14 @@
     fi
   '';
 
-  # Item 3/A5: proves the claude-code emit path the same way dryRunScript
+  # Proves the claude-code emit path the same way dryRunScript
   # above proves --dry-run — by executing the artifact and grepping its
   # output, not by comparing option values. This reads `claudeOverlay.merged`,
-  # never `claudeHooks` directly, because `merged` is the option R4b requires
+  # never `claudeHooks` directly, because `merged` is the option a consumer
   # the consumer's `claude` wrapper to interpolate (and here falls back to
   # `claudeHooks` verbatim, since none of these scratches set
   # `claudeOverlay.base`). Building it here is a real build, not the
-  # import-from-derivation R4 forbids: nothing in ../hm-module.nix ever calls
+  # import-from-derivation: nothing in ../hm-module.nix ever calls
   # `builtins.readFile`/`fromJSON` on this value, only this check does, and
   # only after the module has already produced the store path. Reused for
   # `nonSandboxExec` below (item 5): forcing that build here is also the proof

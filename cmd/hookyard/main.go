@@ -210,7 +210,7 @@ func runInstall(paths manifestPaths, routerPath, stateDir, codex, cursor, pi str
 	}
 	for _, engine := range vocab.Engines {
 		if engine == vocab.ClaudeCode {
-			// install never reaches settings.json (R2): the count is real, but
+			// install never reaches settings.json: the count is real, but
 			// saying only "N entries" here would read exactly like the other
 			// three engines and tell an operator a file was written that was not.
 			fmt.Printf("%-12s %d entries (emitted for Nix to place, not written by install)\n", engine, len(plan[engine]))
@@ -255,7 +255,7 @@ func checkShellSafe(flagName, path string) error {
 }
 
 // emit renders Claude Code's overlay to stdout for Nix to place at its
-// --settings path, and writes nothing itself (R1, R2). It is engine-scoped
+// --settings path, and writes nothing itself. It is engine-scoped
 // and claude-code-only: Cursor's, Codex's and Pi's destinations are real files
 // with other writers or executable state of their own (§4.2), so a store path
 // would lose what they already hold — they stay on install.
@@ -293,7 +293,7 @@ func emit(args []string) error {
 	// LoadStatic, not loadAll (which calls manifest.Load): emit runs inside a
 	// Nix build sandbox, where a manifest's $HOME-rooted exec does not exist,
 	// and stat-ing it would fail the build for a reason that has nothing to do
-	// with the manifest being wrong (R7). Merge still runs on top of it, so a
+	// with the manifest being wrong. Merge still runs on top of it, so a
 	// duplicate id across manifests is refused here exactly as install refuses
 	// it later in the same activation — build time and activation time cannot
 	// disagree about what a legal manifest set is.

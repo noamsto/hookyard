@@ -20,13 +20,13 @@
   # cannot express a second invocation.
   manifestFlags = lib.concatMapStringsSep " " (p: "--manifest ${lib.escapeShellArg p}") cfg.manifests;
 
-  # §9/R6: the profile path is what every engine calls at hook-fire time —
+  # §9: the profile path is what every engine calls at hook-fire time —
   # never the store path, which would churn all four engines' config on
   # every hookyard bump and invalidate Codex's per-entry hook trust hash.
   # `claudeHooks`/`claudeOverlay.merged` below render this same value into
   # Claude's `command` fields, and `installCommand` passes it as
   # `--router-path` for the router table `install` writes — one router path,
-  # two renderers of it, and R6 is precisely the invariant that both read it
+  # two renderers of it, and that is precisely the invariant that both read it
   # from the same `cfg.manifests`/`cfg.stateDir` so the table and the emitted
   # commands never disagree about what they name.
   routerPath = "${config.home.profileDirectory}/bin/hookyard";
@@ -69,41 +69,22 @@
     ]
   );
 
-  # R4/R4b: `emit` prints a document and writes nothing, so both variants
-  # below are "run emit, capture stdout as $out" and differ only in whether
-  # `--base` is present. Factored so that shape can't drift between them.
-  #
-  # This bash line gets the same escapeShellArg discipline as
-  # `installCommand`'s, for the same Go-flag-whitespace-truncation reason,
-  # but the blast radius of a `$(...)` or `$VAR` slipping through differs:
-  # `installCommand`'s line is spliced into an activation script that runs
-  # unsandboxed with the invoking user's own privileges, where a command
-  # substitution reaches real credentials and the real $HOME; this line runs
-  # inside a build sandbox, as the unprivileged nix build user, with no
-  # network — a substitution here can at worst corrupt this one derivation's
-  # output, not the operator's session. Escaping it anyway costs nothing and
-  # keeps the discipline uniform across every cfg-derived value in this file.
-  #
-  # No import-from-derivation: this only ever produces a derivation/path
-  # value, never `builtins.readFile`/`fromJSON` on it, so referencing it
-  # (e.g. from the eventual nix-config `claude` wrapper) does not force a
-  # build at eval time. That matters concretely for a darwin host evaluated
-  # from a linux machine (R4): forcing a build here would need an
-  # aarch64-darwin hookyard, which a linux machine cannot build without a
-  # remote builder.
   # Gated on `enable`, and that gate is the whole of what makes turning
   # hookyard off safe. `home.packages` is inside `mkIf cfg.enable`, so a
-  # disabled generation has no binary at the profile path — while these two
-  # options stay defined regardless, because the consumer's `claude` wrapper
-  # interpolates `merged` on every evaluation. Emitting a consumer's manifests
-  # anyway would leave Claude Code started with entries naming a path that no
-  # longer resolves, failing at exec on every tool call. Zero manifests is the
-  # state `emit` already renders as "nothing registered", so the disabled
-  # overlay reduces to the base byte-for-byte. Relying on `manifests` merely
-  # happening to be empty would not: a consumer can contribute handlers and
-  # disable hookyard in the same generation.
+  # disabled generation has no binary at the profile path — while the two
+  # Claude options stay defined regardless, because the consumer's `claude`
+  # wrapper interpolates `merged` on every evaluation. Emitting a consumer's
+  # manifests anyway would leave Claude Code started with entries naming a
+  # path that no longer resolves, failing at exec on every tool call.
+  # Relying on `manifests` merely happening to be empty would not do: a
+  # consumer can contribute handlers and disable hookyard in one generation.
   emittedManifestFlags = lib.optionalString cfg.enable manifestFlags;
 
+  # No import-from-derivation: this only ever produces a derivation, never
+  # `builtins.readFile`/`fromJSON` over it, so a consumer referencing it does
+  # not force a build at eval time. That matters for a darwin host evaluated
+  # from a linux machine — forcing a build would need an aarch64-darwin
+  # hookyard, which a linux machine cannot produce without a remote builder.
   emitClaudeHooks = extraArgs:
     pkgs.runCommand "hookyard-claude-hooks.json" {} ''
       ${cfg.package}/bin/hookyard emit --engine claude-code \
@@ -186,7 +167,7 @@ in {
       description = "Pi settings.json to render hookyard's registration into; the bridge lands in bin/ beside it.";
     };
 
-    # Claude never gets a `claudeSettings`-shaped destination string (R2):
+    # Claude never gets a `claudeSettings`-shaped destination string:
     # hookyard cannot write settings.json for Claude Code by construction, so
     # there is nothing here for an operator to point at a real file the way
     # codexConfig/cursorHooks/piSettings do. What Claude gets instead is a
@@ -199,7 +180,7 @@ in {
         rendered from this module's `manifests`. Do **not** wire this as
         Claude Code's `--settings` overlay: it carries none of the consumer's
         `statusLine`, `enabledPlugins`, `extraKnownMarketplaces` or
-        `permissions` (R4b) — that overlay is `claudeOverlay.merged`. This
+        `permissions` — that overlay is `claudeOverlay.merged`. This
         option exists so `claudeOverlay.merged` has something to fall back to
         when `claudeOverlay.base` is unset, and for a consumer that wants the
         raw hooks block for some other purpose.
@@ -215,7 +196,7 @@ in {
           carrying the consumer's `statusLine`, `enabledPlugins`,
           `extraKnownMarketplaces` and `permissions` — for `claudeOverlay.merged`
           to merge hookyard's hook entries into, preserving every other key
-          untouched (R4b). Leave unset and `claudeOverlay.merged` falls back
+          untouched. Leave unset and `claudeOverlay.merged` falls back
           to `claudeHooks` verbatim.
         '';
       };
@@ -226,13 +207,13 @@ in {
         description = ''
           The option to wire as Claude Code's `--settings` overlay.
           `claudeOverlay.base` with hookyard's entries merged in, or
-          `claudeHooks` when `base` is unset (R4b: wiring `claudeHooks` here
+          `claudeHooks` when `base` is unset (wiring `claudeHooks` here
           instead would silently drop the rest of the overlay). Defined
           unconditionally — including with `enable = false` or an empty
           `manifests` — because the consumer's `claude` wrapper interpolates
           this on every evaluation, whether hookyard is enabled or not; a
           read-only option with no definition in that state throws, and the
-          failure would land in the consumer's module rather than here (R4).
+          failure would land in the consumer's module rather than here.
           `enable = false` therefore yields `base` verbatim, not a missing
           option — turning hookyard off must leave a working Claude Code.
         '';
@@ -254,7 +235,7 @@ in {
   };
 
   # `claudeHooks` and `claudeOverlay.merged` sit outside `mkIf cfg.enable`
-  # (R4): unlike `installCommand`, which only activation ever reads and only
+  # Unlike `installCommand`, which only activation ever reads and only
   # when hookyard is enabled, these two are read by the consumer's `claude`
   # wrapper on every evaluation regardless of `cfg.enable`. Everything else
   # keeps the shape it had — gated on `cfg.enable`, because nothing reads it

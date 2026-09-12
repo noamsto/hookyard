@@ -117,7 +117,7 @@ func TestLiveClaudeCodeRefusesTheDeniedToolCall(t *testing.T) {
 	// install still sets up the router's own state (table.json under
 	// stateDir) and the three engines that stay on install (§4.2); it is
 	// never given anywhere to put a Claude Code settings.json, because that
-	// flag no longer exists (R2) — emit below is the only path that produces
+	// flag no longer exists — emit below is the only path that produces
 	// Claude Code's overlay.
 	install := exec.Command(hookyardBin, "install",
 		"--manifest", manifestPath,
@@ -140,7 +140,7 @@ func TestLiveClaudeCodeRefusesTheDeniedToolCall(t *testing.T) {
 
 	// claudeConfigDir/settings.json is never written: emit's whole point is
 	// that Claude Code's overlay comes from --settings rather than from
-	// anything hookyard puts under CLAUDE_CONFIG_DIR (A2), so "carries no
+	// anything hookyard puts under CLAUDE_CONFIG_DIR, so "carries no
 	// hookyard entry" holds simply because nothing here ever creates the
 	// file at all.
 	ctx, cancel := context.WithTimeout(context.Background(), liveE2EBudget)

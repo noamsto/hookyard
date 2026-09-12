@@ -350,7 +350,7 @@ func writeAllEnginesManifest(t *testing.T, dir string) string {
 // outright where home-manager makes that file a store link.
 //
 // Claude Code is not among the configs checked here: install never writes
-// settings.json (R2), so a manifest naming claude-code has nothing here to
+// settings.json, so a manifest naming claude-code has nothing here to
 // strip in the first place.
 func TestInstallAllowEmptyStripsHookyardRowsFromEveryConfig(t *testing.T) {
 	dir := t.TempDir()

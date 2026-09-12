@@ -412,7 +412,7 @@ func TestWriteTableLandsFixed0600EvenOverALooserExistingFile(t *testing.T) {
 	}
 }
 
-// The A9 unit half: emit's sandbox does not have the exec a manifest names,
+// emit's sandbox does not have the exec a manifest names,
 // but LoadStatic must accept the manifest anyway because install will
 // re-validate it, with a stat, at activation.
 func TestLoadStaticAcceptsNonExistentExecButLoadRejectsIt(t *testing.T) {
@@ -489,7 +489,7 @@ func TestLoadStaticRejectsZeroHandlersLikeLoadDoes(t *testing.T) {
 }
 
 // LoadStatic's shape composes with Merge, which is the caller's separate,
-// later call that catches a duplicate id across manifests (R7) — the case
+// later call that catches a duplicate id across manifests — the case
 // LoadStatic itself cannot see because it only dedupes within one file.
 func TestLoadStaticComposesWithMergeAcrossManifests(t *testing.T) {
 	dir1 := t.TempDir()

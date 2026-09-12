@@ -94,7 +94,7 @@ func TestClaudeRegistrationFailsOnAStaleMarkerInSettingsJSON(t *testing.T) {
 
 // The second wording §4.4 pins: the repair names the merged overlay option,
 // never an install and never the hooks-only file, which would drop the rest of
-// the overlay (R4b).
+// the overlay.
 func TestClaudeRegistrationFailsWithTheMergedOverlayRepair(t *testing.T) {
 	root := t.TempDir()
 	overlay := writeFile(t, filepath.Join(root, "overlay.json"), []byte(`{"permissions":{}}`))
@@ -166,7 +166,7 @@ func TestClaudeRegistrationReadsAnInlineSettingsValue(t *testing.T) {
 	}
 }
 
-// A10: the gate fires on disableAllHooks in user *or* flag settings (§8), so
+// The gate fires on disableAllHooks in user *or* flag settings (§8), so
 // reading only settings.json and reporting Pass is a fail-open.
 func TestClaudeHooksEnabledReadsEverySource(t *testing.T) {
 	root := t.TempDir()
