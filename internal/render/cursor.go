@@ -9,12 +9,31 @@ import (
 	"github.com/noamsto/hookyard/internal/atomicfile"
 )
 
-// cursorEntry is one row in ~/.cursor/hooks.json. matcher is omitted when the
-// entry matches every tool, which is how Cursor's own writers spell it.
+// cursorEntry shapes the rows hookyard itself writes into
+// ~/.cursor/hooks.json. matcher is omitted when the entry matches every tool,
+// which is how Cursor's own writers spell it; timeout is omitted too so this
+// type stays safe if it is ever reused to encode a row with none.
+//
+// It is never used to decode an inherited row: Cursor's native converter, and
+// presumably other writers, fill in fields this struct does not declare
+// (loop_limit, failClosed), and decoding through it would silently drop them.
+// Foreign rows are kept as raw JSON instead — see hooks below.
 type cursorEntry struct {
 	Command string `json:"command"`
 	Matcher string `json:"matcher,omitempty"`
-	Timeout int    `json:"timeout"`
+	Timeout int    `json:"timeout,omitempty"`
+}
+
+// cursorRowCommand reads just the command field out of one hooks.json row,
+// leaving every other field of the row untouched in its caller's raw bytes.
+func cursorRowCommand(row json.RawMessage) (string, error) {
+	var probe struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(row, &probe); err != nil {
+		return "", err
+	}
+	return probe.Command, nil
 }
 
 // WriteCursor renders entries into ~/.cursor/hooks.json as one more
@@ -34,7 +53,7 @@ func WriteCursor(path string, entries []Entry) error {
 		return fmt.Errorf("%s is not valid JSON, refusing to overwrite it: %w", path, err)
 	}
 
-	hooks := map[string][]cursorEntry{}
+	hooks := map[string][]json.RawMessage{}
 	if existing, ok := root.get("hooks"); ok {
 		if err := json.Unmarshal(existing, &hooks); err != nil {
 			return fmt.Errorf("%s has a hooks key hookyard cannot read, refusing to overwrite it: %w", path, err)
@@ -43,7 +62,11 @@ func WriteCursor(path string, entries []Entry) error {
 	for event, rows := range hooks {
 		kept := rows[:0]
 		for _, row := range rows {
-			if !strings.Contains(row.Command, Marker) {
+			command, err := cursorRowCommand(row)
+			if err != nil {
+				return fmt.Errorf("%s has a hooks row hookyard cannot read, refusing to overwrite it: %w", path, err)
+			}
+			if !strings.Contains(command, Marker) {
 				kept = append(kept, row)
 			}
 		}
@@ -54,11 +77,15 @@ func WriteCursor(path string, entries []Entry) error {
 		hooks[event] = kept
 	}
 	for _, e := range entries {
-		hooks[e.Event] = append(hooks[e.Event], cursorEntry{
+		row, err := json.Marshal(cursorEntry{
 			Command: e.Command,
 			Matcher: e.Matcher,
 			Timeout: EmittedTimeoutSeconds,
 		})
+		if err != nil {
+			return err
+		}
+		hooks[e.Event] = append(hooks[e.Event], row)
 	}
 
 	if err := root.set("version", 1); err != nil {
