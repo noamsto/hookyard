@@ -75,6 +75,11 @@ func PiBridgePath(settingsPath string) string {
 // entry naming it, and on removal the entry goes before the file it named, so
 // pi never reads an extensions[] entry pointing at something this writer is
 // still creating.
+//
+// settings.json is Pi's own file — Pi rewrites it itself at runtime, so
+// nothing else may take an atomic rename over it without a reason. A zero-entry
+// plan with no marker rows to strip has nothing to add and nothing to remove,
+// so it takes no rename at all and leaves the file exactly as Pi last wrote it.
 func WritePi(settingsPath string, entries []Entry, piVersion string) error {
 	raw, err := os.ReadFile(settingsPath)
 	if err != nil && !os.IsNotExist(err) {
@@ -97,14 +102,26 @@ func WritePi(settingsPath string, entries []Entry, piVersion string) error {
 	// hookyard-bridge.ts, or fail to strip a stale entry left under bin/ by an
 	// older bridge filename — which Contains already catches.
 	kept := extensions[:0]
+	stripped := false
 	for _, entry := range extensions {
-		if !strings.Contains(entry, Marker) {
-			kept = append(kept, entry)
+		if strings.Contains(entry, Marker) {
+			stripped = true
+			continue
 		}
+		kept = append(kept, entry)
 	}
 	extensions = kept
 
 	bridge := PiBridgePath(settingsPath)
+	// A prior install can be interrupted between stripping the marker from
+	// extensions and removing the bridge it named (crash, disk full, kill
+	// -9), leaving an orphaned bridge with no matching entry — which
+	// !stripped alone would not see.
+	if len(entries) == 0 && !stripped {
+		if _, err := os.Stat(bridge); os.IsNotExist(err) {
+			return nil
+		}
+	}
 	if len(entries) > 0 {
 		if err := writePiBridge(bridge, entries, piVersion); err != nil {
 			return err

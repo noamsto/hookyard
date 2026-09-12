@@ -254,6 +254,75 @@ func TestWritePiOnAnEmptyPlanKeepsForeignExtensions(t *testing.T) {
 	}
 }
 
+// settings.json is Pi's own file: an empty plan with nothing to strip must
+// take no rename over it at all, not even one that reproduces the same JSON
+// with different formatting.
+func TestWritePiOnAnEmptyPlanWithNoMarkerLeavesTheFileByteIdentical(t *testing.T) {
+	const content = `{"extensions":  ["/home/noams/.pi/agent/extensions/foreign.ts"],   "model":"kimi-k2"}`
+	path := piSettings(t, content)
+	before := readFile(t, path)
+
+	if err := WritePi(path, nil, "0.85.1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, path); got != before {
+		t.Errorf("file was rewritten with nothing to add or strip\n--- before ---\n%s\n--- got ---\n%s", before, got)
+	}
+}
+
+// The first --allow-empty install a machine ever runs has no settings.json at
+// all yet. That must not conjure one into existence just to hold an
+// extensions key with nothing in it.
+func TestWritePiOnAnEmptyPlanWithNoSettingsFileWritesNothing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+
+	if err := WritePi(path, nil, "0.85.1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("want no settings.json created, got stat err: %v", err)
+	}
+}
+
+// The skip requires *both* halves of the condition: zero entries is not
+// enough on its own when a prior hookyard marker row is still registered,
+// since leaving it behind would keep firing against a router that no longer
+// wants it.
+func TestWritePiOnAnEmptyPlanStillStripsAStaleMarkerEvenWithNoNewEntries(t *testing.T) {
+	const stale = "/home/noams/.pi/agent/bin/hookyard-bridge-v1.ts"
+	path := piSettings(t, `{"extensions":["`+stale+`"]}`)
+
+	if err := WritePi(path, nil, "0.85.1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := piExtensions(t, path); len(got) != 0 {
+		t.Errorf("extensions = %q, want the stale marker row stripped", got)
+	}
+}
+
+// A prior install can be interrupted between the settings.json write (marker
+// already gone from extensions) and the os.Remove that follows it, leaving an
+// orphaned bridge with no entry pointing at it. Nothing in the extensions
+// array says so, but the file on disk does, and the skip must not let that
+// leftover survive forever.
+func TestWritePiOnAnEmptyPlanRemovesAnOrphanedBridgeEvenWithNoMarkerToStrip(t *testing.T) {
+	path := piSettings(t, `{"model":"kimi-k2"}`)
+	bridge := PiBridgePath(path)
+	if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bridge, []byte("// orphaned by a crashed install\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := WritePi(path, nil, "0.85.1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(bridge); !os.IsNotExist(err) {
+		t.Errorf("want the orphaned bridge removed, got stat err: %v", err)
+	}
+}
+
 // Nothing is concatenated into source (§8): the one splice is json.Marshal
 // output, so a value that would terminate a string literal, close a comment or
 // break a line lands as data no matter how it is spelled. It is asserted on the
