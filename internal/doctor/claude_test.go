@@ -333,6 +333,10 @@ func TestOtherEnginesFindingsAreUnchanged(t *testing.T) {
 	cursorMarker := writeFile(t, filepath.Join(cursorHome, "projects", cursorProjectSlug(dir), ".workspace-trusted"), nil)
 	// No hookyard entry: the arm that carries the shared repair advice.
 	cursorHooks := writeFile(t, filepath.Join(cursorHome, "hooks.json"), []byte(`{"version":1,"hooks":{}}`))
+	// A valid, empty handler table: competingWriter distinguishes a read-empty
+	// table (Pass) from an unreadable one (Unknown), and this pins the Pass arm
+	// deterministically.
+	writeFile(t, filepath.Join(stateDir, "table.json"), []byte(`{"handlers":[]}`))
 
 	piAgentDir := filepath.Join(root, "pi", "agent")
 	piSettings, piBridge := piConfig(t, piAgentDir, routedCommand(router, vocab.Pi, stateDir))
@@ -347,6 +351,7 @@ func TestOtherEnginesFindingsAreUnchanged(t *testing.T) {
 		{vocab.Cursor, "workspace trust", Pass, "trusted, per " + cursorMarker},
 		{vocab.Cursor, "hookyard registered", Fail, "no hookyard entry in " + cursorHooks + "; run hookyard install"},
 		{vocab.Cursor, "router path", Unknown, "no hookyard entry in " + cursorHooks + " to check"},
+		{vocab.Cursor, "competing writer", Pass, "no handlers in the table, so no foreign entry can double-register one"},
 		{vocab.Pi, "workspace trust", Pass, piBridge + " is a global extension; Pi's project trust gate (" +
 			filepath.Join(piAgentDir, "trust.json") + ") does not gate global extensions, so it runs regardless of trust state"},
 		{vocab.Pi, "extensions targets exist", Pass, "every extensions[] entry in " + piSettings + " resolves to a file"},
@@ -357,7 +362,7 @@ func TestOtherEnginesFindingsAreUnchanged(t *testing.T) {
 
 	var got []Finding
 	got = append(got, codexFindings(p, dir)...)
-	got = append(got, cursorFindings(p, dir)...)
+	got = append(got, cursorFindings(p, dir, stateDir)...)
 	got = append(got, piFindings(p)...)
 
 	if len(got) != len(want) {

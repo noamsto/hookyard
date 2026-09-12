@@ -2513,6 +2513,29 @@ rows live in the same file without either knowing the other exists. The
 constraint is satisfied by the writer model, not by a migration schedule
 anyone has to coordinate.
 
+**The ordering question, answered.** A shared `~/.cursor/hooks.json` invites
+the obvious question — in what order do hookyard's writer and aeye's,
+dispatcher's and lazytmux's run — and the answer is that there is no order to
+declare. Each writer strips only its own marker and preserves every other
+row, so marker-disjoint writers commute: hookyard running before or after
+aeye's `install.sh` produces the same file. nix-config already orders two of
+the four against each other (`entryAfter ["aeyeCursorHooks"]` on the
+dispatcher block), and that is machinery those two chose, not a contract
+hookyard needs to extend. What migration *does* make load-bearing — inert
+before only because `programs.hookyard.manifests` is empty — is the pair of
+invariants this section already states: hookyard's marker appears in no other
+writer's command (above), and a handler's old native entry leaves in the same
+commit its manifest entry enters (the same-commit swap above). A violation of
+the second is a **double registration** — one script firing under two markers
+— and it is mechanical enough to check: `hookyard doctor`'s `competing writer`
+finding reads the handler table and reports any foreign row in
+`~/.cursor/hooks.json` whose command references a script the table says
+hookyard owns. That check is Cursor-only by construction: the Codex
+plugin-cache tree and the Claude `--plugin-dir` tree are loaded from
+directories hookyard does not write, so a swap that forgets the plugin half
+there has no file for the check to read — that leak is bounded by the
+same-commit-swap discipline, not by detection.
+
 ## 9. Delivery: packaging, path form, version skew
 
 ### Nix delivery shape
@@ -2833,6 +2856,56 @@ untested activation path. The order was already built to absorb "prove the
 mechanism where a mistake is cheap before trusting it somewhere expensive";
 the standalone premise's first-deployment risk is that same argument's
 sharpest instance yet, not a new argument for a different order.
+
+**What this task settled about aeye's shape.** Issue #11 asked whether aeye's
+migration could be anything other than a blind port, given two facts: its
+Claude Code (and Codex) hooks are plugin-provided, and its Cursor hooks
+install themselves. Both are answered here, and neither moves aeye from first
+in the order above.
+
+The **plugin-provided question is answered yes, and it was never a boundary.**
+aeye's five handlers are `command`-type shell scripts — exactly what §11's
+manifest models, and what §8's illustrative `aeye/images` row already assumed.
+The plugin is a *delivery* mechanism (where a script lives and how the engine
+loads it), not a capability hookyard lacks. The scripts self-locate via
+`$BASH_SOURCE`/`dirname` and source their `lib/` and `core/` neighbours by
+relative path — none depends on `CLAUDE_PLUGIN_ROOT`/`$PLUGIN_ROOT` being
+exported by the loader — so an absolute manifest `exec` (a nix-store path
+nix-config already holds through `inputs.tmux-og.inputs.aeye`) runs with no
+shim. The plugin keeps shipping `skills/`; its `hooks.json` declares nothing
+once hookyard owns the hooks. §8's sink-4 reasoning and this section's
+aeye-is-three-way claim therefore survive unchanged: aeye is still the
+three-way repo where Cursor-reading-Claude double-fire surfaces first and
+costs least.
+
+The **self-installing question is answered yes, by the same-commit swap.**
+aeye's Cursor rows are merged by `adapters/cursor/install.sh` under that
+adapter's own marker; they move onto a manifest the way every other handler
+does, and nix-config's `aeyeCursorHooks` activation entry — the thing that
+invokes `install.sh` — is removed in the same commit that adds the manifest
+path. The markers stay disjoint, so the two writers commute and no ordering is
+needed (§8, "The ordering question, answered").
+
+Per-handler disposition, split along aeye's own event axis:
+
+| Handler | Event | Disposition |
+|---|---|---|
+| `images.sh` | `post_tool` | **Migratable now**, all three engines. Verdict-lane side effect; append-only, so a transient double-fire is harmless by reader collapse. |
+| `diagrams.sh` | `post_tool` | **Migratable now**, all three. The Cursor copy must adopt `hookSpecificOutput.additionalContext` in place of its native `additional_context`, or its failure advice is silently read as abstain. |
+| `diagram-guidance.sh` | `session_start` | **Migratable, wave 2**, all three. Gated on a SessionStart capture; its Cursor copy needs the same advice-shape fix as `diagrams.sh`; on Codex the advice is recorded, not delivered (§7). |
+| `session-reset.sh` | `session_start` | **Migratable, wave 2**, all three. Gated on a SessionStart capture; the claude/codex copies also read top-level `.source`, which the envelope does not yet expose. |
+| `session-backfill.sh` | `session_start` | **Migratable, wave 2**, all three. Gated on a SessionStart capture plus promotion of `.source` and `.transcript_path` to the envelope; it then runs in §4's `fire_and_forget` lane (its ~20 s rebuild is the lane's own worked example). |
+
+The wave split is the one real constraint the open questions impose on aeye,
+and it is a scheduling gate, not a new boundary: `post_tool` payloads are
+captured and fixture-backed on Claude Code, while **no `SessionStart` payload
+has been captured for any engine**, so engine detection on that event — and
+the `.source`/`.transcript_path` fields the resume handlers read — are exactly
+the residuals §12 already names as the prerequisite for issue #9. The three
+`session_start` handlers wait for that capture and that promotion; the two
+`post_tool` handlers do not. aeye remains the first consumer either way, and
+the first wave of its migration is `post_tool` — still the lowest-stakes,
+three-way exercise this section argued from.
 
 ## 11. Boundary: what hookyard does not absorb
 
@@ -3430,4 +3503,9 @@ prior pass's drift-count arithmetic; and HookBus's carried facts. Moved from
 fully open to resting on the middle evidence grade, one short of a live
 capture: whether Claude Code honours `projectSettings` hooks at all (detailed
 above, under the gate-list item). None of these blocks starting the
-implementation, which is a change from the previous state of this list.
+implementation, which is a change from the previous state of this list. Two
+of them now have a named consumer rather than standing as free-floating
+prerequisites: aeye's three `session_start` handlers wait on the SessionStart
+capture and, for `session-reset.sh`/`session-backfill.sh` on claude/codex, on
+the `.source`/`.transcript_path` envelope promotion, so that capture is the
+gate on aeye's wave 2 (§10), not an item without a user.

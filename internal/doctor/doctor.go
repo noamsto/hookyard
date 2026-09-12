@@ -16,10 +16,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/noamsto/hookyard/internal/manifest"
 	"github.com/noamsto/hookyard/internal/record"
 	"github.com/noamsto/hookyard/internal/render"
 	"github.com/noamsto/hookyard/internal/vocab"
@@ -114,12 +116,10 @@ func DefaultPaths() (Paths, error) {
 func Run(p Paths, dir string) []Finding {
 	claude := resolveClaudeSources(p, dir)
 
-	var findings []Finding
-	findings = append(findings, claudeFindings(p, dir, claude)...)
-	findings = append(findings, codexFindings(p, dir)...)
-	findings = append(findings, cursorFindings(p, dir)...)
-	findings = append(findings, piFindings(p)...)
-
+	// stateDir is resolved before the per-engine findings rather than after,
+	// so the competing-writer check can read the same handler table the router
+	// would: finding one consumers' leaked native rows turns on knowing which
+	// scripts hookyard owns, and that lives in stateDir/table.json.
 	stateDir := p.StateDir
 	var disagreement []string
 	if stateDir == "" {
@@ -135,8 +135,27 @@ func Run(p Paths, dir string) []Finding {
 			disagreement = recovered
 		}
 	}
+	var findings []Finding
+	findings = append(findings, claudeFindings(p, dir, claude)...)
+	findings = append(findings, codexFindings(p, dir)...)
+	findings = append(findings, cursorFindings(p, dir, stateDir)...)
+	findings = append(findings, piFindings(p)...)
 	findings = append(findings, streamFindings(stateDir, disagreement, time.Now())...)
 	return findings
+}
+
+// tableHandlers reads the handler table the router answers each event from,
+// returning the error rather than collapsing it: a missing or corrupt table is
+// a different answer from a genuinely empty one, and competingWriter reports
+// them differently. An empty stateDir must not join "table.json" onto it — that
+// resolves to ./table.json in the directory doctor was run from, and a file a
+// repo under review happens to ship would silently stand in for the real
+// table.
+func tableHandlers(stateDir string) ([]manifest.Handler, error) {
+	if stateDir == "" {
+		return nil, nil
+	}
+	return manifest.ReadTable(filepath.Join(stateDir, "table.json"))
 }
 
 // claudeSource is one settings source doctor can read for Claude Code, with
@@ -413,7 +432,7 @@ func codexFindings(p Paths, dir string) []Finding {
 	return []Finding{trust, hookTrust, registration(vocab.Codex, config), routerPath(vocab.Codex, config)}
 }
 
-func cursorFindings(p Paths, dir string) []Finding {
+func cursorFindings(p Paths, dir, stateDir string) []Finding {
 	hooks := filepath.Join(p.CursorHome, "hooks.json")
 	marker := filepath.Join(p.CursorHome, "projects", cursorProjectSlug(dir), ".workspace-trusted")
 
@@ -426,7 +445,132 @@ func cursorFindings(p Paths, dir string) []Finding {
 		trust.Detail = fmt.Sprintf("no trust marker at %s, so hooks are skipped entirely", marker)
 	}
 
-	return []Finding{trust, registration(vocab.Cursor, hooks), routerPath(vocab.Cursor, hooks)}
+	return []Finding{trust, registration(vocab.Cursor, hooks), routerPath(vocab.Cursor, hooks), competingWriter(stateDir, hooks)}
+}
+
+// competingWriter reports a handler hookyard owns that a foreign writer also
+// registered in Cursor's hooks.json — the double-fire shape a consumer's
+// migration reaches if its old native rows do not leave in the same commit its
+// manifest path enters (§8's same-commit swap). It is the one shared file aeye
+// writes that hookyard also writes, which is why the check is Cursor-only; the
+// Codex plugin-cache tree and the Claude --plugin-dir tree are loaded from
+// directories hookyard does not write, so a swap that forgets the plugin half
+// has no file to catch it here — that leak is bounded by the swap discipline,
+// not by detection.
+//
+// Match is by script basename, not full path, and that is deliberately a
+// two-sided heuristic: two writers may spell the same script under different
+// store or profile paths (a full-path match would miss the double this check
+// exists to catch), while an unrelated foreign script sharing a handler's
+// basename reads as a double when none exists (a spurious Fail). Both costs are
+// named rather than hidden — a wrapper indirection (dispatcher's
+// dispatcher-cursor-notify around dispatch-notify.sh) escapes the check on the
+// false-negative side, and a name collision with another vendor's script
+// over-reports on the false-positive side — so neither a Pass nor a Fail is
+// read as exhaustive or exact.
+func competingWriter(stateDir, hooksPath string) Finding {
+	f := Finding{Engine: vocab.Cursor, Check: "competing writer", Detail: hooksPath}
+	if stateDir == "" {
+		f.Status = Unknown
+		f.Detail = "no --state-dir recoverable to read the handler table from"
+		return f
+	}
+	handlers, err := tableHandlers(stateDir)
+	if err != nil {
+		// A missing or corrupt table is not the same as an empty one: hookyard
+		// may own handlers the check cannot see, so reporting Pass here would
+		// turn a broken install into a green "nothing is double-registered".
+		f.Status = Unknown
+		f.Detail = fmt.Sprintf("cannot read the handler table at %s: %v", filepath.Join(stateDir, "table.json"), err)
+		return f
+	}
+	if len(handlers) == 0 {
+		f.Status = Pass
+		f.Detail = "no handlers in the table, so no foreign entry can double-register one"
+		return f
+	}
+	raw, err := os.ReadFile(hooksPath)
+	if err != nil {
+		f.Status = Unknown
+		f.Detail = fmt.Sprintf("cannot read %s: %v", hooksPath, err)
+		return f
+	}
+	if !strings.Contains(string(raw), render.Marker) {
+		// Hookyard is not registered here at all; registration() already
+		// reports that as Fail, so adding a second finding would be noise, and
+		// a foreign row naming one of hookyard's scripts is not a double until
+		// hookyard is also registered beside it.
+		f.Status = Unknown
+		f.Detail = "no hookyard entry in " + hooksPath + " to compete against"
+		return f
+	}
+
+	var doc struct {
+		Hooks map[string][]struct {
+			Command json.RawMessage `json:"command"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		f.Status = Unknown
+		f.Detail = fmt.Sprintf("cannot parse %s: %v", hooksPath, err)
+		return f
+	}
+
+	// Read every foreign row once, keyed by the script basename it references,
+	// so the per-handler loop below is a single lookup rather than a repeated
+	// scan. Map iteration is harmless here because the result is accumulated
+	// in handler order, which the table's sort fixes.
+	foreign := map[string][]string{}
+	for _, rows := range doc.Hooks {
+		for _, row := range rows {
+			var command string
+			if err := json.Unmarshal(row.Command, &command); err != nil {
+				continue // a foreign row whose command is not a string
+			}
+			if strings.Contains(command, render.Marker) {
+				continue // hookyard's own row, never a double against itself
+			}
+			name := filepath.Base(commandPath(command))
+			if name == "" || name == "." || name == "/" {
+				continue
+			}
+			foreign[name] = append(foreign[name], command)
+		}
+	}
+
+	var clashes []string
+	for _, h := range handlers {
+		name := filepath.Base(h.Exec)
+		commands, ok := foreign[name]
+		if !ok {
+			continue
+		}
+		sort.Strings(commands)
+		clashes = append(clashes, fmt.Sprintf("%s (%s) is also registered by a foreign entry: %s", h.ID, h.Exec, strings.Join(commands, "; ")))
+	}
+	if len(clashes) > 0 {
+		f.Status = Fail
+		f.Detail = strings.Join(clashes, " | ")
+		return f
+	}
+	f.Status = Pass
+	f.Detail = "no foreign entry names a handler hookyard owns"
+	return f
+}
+
+// commandPath returns the leading token of a hook command as a candidate path,
+// which is the part of the command string that can carry a script basename.
+// A command like `hookyard route --registered-for …` is hookyard's own and has
+// already been excluded; a foreign command is a bare path (`…/scripts/images.sh`)
+// or a path followed by args, so the first whitespace-delimited token is the
+// script. Env-var or substitution prefixes ($ADAPTER_DIR/…) are not resolved
+// here — the basename is taken from the token as-is, which is the heuristic the
+// function's comment names.
+func commandPath(command string) string {
+	if fields := strings.Fields(command); len(fields) > 0 {
+		return fields[0]
+	}
+	return ""
 }
 
 // cursorProjectSlug mirrors how Cursor names a project directory under
