@@ -64,22 +64,29 @@ type piResponse struct {
 }
 
 // Render turns a consolidated decision into the bytes one engine expects on
-// one event. It is total: an (engine, event) pair with no decision slot prints
-// nothing rather than failing, so no caller needs a fallback on this path.
-// Stdout is nil whenever nothing is printed.
+// one event. It is total: an (engine, event) pair with no decision slot and no
+// advisory slot prints nothing rather than failing, so no caller needs a
+// fallback on this path. Stdout is nil whenever nothing is printed.
 func Render(in Input) Rendered {
-	if !HasDecisionSlot(in.Engine, in.CanonicalEvent, in.NativeEvent) {
+	hasDecision := HasDecisionSlot(in.Engine, in.CanonicalEvent, in.NativeEvent)
+	if hasDecision {
+		switch in.Engine {
+		case vocab.ClaudeCode:
+			return renderClaudeCode(in)
+		case vocab.Codex:
+			return renderCodex(in)
+		case vocab.Cursor:
+			return renderCursor(in)
+		case vocab.Pi:
+			return renderPi(in)
+		}
 		return Rendered{Enforced: in.Verdict == Abstain}
 	}
-	switch in.Engine {
-	case vocab.ClaudeCode:
-		return renderClaudeCode(in)
-	case vocab.Codex:
-		return renderCodex(in)
-	case vocab.Cursor:
-		return renderCursor(in)
-	case vocab.Pi:
-		return renderPi(in)
+	// Only Claude Code can reach this branch: Cursor/Pi's advisory set is
+	// defined as identical to their decision set (already false here), and
+	// Codex has no advisory slot at all.
+	if HasAdvisorySlot(in.Engine, in.CanonicalEvent, in.NativeEvent) && in.Engine == vocab.ClaudeCode {
+		return renderClaudeCodeAdvisoryOnly(in)
 	}
 	return Rendered{Enforced: in.Verdict == Abstain}
 }
@@ -96,6 +103,20 @@ func renderClaudeCode(in Input) Rendered {
 		out.PermissionDecisionReason = in.Reason
 	}
 	return Rendered{Stdout: marshal(hookResponse{out}), Enforced: true, AdviceDelivered: in.Advice != ""}
+}
+
+// renderClaudeCodeAdvisoryOnly renders additionalContext on an event where
+// Claude Code has an advisory slot but no decision slot (session_start,
+// post_tool). There is nowhere to put permissionDecision on these events —
+// rendering it would be inventing a channel that doesn't exist — so a
+// non-Abstain verdict here is recorded unenforced, the same as any other
+// verdict computed off a decision slot.
+func renderClaudeCodeAdvisoryOnly(in Input) Rendered {
+	if in.Advice == "" {
+		return Rendered{Enforced: in.Verdict == Abstain}
+	}
+	out := hookSpecificOutput{HookEventName: in.NativeEvent, AdditionalContext: in.Advice}
+	return Rendered{Stdout: marshal(hookResponse{out}), Enforced: in.Verdict == Abstain, AdviceDelivered: true}
 }
 
 // renderCodex renders the deny arm, plus ask degraded to deny per §7's rule

@@ -40,17 +40,22 @@ func HasDecisionSlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bo
 }
 
 // HasAdvisorySlot reports whether engine has anywhere to put an advisory
-// string on this event. Codex has none at all. Cursor's is the user_message
-// field of the decision object itself, so its advisory set is exactly its
-// decision set — and advice only rides there alongside a rendered permission,
-// which Render is what enforces. Pi's is its single reason field, riding the
-// same way: the block reason was observed reaching the model as the tool
-// outcome, but only alongside a block, so Pi's advisory set is its decision
-// set too.
+// string on this event. Claude Code's advisory set is pre_tool, session_start,
+// post_tool — confirmed by aeye's diagram-guidance.sh (session_start) and
+// diagrams.sh (post_tool) running against real Claude Code in production, in
+// addition to pre_tool's additionalContext. Codex has no advisory channel on
+// any event, full stop: this is a settled boundary, not a gap to fill later —
+// no handler can get advice to Codex by any means this package offers.
+// Cursor's is the user_message field of the decision object itself, so its
+// advisory set is exactly its decision set — and advice only rides there
+// alongside a rendered permission, which Render is what enforces. Pi's is its
+// single reason field, riding the same way: the block reason was observed
+// reaching the model as the tool outcome, but only alongside a block, so Pi's
+// advisory set is its decision set too.
 func HasAdvisorySlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bool {
 	switch engine {
 	case vocab.ClaudeCode:
-		return canonicalEvent == vocab.PreTool
+		return canonicalEvent == vocab.PreTool || canonicalEvent == vocab.SessionStart || canonicalEvent == vocab.PostTool
 	case vocab.Cursor, vocab.Pi:
 		return HasDecisionSlot(engine, canonicalEvent, nativeEvent)
 	}
