@@ -59,6 +59,7 @@ func WriteCursor(path string, entries []Entry) error {
 			return fmt.Errorf("%s has a hooks key hookyard cannot read, refusing to overwrite it: %w", path, err)
 		}
 	}
+	stripped := false
 	for event, rows := range hooks {
 		kept := rows[:0]
 		for _, row := range rows {
@@ -66,9 +67,11 @@ func WriteCursor(path string, entries []Entry) error {
 			if err != nil {
 				return fmt.Errorf("%s has a hooks row hookyard cannot read, refusing to overwrite it: %w", path, err)
 			}
-			if !strings.Contains(command, Marker) {
-				kept = append(kept, row)
+			if strings.Contains(command, Marker) {
+				stripped = true
+				continue
 			}
+			kept = append(kept, row)
 		}
 		if len(kept) == 0 {
 			delete(hooks, event)
@@ -76,6 +79,15 @@ func WriteCursor(path string, entries []Entry) error {
 		}
 		hooks[event] = kept
 	}
+
+	// hooks.json is Cursor's own file. A zero-entry plan with no prior
+	// hookyard rows to strip has nothing to add and nothing to remove, so it
+	// takes no rename at all and leaves the file exactly as Cursor last wrote
+	// it.
+	if len(entries) == 0 && !stripped {
+		return nil
+	}
+
 	for _, e := range entries {
 		row, err := json.Marshal(cursorEntry{
 			Command: e.Command,

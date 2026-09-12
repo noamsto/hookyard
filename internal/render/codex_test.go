@@ -137,6 +137,56 @@ func TestWriteCodexRefusesInvalidTOML(t *testing.T) {
 	}
 }
 
+// config.toml is Codex's own file: an empty plan with nothing to strip must
+// take no rename over it at all, not even one that reproduces the same TOML
+// with different formatting.
+func TestWriteCodexOnAnEmptyPlanWithNoBlockLeavesTheFileByteIdentical(t *testing.T) {
+	path := writeCodexFixture(t, codexInherited)
+	before := readFile(t, path)
+
+	if err := WriteCodex(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, path); got != before {
+		t.Errorf("file was rewritten with nothing to add or strip\n--- before ---\n%s\n--- got ---\n%s", before, got)
+	}
+}
+
+// The first --allow-empty install a machine ever runs has no config.toml at
+// all yet. That must not conjure one into existence just to hold an empty
+// hookyard block.
+func TestWriteCodexOnAnEmptyPlanWithNoConfigFileWritesNothing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+
+	if err := WriteCodex(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("want no config.toml created, got stat err: %v", err)
+	}
+}
+
+// The skip requires *both* halves of the condition: zero entries is not
+// enough on its own when a prior hookyard block is still present, since
+// leaving it behind would keep firing against a router that no longer wants
+// it.
+func TestWriteCodexOnAnEmptyPlanStillStripsAStaleBlockEvenWithNoNewEntries(t *testing.T) {
+	stale := codexInherited + "\n" + codexBegin + "\n\n[[hooks.PreToolUse]]\nmatcher = \"Bash\"\n\n" +
+		"[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"/x/bin/hookyard route\"\n\n" + codexEnd + "\n"
+	path := writeCodexFixture(t, stale)
+
+	if err := WriteCodex(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, path)
+	if strings.Contains(got, codexBegin) {
+		t.Errorf("stale hookyard block survived\n--- got ---\n%s", got)
+	}
+	if !strings.Contains(got, `model_reasoning_effort = "low"`) {
+		t.Errorf("stripping the stale block dropped inherited content\n--- got ---\n%s", got)
+	}
+}
+
 func TestWriteCodexCreatesMissingFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	entries := []Entry{{Event: "PreToolUse", Command: "/x/bin/hookyard route --registered-for codex --event pre_tool"}}
