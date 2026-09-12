@@ -2,4 +2,6 @@
 
 | invariant/family | finding or thread IDs | observed head | fix commit | proof | disposition | rounds used |
 | --- | --- | --- | --- | --- | --- | --- |
-| doctor `competing writer` check must not conflate an unreadable handler table with an empty one | reviewer HIGH (round 1) | pending | pending | `go test ./internal/doctor -race` + new `TestCompetingWriterUnknownOnMissingTable` | fixed (targeted re-review next) | 1 |
+| doctor `competing writer` check must not conflate an unreadable handler table with an empty one | reviewer HIGH (round 1) | 92467b4 | 92467b4 | `go test ./... -race`, new `TestCompetingWriterUnknownOnMissingTable`; targeted re-review accepted (round 2) | fixed | 2 |
+
+recurrence_escalation: unused
