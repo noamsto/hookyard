@@ -112,7 +112,7 @@ func DefaultPaths() (Paths, error) {
 
 // Run reports on each engine for one working directory.
 func Run(p Paths, dir string) []Finding {
-	claude := resolveClaudeSources(p)
+	claude := resolveClaudeSources(p, dir)
 
 	var findings []Finding
 	findings = append(findings, claudeFindings(p, dir, claude)...)
@@ -156,17 +156,26 @@ type claudeSources struct {
 	settingsPath string
 	settings     []byte // nil when settings.json could not be read
 	overlays     []claudeSource
+	// checkout holds the working directory's own hook-bearing settings files:
+	// `.claude/settings.json` (projectSettings) and `.claude/settings.local.json`
+	// (localSettings). Claude Code's disableAllHooksInCheckout gate ORs both
+	// together (§12), so claudeHooksEnabled scans these too. They are kept out
+	// of all(), which registration and the router-path scan use: those are
+	// about where hookyard itself could have written a marker, and hookyard
+	// never writes to a checkout's own settings files.
+	checkout []claudeSource
 	// unresolved says what doctor could not see, so a Pass on the
 	// disableAllHooks gate names what it did not read rather than implying it
-	// read everything (§4.4). Two different shapes land here and the label
-	// below has to hold both: a source that exists and would not open, and the
-	// launcher reasons, which say there is no source to open at all. Rendering
-	// the second under "not read" would send an operator hunting for a
-	// permissions problem on a file that was never named.
+	// read everything (§4.4). Three different shapes land here and the label
+	// below has to hold all of them: a source that exists and would not open,
+	// the launcher reasons, which say there is no source to open at all, and a
+	// checkout source that exists and would not open. Rendering any of these
+	// under "not read" would send an operator hunting for a permissions
+	// problem on a file that was never named.
 	unresolved []string
 }
 
-func resolveClaudeSources(p Paths) claudeSources {
+func resolveClaudeSources(p Paths, dir string) claudeSources {
 	c := claudeSources{settingsPath: filepath.Join(p.ClaudeConfigDir, "settings.json")}
 	// A missing settings.json is the expected state now that hookyard does not
 	// write it; only a file that is there and unreadable is worth naming.
@@ -191,6 +200,17 @@ func resolveClaudeSources(p Paths) claudeSources {
 			continue
 		}
 		c.unresolved = append(c.unresolved, v)
+	}
+
+	// A missing project or local settings.json is the common case and not
+	// worth naming; only a file that is there and unreadable is.
+	for _, name := range []string{"settings.json", "settings.local.json"} {
+		path := filepath.Join(dir, ".claude", name)
+		if raw, err := os.ReadFile(path); err == nil {
+			c.checkout = append(c.checkout, claudeSource{name: path, raw: raw})
+		} else if !os.IsNotExist(err) {
+			c.unresolved = append(c.unresolved, fmt.Sprintf("%s (%v)", path, err))
+		}
 	}
 	return c
 }
@@ -246,15 +266,17 @@ func claudeFindings(p Paths, dir string, c claudeSources) []Finding {
 }
 
 // claudeHooksEnabled reads disableAllHooks in every source, not just
-// settings.json: §8's gate fires on the flag being set in user *or* flag
-// settings, so checking one of the two and calling the result a Pass is a
-// fail-open now that doctor holds the overlay's bytes.
+// settings.json: §8's gate fires on the flag being set in user or flag
+// settings, and §12's disableAllHooksInCheckout gate fires on the same flag
+// in the checkout's own project or local settings, so checking only
+// settings.json and the overlay and calling the result a Pass is a
+// fail-open now that doctor holds all four sources' bytes.
 func claudeHooksEnabled(c claudeSources) Finding {
 	f := Finding{Engine: vocab.ClaudeCode, Check: "hooks enabled", Detail: c.settingsPath}
 
 	var checked []string
 	blind := c.unresolved
-	for _, s := range c.all() {
+	for _, s := range append(c.all(), c.checkout...) {
 		var settings struct {
 			DisableAllHooks bool `json:"disableAllHooks"`
 		}
