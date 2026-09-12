@@ -48,7 +48,7 @@ func TestClaudeRegistrationPassesOffTheLauncherOverlay(t *testing.T) {
 	overlay := writeFile(t, filepath.Join(root, "overlay.json"),
 		claudeOverlayJSON(t, routedCommand(router, vocab.ClaudeCode, filepath.Join(root, "state"))))
 
-	f := claudeRegistration(resolveClaudeSources(claudePaths(t, overlay)))
+	f := claudeRegistration(resolveClaudeSources(claudePaths(t, overlay), t.TempDir()))
 	if f.Status != Pass {
 		t.Fatalf("status = %v, want Pass; detail=%q", f.Status, f.Detail)
 	}
@@ -77,7 +77,7 @@ func TestClaudeRegistrationFailsOnAStaleMarkerInSettingsJSON(t *testing.T) {
 	f := claudeRegistration(resolveClaudeSources(Paths{
 		ClaudeConfigDir:     configDir,
 		ClaudeSettingsFlags: []string{overlay},
-	}))
+	}, t.TempDir()))
 	if f.Status != Fail {
 		t.Fatalf("status = %v, want Fail; detail=%q", f.Status, f.Detail)
 	}
@@ -99,7 +99,7 @@ func TestClaudeRegistrationFailsWithTheMergedOverlayRepair(t *testing.T) {
 	root := t.TempDir()
 	overlay := writeFile(t, filepath.Join(root, "overlay.json"), []byte(`{"permissions":{}}`))
 
-	f := claudeRegistration(resolveClaudeSources(claudePaths(t, overlay)))
+	f := claudeRegistration(resolveClaudeSources(claudePaths(t, overlay), t.TempDir()))
 	if f.Status != Fail {
 		t.Fatalf("status = %v, want Fail; detail=%q", f.Status, f.Detail)
 	}
@@ -115,7 +115,7 @@ func TestClaudeRegistrationFailsWithTheMergedOverlayRepair(t *testing.T) {
 // three-valued Status reserves the third value for.
 func TestClaudeRegistrationUnknownWhenTheLauncherIsUnreadable(t *testing.T) {
 	t.Run("no --settings recovered", func(t *testing.T) {
-		f := claudeRegistration(resolveClaudeSources(claudePaths(t)))
+		f := claudeRegistration(resolveClaudeSources(claudePaths(t), t.TempDir()))
 		if f.Status != Unknown {
 			t.Fatalf("status = %v, want Unknown; detail=%q", f.Status, f.Detail)
 		}
@@ -129,7 +129,7 @@ func TestClaudeRegistrationUnknownWhenTheLauncherIsUnreadable(t *testing.T) {
 	t.Run("the launcher case is named", func(t *testing.T) {
 		p := claudePaths(t)
 		p.ClaudeLauncherUnread = "/nix/store/x/bin/claude is a compiled binary, not a wrapper script"
-		f := claudeRegistration(resolveClaudeSources(p))
+		f := claudeRegistration(resolveClaudeSources(p, t.TempDir()))
 		if f.Status != Unknown {
 			t.Fatalf("status = %v, want Unknown; detail=%q", f.Status, f.Detail)
 		}
@@ -140,7 +140,7 @@ func TestClaudeRegistrationUnknownWhenTheLauncherIsUnreadable(t *testing.T) {
 
 	t.Run("value resolves to neither a file nor JSON", func(t *testing.T) {
 		value := filepath.Join(t.TempDir(), "never-written.json")
-		f := claudeRegistration(resolveClaudeSources(claudePaths(t, value)))
+		f := claudeRegistration(resolveClaudeSources(claudePaths(t, value), t.TempDir()))
 		if f.Status != Unknown {
 			t.Fatalf("status = %v, want Unknown; detail=%q", f.Status, f.Detail)
 		}
@@ -157,7 +157,7 @@ func TestClaudeRegistrationReadsAnInlineSettingsValue(t *testing.T) {
 	router := writeRouterBinary(t, root, true)
 	inline := string(claudeOverlayJSON(t, routedCommand(router, vocab.ClaudeCode, filepath.Join(root, "state"))))
 
-	c := resolveClaudeSources(claudePaths(t, inline))
+	c := resolveClaudeSources(claudePaths(t, inline), t.TempDir())
 	if f := claudeRegistration(c); f.Status != Pass {
 		t.Fatalf("registration status = %v, want Pass; detail=%q", f.Status, f.Detail)
 	}
@@ -177,7 +177,7 @@ func TestClaudeHooksEnabledReadsEverySource(t *testing.T) {
 	f := claudeHooksEnabled(resolveClaudeSources(Paths{
 		ClaudeConfigDir:     configDir,
 		ClaudeSettingsFlags: []string{overlay},
-	}))
+	}, t.TempDir()))
 	if f.Status != Fail {
 		t.Fatalf("status = %v, want Fail; detail=%q", f.Status, f.Detail)
 	}
@@ -186,6 +186,44 @@ func TestClaudeHooksEnabledReadsEverySource(t *testing.T) {
 	}
 	if strings.Contains(f.Detail, settings) {
 		t.Errorf("detail = %q, names the file that does not set it", f.Detail)
+	}
+}
+
+// §12's disableAllHooksInCheckout gate ORs projectSettings and localSettings
+// together, so a flag set in the checkout's own settings.json — a source
+// entirely outside ClaudeConfigDir and the launcher overlay — must fail the
+// gate too, not just be silently unread.
+func TestClaudeHooksEnabledReadsTheCheckout(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "claude")
+	writeFile(t, filepath.Join(configDir, "settings.json"), []byte(`{"disableAllHooks":false}`))
+	dir := filepath.Join(root, "project")
+	project := writeFile(t, filepath.Join(dir, ".claude", "settings.json"), []byte(`{"disableAllHooks":true}`))
+
+	f := claudeHooksEnabled(resolveClaudeSources(Paths{ClaudeConfigDir: configDir}, dir))
+	if f.Status != Fail {
+		t.Fatalf("status = %v, want Fail; detail=%q", f.Status, f.Detail)
+	}
+	if !strings.Contains(f.Detail, project) {
+		t.Errorf("detail = %q, want it to name the checkout source that sets the flag", f.Detail)
+	}
+}
+
+// localSettings is the other half of disableAllHooksInCheckout's OR, and it's
+// a different file (settings.local.json) from projectSettings's.
+func TestClaudeHooksEnabledReadsLocalCheckoutSettings(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "claude")
+	writeFile(t, filepath.Join(configDir, "settings.json"), []byte(`{"disableAllHooks":false}`))
+	dir := filepath.Join(root, "project")
+	local := writeFile(t, filepath.Join(dir, ".claude", "settings.local.json"), []byte(`{"disableAllHooks":true}`))
+
+	f := claudeHooksEnabled(resolveClaudeSources(Paths{ClaudeConfigDir: configDir}, dir))
+	if f.Status != Fail {
+		t.Fatalf("status = %v, want Fail; detail=%q", f.Status, f.Detail)
+	}
+	if !strings.Contains(f.Detail, local) {
+		t.Errorf("detail = %q, want it to name the checkout source that sets the flag", f.Detail)
 	}
 }
 
@@ -201,7 +239,7 @@ func TestClaudeHooksEnabledDropsTheOverlayDisclaimer(t *testing.T) {
 	f := claudeHooksEnabled(resolveClaudeSources(Paths{
 		ClaudeConfigDir:     configDir,
 		ClaudeSettingsFlags: []string{overlay},
-	}))
+	}, t.TempDir()))
 	if f.Status != Pass {
 		t.Fatalf("status = %v, want Pass; detail=%q", f.Status, f.Detail)
 	}
@@ -218,9 +256,29 @@ func TestClaudeHooksEnabledDropsTheOverlayDisclaimer(t *testing.T) {
 func TestClaudeHooksEnabledNamesWhatItCouldNotRead(t *testing.T) {
 	value := filepath.Join(t.TempDir(), "never-written.json")
 
-	f := claudeHooksEnabled(resolveClaudeSources(claudePaths(t, value)))
+	f := claudeHooksEnabled(resolveClaudeSources(claudePaths(t, value), t.TempDir()))
 	if !strings.Contains(f.Detail, value) {
 		t.Errorf("detail = %q, want the unresolved source named", f.Detail)
+	}
+}
+
+// A checkout settings.json that exists but will not open follows the same
+// "name what it did not read" rule as the overlay case above; unlike a
+// missing checkout file, which is the expected common case and stays silent.
+func TestClaudeHooksEnabledNamesAnUnreadableCheckoutFile(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores file permissions, so this check cannot bite")
+	}
+	dir := t.TempDir()
+	project := writeFile(t, filepath.Join(dir, ".claude", "settings.json"), []byte(`{}`))
+	if err := os.Chmod(project, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(project, 0o600) })
+
+	f := claudeHooksEnabled(resolveClaudeSources(claudePaths(t), dir))
+	if !strings.Contains(f.Detail, project) {
+		t.Errorf("detail = %q, want the unreadable checkout source named", f.Detail)
 	}
 }
 
@@ -237,7 +295,7 @@ func TestClaudeScansFollowTheOverlay(t *testing.T) {
 		claudeOverlayJSON(t, routedCommand(router, vocab.ClaudeCode, stateDir)))
 
 	p := Paths{ClaudeConfigDir: configDir, ClaudeSettingsFlags: []string{overlay}}
-	c := resolveClaudeSources(p)
+	c := resolveClaudeSources(p, t.TempDir())
 
 	f := claudeRouterPath(c)
 	if f.Status != Pass {

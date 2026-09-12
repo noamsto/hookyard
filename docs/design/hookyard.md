@@ -1924,6 +1924,20 @@ on disk are counted once — and `flagSettings` is explicitly exempt even from
 that. Eleven entries would be registered from the case above, and all eleven
 would run.
 
+This three-source enumeration is `claude-code-2.1.263`'s reading, for the
+specific question this collision check needed answered: does `settings.json`
+compete with the `--settings` overlay, or lose to it? §12 (item 1 and the
+`projectSettings` finding under §8's gate-list bullet) reads `2.1.269` — a
+later version, not the same binary re-read — and finds `projectSettings`
+named everywhere this later binary's strings enumerate settings sources in
+the places this pass looked. Whether that means `2.1.263` already modeled
+`projectSettings` and this pass's read of `2.1.263` simply missed it, or
+`2.1.269` added it in the six versions between, is not something a strings
+diff between the two settles, and this document does not claim it either
+way. Either reading leaves the same operational conclusion: the three named
+here are not evidence that `projectSettings` is excluded from the general
+hook-source union on the version actually running today.
+
 Both halves of the earlier conclusion therefore fall, as a general statement
 about Claude Code's own merge semantics. Nothing is silently discarded, so
 there is no data-loss risk to mitigate; and the operational rule that
@@ -1982,6 +1996,13 @@ nothing dangerous was attempted. `hookyard doctor` is the right place to
 answer it: it can read the same settings sources and report whether hooks are
 gated off, rather than leaving the operator to infer coverage from an empty
 stream.
+
+A later pass adds one more condition to this list, read off a different
+function than the one above: `disableAllHooksInCheckout` ORs the same
+`disableAllHooks` flag from the working directory's own `.claude/settings.json`
+(`projectSettings`) and `.claude/settings.local.json` (`localSettings`), a
+gate scoped to the checkout rather than to the user or the launcher (§12).
+`hookyard doctor`'s `claudeHooksEnabled` check now reads that gate too.
 
 **The emit path costs something the user-settings path did not, and that
 belongs beside the fail-open list above rather than only in an acceptance
@@ -2935,6 +2956,18 @@ real tool calls across all three engines, each engine watched refusing a tool
 call, and Codex's undeclared-timeout behaviour timed. Statuses below say which
 grade they rest on where the difference matters.
 
+**This pass's host is weaker than the ones above, and that caps what it could
+add.** `codex-cli` is not installed here at all — no binary to read strings
+from, let alone run — so every remaining Codex question stayed exactly where
+it was. `cursor-agent` and `claude-code` are both present, so this pass could
+still read their shipped bundles the same way the first pass did, and it did:
+one correction came out of that (below, under §8's gate-list item). It could
+not add a new live capture of its own — this pass runs inside a Claude Code
+session whose own harness refuses to spawn a nested `claude` process to watch
+behave — so nothing here reaches the top grade; everything new this pass adds
+rests on the middle one, reading shipped code, same as the first pass's
+non-Cursor findings.
+
 1. **The settings.json / Nix-overlay collision (§8).**
    **Resolved as a merge question, and then overtaken by a blocking one — the
    two are separate findings, and only the second decides how Claude Code is
@@ -2958,7 +2991,11 @@ grade they rest on where the difference matters.
    surviving in `settings.json` from a pre-#29 install — is what marker-scoped
    single ownership and `doctor`'s stale-marker check now cover instead.
    `~/.claude/settings.json` still has no `hooks` key
-   (`jq 'has("hooks")'` → `false`), so nothing is deployed either way.
+   (`jq 'has("hooks")'` → `false`), so nothing is deployed either way. The
+   three-source enumeration above (`userSettings`, `localSettings`,
+   `flagSettings`) was `2.1.263`'s answer to this item's specific question,
+   not the full source list — see the `projectSettings` finding under §8's
+   gate-list bullet below for the source this item never asked about.
 2. **The exact native multi-hook consolidation rule, per engine (§4).**
    **One of three resolved.** Cursor's reducer folds two hooks' `permission`
    values as `deny` > `ask` > `allow` — this design's own rule, arrived at
@@ -3028,8 +3065,20 @@ grade they rest on where the difference matters.
    `protocol` field to disambiguate — and it settles the direction of the
    `Edit`/`Write` collapse for Cursor. Whether **Codex's** single
    `apply_patch` should always map to `Write` or sometimes to `Edit` is
-   untouched and stays open. The `Glob` drop is a new obligation rather than
-   an answer, and §7 states it: a `match` that renders empty for an engine
+   untouched and stays open, and this pass could not touch it either —
+   `codex-cli` is not installed on this host this session, and the existing
+   Codex fixture (`codex-pre_tool_use.json`) only ever captured a shell call
+   (`tool_name` is `Bash`, per the fixtures README), not a file edit. The
+   experiment that settles it is the one `docs/design/fixtures/hook-payloads/`
+   already documents a method for: with `codex-cli` on PATH, run
+   `capture-hook.sh` the same way the first capture pass did (a scratch
+   `CODEX_HOME`, trust granted, `PreToolUse` observed) against two prompts —
+   one that edits an existing file and one that creates a new one — and read
+   `tool_name`/`tool_input` off the two payloads. If both spell the same way,
+   the mapping is unconditional; if they differ, the mapping is conditional on
+   create-vs-edit and Cursor's collapse rule does not carry over. The `Glob`
+   drop is a new obligation rather than an answer, and §7 states it: a
+   `match` that renders empty for an engine
    the entry claims must be rejected or warned on, because an unregistered
    handler leaves no trace at all in the record.
 7. **The 2.35ms measurement was for the wrong code path (§2, §4.1).**
@@ -3116,7 +3165,8 @@ Six items the prior pass's own findings added, each with this pass's status:
   The behavioural half is settled, and it is the half that matters: editing an
   entry invalidates that entry's trust and Codex re-prompts. Rewriting the
   config announced "2 hooks are new or changed" for the two edited entries,
-  and trust had to be granted again before either would run. One adjacent finding is worth carrying for §9: a
+  and trust had to be granted again before either would run. One adjacent
+  finding is worth carrying for §9: a
   `bypass_hook_trust` config override exists, which is a lever for the
   first-activation problem §10 describes, and whose safety this document has
   not assessed.
@@ -3191,14 +3241,69 @@ being more capable than this document assumed rather than less.
   flag settings, an `allowManagedHooksOnly` policy, safe mode, a plugin-only
   restriction, bare mode, or an unreadable policy file; `localSettings` hooks
   are dropped separately when the workspace is untrusted or
-  `settings.local.json` is git-tracked. Every one of these yields guards that
-  appear installed and never run, and hookyard's record cannot distinguish
-  that from a quiet session, because a handler that was never invoked cannot
-  abstain, error, or time out. A smaller loose end from the same reading:
-  `projectSettings` does not appear among Claude Code's hook sources at all,
-  which would mean project-level `.claude/settings.json` hooks are not honoured
-  — plausible, consistent with Cursor importing those separately, and not
-  confirmed.
+  `settings.local.json` is git-tracked. This list needs one more line, added
+  below by this pass rather than corrected in place, because it was written
+  before the `projectSettings` finding existed: `disableAllHooksInCheckout`
+  is a **second**, checkout-scoped `disableAllHooks` gate, set in either the
+  working directory's own `.claude/settings.json` (`projectSettings`) or
+  `.claude/settings.local.json` (`localSettings`), distinct from the
+  user/flag one named above. Every one of these yields guards that appear
+  installed and never run, and hookyard's record cannot distinguish that
+  from a quiet session, because a handler that was never invoked cannot
+  abstain, error, or time out. `doctor`'s `claudeHooksEnabled` check now
+  reads the checkout-scoped gate too, not just user/flag settings — see
+  `internal/doctor/doctor.go`.
+
+  **Codex's and Cursor's equivalent gate lists beyond workspace trust are
+  still open, and stay that way this pass.** For Cursor, this pass read the
+  shipped `cursor-agent 2026.09.10-fd3934a` bundles for the Claude-Code-shaped
+  identifiers (`disableAllHooks`, `allowManagedHooksOnly`, a bare-mode or
+  policy-file equivalent) and found none beyond the already-known per-entry
+  `failClosed` knob and workspace trust itself — a negative grep result, not a
+  proof that no such gate exists in code this search didn't name correctly.
+  For Codex, `codex-cli` is not installed on the host this session ran on
+  (only `~/.codex/config.toml` and its trust state are present, no binary to
+  read or run), so this pass could not even attempt it. Settling either list
+  the way Claude Code's was settled needs the binary in hand and, ideally, a
+  live capture toggling each candidate setting and watching a hook actually
+  get skipped or run — string-reading alone gives a name, not a confirmation
+  that the name gates anything at runtime.
+
+  **A smaller loose end from the same reading is resolved, in the opposite
+  direction from what the prior pass recorded.** That pass read
+  `projectSettings` as absent from Claude Code's hook sources entirely
+  (on `2.1.263`). Static reading of the shipped `claude-code-2.1.269`
+  binary's strings — a later version, so this either corrects a miss on
+  `2.1.263` or reflects something added in between; a strings diff between
+  the two doesn't distinguish those, and this document doesn't guess —
+  finds `projectSettings` is not absent from `2.1.269`: everywhere this
+  pass found the binary enumerate its settings sources, `projectSettings`
+  appeared alongside `userSettings`, `localSettings` and `flagSettings`
+  (`policySettings` also recurs in these enumerations, but this pass did not
+  specifically check it for hook-union membership the way it checked
+  `projectSettings` below, so this finding makes no claim about it), gated
+  by the same "is this source enabled" check as `userSettings` and
+  `localSettings`. Concretely, the function that decides whether hooks are
+  disabled "in checkout" ORs a check against `projectSettings` with the same
+  check against `localSettings` — `disableAllHooksInCheckout` reads
+  `jIe("projectSettings")||jIe("localSettings")||…` — and the `/hooks`
+  command's own hook-listing code marks an entry editable when its source is
+  `userSettings`, `projectSettings`, **or** `localSettings`, treating the
+  three identically. That is strong circumstantial evidence that a
+  project-level `.claude/settings.json`'s `hooks` key is a live surface, not a
+  dead one. It stops short of the top evidence grade this document uses
+  elsewhere (watching a hook actually fire from one): tracing the exact
+  runtime call path from settings file to dispatched hook through Claude
+  Code's bun-minified bundle wasn't reliable enough to claim with certainty,
+  and the direct experiment — writing a hook into a trusted project's
+  `.claude/settings.json` and watching it run — needs a `claude -p` session
+  that this pass could not launch (this worker's own harness refuses to spawn
+  a nested Claude Code agent process). The claim here is therefore upgraded
+  from "plausible, untested" to resting on the middle evidence grade this
+  section's preamble names — reading shipped code — not the top one. The
+  live capture that would move it to the top grade is unchanged from what the
+  prior pass already proposed: run it once outside a sandbox that blocks
+  spawning the engine under test.
 - **Settled by a ruling, not by new evidence: what is Claude Code's `defer`
   permission decision, and does hookyard ever render it (§7)?** The accepted
   value set is `allow | deny | ask | defer`, and `defer` was a fourth verdict
@@ -3315,11 +3420,14 @@ payloads, payload-level `hook_event_name` spellings unverified for twelve of
 the table's eighteen rows, and `tool_input` field spellings unverified for
 non-shell tools — all three closing the same way, one more capture run, and
 all three a stated prerequisite for issue #9; Pi's `pre_compact` mapping,
-closing the same way; the per-engine gate lists for
-Codex and Cursor beyond workspace trust, and whether Claude Code honours
-`projectSettings` hooks at all; Codex's `apply_patch` sub-tool mapping; Claude
-Code's and Codex's native consolidation rules; whether fail-open should be
-conditional for security-classed handlers; the exact preimage of Codex's
-trust hash; the prior pass's drift-count arithmetic; and HookBus's carried
-facts. None of these blocks starting the implementation, which is a change
-from the previous state of this list.
+closing the same way; the per-engine gate lists for Codex and Cursor beyond
+workspace trust — this pass tried Cursor's shipped bundles and found nothing
+beyond what was already known, and couldn't try Codex at all, for want of the
+binary on this host; Codex's `apply_patch` sub-tool mapping; Claude Code's and
+Codex's native consolidation rules; whether fail-open should be conditional
+for security-classed handlers; the exact preimage of Codex's trust hash; the
+prior pass's drift-count arithmetic; and HookBus's carried facts. Moved from
+fully open to resting on the middle evidence grade, one short of a live
+capture: whether Claude Code honours `projectSettings` hooks at all (detailed
+above, under the gate-list item). None of these blocks starting the
+implementation, which is a change from the previous state of this list.
