@@ -5,6 +5,10 @@
 // own: it strips only entries carrying hookyard's own marker, leaves every
 // other writer's entries untouched, refuses a file it cannot parse rather than
 // clobbering it, and lands its result through a single rename.
+//
+// Claude Code is the exception, and by construction: ClaudeSettings is a pure
+// function over bytes, because the file its result belongs in is a Nix store
+// link that hookyard must never be able to name for writing (#29).
 package render
 
 import (

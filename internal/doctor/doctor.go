@@ -61,6 +61,12 @@ type Paths struct {
 	CodexHome       string
 	CursorHome      string
 	PiAgentDir      string
+	// ClaudeSettingsFlags are the --settings values the claude launcher on
+	// PATH passes. Under Nix that overlay, not settings.json, is where
+	// hookyard's block lives, and nothing else on the machine names it (§4.4).
+	// Empty means doctor cannot see which settings file the engine starts
+	// with. Tests set it directly.
+	ClaudeSettingsFlags []string
 	// StateDir is the operator's explicit --state-dir. Empty means none was
 	// given: Run recovers it from the --state-dir the four engines' emitted
 	// configs already name, rather than treating empty as shorthand for
@@ -89,17 +95,20 @@ func DefaultPaths() (Paths, error) {
 		piAgentDir = filepath.Join(home, ".pi", "agent")
 	}
 	return Paths{
-		ClaudeConfigDir: claude,
-		CodexHome:       codex,
-		CursorHome:      filepath.Join(home, ".cursor"),
-		PiAgentDir:      piAgentDir,
+		ClaudeConfigDir:     claude,
+		CodexHome:           codex,
+		CursorHome:          filepath.Join(home, ".cursor"),
+		PiAgentDir:          piAgentDir,
+		ClaudeSettingsFlags: claudeLauncherSettings(),
 	}, nil
 }
 
 // Run reports on each engine for one working directory.
 func Run(p Paths, dir string) []Finding {
+	claude := resolveClaudeSources(p)
+
 	var findings []Finding
-	findings = append(findings, claudeFindings(p, dir)...)
+	findings = append(findings, claudeFindings(p, dir, claude)...)
 	findings = append(findings, codexFindings(p, dir)...)
 	findings = append(findings, cursorFindings(p, dir)...)
 	findings = append(findings, piFindings(p)...)
@@ -107,7 +116,7 @@ func Run(p Paths, dir string) []Finding {
 	stateDir := p.StateDir
 	var disagreement []string
 	if stateDir == "" {
-		switch recovered := recoverStateDir(p); len(recovered) {
+		switch recovered := recoverStateDir(p, claude); len(recovered) {
 		case 1:
 			stateDir = recovered[0]
 		case 0:
@@ -123,8 +132,80 @@ func Run(p Paths, dir string) []Finding {
 	return findings
 }
 
-func claudeFindings(p Paths, dir string) []Finding {
-	settings := filepath.Join(p.ClaudeConfigDir, "settings.json")
+// claudeSource is one settings source doctor can read for Claude Code, with
+// the bytes it was read from: the raw text is what the marker, router-path and
+// --state-dir scans all run against.
+type claudeSource struct {
+	name string
+	raw  []byte
+}
+
+// claudeSources is every settings source doctor can reach for Claude Code.
+// settings.json is kept apart from the launcher's overlays because which of
+// the two carries the marker is the whole of §4.4's registration finding: in
+// the overlay it is the live Nix-placed registration, in settings.json it is a
+// stale one from a hookyard that still wrote that file.
+type claudeSources struct {
+	settingsPath string
+	settings     []byte // nil when settings.json could not be read
+	overlays     []claudeSource
+	// unresolved names each source doctor knows exists but could not read, so
+	// a Pass on the disableAllHooks gate can say what it did not see (§4.4).
+	unresolved []string
+}
+
+func resolveClaudeSources(p Paths) claudeSources {
+	c := claudeSources{settingsPath: filepath.Join(p.ClaudeConfigDir, "settings.json")}
+	// A missing settings.json is the expected state now that hookyard does not
+	// write it; only a file that is there and unreadable is worth naming.
+	if raw, err := os.ReadFile(c.settingsPath); err == nil {
+		c.settings = raw
+	} else if !os.IsNotExist(err) {
+		c.unresolved = append(c.unresolved, fmt.Sprintf("%s (%v)", c.settingsPath, err))
+	}
+
+	for _, v := range p.ClaudeSettingsFlags {
+		if raw, err := os.ReadFile(v); err == nil {
+			c.overlays = append(c.overlays, claudeSource{name: v, raw: raw})
+			continue
+		}
+		// claude --help declares --settings <file-or-json>, so a value that is
+		// not a readable file may be the settings document itself.
+		if json.Valid([]byte(v)) {
+			c.overlays = append(c.overlays, claudeSource{name: "inline --settings JSON", raw: []byte(v)})
+			continue
+		}
+		c.unresolved = append(c.unresolved, v)
+	}
+	return c
+}
+
+func (c claudeSources) all() []claudeSource {
+	var out []claudeSource
+	if c.settings != nil {
+		out = append(out, claudeSource{name: c.settingsPath, raw: c.settings})
+	}
+	return append(out, c.overlays...)
+}
+
+// markerSource returns the source whose paths a session will actually run.
+// The overlay outranks settings.json here, the reverse of claudeRegistration's
+// arms: a marker in settings.json is the stale copy, and reporting the stale
+// row's router path and --state-dir would describe a registration that is no
+// longer the live one.
+func (c claudeSources) markerSource() (claudeSource, bool) {
+	for _, o := range c.overlays {
+		if bytes.Contains(o.raw, []byte(render.Marker)) {
+			return o, true
+		}
+	}
+	if bytes.Contains(c.settings, []byte(render.Marker)) {
+		return claudeSource{name: c.settingsPath, raw: c.settings}, true
+	}
+	return claudeSource{}, false
+}
+
+func claudeFindings(p Paths, dir string, c claudeSources) []Finding {
 	state := claudeStatePath(p.ClaudeConfigDir)
 
 	trust := Finding{Engine: vocab.ClaudeCode, Check: "workspace trust", Detail: state}
@@ -146,23 +227,105 @@ func claudeFindings(p Paths, dir string) []Finding {
 		trust.Detail = fmt.Sprintf("%s is not trusted in %s, so hooks are skipped entirely", dir, state)
 	}
 
-	gate := Finding{Engine: vocab.ClaudeCode, Check: "hooks enabled", Detail: settings}
-	var claudeSettings struct {
-		DisableAllHooks bool `json:"disableAllHooks"`
-	}
-	if err := readJSON(settings, &claudeSettings); err != nil && !os.IsNotExist(err) {
-		gate.Detail = fmt.Sprintf("%s: %v", settings, err)
-	} else if claudeSettings.DisableAllHooks {
-		gate.Status = Fail
-		gate.Detail = "disableAllHooks is set in " + settings
-	} else {
-		gate.Status = Pass
-		// The --settings overlay is a separate source hookyard cannot see from
-		// here, and it can disable hooks on its own.
-		gate.Detail = "not disabled in " + settings + " (a --settings overlay is not visible here)"
+	return []Finding{trust, claudeHooksEnabled(c), claudeRegistration(c), claudeRouterPath(c)}
+}
+
+// claudeHooksEnabled reads disableAllHooks in every source, not just
+// settings.json: §8's gate fires on the flag being set in user *or* flag
+// settings, so checking one of the two and calling the result a Pass is a
+// fail-open now that doctor holds the overlay's bytes.
+func claudeHooksEnabled(c claudeSources) Finding {
+	f := Finding{Engine: vocab.ClaudeCode, Check: "hooks enabled", Detail: c.settingsPath}
+
+	var checked []string
+	blind := c.unresolved
+	for _, s := range c.all() {
+		var settings struct {
+			DisableAllHooks bool `json:"disableAllHooks"`
+		}
+		if err := json.Unmarshal(s.raw, &settings); err != nil {
+			blind = append(blind, fmt.Sprintf("%s (%v)", s.name, err))
+			continue
+		}
+		if settings.DisableAllHooks {
+			f.Status = Fail
+			f.Detail = "disableAllHooks is set in " + s.name
+			return f
+		}
+		checked = append(checked, s.name)
 	}
 
-	return []Finding{trust, gate, registration(vocab.ClaudeCode, settings), routerPath(vocab.ClaudeCode, settings)}
+	if len(checked) == 0 {
+		f.Status = Unknown
+		f.Detail = "no Claude settings source hookyard can read"
+	} else {
+		f.Status = Pass
+		f.Detail = "not disabled in " + strings.Join(checked, ", ")
+	}
+	if len(blind) > 0 {
+		f.Detail += " (not read: " + strings.Join(blind, ", ") + ")"
+	}
+	return f
+}
+
+// claudeRegistration is Claude's own arm rather than registration()'s: the
+// shared one greps a single config file and tells the reader to run hookyard
+// install, and under emit both halves are wrong — the block is not in
+// settings.json, and no install can put it there (§4.4).
+func claudeRegistration(c claudeSources) Finding {
+	f := Finding{Engine: vocab.ClaudeCode, Check: "hookyard registered", Detail: c.settingsPath}
+
+	// A marker in settings.json outranks one in the overlay instead of being
+	// masked by it: §8 unions hooks across sources, so registered in both
+	// means every handler runs twice.
+	if bytes.Contains(c.settings, []byte(render.Marker)) {
+		f.Status = Fail
+		f.Detail = "stale hookyard entry in " + c.settingsPath +
+			"; remove it — hookyard no longer writes that file, and an entry in both it and the --settings overlay runs every handler twice"
+		return f
+	}
+
+	var names []string
+	for _, o := range c.overlays {
+		if bytes.Contains(o.raw, []byte(render.Marker)) {
+			f.Status = Pass
+			// The narrow claim §4.3b requires: --settings is last-wins, so a
+			// caller passing its own displaces this one, and doctor reads the
+			// launcher rather than any given invocation.
+			f.Detail = "the claude launcher on PATH passes --settings " + o.name +
+				", the Nix-placed overlay, and it carries hookyard's block; a caller passing its own --settings displaces it, which doctor cannot see"
+			return f
+		}
+		names = append(names, o.name)
+	}
+	if len(names) > 0 {
+		f.Status = Fail
+		f.Detail = "no hookyard entry in the --settings overlay the claude launcher passes (" + strings.Join(names, ", ") +
+			"); wire programs.hookyard.claudeOverlay.merged into it and rebuild"
+		return f
+	}
+
+	f.Status = Unknown
+	f.Detail = "hookyard cannot see which settings file claude is started with"
+	if len(c.unresolved) > 0 {
+		f.Detail += " (not read: " + strings.Join(c.unresolved, ", ") + ")"
+	}
+	return f
+}
+
+func claudeRouterPath(c claudeSources) Finding {
+	src, ok := c.markerSource()
+	if !ok {
+		// claudeRegistration above already reports a missing hookyard entry;
+		// a second Fail here for the same cause would be duplicate noise.
+		return Finding{
+			Engine: vocab.ClaudeCode,
+			Check:  "router path",
+			Status: Unknown,
+			Detail: "no hookyard entry in any Claude settings source to check",
+		}
+	}
+	return routerPathIn(vocab.ClaudeCode, src.name, src.raw)
 }
 
 // Claude Code keeps per-directory trust in .claude.json, one entry per
@@ -365,14 +528,7 @@ func piLauncherFindings() Finding {
 		f.Detail = fmt.Sprintf("cannot read %s: %v", resolved, err)
 		return f
 	}
-	// A compiled binary can contain byte sequences that coincidentally match
-	// these patterns; a NUL byte in the first slice is the standard signal
-	// that a file isn't text, the same heuristic git and file(1) use.
-	probe := raw
-	if len(probe) > 512 {
-		probe = probe[:512]
-	}
-	if bytes.IndexByte(probe, 0) != -1 {
+	if looksBinary(raw) {
 		f.Status = Pass
 		f.Detail = resolved + " is a compiled binary, not a wrapper script"
 		return f
@@ -395,6 +551,51 @@ func piLauncherFindings() Finding {
 	f.Status = Fail
 	f.Detail = fmt.Sprintf("%s injects registrations hookyard did not write and cannot strip: %s", resolved, strings.Join(injected, ", "))
 	return f
+}
+
+// looksBinary reports whether a launcher is a compiled binary rather than a
+// text script. A compiled binary can contain byte sequences that
+// coincidentally match the launcher patterns; a NUL byte in the first slice is
+// the standard signal that a file isn't text, the same heuristic git and
+// file(1) use.
+func looksBinary(raw []byte) bool {
+	probe := raw
+	if len(probe) > 512 {
+		probe = probe[:512]
+	}
+	return bytes.IndexByte(probe, 0) != -1
+}
+
+// claudeSettingsPattern recovers what the claude launcher passes as
+// --settings. The quoted alternatives are not decoration: --settings takes a
+// file *or* an inline JSON document, and an inline one is quoted and full of
+// spaces, so a bare \S+ would recover a fragment of it.
+var claudeSettingsPattern = regexp.MustCompile(`--settings[=\s]+('[^']*'|"[^"]*"|\S+)`)
+
+// claudeLauncherSettings recovers those values the way piLauncherFindings
+// recovers Pi's injections: resolve on PATH, follow symlinks, scan only a text
+// script. It is the only way to read them — hookyard no longer writes
+// ~/.claude/settings.json, and the overlay Nix passes is named nowhere else on
+// the machine (§4.4).
+func claudeLauncherSettings() []string {
+	path, err := exec.LookPath("claude")
+	if err != nil {
+		return nil
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil
+	}
+	raw, err := os.ReadFile(resolved)
+	if err != nil || looksBinary(raw) {
+		return nil
+	}
+
+	var values []string
+	for _, m := range claudeSettingsPattern.FindAllStringSubmatch(string(raw), -1) {
+		values = append(values, strings.Trim(m[1], `'"`))
+	}
+	return distinctStrings(values)
 }
 
 func registration(engine vocab.Engine, path string) Finding {
@@ -437,20 +638,29 @@ var stateDirPattern = regexp.MustCompile(`--state-dir\s+([^\s"']+)`)
 // profile symlink fails at exec, before any hookyard code runs, so there is
 // nothing running to write a record for streamFindings to read.
 func routerPath(engine vocab.Engine, configPath string) Finding {
-	f := Finding{Engine: engine, Check: "router path", Detail: configPath}
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
-		f.Status = Unknown
-		f.Detail = fmt.Sprintf("cannot read %s: %v", configPath, err)
-		return f
+		return Finding{
+			Engine: engine,
+			Check:  "router path",
+			Status: Unknown,
+			Detail: fmt.Sprintf("cannot read %s: %v", configPath, err),
+		}
 	}
+	return routerPathIn(engine, configPath, raw)
+}
+
+// routerPathIn takes the bytes rather than the path because Claude's source
+// may be an inline --settings document, which has no file to re-read.
+func routerPathIn(engine vocab.Engine, source string, raw []byte) Finding {
+	f := Finding{Engine: engine, Check: "router path", Detail: source}
 	paths := distinctStrings(routerPathPattern.FindAllString(string(raw), -1))
 	if len(paths) == 0 {
 		// registration() above already reports a missing hookyard entry as
 		// Fail; a second Fail here for the same cause would be duplicate
 		// noise.
 		f.Status = Unknown
-		f.Detail = "no hookyard entry in " + configPath + " to check"
+		f.Detail = "no hookyard entry in " + source + " to check"
 		return f
 	}
 
@@ -519,10 +729,23 @@ func distinctStrings(in []string) []string {
 // negative in the tool nominated to catch silent failures. The emitted
 // config is ground truth for what the router actually uses, and it is
 // already open in front of the router-path scan above.
-func recoverStateDir(p Paths) []string {
+func recoverStateDir(p Paths, claude claudeSources) []string {
 	var found []string
+	scan := func(raw []byte) {
+		for _, m := range stateDirPattern.FindAllStringSubmatch(string(raw), -1) {
+			found = append(found, m[1])
+		}
+	}
+
+	// Claude's --state-dir lives in whichever source carries the registration,
+	// which under Nix is the launcher's --settings overlay; settings.json
+	// holds nothing to recover and scanning it would reproduce the exact
+	// silent fallback this function exists to close.
+	if src, ok := claude.markerSource(); ok {
+		scan(src.raw)
+	}
+
 	for _, path := range []string{
-		filepath.Join(p.ClaudeConfigDir, "settings.json"),
 		filepath.Join(p.CodexHome, "config.toml"),
 		filepath.Join(p.CursorHome, "hooks.json"),
 		// Pi's settings.json only names the bridge file; the router command,
@@ -536,9 +759,7 @@ func recoverStateDir(p Paths) []string {
 		if err != nil {
 			continue
 		}
-		for _, m := range stateDirPattern.FindAllStringSubmatch(string(raw), -1) {
-			found = append(found, m[1])
-		}
+		scan(raw)
 	}
 	return distinctStrings(found)
 }

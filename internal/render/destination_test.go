@@ -7,20 +7,22 @@ import (
 	"testing"
 )
 
-// A link stands for something else managing that path — on this machine
-// home-manager's store link at ~/.claude/settings.json. The assertion that
-// matters is the last one: the link is still a link, so nothing detached it.
+// A link stands for something else managing that path — a dotfiles repo, or a
+// home-manager store link. ~/.claude/settings.json was that case and is gone
+// from this table because hookyard can no longer name it at all (#29); these
+// three are still hookyard's to write, so a link over one must be refused. The
+// assertion that matters is the last one: the link is still a link, so nothing
+// detached it.
 func TestCheckDestinationsRefusesASymlinkAndLeavesItIntact(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		slot int
 		flag string
 	}{
-		{"claude settings.json", 0, "--claude-settings"},
-		{"codex config.toml", 1, "--codex-config"},
-		{"cursor hooks.json", 2, "--cursor-hooks"},
-		{"pi settings.json", 3, "--pi-settings"},
-		{"pi bridge", 4, "--pi-settings"},
+		{"codex config.toml", 0, "--codex-config"},
+		{"cursor hooks.json", 1, "--cursor-hooks"},
+		{"pi settings.json", 2, "--pi-settings"},
+		{"pi bridge", 3, "--pi-settings"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -34,7 +36,6 @@ func TestCheckDestinationsRefusesASymlinkAndLeavesItIntact(t *testing.T) {
 			}
 			piSettings := filepath.Join(dir, "pi-settings.json")
 			paths := []string{
-				filepath.Join(dir, "claude.json"),
 				filepath.Join(dir, "config.toml"),
 				filepath.Join(dir, "cursor.json"),
 				piSettings,
@@ -43,11 +44,10 @@ func TestCheckDestinationsRefusesASymlinkAndLeavesItIntact(t *testing.T) {
 			paths[tc.slot] = link
 
 			err := CheckDestinations(
-				Destination{"--claude-settings", paths[0]},
-				Destination{"--codex-config", paths[1]},
-				Destination{"--cursor-hooks", paths[2]},
+				Destination{"--codex-config", paths[0]},
+				Destination{"--cursor-hooks", paths[1]},
+				Destination{"--pi-settings", paths[2]},
 				Destination{"--pi-settings", paths[3]},
-				Destination{"--pi-settings", paths[4]},
 			)
 			if err == nil {
 				t.Fatal("want a refusal for the symlinked destination, got nil")
@@ -77,7 +77,6 @@ func TestCheckDestinationsAcceptsRegularAndMissingFiles(t *testing.T) {
 	}
 
 	err := CheckDestinations(
-		Destination{"--claude-settings", filepath.Join(dir, "absent.json")},
 		Destination{"--codex-config", existing},
 		Destination{"--cursor-hooks", filepath.Join(dir, "absent-too.json")},
 		Destination{"--pi-settings", filepath.Join(dir, "pi-settings.json")},
@@ -96,13 +95,13 @@ func TestWritersStillWriteRegularAndMissingDestinations(t *testing.T) {
 	if err := os.WriteFile(existing, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	missing := filepath.Join(dir, "settings.json")
+	missing := filepath.Join(dir, "config.toml")
 	entries := []Entry{{Event: "preToolUse", Command: "/nix/store/x/bin/hookyard route --registered-for cursor --event pre_tool"}}
 
 	if err := WriteCursor(existing, entries); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteClaude(missing, []Entry{{Event: "PreToolUse", Command: entries[0].Command}}); err != nil {
+	if err := WriteCodex(missing, []Entry{{Event: "PreToolUse", Command: entries[0].Command}}); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{existing, missing} {
@@ -162,16 +161,16 @@ func TestCheckPiBridgeDirAcceptsAMissingOrRealBinDirectory(t *testing.T) {
 // break installs that work today.
 func TestCheckDestinationsAcceptsASymlinkedEngineDirectory(t *testing.T) {
 	dir := t.TempDir()
-	real := filepath.Join(dir, "dotfiles-claude")
+	real := filepath.Join(dir, "dotfiles-cursor")
 	if err := os.Mkdir(real, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	linked := filepath.Join(dir, ".claude")
+	linked := filepath.Join(dir, ".cursor")
 	if err := os.Symlink(real, linked); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := CheckDestinations(Destination{"--claude-settings", filepath.Join(linked, "settings.json")}); err != nil {
-		t.Errorf("want a settings.json inside a linked config directory accepted, got %v", err)
+	if err := CheckDestinations(Destination{"--cursor-hooks", filepath.Join(linked, "hooks.json")}); err != nil {
+		t.Errorf("want a hooks.json inside a linked config directory accepted, got %v", err)
 	}
 }

@@ -281,6 +281,50 @@ func execIsRunnable(path string) error {
 	return nil
 }
 
+// LoadStatic reads and validates one manifest the way Load does, minus
+// execIsRunnable: it runs validateStatic alone, the same rule ReadTable
+// already carves out and for the same reason (its doc comment explains the
+// stat is redundant on the critical path; here the stat is worse than
+// redundant, it is wrong). `emit` runs inside a Nix build sandbox, where a
+// manifest's `exec` may be an ordinary absolute path like `/home/you/bin/
+// guard` that simply does not exist yet — it will, at activation, when
+// `install` runs and re-validates through Load. So `emit` must not fail a
+// build over a manifest `install` would accept minutes later in the same
+// activation (R7).
+//
+// The narrowing is exactly one check wide. validateStatic still refuses a
+// relative or bare exec — that rule lives there, not in the stat, so nothing
+// about §9's hook-fire-time argument is given up. And unlike Load,
+// LoadStatic accepts zero handlers: it matches ReadTable, and matches
+// `install --allow-empty`, since nix-config#252 ships an empty manifest.
+// Duplicate ids within one file are still refused, matching both Load and
+// ReadTable — only Merge's cross-manifest check is left to the caller, who
+// must still run it (R7): LoadStatic dedupes one file, not a caller's whole
+// --manifest list.
+func LoadStatic(path string) (*Manifest, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var m Manifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	m.Source = path
+	seen := map[string]bool{}
+	for _, h := range m.Handlers {
+		where := fmt.Sprintf("%s: handler %q", m.Source, h.ID)
+		if err := validateStatic(where, h); err != nil {
+			return nil, err
+		}
+		if seen[h.ID] {
+			return nil, fmt.Errorf("%s: handler id %q declared twice in one manifest", m.Source, h.ID)
+		}
+		seen[h.ID] = true
+	}
+	return &m, nil
+}
+
 // Merge combines validated manifests into one table. A duplicate id across
 // repos is an error rather than a last-writer-wins override, because that is
 // the case where one repo's change silently replaces another repo's guard.

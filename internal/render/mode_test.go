@@ -24,12 +24,6 @@ func TestWritersMode(t *testing.T) {
 		fixture string // pre-existing content the writer accepts
 		write   func(path string) error
 	}{
-		"WriteClaude": {
-			fixture: "{}",
-			write: func(path string) error {
-				return WriteClaude(path, []Entry{{Event: "PreToolUse", Command: "/x/bin/hookyard route"}})
-			},
-		},
 		"WriteCodex": {
 			fixture: "model_reasoning_effort = \"low\"\n",
 			write: func(path string) error {

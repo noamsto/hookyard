@@ -43,7 +43,14 @@ func claudeConfig(t *testing.T, dir, command string) string {
 	t.Helper()
 	path := filepath.Join(dir, "settings.json")
 	entries := []render.Entry{{Event: "PreToolUse", Matcher: "Bash", Command: command}}
-	if err := render.WriteClaude(path, entries); err != nil {
+	out, err := render.ClaudeSettings(nil, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path

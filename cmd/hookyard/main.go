@@ -25,6 +25,7 @@ import (
 const usage = `hookyard — register agent hooks once, route them to every coding agent
 
   hookyard install   render every manifest into every engine's native config
+  hookyard emit      print Claude Code's overlay to stdout for Nix to place
   hookyard validate  check manifests without writing anything
   hookyard doctor    report whether each engine will actually run the hooks
   hookyard route     dispatch one hook event to every handler that matches it
@@ -39,6 +40,8 @@ func main() {
 	switch os.Args[1] {
 	case "install":
 		err = install(os.Args[2:])
+	case "emit":
+		err = emit(os.Args[2:])
 	case "validate":
 		err = validate(os.Args[2:])
 	case "doctor":
@@ -72,7 +75,6 @@ func (m *manifestPaths) Set(v string) error {
 }
 
 type targets struct {
-	claude string
 	codex  string
 	cursor string
 	pi     string
@@ -82,10 +84,6 @@ func defaultTargets() (targets, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return targets{}, err
-	}
-	claudeDir := os.Getenv("CLAUDE_CONFIG_DIR")
-	if claudeDir == "" {
-		claudeDir = filepath.Join(home, ".claude")
 	}
 	codexHome := os.Getenv("CODEX_HOME")
 	if codexHome == "" {
@@ -98,7 +96,6 @@ func defaultTargets() (targets, error) {
 		piAgentDir = filepath.Join(home, ".pi", "agent")
 	}
 	return targets{
-		claude: filepath.Join(claudeDir, "settings.json"),
 		codex:  filepath.Join(codexHome, "config.toml"),
 		cursor: filepath.Join(home, ".cursor", "hooks.json"),
 		pi:     filepath.Join(piAgentDir, "settings.json"),
@@ -119,7 +116,6 @@ func install(args []string) error {
 	}
 	routerPath := fs.String("router-path", "", "absolute path hookyard is invoked by (defaults to this binary)")
 	stateDir := fs.String("state-dir", defaultStateDir, "directory the router reads its table from and writes records to")
-	claude := fs.String("claude-settings", defaults.claude, "Claude Code settings.json to write")
 	codex := fs.String("codex-config", defaults.codex, "Codex config.toml to write")
 	cursor := fs.String("cursor-hooks", defaults.cursor, "Cursor hooks.json to write")
 	pi := fs.String("pi-settings", defaults.pi, "Pi settings.json to write; the bridge lands in bin/ beside it")
@@ -139,12 +135,12 @@ func install(args []string) error {
 	if len(paths) == 0 && !*allowEmpty {
 		return fmt.Errorf("no --manifest given")
 	}
-	return runInstall(paths, *routerPath, *stateDir, *claude, *codex, *cursor, *pi, *dryRun)
+	return runInstall(paths, *routerPath, *stateDir, *codex, *cursor, *pi, *dryRun)
 }
 
 // runInstall is install's pipeline, split out so tests can drive it with
 // explicit paths instead of os.Args.
-func runInstall(paths manifestPaths, routerPath, stateDir, claude, codex, cursor, pi string, dryRun bool) error {
+func runInstall(paths manifestPaths, routerPath, stateDir, codex, cursor, pi string, dryRun bool) error {
 	handlers, err := loadAll(paths)
 	if err != nil {
 		return err
@@ -176,7 +172,6 @@ func runInstall(paths manifestPaths, routerPath, stateDir, claude, codex, cursor
 	// install is still all-or-nothing. A per-writer refusal would land after
 	// the table and the earlier engines were already written.
 	if err := render.CheckDestinations(
-		render.Destination{Flag: "--claude-settings", Path: claude},
 		render.Destination{Flag: "--codex-config", Path: codex},
 		render.Destination{Flag: "--cursor-hooks", Path: cursor},
 		render.Destination{Flag: "--pi-settings", Path: pi},
@@ -205,11 +200,8 @@ func runInstall(paths manifestPaths, routerPath, stateDir, claude, codex, cursor
 	if err := render.WriteCursor(cursor, plan[vocab.Cursor]); err != nil {
 		return err
 	}
-	if err := render.WriteClaude(claude, plan[vocab.ClaudeCode]); err != nil {
-		return err
-	}
-	// More consequential than the two config-only writers above it: this one
-	// also lands executable code.
+	// More consequential than the config-only writer above it: this one also
+	// lands executable code.
 	if err := render.WritePi(pi, plan[vocab.Pi], piVersion()); err != nil {
 		return err
 	}
@@ -217,6 +209,13 @@ func runInstall(paths manifestPaths, routerPath, stateDir, claude, codex, cursor
 		return err
 	}
 	for _, engine := range vocab.Engines {
+		if engine == vocab.ClaudeCode {
+			// install never reaches settings.json (R2): the count is real, but
+			// saying only "N entries" here would read exactly like the other
+			// three engines and tell an operator a file was written that was not.
+			fmt.Printf("%-12s %d entries (emitted for Nix to place, not written by install)\n", engine, len(plan[engine]))
+			continue
+		}
 		fmt.Printf("%-12s %d entries\n", engine, len(plan[engine]))
 	}
 	return nil
@@ -253,6 +252,85 @@ func checkShellSafe(flagName, path string) error {
 		return fmt.Errorf("%s %q contains %q, which a shell would treat specially; pass a path without whitespace or shell metacharacters", flagName, path, path[i])
 	}
 	return nil
+}
+
+// emit renders Claude Code's overlay to stdout for Nix to place at its
+// --settings path, and writes nothing itself (R1, R2). It is engine-scoped
+// and claude-code-only: Cursor's, Codex's and Pi's destinations are real files
+// with other writers or executable state of their own (§4.2), so a store path
+// would lose what they already hold — they stay on install.
+func emit(args []string) error {
+	fs := flag.NewFlagSet("emit", flag.ExitOnError)
+	var paths manifestPaths
+	fs.Var(&paths, "manifest", "path to a handler manifest (repeatable)")
+	engine := fs.String("engine", "", "engine to emit for; only claude-code is supported")
+	routerPath := fs.String("router-path", "", "absolute path hookyard is invoked by, embedded in each entry")
+	stateDir := fs.String("state-dir", "", "state dir embedded in each entry as text; emit never creates it")
+	base := fs.String("base", "", `existing settings file to merge hookyard's entries into (omit for a bare {"hooks":...} document)`)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *engine == "" {
+		return fmt.Errorf("--engine is required")
+	}
+	if *engine != string(vocab.ClaudeCode) {
+		return fmt.Errorf("--engine %q is not supported by emit: only claude-code's destination is Nix-managed; "+
+			"codex, cursor and pi keep other writers or executable state a store path can't hold, so they stay on hookyard install", *engine)
+	}
+	if *routerPath == "" {
+		return fmt.Errorf("--router-path is required")
+	}
+	if *stateDir == "" {
+		return fmt.Errorf("--state-dir is required")
+	}
+	if err := checkShellSafe("--router-path", *routerPath); err != nil {
+		return err
+	}
+	if err := checkShellSafe("--state-dir", *stateDir); err != nil {
+		return err
+	}
+
+	// LoadStatic, not loadAll (which calls manifest.Load): emit runs inside a
+	// Nix build sandbox, where a manifest's $HOME-rooted exec does not exist,
+	// and stat-ing it would fail the build for a reason that has nothing to do
+	// with the manifest being wrong (R7). Merge still runs on top of it, so a
+	// duplicate id across manifests is refused here exactly as install refuses
+	// it later in the same activation — build time and activation time cannot
+	// disagree about what a legal manifest set is.
+	manifests := make([]*manifest.Manifest, 0, len(paths))
+	for _, p := range paths {
+		m, err := manifest.LoadStatic(p)
+		if err != nil {
+			return err
+		}
+		manifests = append(manifests, m)
+	}
+	handlers, err := manifest.Merge(manifests)
+	if err != nil {
+		return err
+	}
+
+	plan, err := render.BuildPlan(handlers, *routerPath, *stateDir)
+	if err != nil {
+		return err
+	}
+
+	var baseBytes []byte
+	if *base != "" {
+		baseBytes, err = os.ReadFile(*base)
+		if err != nil {
+			return err
+		}
+	}
+	doc, err := render.ClaudeSettings(baseBytes, plan[vocab.ClaudeCode])
+	if err != nil {
+		return err
+	}
+	// The whole document, one write: a Nix derivation redirects this with
+	// `> $out`, so anything printed ahead of a later refusal would be captured
+	// as if it were a valid overlay.
+	_, err = os.Stdout.Write(doc)
+	return err
 }
 
 func validate(args []string) error {
@@ -530,6 +608,9 @@ func loadAll(paths []string) ([]manifest.Handler, error) {
 func printPlan(plan render.Plan, piSettings string) {
 	for _, engine := range vocab.Engines {
 		fmt.Printf("%s\n", engine)
+		if engine == vocab.ClaudeCode {
+			fmt.Println("  (emitted for Nix to place, not written by install)")
+		}
 		if len(plan[engine]) == 0 {
 			fmt.Println("  (nothing)")
 			continue
