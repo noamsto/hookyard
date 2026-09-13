@@ -1,0 +1,34 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: DeterminateSystems/nix-installer-action@main
+      # No magic-nix-cache: it now requires a FlakeHub account and fails to
+      # authenticate on a plain public repo, adding a red annotation for a
+      # build this small does not need.
+      - name: flake check
+        run: nix flake check
+      # nix flake check does not run this repo's `gotest`/`golangci-lint`
+      # pre-commit hooks -- both are staged "pre-push" only, and the
+      # `pre-commit` flake check runs `pre-commit run --all-files` with the
+      # default stage "pre-commit", which skips them. Run them explicitly so
+      # Go tests and lint actually gate CI.
+      - name: go test
+        run: nix develop -c go test ./...
+      - name: golangci-lint
+        run: nix develop -c golangci-lint run ./...
