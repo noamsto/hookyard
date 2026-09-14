@@ -1,28 +1,44 @@
 # hookyard
 
-Register agent hooks once, route them to every coding agent.
+Write agent hooks once, ship them to every coding agent.
 
-Claude Code, Codex, Cursor and Pi each declare hooks in their own config
-format, under their own event names, with their own payload shape — Pi has
-no config-level hook at all, and gets a generated bridge extension instead
-(more below). hookyard is a standalone static binary that holds one
-declarative table of which handler runs on which event on which engine,
-renders that table into each engine's native config, and — when an engine
-fires a hook — decodes the payload into a normalized shape, runs the
-matching handlers concurrently under a shared deadline, folds their
-verdicts with a deny-wins consolidation, and renders the result in the
-shape the calling engine accepts. All four engines have a confirmed deny
-path, so a guard enforces on all four; a decision only has somewhere to
-land on `pre_tool` (plus a handful of Cursor-scoped events), so a verdict on
-any other event is recorded but not enforced, and an `allow` rendered to
-Codex or Pi is recorded rather than enforced too — Codex rejects an explicit
-allow by name, and Pi's decision channel has no allow wire form at all, so
-on both nothing is printed and the engine's own default flow runs instead.
-An `ask` is not one of those cases: on Codex and Pi, whose decision shapes
-are binary, a consolidated `ask` degrades to an enforced `deny` with a
-reason explaining why.
+hookyard is one Go binary and one manifest schema behind two front ends.
+**Build mode** is the decided OSS default: `hookyard build` would generate
+what a plugin ships per engine — Claude Code and Codex plugin hooks.json, a
+generated Pi package, with Cursor gated pending verification — bundling the
+hookyard binary itself as the shim, so end users install a tool's plugin
+through their engine's own plugin flow and never see hookyard at all. It's
+the hooks layer Agent Plugins lacks (Agent Plugins 1.0, agent-plugins.org,
+covers skills and MCP only; hooks are explicitly out of scope) — but it is
+not yet implemented. **Yard mode** is what ships today: install/emit/route,
+machine-wide deny-wins consolidation across every tool's handlers, and the
+always-on event record, aimed at Nix and power users and at security guards
+that need machine-wide enforcement.
 
-## How it works
+Yard mode works like this: Claude Code, Codex, Cursor and Pi each declare
+hooks in their own config format, under their own event names, with their
+own payload shape — Pi has no config-level hook at all, and gets a
+generated bridge extension instead (more below). hookyard is a standalone
+static binary that holds one declarative table of which handler runs on
+which event on which engine, renders that table into each engine's native
+config, and — when an engine fires a hook — decodes the payload into a
+normalized shape, runs the matching handlers concurrently under a shared
+deadline, folds their verdicts with a deny-wins consolidation, and renders
+the result in the shape the calling engine accepts. All four engines have a
+confirmed deny path, so a guard enforces on all four; a decision only has
+somewhere to land on `pre_tool` (plus a handful of Cursor-scoped events), so
+a verdict on any other event is recorded but not enforced, and an `allow`
+rendered to Codex or Pi is recorded rather than enforced too — hookyard
+prints no allow to Codex (an older Codex binary was read as rejecting one;
+current Codex docs describe `allow` with `updatedInput`), and Pi's decision
+channel has no allow wire form at all, so on both nothing is printed and the
+engine's own default flow runs instead. An `ask` is not one of those cases:
+on Codex and Pi, whose decision shapes are binary, a consolidated `ask`
+degrades to an enforced `deny` with a reason explaining why.
+
+Everything below documents yard mode, the part that ships today.
+
+## How yard mode works
 
 Two passes. `hookyard install` writes the table down into Codex's, Cursor's
 and Pi's config and hookyard's own state table; `hookyard emit` prints
@@ -259,4 +275,5 @@ The design, and the verification behind it, is in
 payloads for all four engines are in
 [`docs/design/fixtures/hook-payloads/`](docs/design/fixtures/hook-payloads/) —
 Pi's are hookyard's own bridge output rather than a native payload, and the
-fixtures' own README says so.
+fixtures' own README says so. The build-mode/yard-mode distribution
+decision is in [`docs/design/hookyard.md`](docs/design/hookyard.md) §3.1.

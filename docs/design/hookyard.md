@@ -321,7 +321,10 @@ and dispatcher's hook scripts are wired today, and versioned alongside the
 handler it describes. What differs from that pattern is who writes the
 engine-facing config: **no consumer repo emits native config for hookyard.**
 One aggregated invocation does, for all of them at once, for the reason §8
-gives — a per-repo invocation would strip the other repos' rows.
+gives — a per-repo invocation would strip the other repos' rows. That claim
+is scoped to yard mode: in build mode, a consumer repo does ship generated
+native plugin config, rendered by `build` rather than by an aggregated
+`install` (§3.1).
 
 That direction has a real cost, and it is named rather than elided: hookyard
 is a fifth thing that has to be present and correct on the machine, where
@@ -330,7 +333,8 @@ exist yet, where houston's would have been reused. Nothing here inherits an
 existing pipeline; a new one — flake package output, CI, versioning — has to
 be built for hookyard specifically. That is a genuine expense, not a rounding
 error, and it is the price of the reduction in per-repo, per-engine
-duplication documented in §1.
+duplication documented in §1. In build mode that cost does not disappear —
+it moves from the end user's machine to the author's release pipeline (§3.1).
 
 Two rationales the prior pass gave *for* building inside houston are retired
 outright, not softened into hedges, and are not restated anywhere in this
@@ -375,7 +379,9 @@ logic. Each consumer repo's Nix module points its engine's native config at
 hookyard's binary and declares which guards from which repos are active;
 none of that changes shape by virtue of hookyard being standalone rather
 than houston-hosted, because nix-config never held the registry or router
-logic under either premise.
+logic under either premise. That picture is yard mode's; build mode's
+native config is rendered by `build` into a plugin, not wired by a
+nix-config module (§3.1).
 
 Delivery — the concrete packaging shape, the path form emitted into native
 config, and how version skew across independently-migrating consumer repos
@@ -385,7 +391,478 @@ path rather than a bare name resolved on `PATH`) and developed in full in
 §9, including which absolute form — a profile path, not a store path — the
 evidence there settles on. This section only cites D1 by name, as the
 delivery shape the rest of the recommendation assumes; it does not re-derive
-or re-argue it.
+or re-argue it. D1's path form is yard mode's; build mode's path form is the
+plugin-root-relative reference §3.1 develops instead.
+
+## 3.1 Distribution model: runtime router, build-time author tool, or both
+
+This section does not re-argue §3's settled premise that hookyard is a
+standalone binary — that decision is fixed input, not something reopened
+here. What it revisits is narrower: §3 named a real cost, "hookyard is a
+fifth thing that has to be present and correct on the machine," and moved on
+without saying who pays it. Every section from §4 through §9 was written
+against one implicit answer — the end user's machine pays it, because that
+is where a router has to run for an engine to invoke it — and this section
+asks whether that has to be the only answer.
+
+The human's own framing, quoted rather than paraphrased: "for the ease of
+development we will cause worse UX." That is the actual shape of the
+trade-off §1 through §9 make, named as costs rather than folded silently
+into "hookyard works":
+
+- the binary install itself;
+- `install` run against a manifest list, or the Nix `emit` path nix-config
+  already takes;
+- the empty-manifests-then-disable ordering §8 and §10 depend on for a
+  no-flag-day migration;
+- a `doctor` invocation the moment a guard silently fails to fire.
+
+**Author wins, end user pays** is the honest name for that shape — call the
+whole existing design **yard mode**, unchanged by anything below. What this
+section asks is whether the cost has to land there. The alternative reverses
+the direction: the author pays it once, at release time, and the end user
+runs their engine's own plugin installer, the flow they already know, never
+installing, pathing, or naming hookyard at all.
+
+### What plugins already carry, per engine
+
+All four engines this design targets already have a plugin mechanism, and
+three of the four already carry a hooks feature inside it. The question this
+table answers is not whether a plugin can deliver a script — it plainly
+can — but what a plugin's own hooks feature gives a router for free, and
+what it still leaves for hookyard to build.
+
+| Engine | Hook config in plugin | Plugin-root reference in hook command | Multi-hook consolidation | End-user install steps | Trust gate |
+|---|---|---|---|---|---|
+| Claude Code | `hooks/hooks.json`, same shape as user/project hooks (DOC) | `${CLAUDE_PLUGIN_ROOT}`, expanded and exported; changes on every plugin update (DOC) | deny > defer > ask > allow, documented (DOC) | marketplace add, then install (`--scope`), or `--plugin-dir` for a session (DOC) | Workspace trust; whether it applies to user-scope plugins the way §8 found it applies to settings hooks is **unverified** |
+| Codex | root `plugin.json` `extensions.com.openai`, or `hooks/hooks.json` (legacy `.codex-plugin/plugin.json` fallback) (DOC) | `$PLUGIN_ROOT` (DOC) | Concurrent; "any deny wins" documented only for `PermissionRequest`. `PreToolUse` documents both `deny` and `allow` with `updatedInput`, which rewrites the tool input (DOC); the rule when one hook allows-and-rewrites while another denies is undocumented — **unverified**, and not a narrow gap | marketplace add, then `/plugins` install; no one-step CLI path found (DOC) | Codex records trust against the hook's current hash, so new or changed hook definitions are marked for review and skipped until trusted (DOC); whether a version bump that leaves a `$PLUGIN_ROOT`-based definition textually unchanged changes that hash is **unverified** (§12, trust-hash preimage), unlike Claude Code, which documents no re-trust step at all |
+| Cursor | `.cursor-plugin/plugin.json` + `hooks/hooks.json`, or manifest `hooks` (DOC) | **No documented plugin-root variable** — the docs show `${PLUGIN_ROOT}` only for MCP `cwd`; a third-party plugin uses `${CURSOR_PLUGIN_ROOT}`, which is **unverified** as a supported mechanism | Across sources, higher-priority source wins (DOC); same-source, `deny > ask > allow` read from `cursor-agent`'s own reducer (code-reading, §4) | IDE: Customize → find the plugin → Install, with a scope choice (DOC, [Cursor plugins](https://cursor.com/docs/plugins)); CLI: `cursor-agent plugin marketplace add <url>`, then `/plugin` → Marketplace, no non-interactive install (vendor staff forum post, [Cursor forum](https://forum.cursor.com/t/unable-to-find-a-cli-command-to-install-a-cursor-plugin-after-adding-its-marketplace-repository/166016); LOCAL, `cursor-agent plugin --help` shows only `marketplace`) | Workspace trust |
+| Pi | `package.json` `"pi"` key; `pi install npm:\|git:\|path` (DOC) | None — an extension resolves its own path itself at load; there is no install-time variable to expand (DOC, code-reading `pi_bridge.ts`) | **Unverified** — not researched | `pi install`, one step (DOC) | Project-local trust gate; does not cover globally installed packages (§8/§12) |
+
+One caveat governs the whole Codex column above: `codex-cli` is not
+installed on this host, so none of Codex's plugin facts could be checked
+against a live install the way Claude Code's and Cursor's were — every
+Codex cell above is DOC grade only, read from vendor documentation, not
+corroborated locally on this pass. That gap is itself routed to §12.
+
+Sources: [Claude Code hooks guide](https://code.claude.com/docs/en/hooks-guide),
+[plugins reference](https://code.claude.com/docs/en/plugins-reference),
+[plugin marketplaces](https://code.claude.com/docs/en/plugin-marketplaces);
+[Codex hooks](https://learn.chatgpt.com/docs/hooks),
+[Codex plugin build](https://developers.openai.com/plugins/build/plugins),
+[Codex plugins](https://learn.chatgpt.com/docs/plugins);
+[Cursor hooks](https://cursor.com/docs/agent/hooks),
+[Cursor plugins reference](https://cursor.com/docs/reference/plugins),
+[Cursor third-party hooks](https://cursor.com/docs/reference/third-party-hooks),
+[Cursor plugins](https://cursor.com/docs/plugins),
+[Cursor forum, CLI plugin install](https://forum.cursor.com/t/unable-to-find-a-cli-command-to-install-a-cursor-plugin-after-adding-its-marketplace-repository/166016);
+[Pi extensions](https://raw.githubusercontent.com/badlogic/pi-mono/main/packages/coding-agent/docs/extensions.md),
+[Pi packages](https://raw.githubusercontent.com/badlogic/pi-mono/main/packages/coding-agent/docs/packages.md).
+
+What the table does not show is more important than what it does: a
+plugin's hooks feature is a **delivery** mechanism — where a script lives,
+how the engine finds it, what trust gate stands in front of it — not a
+**translation** one. It names no cross-engine event vocabulary, decodes no
+payload, renders no verdict, and consolidates only within its own engine's
+rule, when it documents one at all. §10 already made this point about one
+repo's plugin, aeye's: "The plugin is a *delivery* mechanism (where a script
+lives and how the engine loads it), not a capability hookyard lacks. …The
+plugin keeps shipping `skills/`; its `hooks.json` declares nothing once
+hookyard owns the hooks." That is the general case, not an aeye-specific
+one — a plugin carrying hooks at all is orthogonal to whether something
+still has to own event names, decode, verdict, and consolidation, which is
+§4 through §7's job regardless of which front end fires the binary.
+
+Nor is a plugin install "one step" in the way it can sound when set against
+a separate tool plus a manifest plus an ordering rule. Claude Code and
+Codex both need a marketplace add and then an install; Cursor's IDE flow is
+find, install, and pick a scope, and its CLI needs two steps and has no
+non-interactive path at all (table above). The honest comparison is
+not one step against many, it is **the native flow the user already knows
+from installing every other plugin on that engine** against **a separate
+binary, a manifest step, and this design's own ordering discipline** — a
+real difference, but a narrower one than "one click" would suggest.
+
+### Four options, costed for authors and end users
+
+**A. Runtime router (status quo, §1 through §9).** **Author cost:** none
+beyond writing manifests — the same cost yard mode already designed for.
+**End-user cost:** install the binary, run `install` (or Nix `emit`), keep
+manifests current, run `doctor` when something goes quiet. **Trade-off:**
+one implementation, no per-engine drift, but the whole "fifth thing" cost
+from §3 lands on every machine that wants any guard to fire.
+
+**M. Plugin `hooks.json` → `hookyard` on PATH.** Each plugin's own
+`hooks.json` names a bare `hookyard` command, leaning on the plugin
+mechanism only to deliver the *pointer*, not the binary. Rejected as a
+default for the reason §9 already rejects a bare name generally: a bare
+command resolves against whatever `PATH` the engine's hook-launching
+process happens to hand down, which is exactly the environment
+`home/ai/cursor/default.nix` already refuses to trust for `jq`. hookyard
+would still be a prerequisite the end user has to have installed and
+pathed, with a **silent** fail-open when it is not — worse than A's, since A
+at least fails at a path `doctor` can `test -x`, while a bare name's failure
+mode is "resolves to nothing, on some machines, some of the time."
+
+**B. Build-time author tool.** **Author cost:** run `hookyard build`
+(decided direction, not yet implemented) once per release, producing a
+native plugin per engine with the router baked in. **End-user cost:**
+install the plugin the way they install every other plugin on that engine;
+never install, path, or name hookyard. **Trade-off:** the "fifth thing" cost
+moves to the author's release pipeline instead of the end user's machine,
+but cross-plugin consolidation, the always-on record, and machine-wide
+guard coverage all become properties of *which plugins happen to be
+installed*, not of one router that sees every tool call.
+
+**C. Hybrid.** **Author cost:** either of the above, per handler — most
+handlers ship built, a subset stays wired through yard mode. **End-user
+cost:** whichever B or A that handler chose. **Trade-off:** keeps B's
+end-user win for the common case while keeping A's machine-wide
+consolidation and record where it is actually load-bearing (Nix hosts,
+security guards).
+
+| | Author cost | End-user steps (incl. trust prompts) | Cross-plugin deny-wins | Record | Shared-file writes | Failure blast radius |
+|---|---|---|---|---|---|---|
+| A | Manifest only | Binary install + `install`/`emit` + ordering discipline; no plugin trust prompt | hookyard's own lattice, machine-wide (§4) | Always-on, one stream (§6) | Yes — §8's marker-scoped writers into four shared files | One router failure silences every guard on the machine (§5) |
+| M | Manifest only, pointer via plugin | Plugin install/trust, *plus* a hookyard binary silently required on PATH | Same as A, if the binary resolves | Same as A, if the binary resolves | Yes, same as A | Same as A, but "binary absent" is invisible, not `test -x`-checkable |
+| B | `build` per release, per plugin | Native plugin install + that engine's own trust prompt; no separate binary, no manifest step | Engine's native rule, per plugin (table above) | Only if a state directory on the default chain already exists (below) | No — each plugin ships its own file, nothing shared | One plugin's launcher failing costs that plugin's handlers, not the machine's (below) |
+| C | Split by handler | Split by handler | Machine-wide lattice among yard handlers; per-plugin lattice plus the engine's native rule for build handlers and between the two modes | Always-on for yard handlers; conditional for build handlers | Yes for yard handlers only | Bounded per handler, by which mode it shipped in |
+
+### Recommendation: both front-ends, one binary
+
+**C**, sharpened past "some handlers one way, some the other" into a single
+mechanism: the build-mode shim is **the same `hookyard` Go binary**,
+running `route` against a table `build` bakes and ships inside the plugin,
+invoked by a plugin-root-relative path instead of yard mode's absolute
+profile path. There is no second implementation of vocabulary, envelope, or
+verdict to drift out of sync with the first — B and M collapse into one
+mechanism with a different path form, not two designs. **Build mode is the
+OSS default; yard mode stays opt-in**, for Nix hosts and for handlers that
+need machine-wide consolidation and the always-on record — concretely,
+nix-config's `agent-hooks` security guards, for exactly the reason §5 and
+§6 exist: a guard that has to be provably running everywhere, with a record
+`doctor` can inspect, is the case yard mode was built for, and build mode's
+per-plugin, best-effort record (below) does not replace it.
+
+The recommendation is **scoped per engine**, not applied uniformly, because
+the plugin-root facts above are not uniform. Claude Code, Codex, and Pi
+each have a fire-time way for a hook command to find its own plugin
+(`${CLAUDE_PLUGIN_ROOT}`, `$PLUGIN_ROOT`, an extension resolving its own
+path) — build mode is viable on all three. **Cursor build mode is gated on
+verifying a plugin-root reference (or another fire-time path form the docs
+do not currently name); until that gate clears, Cursor stays served by
+yard mode or the tool's existing Cursor installer, the same way it is
+served today.** That gate is stated explicitly because it is the one place
+this recommendation depends on a fact the evidence pass could not confirm,
+rather than one it could.
+
+### The six questions, answered
+
+**1. Shim runtime.** A per-arch static Go binary shipped inside the plugin,
+selected by a POSIX-`sh` launcher (`uname -s`/`-m`, no `jq` — the same
+argument §9 already makes for not trusting an activation environment to
+carry `jq`). Shell or TypeScript shims were considered and rejected: either
+would need `jq` or `node`, neither of which an engine guarantees at
+hook-fire time, and a second table implementation in a second language is
+exactly the kind of per-implementation drift §1 documents across engines —
+codegen and golden fixtures could police it, but removing the second
+implementation removes the need to police it at all. The fixtures already
+committed at `docs/design/fixtures/hook-payloads/` remain the golden inputs
+for both modes, because both modes share one decoder. An unsupported arch
+makes the launcher exit 0 with nothing — fail-open, no record — which joins
+§9's enumerated "nothing running to write a record" set rather than
+inventing a new failure shape.
+
+Windows is out of scope for this launcher: it assumes POSIX `sh`, so on
+Windows the hook command itself errors — an engine-specific failure, not
+the exit-0 fail-open path above — **unverified**, per engine, and routed
+to §12. Artifacts delivered via zip or npm must preserve exec bits for the
+per-arch binaries to remain runnable; that is a packaging requirement on
+`build`, not a design choice this section is free to relax.
+
+**Where the artifacts live.** The marketplaces and Pi's `git:` fetch a git
+ref with no build step in between, so a binary `build` produces has to
+already be in the fetched tree — there is no CI step on the consumer's own
+machine to produce it. Three shapes were weighed: (a) commit binaries to
+the source branch, (b) a generated release branch or tag the marketplace
+entry's `ref` points at, (c) Claude Code's `archive` source (zip + sha256,
+256 MiB cap) or npm for Pi. **Recommend (b)**: the source branch stays
+binary-free, and one CI job produces the ref consumers actually point at.
+The cost is real and named rather than assumed away — a CI job per consumer
+repo, a cross-compile matrix per supported arch, and ref-bump discipline so
+the marketplace entry and the release branch do not drift apart. Built
+plugin size per arch is unmeasured — flagged, not estimated, and routed to
+§12.
+
+**2. Pi.** `build` emits a Pi package whose extension derives from
+`internal/render/pi_bridge.ts`'s template — but not unchanged. Today's
+template bakes install-time values into `DATA` (router path, state
+directory, timeout) the way yard mode's single, absolute-path bridge needs;
+build mode needs the template itself to change, and those changes are named
+here as future implementation work, not committed code:
+
+- the router path has to resolve at extension **load** time, relative to
+  the extension file itself, rather than arrive as an install-time
+  absolute string spliced into `DATA`;
+- argv has to travel as an array rather than the space-split string
+  `pi_bridge.ts:41` currently relies on — a plugin's install path can
+  contain spaces, which `checkShellSafe`'s current contract forbids
+  outright;
+- `pi_version` has to resolve at runtime rather than be baked in at install
+  time, since a build-mode package is not re-rendered per host the way
+  yard mode's bridge is;
+- doctor's state-dir recovery, which today reads it back out of the
+  bridge's own raw bytes (`pi_bridge.ts:36-40`'s comment on why the command
+  stays one whitespace-split string), does not apply to a package doctor
+  did not render.
+
+nix-config's hand-written `hook-bridge.ts` and its `PI_AGENT_HOOKS`
+injection are retired by the guard migration, which stays in yard mode
+(§10); the built Pi package serves only build-mode consumers' Pi handlers.
+§8's `PI_AGENT_HOOKS` double-fire detection (a `doctor` check, not a fix —
+§8 already says it "cannot resolve it by writing") still applies exactly as
+written. Pi's own de-duplication (§8: "the double-fire hazard this pass was
+checking for does not exist") only covers **identical** extension paths, so
+a yard-mode bridge and a build-mode package extension for the same handler
+are two different paths and **both load** — this is the concrete case
+question 3, below, has to resolve.
+
+**3. Yard mode vs plugin-shipped hooks.** There is no plugin-side "step
+aside" check available: a build-mode extension cannot tell whether yard
+mode is also registered with the engine that fired it, because yard mode's
+own registration is invisible from inside a plugin (Claude Code's yard path
+is the Nix overlay a given `claude` invocation may not have loaded; Codex
+and Cursor rows can be stripped or untrusted independently). Even if one
+could be built, it would trade double-fire for a *persistent* neither-fires
+that nothing detects — a standing state that lasts until someone notices,
+not a window visible to the user performing the migration the way §8's
+remove-first exposure is (Codex's own trust prompt surfaces it, even when
+that window runs long) — and it would couple plugin-bundled binaries, several versions
+per host, to a foreign version's state-table format. The decision is
+**one handler, one mode per host** — the same discipline §8 already states
+for migrating a handler between two native entries, generalised to
+migrating a handler between yard mode and a built plugin.
+
+How that discipline is satisfied differs by host, because "same commit" is
+a Nix-specific guarantee. **On Nix hosts**, the switch is the same-commit,
+same-generation swap §8 already names: "a behavior's old native entry is
+removed in the same commit that adds its hookyard-emitted entry" — here,
+the plugin install and the yard-manifest removal land in the one
+nix-config commit that activates as one generation, so no rebuild can ever
+observe only one side. **Non-Nix hosts have no generation boundary to make
+that atomic** — a plugin install and a yard manifest edit are two separate,
+unordered operations there, so the swap cannot be one commit the way it is
+under Nix. What holds instead is §8's residual ordering rule — but the
+neither-fires window it opens lasts until the newly added registration
+actually *runs*, not merely until it is added: on Codex that includes the
+user's separate trust review, which skips new or changed hook definitions
+until trusted (§3.1's per-engine table) and can be open-ended. §8 states the
+rule as "remove the old entry first, add the manifest path second", which
+"inverts the exposure, from a window where both fire to a window where
+neither does, which is the better failure for every handler here — fail-open
+(§5) already accepts that a guard not running is survivable, while this
+section has just established that a double-fire may not be recoverable." For
+guards on non-Nix Codex, the order flips instead: **add and trust the new
+registration, then remove the old one**, accepting a transient both-fire
+rather than an open-ended neither-fires — a deny-wins guard firing twice is
+redundant, not unsafe. Side-effecting handlers, where a double-fire is not
+recoverable, keep §8's remove-first order and the longer, trust-gated
+neither-fires window that comes with it; that window is still the better
+failure than a step-aside's, because it is visible to the user performing
+the migration — Codex prompts for the trust review — where a step-aside's
+persistent neither-fires would not announce itself to anyone. Whether Claude
+Code's user-scope plugin trust opens the same kind of window is
+**unverified** (§3.1's per-engine table already flags this against §8's
+settings-hooks finding). The discipline matters because both-fire is real if
+it breaks — Claude Code runs a plugin's copy of a handler separately from a
+settings copy of the same handler (DOC, hooks reference, "Hook handler
+fields").
+
+One Cursor-specific double-fire risk is structurally identical to §8's sink
+4 (Cursor importing Claude Code's settings hooks) but unconfirmed for
+plugins: whether `cursor-agent`'s hook resolution also imports Claude
+Code's *plugin* hooks, not only its settings-file hooks, is not stated in
+Cursor's docs — **unverified**, routed to §12. If it does, a handler shipped
+as both a Claude Code build-mode plugin and a Cursor build-mode plugin
+could reach Cursor twice, the same shape §8 already suppresses for the
+settings-file case via `--registered-for` provenance; a build-mode analogue
+of that suppression is out of scope here.
+
+Detection is partial, not claimed complete: `doctor` can already read
+Cursor's `hooks.json` today; whether it can read Claude Code's or Codex's
+plugin caches to detect a handler registered both ways is **unverified**,
+routed to §12. No claim is made that `doctor` detects a broken discipline
+everywhere it could occur.
+
+**4. Deny-wins and the record in build mode.** Within one plugin,
+hookyard's own deny-wins lattice (§4) applies exactly as it does in yard
+mode — same code, same rule, no engine involved yet. **Across plugins,
+there is no hookyard code running at all between them; the engine's own
+native rule is what consolidates**, and that rule is not uniform:
+
+- **Claude Code** documents deny > defer > ask > allow (DOC, hooks guide) —
+  §4's own consolidation section already cites this, and §12 item 2 is
+  updated to resolved at DOC grade for Claude Code on the strength of it.
+- **Cursor** documents across-source priority on top of a same-source
+  reducer read directly from `cursor-agent`'s code — deny beats ask beats
+  allow, corroborating §4's own rule (DOC for the source ordering,
+  code-reading for the same-source reducer).
+- **Codex** leaves `PreToolUse` multi-hook consolidation undocumented, and
+  current docs make that gap wide rather than narrow: `PreToolUse` documents
+  both `permissionDecision: "deny"` and `permissionDecision: "allow"` with
+  `updatedInput`, which rewrites the tool input (DOC, [Codex
+  hooks](https://learn.chatgpt.com/docs/hooks)). One plugin's hook can
+  therefore rewrite a call's input while another plugin's hook denies it,
+  with no documented rule for which wins — **unverified**, routed to §12.
+- **Pi**'s multi-extension block consolidation was not researched this
+  pass — **unverified**, routed to §12.
+
+So item 2 is genuinely load-bearing for build mode in a way it was only
+informational for yard mode: yard mode states and enforces its own rule
+regardless of what any engine does (§4), while build mode's cross-plugin
+case depends on the engine's rule *actually being* deny-wins, which is
+confirmed for Claude Code and Cursor and open for Codex and Pi. Neither open
+case is small: Codex documents an allow-and-rewrite verdict with no
+documented rule for its conflict with a deny, and Pi's rule is unread
+outright, so Codex's and Pi's guards both have strong reason to stay in yard
+mode until their items close.
+
+**Record.** Build mode appends to the same on-disk stream yard mode
+writes, under the same schema, but only when the record's state directory
+already exists — it **never creates** the directory itself, unlike yard
+mode's installer, and it checks only the default chain §6 already
+documents: `$HOOKYARD_STATE_DIR`, else `$XDG_STATE_HOME/hookyard`, else
+`~/.local/state/hookyard`. A yard host with a non-default, install-time
+state directory therefore gets **no build-mode records at all** — a stated
+limitation, not a bug to fix here. `--registered-for` (§8's
+cross-registration provenance tag) is carried into every generated entry
+the same way. Several independently versioned, plugin-bundled `hookyard`
+binaries can end up appending to that one stream and running its 14-day
+sweep (§6), which makes the record's line schema a genuine cross-version
+compatibility contract. That rule is **stated here, not deferred**: the
+schema is additive-only across versions — a field is only ever added,
+never removed or repurposed — amended directly into §6 (one of this
+section's own amendments, below), so an older build-mode binary's entries
+and a newer yard-mode binary's entries can share one stream and one sweep
+without either needing to know the other's version.
+
+**5. #40 / aeye and positioning.** Each consumer repo moves to build mode
+on the engines it already targets, with Cursor excepted under the gate
+stated above: aeye on Claude Code and Codex; lazytmux and dispatcher on the
+engines each already targets, Cursor excepted. aeye is build mode's first
+consumer: its plugin's `hooks.json`, which §10
+already described as declaring nothing once hookyard owns the hooks,
+becomes **generated** rather than absent — the same "hookyard owns the
+hooks" outcome §10 argued for, reached by build mode's `build` step
+instead of by yard mode's `emit`. §10's own per-handler disposition table
+and its `post_tool`/`session_start` wave split survive unchanged, because
+both gate on envelope capture (§7), a property shared by both modes, not by
+which one renders the config. **Cursor stays under the gate stated above**:
+aeye's `adapters/cursor/install.sh` keeps running until a plugin-root
+reference (or equivalent) is verified for Cursor. nix-config's activation
+loads the **built** aeye plugin in place of feeding aeye's manifest to
+yard mode's aggregated `install` — the aggregation invariant §8 states
+still governs yard mode's remaining handlers, it simply has one fewer
+repo's manifest in its list.
+
+Migration order is re-stated, not re-argued: **aeye (build), lazytmux
+(build), dispatcher (build), then the guard migration (yard mode, last)**.
+Not all of §10's reasons for that order carry over. What does: lowest
+stakes first, and the guard migration last because it is the only one where
+getting it wrong disables a security control. What does not: §10 promoted
+dispatcher because aeye and lazytmux would first prove hookyard as a
+marker-scoped writer into `~/.cursor/hooks.json`, and kept the guards last
+so they would get a router proven on three live migrations. With Cursor
+gated and aeye, lazytmux, and dispatcher all moving to build mode, no
+earlier migration exercises yard mode's `install`/`emit` or the Cursor
+writer idiom at all. Dispatcher's promotion rationale therefore does not
+carry over — its position stands only on build-mode grounds, low stakes
+relative to the guards — and the guard migration becomes yard mode's first
+live proof of `install`/`emit` and of the Cursor writer, inheriting §10's
+first-deployment risk (the first activation that has ever needed hookyard in
+the profile at all) without the three-migration safeguard §10 built around
+it. Whether yard mode needs its own low-stakes proving migration first is
+routed to §12. Question 4's open cross-plugin consolidation cases on Codex
+and Pi are a second, independent reason the guards stay in yard mode,
+alongside §10's original severity argument. §10's framing — "prove the
+mechanism where a mistake is cheap before trusting it somewhere expensive" —
+still holds for the shared router core and the build path, which aeye now
+proves together; it no longer holds for yard mode's own install path.
+
+Positioning, stated plainly: **write hooks once, ship a native plugin for
+every engine — the hooks layer Agent Plugins leaves out.** Agent Plugins
+1.0 places skills and MCP servers under one portable manifest and
+explicitly scopes hooks out as "too client-specific for a stable portable
+contract" (DOC, [Agent Plugins
+specification](https://agent-plugins.org/specification); published
+2026-08-06 per [Google's developer
+blog](https://developers.googleblog.com/agent-plugins-package-your-skills-tools-and-more/))
+— build mode fills exactly
+that gap, per engine, without waiting on a cross-engine hooks standard that
+does not exist yet.
+
+**6. Superseded and amended sections.** The full section-by-section
+disposition is a table, not prose — see "What this amends," below.
+
+### Build-mode manifest semantics
+
+The manifest schema is the same `hookyard.json` shape §8's registration
+interface already defines — same fields, same validation entry point — but
+the `exec` field resolves differently by mode. **Yard mode** keeps §8's
+existing rule: `exec` is validated at install time, and must resolve to an
+executable path the installer can check before it ever reaches a rendered
+config (§8, "Manifest trust, validation, and safe rendering" — "a manifest
+that cannot be parsed, or whose `exec` does not resolve to an executable
+path, fails the install outright"). **Build mode's `exec` is relative to
+the plugin root**, resolved by the router itself at **fire time**, not by
+`build` at bake time — there is no install-time filesystem to check
+against, because the plugin has not been installed onto *this* machine yet
+when `build` runs on the author's. A relative path that escapes the plugin
+root (`../`, an absolute path, a symlink resolving outside the plugin
+directory) is rejected by the router before it execs anything, the
+fire-time analogue of yard mode's install-time rejection.
+
+The consequence for §8's registration interface and manifest-trust sections
+is one clarification, not a new schema: "the same `hookyard.json`" means
+the same fields and the same validation *shape*, with `exec`'s resolution
+rule — absolute and checked at install, or plugin-root-relative and
+resolved at fire time — switched by which mode is rendering it. The trust
+root moves with the mode too: yard mode's trust root is nix-config's own
+review (§8) — a manifest enters hookyard's table only by way of a merged
+nix-config change. Build mode has no such review; its trust root is **the
+plugin author plus the end user's own decision to install and trust that
+plugin**, the same trust boundary every other plugin on that engine already
+has. hookyard does not weaken or strengthen that boundary any more than it
+does nix-config's — it inherits whichever one applies to the mode
+rendering it.
+
+Whether one `hookyard.json` file can serve both modes at once — for
+example, a yard-mode consumer resolving the same relative `exec` field
+against a Nix store path instead of a plugin root — is not decided here.
+The two resolution rules are different enough (fire-time vs. install-time,
+plugin-root-relative vs. absolute) that unifying them is plausible but
+unproven, and forcing an answer without evidence would be exactly the kind
+of speculative generality this document argues against elsewhere.
+**Deferred to §12**, with that reason.
+
+### What this amends
+
+| Section | Disposition | Reason |
+|---|---|---|
+| §3 (standalone tool) | Amended | The "fifth thing" cost is real either way; build mode moves who pays it (intro, above) |
+| §4, consolidation rule | Carried, scoped | hookyard's own deny-wins lattice governs within one plugin unchanged; across plugins in build mode, the engine's native rule governs instead (question 4, above) |
+| §5, fail-open | Carried, scoped | Build mode's blast radius is one plugin, not the machine; an unsupported arch/launcher joins §9's enumerated fail-open set (question 1, above) |
+| §6, the record | Amended | Build mode appends conditionally, never creates the state directory; the line schema's additive-only rule is stated as a cross-version contract (question 4, above) |
+| §8, one declarative table | Scoped to yard mode | "Invoked exactly once per activation" is yard mode's aggregation invariant; build mode renders one plugin's own table into files only that plugin ships, with no shared-file strip to get wrong |
+| §8, registration interface | Amended | `exec` gains a second resolution rule, selected by mode (Build-mode manifest semantics, above) |
+| §8, manifest trust | Amended | Build mode's trust root is the plugin author and the end user's install choice, not nix-config's review (Build-mode manifest semantics, above) |
+| §8, Pi | Amended | Build mode ships a Pi package derived from `pi_bridge.ts`'s template, with the template changes named in question 2, above; Pi dedups only identical extension paths, so a yard bridge and a build package for the same handler both load (questions 2 and 3, above) |
+| §8, dedup / double-firing | Amended | The one-handler-one-mode discipline generalises §8's same-commit swap, split by host: same-commit swap on Nix, §8's remove-first residual rule for side-effecting handlers on non-Nix and add-trust-remove for guards on Codex (question 3, above); Claude Code runs a plugin's copy of a handler separately from a settings copy of the same handler (DOC, [Claude Code hooks reference](https://code.claude.com/docs/en/hooks)) |
+| §9, pinned-once | Scoped to yard mode | "hookyard is pinned once, by nix-config" describes yard mode's single binary; build mode is one binary per plugin, several versions per host, by design |
+| §9, path form | Amended | Build mode's path form is the plugin-root-relative reference in the per-engine facts table above, not the absolute profile path; artifact location is answered at question 1, above |
+| §10, migration order and aeye | Amended | aeye's `hooks.json` is generated, not empty; wave split and order carried, but not dispatcher's promotion rationale or the guards' three-migration safeguard; positioning re-stated against Agent Plugins 1.0 (question 5, above) |
+| §11, boundary | Carried | Unchanged by #43 — build mode is still a delivery shape for the same protocol problem, not a placement mechanism (question 5, above) |
+| §12, open questions | Amended | Item 2 updated to two of three resolved; new items added for the distribution decision, listed where §12 itself is amended |
 
 ## 4. Router shape: per-event exec, no daemon
 
@@ -417,11 +894,16 @@ daemon-shaped problem here to justify a daemon-shaped solution.
 Claude Code's own documentation states that all matching hooks for one event
 run in parallel, so native multi-hook fan-out is confirmed for that engine.
 How an engine consolidates verdicts from parallel hooks that *disagree* was
-unread for all three when the rule below was written. One of the three has
-since been read directly, and it agrees: `cursor-agent`'s own reducer folds
-two hooks' `permission` values with `deny` beating `ask` beating `allow`,
-which is this design's rule exactly. Claude Code's and Codex's native
-consolidation rules remain unread (§12, item 2).
+unread for all three when the rule below was written. Two of the three have
+since been read — Cursor's directly, Claude Code's from its documentation —
+and both agree: `cursor-agent`'s own reducer folds two hooks' `permission`
+values with `deny` beating `ask` beating `allow`, which is this design's rule
+exactly. Claude Code's hooks guide documents the same ordering across an
+event's matching hooks — deny, defer, ask, allow (DOC,
+https://code.claude.com/docs/en/hooks-guide); Codex's native consolidation
+rule remains unread (§12, item 2). In build mode, the rule below holds within
+one plugin; across plugins, the firing engine's own native rule governs
+instead (§3.1).
 
 That match is corroboration, not the source. This design still states its own
 rule rather than borrowing one, because the reason for stating it — a router
@@ -502,11 +984,18 @@ of the narrowing is unusually convenient: **Codex's `pre_tool_use` is a
 deny-only decision channel.** `permissionDecision: "deny"` with a non-empty
 `permissionDecisionReason` is honoured; `allow` and `ask` are both explicitly
 rejected, as are `continue: false`, `stopReason`, `suppressOutput`, the legacy
-`decision: "approve"`, and any `updatedInput`. A router whose consolidation
+`decision: "approve"`, and `updatedInput` when it is not paired with
+`allow`. A router whose consolidation
 rule is deny-wins (below) never needs the rejected half: the only verdict it
 has to render to Codex is the one Codex takes. The engine with the poorest
 decision vocabulary is the engine whose vocabulary happens to be exactly the
-one this design uses.
+one this design uses. Current Codex documentation describes `allow` with
+`updatedInput` on `PreToolUse` (§12, item 3); the 0.153.4 strings already
+name that pairing, so the earlier "deny-only" reading may have been a
+misreading rather than a version change — **unverified** which. The deny
+path this paragraph rests on is unaffected either way, and yard mode still
+renders only `deny` to Codex, which matters for build mode's cross-plugin
+case (§3.1).
 
 One thing about this evidence was worth stating precisely, because the rest
 of the document is careful about it. The confirmation had been **static**: it
@@ -888,6 +1377,11 @@ small subset, since §4.1's all-abstain path is the overwhelmingly common one.
 A single point of failure that can only degrade is a better single point of
 failure than one that can only stop. **Fail-open is the recommendation.**
 
+In build mode, that blast radius shrinks along a different axis: a launcher
+failure costs the one plugin it ships in, not every guard on the machine
+(§3.1). An unsupported arch or missing binary joins §9's enumerated
+nothing-running set below, rather than widening it.
+
 ### The independence assumption, and why it needs defending
 
 The blast-radius argument above compares *frequencies*: fail-open costs the
@@ -1139,8 +1633,10 @@ Four fields carry the weight of §5's argument, and one outcome value does.
 result; `enforced` is `false` exactly when the router computed a verdict the
 engine cannot act on. With Codex's `pre_tool` deny path confirmed (§4), no
 engine is wholesale observe-only any more, so this field now marks the
-narrower per-event cases — an `allow` rendered to Codex, which accepts only
-`deny` and rejects an explicit allow by name (§7), or an event whose engine
+narrower per-event cases — an `allow` rendered to Codex, which hookyard does
+not print there (§7; the shipped binary this was read from was read as
+rejecting an explicit allow — misreading or version change is
+**unverified**, §12 item 3), or an event whose engine
 has no decision slot at all; `router` is `ok`, `error` or `timeout`, which is what
 makes a router that failed *after starting* recoverable; `handlers`
 distinguishes `abstain` from `error` and from `timeout`, which is what makes a
@@ -1176,6 +1672,14 @@ wired into the registry rather than pretended to be a router guarantee.
 handler, stored verbatim, and handed to any subscriber. A subscriber that
 renders it into a terminal or a web view is responsible for escaping it;
 hookyard neither sanitizes nor validates its content beyond the length cap.
+
+Build mode appends to this same stream, under this same schema, but only when
+the default-chain state directory already exists — it never creates one
+(§3.1). Because several independently versioned, plugin-bundled binaries can
+end up appending to one stream and running its 14-day sweep, the line schema
+is a cross-version compatibility contract: fields are only ever added, never
+removed or repurposed, so an older binary's entries and a newer one's can
+share the stream without either needing to know the other's version.
 
 ### The correlation key
 
@@ -1746,6 +2250,11 @@ produced a row, so a second per-repo invocation would strip the first repo's
 rows and write only its own. Three repos' hooks would vanish with no error on
 the next rebuild.
 
+That invariant is yard mode's aggregation rule. Build mode has no aggregated
+`install` to get wrong: `build` renders one plugin's own table into files
+only that plugin ships, so there is no shared file to strip and nothing for
+a second invocation to orphan (§3.1).
+
 That is a real departure from how the existing writers work, and it is worth
 naming as such. aeye's installer and the dispatcher block *are* separate
 per-repo activation entries, and they get away with it because each strips
@@ -2179,6 +2688,14 @@ emitted-timeout budget (5 s, above) — but that is the bridge's own
 discipline, not anything Pi provides, and hookyard's generated bridge has to
 carry the same timeout itself rather than assume Pi will enforce one.
 
+Build mode ships this bridge as a Pi package instead of a Nix-rendered file,
+derived from the same template but not unchanged — the router path has to
+resolve at extension load rather than arrive baked in, argv has to travel as
+an array, and `pi_version` has to resolve at runtime (§3.1 Q2). Pi's
+de-duplication above covers only identical extension paths, so a yard-mode
+bridge and a build-mode package extension for the same handler are two
+different paths and both load (§3.1 Q2/Q3).
+
 Config dir override: `PI_CODING_AGENT_DIR` replaces `~/.pi/agent`, not
 `~/.pi` as a whole — confirmed by reading `$PI_CODING_AGENT_DIR/settings.json`
 and `.../models.json` directly from the override root. Whatever path form §9
@@ -2232,6 +2749,10 @@ formats. It mirrors the existing split rather than inventing one: nix-config
 wires paths and never owns hook logic, and this design adds one more kind of
 path for it to wire, not a new kind of thing it has to understand.
 
+`exec` above is yard mode's form: absolute, checked at install time. Build
+mode's `exec` is relative to the plugin root and resolved at fire time
+instead (§3.1).
+
 ### Manifest trust, validation, and safe rendering
 
 A manifest is a list of binaries hookyard will execute on the critical path of
@@ -2248,6 +2769,12 @@ It is worth saying out loud because manifests are now the mechanism by which
 new subprocess executions get wired into a gate that fires on every tool call
 across four engines — the review that admits one is the whole of the
 control.
+
+Build mode has no such review to inherit. Its trust root is the plugin
+author plus the end user's own decision to install and trust that plugin —
+the same boundary every other plugin on that engine already carries, and
+hookyard neither weakens nor strengthens it any more than it does
+nix-config's (§3.1).
 
 **Validation is on entry, and failure is loud.** Every manifest is validated
 before it reaches the table: fields hookyard does not recognize are ignored,
@@ -2513,6 +3040,19 @@ rows live in the same file without either knowing the other exists. The
 constraint is satisfied by the writer model, not by a migration schedule
 anyone has to coordinate.
 
+Migrating a handler between yard mode and a built plugin generalises this
+same discipline to **one handler, one mode per host**: on Nix hosts the
+same-commit, same-generation swap above applies unchanged; on non-Nix hosts,
+which have no generation boundary to make that atomic, every handler
+removes the old registration first and adds the new one second, per the
+residual rule above (§3.1) — except guards on Codex, which add and trust
+the new registration before removing the old one, accepting a transient
+both-fire rather than an open-ended, trust-gated neither-fires. Claude Code already
+runs a plugin's copy of a handler separately from a settings copy of the
+same handler (DOC, [hooks reference](https://code.claude.com/docs/en/hooks), "Hook handler fields") — both-fire between modes is not a
+hypothetical this design introduces, it is a documented behavior it has to
+account for.
+
 **The ordering question, answered.** A shared `~/.cursor/hooks.json` invites
 the obvious question — in what order do hookyard's writer and aeye's,
 dispatcher's and lazytmux's run — and the answer is that there is no order to
@@ -2561,6 +3101,11 @@ four repos pinned its own, one machine could end up with four hookyard
 builds rendering into three shared config files, and the guard × event ×
 engine table would stop being a single table in any meaningful sense. One
 input, one binary, one rendering pass.
+
+That pin describes yard mode only. Build mode has no single pinned binary to
+describe: it is one `hookyard` binary per plugin, baked in by that plugin's
+own `build` run, so several versions can legitimately be present on one host
+at once — by design, not as skew to be corrected (§3.1).
 
 ### Path form: a stable profile path
 
@@ -2638,6 +3183,19 @@ wires hookyard must also put the binary in `home.packages`. lazytmux asserts
 exactly this for its own binaries. That assertion is part of hookyard's Nix
 module, not an operator's responsibility.
 
+This whole form is yard mode's. Build mode's path form is the plugin-root
+reference the per-engine facts table gives each engine — `${CLAUDE_PLUGIN_ROOT}`,
+`$PLUGIN_ROOT`, an extension resolving its own path — not a profile path at
+all; where the built artifact itself lives is answered at §3.1's question 1.
+One open item falls out of this split. Codex records trust against the
+hook's current hash, so new or changed hook definitions are re-reviewed
+(DOC, [Codex hooks](https://learn.chatgpt.com/docs/hooks)); whether a plugin
+version bump that leaves a `$PLUGIN_ROOT`-based definition textually
+unchanged changes that hash is **unverified**, routed to §12 — the
+plugin-bundled analogue of the store-path trust-hash concern above, and
+bound up with §12's open trust-hash preimage finding. Claude Code documents
+no re-trust step at all for a plugin update.
+
 ### Version skew across independently migrating repos
 
 Native config is re-rendered on **every home-manager activation**, so an
@@ -2676,7 +3234,8 @@ What that does **not** cover is the honest half:
   on the destination host to a different version, or to another user's
   binary. Whether any such sync exists here is **unverified**; the failure
   shape is stated because the file format invites it.
-- **Manifests versus binary.** hookyard's version is pinned once, but the
+- **Manifests versus binary.** In yard mode hookyard's version is pinned once
+  (build mode ships one binary per plugin, §3.1), but the
   manifests come from four repos on their own schedules. A manifest written
   against a newer hookyard than the one nix-config pins is the realistic
   skew, and it is a *parsing* problem, not a path problem: the rule is that
@@ -2716,7 +3275,9 @@ partway and left the profile without it, it was removed from `home.packages`,
 or the config travelled to a machine that has no such profile entry. All of
 them fail the same way, at `exec`, before any hookyard code runs — which is
 why §6's observability argument cannot cover this case by writing a record.
-There is nothing running to write one.
+There is nothing running to write one. In build mode the same enumerable set
+gains one more member: a launcher with no binary for the host's
+platform/arch (§3.1).
 
 The path form does not change fail-open's verdict. It changes the diagnosis,
 from "an environment problem that could be anything" to a single absolute
@@ -2907,6 +3468,29 @@ the residuals §12 already names as the prerequisite for issue #9. The three
 the first wave of its migration is `post_tool` — still the lowest-stakes,
 three-way exercise this section argued from.
 
+**What #43 changes about this order.** aeye, lazytmux, and dispatcher move to
+build mode on the engines each already targets, as §3.1 question 5 lists
+them; Cursor is gated per §3.1, so aeye's `adapters/cursor/install.sh` keeps
+running there until a plugin-root reference is verified. The per-handler table and wave split above carry
+unchanged — both gate on envelope capture, a property of both modes, not of
+which one renders the config. §10's own "its `hooks.json` declares nothing
+once hookyard owns the hooks" is amended to "its `hooks.json` is generated":
+nix-config's activation loads the built aeye plugin in place of feeding
+aeye's manifest to yard mode's aggregated `install`. The guard migration
+stays yard mode, last — §10's original severity argument, plus §3.1
+question 4's cross-plugin consolidation gap for Codex and Pi. Not every
+reason above carries over. Dispatcher's promotion rested on aeye and
+lazytmux first proving hookyard as a marker-scoped writer into
+`~/.cursor/hooks.json`, and the guards went last partly so they would get a
+router proven on three live migrations; with Cursor gated and all three
+repos in build mode, no earlier migration exercises yard mode's
+`install`/`emit` or the Cursor writer idiom. Dispatcher's position now
+stands only on build-mode grounds, and the guard migration becomes yard
+mode's first live proof of `install`/`emit` and the Cursor writer,
+inheriting this section's first-deployment risk without the three-migration
+safeguard. Whether a low-stakes yard-mode migration should precede it is
+open (§12).
+
 ## 11. Boundary: what hookyard does not absorb
 
 The brief's own account of static-artifact unification is labelled
@@ -2987,6 +3571,23 @@ locally-authored skills) but solved in kind, not in a way that argues for a
 different kind of fix. Nothing found this pass contradicts that division, so
 hookyard's boundary holds where the brief expected it to: it handles the
 protocol problem and does not absorb the placement problem.
+
+The distribution decision (§3.1) does not move that line. Agent Plugins 1.0
+places skills and MCP servers under one portable manifest and explicitly
+scopes hooks out as "too client-specific for a stable portable contract"
+(DOC, [Agent Plugins
+specification](https://agent-plugins.org/specification); published
+2026-08-06 per [Google's developer
+blog](https://developers.googleblog.com/agent-plugins-package-your-skills-tools-and-more/))
+— placement for the first two, protocol for the third, the exact
+split this section already draws, and the reason build mode ships hooks as
+per-engine plugin content rather than waiting on that standard. One
+alternative was considered and rejected: a `session_start` hook that injects
+registered skills and rules into the session. It would defeat lazy skill
+loading — every engine here loads a skill's body only when it is invoked, and
+injection front-loads all of them into every session — and it would
+duplicate rule files the engines already load natively, solving a placement
+problem with a protocol mechanism.
 
 **The manifest models `command` handlers only, and that is a stated boundary,
 not an omission.** hookyard's manifest registers executable handlers —
@@ -3070,13 +3671,20 @@ non-Cursor findings.
    not the full source list — see the `projectSettings` finding under §8's
    gate-list bullet below for the source this item never asked about.
 2. **The exact native multi-hook consolidation rule, per engine (§4).**
-   **One of three resolved.** Cursor's reducer folds two hooks' `permission`
+   **Two of three resolved.** Cursor's reducer folds two hooks' `permission`
    values as `deny` > `ask` > `allow` — this design's own rule, arrived at
-   independently by the vendor. Claude Code's and Codex's native rules remain
-   unread: Claude Code is documented as running matching hooks in parallel
-   but not as to how it reconciles disagreement, and Codex was not examined
-   on this point. §4 explains why the design states its own rule regardless,
-   so the remaining two are informational.
+   independently by the vendor. Claude Code documents `deny` > `defer` >
+   `ask` > `allow` across an event's matching hooks (DOC,
+   https://code.claude.com/docs/en/hooks-guide); Cursor's docs add
+   across-source priority (DOC) on top of that same-source
+   reducer. Codex's `PreToolUse` rule is undocumented, and current Codex
+   docs document both `deny` and `allow` with `updatedInput` on that event
+   (DOC, https://learn.chatgpt.com/docs/hooks), so one hook can rewrite a
+   call's input while another denies it with no documented resolution —
+   **unverified**, and not a narrow gap.
+   Pi's is open, not researched. §4 explains why the design states its own
+   rule regardless — informational for yard mode, load-bearing for build
+   mode's cross-plugin case (§3.1).
 3. **Per-engine deny capability beyond Claude Code (§4).** **Resolved for
    both engines, and this item is no longer security-blocking.** It was the
    one genuinely load-bearing question on this list, and it resolved in the
@@ -3087,7 +3695,12 @@ non-Cursor findings.
      `ask`, `continue: false`, `stopReason`, `suppressOutput`, legacy
      `decision: "approve"`, and `updatedInput`. A `permission_request` path
      can deny approval separately. Deny-only is exactly the vocabulary a
-     deny-wins router needs.
+     deny-wins router needs. Current Codex documentation
+     (https://learn.chatgpt.com/docs/hooks, DOC) describes `allow` with
+     `updatedInput` on `PreToolUse`; the 0.153.4 strings already name that
+     pairing, so the "rejects `allow`" reading may have been a misreading of
+     those strings rather than a version change — **unverified** which;
+     deny capability is unaffected either way.
    - **Cursor** accepts `permission` values `allow`, `deny`, `ask` on six
      permission-capable events, `preToolUse` among them, and also treats a
      handler exiting 2 as a block with its stderr as the reason.
@@ -3472,14 +4085,69 @@ detection and canonicalization first become load-bearing.
   `workspace_roots[0]`-style fallback; Cursor stays the one exception §7's
   envelope decode has to special-case.
 
+**Items the distribution decision (§3.1) adds.**
+
+- **Cursor's plugin-root reference in hook commands.** `${CURSOR_PLUGIN_ROOT}`
+  is used by one third-party plugin but named nowhere in Cursor's own docs —
+  **unverified**. This is the gate on Cursor build mode: until a fire-time
+  path form is confirmed, Cursor stays served by yard mode or the existing
+  Cursor installer (§3.1).
+- **Codex trust re-prompt across a plugin version bump.** Codex records
+  trust against the hook's current hash, so new or changed hook definitions
+  are re-reviewed (DOC). What is **unverified** is whether a plugin version
+  bump that leaves a `$PLUGIN_ROOT`-based hook definition textually
+  unchanged changes that hash — which turns on the trust-hash preimage the
+  §9 finding above leaves unknown (§3.1).
+- **Codex `PreToolUse` conflict between one hook's `allow`+`updatedInput`
+  and another's `deny`.** **Open**, and load-bearing for build mode: current
+  Codex docs document both verdicts on `PreToolUse` but no rule for which
+  wins when separate plugins' hooks return them for the same call (§3.1).
+- **Whether yard mode needs a low-stakes proving migration before the
+  guards.** **Open.** With aeye, lazytmux, and dispatcher in build mode and
+  Cursor gated, the guard migration is the first live exercise of yard
+  mode's `install`/`emit` and the Cursor writer idiom, without §10's
+  three-migration safeguard; one non-guard handler routed through yard mode
+  first would restore a cheap proving step, at the cost of keeping that
+  handler out of build mode (§3.1, §10).
+- **Whether Cursor loads Claude Code plugins' hooks.** Cursor documents
+  running Claude Code's settings-file hooks at lower priority; whether it
+  also loads Claude Code's *plugin* hooks — the build-mode analogue of §8's
+  sink 4 — is not stated either way, **unverified** (§3.1).
+- **Pi's multi-extension block consolidation.** Not researched this pass —
+  **unverified**, and load-bearing for build mode the same way item 2 is for
+  the other three engines (§3.1).
+- **Doctor visibility into Claude Code / Codex plugin caches.** `doctor` can
+  already read Cursor's `hooks.json`; whether it can read Claude Code's or
+  Codex's plugin caches to detect a handler registered both as a yard entry
+  and a built plugin is **unverified** (§3.1).
+- **Built plugin size per arch.** Flagged as a real packaging cost against
+  Claude Code's zip/archive caps and npm's, but unmeasured — a `build`
+  implementation question, not decided here (§3.1).
+- **Windows behaviour of the build-mode launcher, per engine.** The launcher
+  assumes POSIX `sh`; on Windows the hook command itself errors,
+  engine-specifically, rather than following the exit-0 fail-open path —
+  **unverified**, per engine (§3.1).
+- **Claude Code workspace trust for user-scope plugins.** §8's
+  workspace-trust finding was about settings hooks; whether the same gate
+  applies to a user-scope plugin install is **unverified** (§3.1).
+- **Whether one `hookyard.json` can serve both modes.** A yard-mode consumer
+  resolving the same relative `exec` field against a Nix store path instead
+  of a plugin root is plausible but unproven, and deliberately not decided
+  here (§3.1).
+- **Codex CLI absent on this host.** `codex-cli` is not installed, so every
+  Codex plugin fact in the per-engine facts table is DOC grade only, not
+  corroborated against a live install the way Claude Code's and Cursor's
+  were (§3.1).
+
 Everything left unverified is accounted for above. **Resolved**, and no
 longer a risk anyone carries: Claude Code's settings merge (item 1); all three
 engines' deny paths, read off their implementations and then watched enforcing
 (item 3); Codex's undeclared-timeout behaviour, which turned out to be no
 bound at all rather than a generous default (item 4); the live payload
 capture, which also corrected §7's field table and simplified §6's correlation
-key; Cursor's native consolidation rule, tool mapping and event families
-(items 2 and 6); §8's sink-4 double-firing decision; Codex's trust mechanism
+key; Cursor's and Claude Code's native consolidation rules (Claude Code's at
+DOC grade), Cursor's tool mapping and event families (items 2 and 6); §8's
+sink-4 double-firing decision; Codex's trust mechanism
 in substance; the profile-gate question, which retracted the §11 correction
 that raised it; and, settled by a ruling rather than new evidence, Claude
 Code's `defer` verdict and the manifest's handling of non-command handler
@@ -3496,8 +4164,9 @@ all three a stated prerequisite for issue #9; Pi's `pre_compact` mapping,
 closing the same way; the per-engine gate lists for Codex and Cursor beyond
 workspace trust — this pass tried Cursor's shipped bundles and found nothing
 beyond what was already known, and couldn't try Codex at all, for want of the
-binary on this host; Codex's `apply_patch` sub-tool mapping; Claude Code's and
-Codex's native consolidation rules; whether fail-open should be conditional
+binary on this host; Codex's `apply_patch` sub-tool mapping; Codex's
+`PreToolUse` consolidation rule (§3.1) and Pi's; whether fail-open
+should be conditional
 for security-classed handlers; the exact preimage of Codex's trust hash; the
 prior pass's drift-count arithmetic; and HookBus's carried facts. Moved from
 fully open to resting on the middle evidence grade, one short of a live
@@ -3508,4 +4177,6 @@ of them now have a named consumer rather than standing as free-floating
 prerequisites: aeye's three `session_start` handlers wait on the SessionStart
 capture and, for `session-reset.sh`/`session-backfill.sh` on claude/codex, on
 the `.source`/`.transcript_path` envelope promotion, so that capture is the
-gate on aeye's wave 2 (§10), not an item without a user.
+gate on aeye's wave 2 (§10), not an item without a user. The distribution
+decision adds twelve more items to this list, listed above under "Items the
+distribution decision (§3.1) adds."
