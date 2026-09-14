@@ -436,7 +436,7 @@ what it still leaves for hookyard to build.
 |---|---|---|---|---|---|
 | Claude Code | `hooks/hooks.json`, same shape as user/project hooks (DOC) | `${CLAUDE_PLUGIN_ROOT}`, expanded and exported; changes on every plugin update (DOC) | deny > defer > ask > allow, documented (DOC) | marketplace add, then install (`--scope`), or `--plugin-dir` for a session (DOC) | Workspace trust; whether it applies to user-scope plugins the way §8 found it applies to settings hooks is **unverified** |
 | Codex | root `plugin.json` `extensions.com.openai`, or `hooks/hooks.json` (legacy `.codex-plugin/plugin.json` fallback) (DOC) | `$PLUGIN_ROOT` (DOC) | Concurrent; "any deny wins" documented only for `PermissionRequest`. `PreToolUse` documents both `deny` and `allow` with `updatedInput`, which rewrites the tool input (DOC); the rule when one hook allows-and-rewrites while another denies is undocumented — **unverified**, and not a narrow gap | marketplace add, then `/plugins` install; no one-step CLI path found (DOC) | Codex records trust against the hook's current hash, so new or changed hook definitions are marked for review and skipped until trusted (DOC); whether a version bump that leaves a `$PLUGIN_ROOT`-based definition textually unchanged changes that hash is **unverified** (§12, trust-hash preimage), unlike Claude Code, which documents no re-trust step at all |
-| Cursor | `.cursor-plugin/plugin.json` + `hooks/hooks.json`, or manifest `hooks` (DOC) | **No documented plugin-root variable** — the docs show `${PLUGIN_ROOT}` only for MCP `cwd`; a third-party plugin uses `${CURSOR_PLUGIN_ROOT}`, which is **unverified** as a supported mechanism | Across sources, higher-priority source wins (DOC); same-source, `deny > ask > allow` read from `cursor-agent`'s own reducer (code-reading, §4) | IDE: Customize → find the plugin → Install, with a scope choice (DOC, [Cursor plugins](https://cursor.com/docs/plugins)); CLI: `cursor-agent plugin marketplace add <url>`, then `/plugin` → Marketplace, no non-interactive install (vendor staff forum post, [Cursor forum](https://forum.cursor.com/t/unable-to-find-a-cli-command-to-install-a-cursor-plugin-after-adding-its-marketplace-repository/166016); LOCAL, `cursor-agent plugin --help` shows only `marketplace`) | Workspace trust |
+| Cursor | `.cursor-plugin/plugin.json` + `hooks/hooks.json`, or manifest `hooks` (DOC) | Undocumented but real: `cursor-agent` exports **both** `${CURSOR_PLUGIN_ROOT}` and `${CLAUDE_PLUGIN_ROOT}` as env vars set to the firing plugin's install path, for any hook sourced from a plugin's `hooks.json` (never for project/user/team/enterprise hooks); the default `cwd` for those hooks is already the plugin dir too, except on `stop`/`subagentStop` (code-reading, cursor-agent 2026.09.10-fd3934a bundle, `docs/design/fixtures/cursor-plugin-root/`); confirmed for the `cursor-agent` CLI only — the IDE ships a separate bundle not read here, so it stays **unverified** | Across sources, higher-priority source wins (DOC); same-source, `deny > ask > allow` read from `cursor-agent`'s own reducer (code-reading, §4) | IDE: Customize → find the plugin → Install, with a scope choice (DOC, [Cursor plugins](https://cursor.com/docs/plugins)); CLI: `cursor-agent plugin marketplace add <url>`, then `/plugin` → Marketplace, no non-interactive install (vendor staff forum post, [Cursor forum](https://forum.cursor.com/t/unable-to-find-a-cli-command-to-install-a-cursor-plugin-after-adding-its-marketplace-repository/166016); LOCAL, `cursor-agent plugin --help` shows only `marketplace`) | Workspace trust |
 | Pi | `package.json` `"pi"` key; `pi install npm:\|git:\|path` (DOC) | None — an extension resolves its own path itself at load; there is no install-time variable to expand (DOC, code-reading `pi_bridge.ts`) | **Unverified** — not researched | `pi install`, one step (DOC) | Project-local trust gate; does not cover globally installed packages (§8/§12) |
 
 One caveat governs the whole Codex column above: `codex-cli` is not
@@ -545,16 +545,20 @@ nix-config's `agent-hooks` security guards, for exactly the reason §5 and
 per-plugin, best-effort record (below) does not replace it.
 
 The recommendation is **scoped per engine**, not applied uniformly, because
-the plugin-root facts above are not uniform. Claude Code, Codex, and Pi
-each have a fire-time way for a hook command to find its own plugin
-(`${CLAUDE_PLUGIN_ROOT}`, `$PLUGIN_ROOT`, an extension resolving its own
-path) — build mode is viable on all three. **Cursor build mode is gated on
-verifying a plugin-root reference (or another fire-time path form the docs
-do not currently name); until that gate clears, Cursor stays served by
-yard mode or the tool's existing Cursor installer, the same way it is
-served today.** That gate is stated explicitly because it is the one place
-this recommendation depends on a fact the evidence pass could not confirm,
-rather than one it could.
+the plugin-root facts above are not uniform. Claude Code, Codex, Cursor, and
+Pi each have a fire-time way for a hook command to find its own plugin
+(`${CLAUDE_PLUGIN_ROOT}`, `$PLUGIN_ROOT`, `${CURSOR_PLUGIN_ROOT}` /
+`${CLAUDE_PLUGIN_ROOT}`, an extension resolving its own path) — build mode
+is viable on all four. **Cursor build mode's gate has cleared for the
+`cursor-agent` CLI**: `cursor-agent` exports `${CURSOR_PLUGIN_ROOT}` (and,
+redundantly, `${CLAUDE_PLUGIN_ROOT}`) to the plugin's own install path for
+any plugin-sourced hook (§12, code-reading). The IDE ships a separate
+bundle this pass did not read, so build mode there — and therefore for any
+end user relying on the IDE rather than `cursor-agent` — stays gated on the
+same open question until that bundle (or a live IDE probe) confirms the
+same mechanism; **until then, Cursor's IDE surface stays served by yard
+mode or the tool's existing Cursor installer, the same way it is served
+today.**
 
 ### The six questions, answered
 
@@ -4087,11 +4091,21 @@ detection and canonicalization first become load-bearing.
 
 **Items the distribution decision (§3.1) adds.**
 
-- **Cursor's plugin-root reference in hook commands.** `${CURSOR_PLUGIN_ROOT}`
-  is used by one third-party plugin but named nowhere in Cursor's own docs —
-  **unverified**. This is the gate on Cursor build mode: until a fire-time
-  path form is confirmed, Cursor stays served by yard mode or the existing
-  Cursor installer (§3.1).
+- **Cursor's plugin-root reference in hook commands: resolved for the CLI.**
+  `cursor-agent` 2026.09.10-fd3934a's own bundle sets both
+  `CURSOR_PLUGIN_ROOT` and `CLAUDE_PLUGIN_ROOT` as real env vars, equal to
+  the firing plugin's install path, whenever a hook is sourced from that
+  plugin's `hooks/hooks.json` (never for project/user/team/enterprise
+  hooks); the hook's default `cwd` is already that same directory except on
+  `stop`/`subagentStop`. Found by code-reading the installed CLI bundle
+  (no public source to permalink; evidence and re-derivation steps are in
+  `docs/design/fixtures/cursor-plugin-root/`) — a live-fire capture would
+  have been LOCAL-grade but was blocked by `cursor-agent`'s interactive
+  login requirement, which this pass did not want to drive against a real
+  account. The IDE was not checked (separate, unread bundle) and stays
+  **unverified**. This narrows, rather than clears, the gate on Cursor build
+  mode: build mode is unblocked for `cursor-agent`-driven use, still gated
+  for the IDE (§3.1).
 - **Codex trust re-prompt across a plugin version bump.** Codex records
   trust against the hook's current hash, so new or changed hook definitions
   are re-reviewed (DOC). What is **unverified** is whether a plugin version

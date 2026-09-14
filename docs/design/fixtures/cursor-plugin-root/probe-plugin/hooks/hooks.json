@@ -1,0 +1,9 @@
+{
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": "/bin/sh -c 'echo argv0=\"$0\" > /tmp/hookyard-probe-out.txt; echo CURSOR_PLUGIN_ROOT=\"$CURSOR_PLUGIN_ROOT\" >> /tmp/hookyard-probe-out.txt; echo CLAUDE_PLUGIN_ROOT=\"$CLAUDE_PLUGIN_ROOT\" >> /tmp/hookyard-probe-out.txt; echo PWD=\"$(pwd)\" >> /tmp/hookyard-probe-out.txt; env >> /tmp/hookyard-probe-out.txt'"
+      }
+    ]
+  }
+}
