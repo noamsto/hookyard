@@ -1,0 +1,30 @@
+Source: cursor-agent 2026.09.10-fd3934a (Nix store path below), file
+`190.index.js`, a minified single-line webpack chunk — offsets are byte
+offsets into that one line, not source line numbers.
+
+Store path (content-addressed, stable as long as this derivation exists):
+/nix/store/f5gqx5nikf1zswmd9hkxn83wgsjfql9z-cursor-agent-2026.09.10-fd3934a/190.index.js
+
+--- offset 69777 (plugin-hook enumeration, inside the per-event hook collector) ---
+for(const t of null!==(f=this.config.pluginHooks)&&void 0!==f?f:[]){const n=t.config.hooks[e];if(!(null==n?void 0:n.length))continue;const s=null!==(p=null==o?void 0:o.cwd)&&void 0!==p?p:e===_._E.stop||e===_._E.subagentStop?this.workspacePath:t.installPath,r=Object.assign(...);for(const e of(0,_.Qk)(n,b))(0,_.Xz)(e)&&x.push({type:"command",script:e,cwd:s,env:null==o?void 0:o.env,source:"claude-plugin",attribution:r,pluginInstallPath:t.installPath})}
+
+--- offset 79189 (executeCommandScript, building the child-process env just before spawn) ---
+const{script:a,cwd:c,request:l,env:u,pluginInstallPath:h}=e, ... F={};for(const[e,t]of Object.entries(T))void 0!==t&&(F[e]=t);void 0!==h&&(F.CURSOR_PLUGIN_ROOT=h,F.CLAUDE_PLUGIN_ROOT=h);
+
+Reading:
+- A hook declared by a plugin (`this.config.pluginHooks`, populated from a
+  plugin's `hooks/hooks.json` per the manifest shape §3.1's table already
+  documents) is tagged internally with source "claude-plugin" and carries
+  `pluginInstallPath: t.installPath` — the plugin's own on-disk directory.
+- The hook's default `cwd` is already that plugin directory (`t.installPath`)
+  for every event except `stop`/`subagentStop`, which default to the
+  workspace path instead.
+- When `pluginInstallPath` is set, `executeCommandScript` exports it into the
+  child process's environment under BOTH `CURSOR_PLUGIN_ROOT` and
+  `CLAUDE_PLUGIN_ROOT` — not templated into the command string itself, but
+  set as a real env var the shell that runs `command` can expand
+  (`${CURSOR_PLUGIN_ROOT}` or `${CLAUDE_PLUGIN_ROOT}`, either name works).
+  Only plugin-sourced hooks get this; project/user/team/enterprise hooks
+  (the other `E(...)` calls a few hundred bytes earlier in the same
+  function) never populate `pluginInstallPath`, so they never see either
+  variable.
