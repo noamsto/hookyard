@@ -435,9 +435,9 @@ what it still leaves for hookyard to build.
 | Engine | Hook config in plugin | Plugin-root reference in hook command | Multi-hook consolidation | End-user install steps | Trust gate |
 |---|---|---|---|---|---|
 | Claude Code | `hooks/hooks.json`, same shape as user/project hooks (DOC) | `${CLAUDE_PLUGIN_ROOT}`, expanded and exported; changes on every plugin update (DOC) | deny > defer > ask > allow, documented (DOC) | marketplace add, then install (`--scope`), or `--plugin-dir` for a session (DOC) | Workspace trust; whether it applies to user-scope plugins the way §8 found it applies to settings hooks is **unverified** |
-| Codex | root `plugin.json` `extensions.com.openai`, or `hooks/hooks.json` (legacy `.codex-plugin/plugin.json` fallback) (DOC) | `$PLUGIN_ROOT` (DOC) | Concurrent; "any deny wins" documented only for `PermissionRequest`. `PreToolUse` documents both `deny` and `allow` with `updatedInput`, which rewrites the tool input (DOC); the rule when one hook allows-and-rewrites while another denies is undocumented — **unverified**, and not a narrow gap | marketplace add, then `/plugins` install; no one-step CLI path found (DOC) | Codex records trust against the hook's current hash, so new or changed hook definitions are marked for review and skipped until trusted (DOC); whether a version bump that leaves a `$PLUGIN_ROOT`-based definition textually unchanged changes that hash is **unverified** (§12, trust-hash preimage), unlike Claude Code, which documents no re-trust step at all |
+| Codex | root `plugin.json` `extensions.com.openai`, or `hooks/hooks.json` (legacy `.codex-plugin/plugin.json` fallback) (DOC) | `$PLUGIN_ROOT` (DOC) | Concurrent, confirmed by source: every matched hook runs to completion, no short-circuit on deny (code-reading, `codex-rs/hooks/src/engine/dispatcher.rs:115-188`, tag `rust-v0.153.4` / commit `3d2ee51c`). `should_block` folds as OR across every hook, and `updatedInput` is discarded whenever any hook denies — **deny always wins over an allow+updatedInput from a different hook, unconditionally** (`codex-rs/hooks/src/events/pre_tool_use.rs:105-133`); among multiple non-denying rewrites, the one from the hook that finishes last in real time wins, not declaration order (`latest_updated_input`, `pre_tool_use.rs:153-167`) — **resolved** | marketplace add, then `/plugins` install; no one-step CLI path found (DOC) | Codex records trust against the hook's current hash, so new or changed hook definitions are marked for review and skipped until trusted (DOC); whether a version bump that leaves a `$PLUGIN_ROOT`-based definition textually unchanged changes that hash is **unverified** (§12, trust-hash preimage), unlike Claude Code, which documents no re-trust step at all |
 | Cursor | `.cursor-plugin/plugin.json` + `hooks/hooks.json`, or manifest `hooks` (DOC) | Undocumented but real: `cursor-agent` exports **both** `${CURSOR_PLUGIN_ROOT}` and `${CLAUDE_PLUGIN_ROOT}` as env vars set to the firing plugin's install path, for any hook sourced from a plugin's `hooks.json` (never for project/user/team/enterprise hooks); the default `cwd` for those hooks is already the plugin dir too, except on `stop`/`subagentStop` (code-reading, cursor-agent 2026.09.10-fd3934a bundle, `docs/design/fixtures/cursor-plugin-root/`); confirmed for the `cursor-agent` CLI only — the IDE ships a separate bundle not read here, so it stays **unverified** | Across sources, higher-priority source wins (DOC); same-source, `deny > ask > allow` read from `cursor-agent`'s own reducer (code-reading, §4) | IDE: Customize → find the plugin → Install, with a scope choice (DOC, [Cursor plugins](https://cursor.com/docs/plugins)); CLI: `cursor-agent plugin marketplace add <url>`, then `/plugin` → Marketplace, no non-interactive install (vendor staff forum post, [Cursor forum](https://forum.cursor.com/t/unable-to-find-a-cli-command-to-install-a-cursor-plugin-after-adding-its-marketplace-repository/166016); LOCAL, `cursor-agent plugin --help` shows only `marketplace`) | Workspace trust |
-| Pi | `package.json` `"pi"` key; `pi install npm:\|git:\|path` (DOC) | None — an extension resolves its own path itself at load; there is no install-time variable to expand (DOC, code-reading `pi_bridge.ts`) | **Unverified** — not researched | `pi install`, one step (DOC) | Project-local trust gate; does not cover globally installed packages (§8/§12) |
+| Pi | `package.json` `"pi"` key; `pi install npm:\|git:\|path` (DOC) | None — an extension resolves its own path itself at load; there is no install-time variable to expand (DOC, code-reading `pi_bridge.ts`) | Sequential, load order; the first handler to return `{ block: true }` or throw wins and short-circuits the chain, so a later allow never overrides an earlier deny — **resolved** LOCAL against Pi 0.85.1, corroborated by its bundled `docs/extensions.md` (code-reading, `docs/design/fixtures/pi-multi-extension-consolidation/`) | `pi install`, one step (DOC) | Project-local trust gate; does not cover globally installed packages (§8/§12) |
 
 One caveat governs the whole Codex column above: `codex-cli` is not
 installed on this host, so none of Codex's plugin facts could be checked
@@ -711,13 +711,15 @@ native rule is what consolidates**, and that rule is not uniform:
   reducer read directly from `cursor-agent`'s code — deny beats ask beats
   allow, corroborating §4's own rule (DOC for the source ordering,
   code-reading for the same-source reducer).
-- **Codex** leaves `PreToolUse` multi-hook consolidation undocumented, and
-  current docs make that gap wide rather than narrow: `PreToolUse` documents
-  both `permissionDecision: "deny"` and `permissionDecision: "allow"` with
-  `updatedInput`, which rewrites the tool input (DOC, [Codex
-  hooks](https://learn.chatgpt.com/docs/hooks)). One plugin's hook can
-  therefore rewrite a call's input while another plugin's hook denies it,
-  with no documented rule for which wins — **unverified**, routed to §12.
+- **Codex**'s `PreToolUse` multi-hook consolidation is now source-confirmed
+  (code-reading, `codex-rs/hooks/src/events/pre_tool_use.rs:105-133`,
+  `codex-rs/hooks/src/engine/dispatcher.rs:115-188`, tag `rust-v0.153.4` /
+  commit `3d2ee51c`): all matched hooks run to completion in parallel, and
+  `should_block` folds as OR across every hook while `updatedInput` is
+  discarded whenever any hook denies. One plugin's hook rewriting a call's
+  input while another plugin's hook denies it therefore resolves to
+  **deny**, unconditionally — **resolved**, matching this design's own
+  rule.
 - **Pi** is now resolved, LOCAL grade: `tool_call` handlers across two or
   more extensions run sequentially in load order and Pi stops at the first
   one that returns `{ block: true }` or throws (a throw fails closed,
@@ -726,7 +728,7 @@ native rule is what consolidates**, and that rule is not uniform:
   is applied in place, but a later block prevents the tool from ever
   executing, so there is nothing left for that mutation to observably
   affect — Pi has no `updatedInput`-vs-`deny` race the way Codex's item
-  below does. One plugin's deny is never overridden by another plugin's
+  above did. One plugin's deny is never overridden by another plugin's
   allow, which is the guarantee build mode needs — confirmed LOCAL against
   Pi 0.85.1, corroborated by its bundled `docs/extensions.md` on the
   block-return shape, the load-order mutation guarantee, and `tool_call`
@@ -736,11 +738,11 @@ So item 2 is genuinely load-bearing for build mode in a way it was only
 informational for yard mode: yard mode states and enforces its own rule
 regardless of what any engine does (§4), while build mode's cross-plugin
 case depends on the engine's rule *actually being* deny-wins, which is
-confirmed for Claude Code, Cursor and Pi, and open for Codex. Codex's open
-case is not small: it documents an allow-and-rewrite verdict with no
-documented rule for its conflict with a deny, so Codex's guards have strong
-reason to stay in yard mode until that item closes; Pi's guards no longer
-need to.
+confirmed for Claude Code, Cursor, Codex (source-confirmed — deny folds as
+OR across every hook and always wins over any hook's rewrite; §12 item 2),
+and Pi (LOCAL-confirmed — a block or throw short-circuits the load-ordered
+chain, so no later allow ever overrides an earlier deny; §12 item 3). Neither
+Codex's nor Pi's guards have this reason to stay in yard mode any longer.
 
 **Record.** Build mode appends to the same on-disk stream yard mode
 writes, under the same schema, but only when the record's state directory
@@ -797,12 +799,13 @@ live proof of `install`/`emit` and of the Cursor writer, inheriting §10's
 first-deployment risk (the first activation that has ever needed hookyard in
 the profile at all) without the three-migration safeguard §10 built around
 it. Whether yard mode needs its own low-stakes proving migration first is
-routed to §12. Question 4's open cross-plugin consolidation cases on Codex
-and Pi are a second, independent reason the guards stay in yard mode,
-alongside §10's original severity argument. §10's framing — "prove the
-mechanism where a mistake is cheap before trusting it somewhere expensive" —
-still holds for the shared router core and the build path, which aeye now
-proves together; it no longer holds for yard mode's own install path.
+routed to §12. Question 4's open cross-plugin consolidation case on Pi is a
+second, independent reason the guards stay in yard mode, alongside §10's
+original severity argument — Codex's case is resolved (§12 item 2). §10's
+framing — "prove the mechanism where a mistake is cheap before trusting it
+somewhere expensive" — still holds for the shared router core and the build
+path, which aeye now proves together; it no longer holds for yard mode's own
+install path.
 
 Positioning, stated plainly: **write hooks once, ship a native plugin for
 every engine — the hooks layer Agent Plugins leaves out.** Agent Plugins
@@ -909,14 +912,17 @@ daemon-shaped problem here to justify a daemon-shaped solution.
 Claude Code's own documentation states that all matching hooks for one event
 run in parallel, so native multi-hook fan-out is confirmed for that engine.
 How an engine consolidates verdicts from parallel hooks that *disagree* was
-unread for all three when the rule below was written. Two of the three have
-since been read — Cursor's directly, Claude Code's from its documentation —
-and both agree: `cursor-agent`'s own reducer folds two hooks' `permission`
-values with `deny` beating `ask` beating `allow`, which is this design's rule
-exactly. Claude Code's hooks guide documents the same ordering across an
-event's matching hooks — deny, defer, ask, allow (DOC,
+unread for all three when the rule below was written. All three have since
+been read — Cursor's and Codex's directly, Claude Code's from its
+documentation — and all three agree: `cursor-agent`'s own reducer folds two
+hooks' `permission` values with `deny` beating `ask` beating `allow`, which
+is this design's rule exactly. Claude Code's hooks guide documents the same
+ordering across an event's matching hooks — deny, defer, ask, allow (DOC,
 https://code.claude.com/docs/en/hooks-guide); Codex's native consolidation
-rule remains unread (§12, item 2). In build mode, the rule below holds within
+rule is now read: `deny` folds as OR across every hook and always beats any
+hook's `allow`+`updatedInput` (code-reading,
+`codex-rs/hooks/src/events/pre_tool_use.rs:105-133`, tag `rust-v0.153.4` /
+commit `3d2ee51c`; §12, item 2). In build mode, the rule below holds within
 one plugin; across plugins, the firing engine's own native rule governs
 instead (§3.1).
 
@@ -996,21 +1002,24 @@ Codex tool call the same way they stop a Claude Code one.
 
 What Codex accepts is narrower than what Claude Code accepts, and the shape
 of the narrowing is unusually convenient: **Codex's `pre_tool_use` is a
-deny-only decision channel.** `permissionDecision: "deny"` with a non-empty
-`permissionDecisionReason` is honoured; `allow` and `ask` are both explicitly
-rejected, as are `continue: false`, `stopReason`, `suppressOutput`, the legacy
-`decision: "approve"`, and `updatedInput` when it is not paired with
-`allow`. A router whose consolidation
-rule is deny-wins (below) never needs the rejected half: the only verdict it
-has to render to Codex is the one Codex takes. The engine with the poorest
-decision vocabulary is the engine whose vocabulary happens to be exactly the
-one this design uses. Current Codex documentation describes `allow` with
-`updatedInput` on `PreToolUse` (§12, item 3); the 0.153.4 strings already
-name that pairing, so the earlier "deny-only" reading may have been a
-misreading rather than a version change — **unverified** which. The deny
-path this paragraph rests on is unaffected either way, and yard mode still
-renders only `deny` to Codex, which matters for build mode's cross-plugin
-case (§3.1).
+deny-or-rewrite decision channel.** `permissionDecision: "deny"` with a
+non-empty `permissionDecisionReason` is honoured, and so is
+`permissionDecision: "allow"` paired with `updatedInput` — a command-rewrite
+verdict, not a bare allow; bare `allow`, `ask`, `continue: false`,
+`stopReason`, `suppressOutput`, the legacy `decision: "approve"`, and
+`updatedInput` when it is not paired with `allow` are all explicitly
+rejected (code-reading, `codex-rs/hooks/src/engine/output_parser.rs:441-482`,
+tag `rust-v0.153.4` / commit `3d2ee51c`). A router whose consolidation rule
+is deny-wins (below) never needs to render `allow` at all: Codex's own
+multi-hook fold makes a deny decisive over any hook's rewrite regardless
+(§12 item 2, resolved). Current Codex documentation describes `allow` with
+`updatedInput` on `PreToolUse` (§12, item 3, now resolved); the 0.153.4
+strings and source agree with that documentation — the earlier "deny-only"
+reading here was a misreading of the strings (they reject *bare* `allow`,
+not `allow`+`updatedInput`), not a version change. The deny path this
+paragraph rests on is unaffected either way, and yard mode still renders
+only `deny` to Codex, which matters for build mode's cross-plugin case
+(§3.1, resolved).
 
 One thing about this evidence was worth stating precisely, because the rest
 of the document is careful about it. The confirmation had been **static**: it
@@ -1649,9 +1658,10 @@ result; `enforced` is `false` exactly when the router computed a verdict the
 engine cannot act on. With Codex's `pre_tool` deny path confirmed (§4), no
 engine is wholesale observe-only any more, so this field now marks the
 narrower per-event cases — an `allow` rendered to Codex, which hookyard does
-not print there (§7; the shipped binary this was read from was read as
-rejecting an explicit allow — misreading or version change is
-**unverified**, §12 item 3), or an event whose engine
+not print there (§7; the shipped binary accepts an explicit `allow` when it
+carries `updatedInput` — the earlier reading of it as a blanket rejection
+was a misreading, not a version change, §12 item 3, resolved), or an event
+whose engine
 has no decision slot at all; `router` is `ok`, `error` or `timeout`, which is what
 makes a router that failed *after starting* recoverable; `handlers`
 distinguishes `abstain` from `error` and from `timeout`, which is what makes a
@@ -3493,7 +3503,8 @@ once hookyard owns the hooks" is amended to "its `hooks.json` is generated":
 nix-config's activation loads the built aeye plugin in place of feeding
 aeye's manifest to yard mode's aggregated `install`. The guard migration
 stays yard mode, last — §10's original severity argument, plus §3.1
-question 4's cross-plugin consolidation gap for Codex and Pi. Not every
+question 4's cross-plugin consolidation gap for Pi (Codex's gap is
+resolved, §12 item 2). Not every
 reason above carries over. Dispatcher's promotion rested on aeye and
 lazytmux first proving hookyard as a marker-scoped writer into
 `~/.cursor/hooks.json`, and the guards went last partly so they would get a
@@ -3686,36 +3697,52 @@ non-Cursor findings.
    not the full source list — see the `projectSettings` finding under §8's
    gate-list bullet below for the source this item never asked about.
 2. **The exact native multi-hook consolidation rule, per engine (§4).**
-   **Two of three resolved.** Cursor's reducer folds two hooks' `permission`
+   **Four of four resolved.** Cursor's reducer folds two hooks' `permission`
    values as `deny` > `ask` > `allow` — this design's own rule, arrived at
    independently by the vendor. Claude Code documents `deny` > `defer` >
    `ask` > `allow` across an event's matching hooks (DOC,
    https://code.claude.com/docs/en/hooks-guide); Cursor's docs add
    across-source priority (DOC) on top of that same-source
-   reducer. Codex's `PreToolUse` rule is undocumented, and current Codex
-   docs document both `deny` and `allow` with `updatedInput` on that event
-   (DOC, https://learn.chatgpt.com/docs/hooks), so one hook can rewrite a
-   call's input while another denies it with no documented resolution —
-   **unverified**, and not a narrow gap.
-   Pi's is open, not researched. §4 explains why the design states its own
-   rule regardless — informational for yard mode, load-bearing for build
-   mode's cross-plugin case (§3.1).
+   reducer. Codex's `PreToolUse` rule is now read from source (code-reading,
+   `codex-rs/hooks/src/events/pre_tool_use.rs:105-133`,
+   `codex-rs/hooks/src/engine/dispatcher.rs:115-188`, tag `rust-v0.153.4` /
+   commit `3d2ee51c`): every matched hook runs to completion in parallel (no
+   short-circuit on deny), `should_block` folds as OR across all of them,
+   and `updatedInput` is discarded whenever any hook denies — deny always
+   wins over a rewrite, unconditionally. Among multiple non-denying
+   rewrites, the one from the hook that finishes last in real time wins,
+   not declaration order — **resolved**.
+   Pi's is also resolved, LOCAL grade: `tool_call` handlers across
+   extensions run in load order and stop at the first block or throw, so one
+   plugin's deny is never overridden by another plugin's allow (confirmed
+   against Pi 0.85.1, `docs/design/fixtures/pi-multi-extension-consolidation/`).
+   §4 explains why the design states its own rule regardless —
+   informational for yard mode, load-bearing for build mode's cross-plugin
+   case (§3.1).
 3. **Per-engine deny capability beyond Claude Code (§4).** **Resolved for
    both engines, and this item is no longer security-blocking.** It was the
    one genuinely load-bearing question on this list, and it resolved in the
    direction that removes a coverage gap rather than confirming one:
 
    - **Codex** accepts `permissionDecision: "deny"` on `pre_tool_use` with a
-     mandatory non-empty `permissionDecisionReason`, and rejects `allow`,
-     `ask`, `continue: false`, `stopReason`, `suppressOutput`, legacy
-     `decision: "approve"`, and `updatedInput`. A `permission_request` path
-     can deny approval separately. Deny-only is exactly the vocabulary a
-     deny-wins router needs. Current Codex documentation
-     (https://learn.chatgpt.com/docs/hooks, DOC) describes `allow` with
-     `updatedInput` on `PreToolUse`; the 0.153.4 strings already name that
-     pairing, so the "rejects `allow`" reading may have been a misreading of
-     those strings rather than a version change — **unverified** which;
-     deny capability is unaffected either way.
+     mandatory non-empty `permissionDecisionReason`, and also accepts
+     `permissionDecision: "allow"` when paired with `updatedInput` — a
+     command-rewrite verdict, not a bare allow. Bare `allow`, `ask`,
+     `continue: false`, `stopReason`, `suppressOutput`, legacy
+     `decision: "approve"`, and `updatedInput` without `allow` are all
+     rejected (code-reading,
+     `codex-rs/hooks/src/engine/output_parser.rs:441-482`, tag
+     `rust-v0.153.4` / commit `3d2ee51c`). A `permission_request` path can
+     deny approval separately. Deny-with-reason or allow-with-rewrite is
+     exactly the vocabulary a deny-wins router needs — it never needs to
+     render `allow`, since Codex's own multi-hook fold makes a deny
+     decisive over any hook's rewrite regardless (§12 item 2, resolved).
+     Current Codex documentation (https://learn.chatgpt.com/docs/hooks,
+     DOC) describes `allow` with `updatedInput` on `PreToolUse`, agreeing
+     with the source; the earlier "rejects `allow`" reading was a
+     misreading of the validation strings (they reject *bare* `allow`, not
+     `allow`+`updatedInput`), not a version change — **resolved**; deny
+     capability is unaffected either way.
    - **Cursor** accepts `permission` values `allow`, `deny`, `ask` on six
      permission-capable events, `preToolUse` among them, and also treats a
      handler exiting 2 as a block with its stderr as the reason.
@@ -4124,9 +4151,25 @@ detection and canonicalization first become load-bearing.
   unchanged changes that hash — which turns on the trust-hash preimage the
   §9 finding above leaves unknown (§3.1).
 - **Codex `PreToolUse` conflict between one hook's `allow`+`updatedInput`
-  and another's `deny`.** **Open**, and load-bearing for build mode: current
-  Codex docs document both verdicts on `PreToolUse` but no rule for which
-  wins when separate plugins' hooks return them for the same call (§3.1).
+  and another's `deny`, resolved: deny always wins.** Source-confirmed
+  (code-reading, `codex-rs/hooks/src/events/pre_tool_use.rs:105-133`,
+  `codex-rs/hooks/src/engine/dispatcher.rs:115-188`, tag `rust-v0.153.4` /
+  commit `3d2ee51c`, matching `codex-cli 0.153.4`): matched `PreToolUse`
+  hooks — same source and across plugins/`config.toml` — run in parallel to
+  completion, with no short-circuit on deny. `should_block` folds as OR
+  across every hook's verdict, and `updatedInput` is discarded whenever any
+  hook denies, so a deny from any hook blocks the call unconditionally even
+  when a different hook validly returned `allow`+`updatedInput` — the
+  rewrite is never applied first and then re-evaluated. Among multiple
+  non-denying rewrites with no deny anywhere, the surviving one is the hook
+  that finished last in real time (a race), not the one declared last, and
+  not determined by plugin- vs `config.toml`-sourcing; that source ordering
+  (`config.toml`/managed hooks are discovered before plugin hooks,
+  `codex-rs/hooks/src/engine/discovery.rs:94-206`) only affects which
+  denial's *reason* is reported when several hooks deny. Consequence for
+  §3.1: Codex guards no longer have this reason to stay in yard mode —
+  Codex's native `PreToolUse` fold is deny-wins, matching hookyard's own
+  rule exactly.
 - **Whether yard mode needs a low-stakes proving migration before the
   guards.** **Open.** With aeye, lazytmux, and dispatcher in build mode and
   Cursor gated, the guard migration is the first live exercise of yard
@@ -4182,8 +4225,9 @@ engines' deny paths, read off their implementations and then watched enforcing
 (item 3); Codex's undeclared-timeout behaviour, which turned out to be no
 bound at all rather than a generous default (item 4); the live payload
 capture, which also corrected §7's field table and simplified §6's correlation
-key; Cursor's and Claude Code's native consolidation rules (Claude Code's at
-DOC grade), Cursor's tool mapping and event families (items 2 and 6); §8's
+key; Cursor's, Claude Code's, and Codex's native consolidation rules
+(Claude Code's at DOC grade, Codex's at code-reading grade), Cursor's tool
+mapping and event families (items 2 and 6); §8's
 sink-4 double-firing decision; Codex's trust mechanism
 in substance; the profile-gate question, which retracted the §11 correction
 that raised it; and, settled by a ruling rather than new evidence, Claude
@@ -4203,10 +4247,9 @@ all three a stated prerequisite for issue #9; Pi's `pre_compact` mapping,
 closing the same way; the per-engine gate lists for Codex and Cursor beyond
 workspace trust — this pass tried Cursor's shipped bundles and found nothing
 beyond what was already known, and couldn't try Codex at all, for want of the
-binary on this host; Codex's `apply_patch` sub-tool mapping; Codex's
-`PreToolUse` consolidation rule (§3.1); whether fail-open
-should be conditional
-for security-classed handlers; the exact preimage of Codex's trust hash; the
+binary on this host; Codex's `apply_patch` sub-tool mapping; whether
+fail-open should be conditional for security-classed handlers; the exact
+preimage of Codex's trust hash; the
 prior pass's drift-count arithmetic; and HookBus's carried facts. Moved from
 fully open to resting on the middle evidence grade, one short of a live
 capture: whether Claude Code honours `projectSettings` hooks at all (detailed
