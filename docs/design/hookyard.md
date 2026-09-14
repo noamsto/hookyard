@@ -714,18 +714,29 @@ native rule is what consolidates**, and that rule is not uniform:
   hooks](https://learn.chatgpt.com/docs/hooks)). One plugin's hook can
   therefore rewrite a call's input while another plugin's hook denies it,
   with no documented rule for which wins — **unverified**, routed to §12.
-- **Pi**'s multi-extension block consolidation was not researched this
-  pass — **unverified**, routed to §12.
+- **Pi** is now resolved, LOCAL grade: `tool_call` handlers across two or
+  more extensions run sequentially in load order and Pi stops at the first
+  one that returns `{ block: true }` or throws (a throw fails closed,
+  short-circuiting the chain the same as an explicit block); the winning
+  handler's `reason` is what's shown. An earlier handler's input mutation
+  is applied in place, but a later block prevents the tool from ever
+  executing, so there is nothing left for that mutation to observably
+  affect — Pi has no `updatedInput`-vs-`deny` race the way Codex's item
+  below does. One plugin's deny is never overridden by another plugin's
+  allow, which is the guarantee build mode needs — confirmed LOCAL against
+  Pi 0.85.1, corroborated by its bundled `docs/extensions.md` on the
+  block-return shape, the load-order mutation guarantee, and `tool_call`
+  errors failing closed (§12, `docs/design/fixtures/pi-multi-extension-consolidation/`).
 
 So item 2 is genuinely load-bearing for build mode in a way it was only
 informational for yard mode: yard mode states and enforces its own rule
 regardless of what any engine does (§4), while build mode's cross-plugin
 case depends on the engine's rule *actually being* deny-wins, which is
-confirmed for Claude Code and Cursor and open for Codex and Pi. Neither open
-case is small: Codex documents an allow-and-rewrite verdict with no
-documented rule for its conflict with a deny, and Pi's rule is unread
-outright, so Codex's and Pi's guards both have strong reason to stay in yard
-mode until their items close.
+confirmed for Claude Code, Cursor and Pi, and open for Codex. Codex's open
+case is not small: it documents an allow-and-rewrite verdict with no
+documented rule for its conflict with a deny, so Codex's guards have strong
+reason to stay in yard mode until that item closes; Pi's guards no longer
+need to.
 
 **Record.** Build mode appends to the same on-disk stream yard mode
 writes, under the same schema, but only when the record's state directory
@@ -4113,9 +4124,21 @@ detection and canonicalization first become load-bearing.
   running Claude Code's settings-file hooks at lower priority; whether it
   also loads Claude Code's *plugin* hooks — the build-mode analogue of §8's
   sink 4 — is not stated either way, **unverified** (§3.1).
-- **Pi's multi-extension block consolidation.** Not researched this pass —
-  **unverified**, and load-bearing for build mode the same way item 2 is for
-  the other three engines (§3.1).
+- **Pi's multi-extension block consolidation is resolved, LOCAL grade.**
+  Two or more extensions subscribed to `tool_call` run sequentially in load
+  order; Pi stops at the first handler that returns `{ block: true }` or
+  throws, so one plugin's deny always wins over another plugin's allow
+  regardless of registration order, and the winning handler's `reason` is
+  what's shown. A throw fails closed and short-circuits the remaining chain
+  exactly like an explicit block. An earlier handler's input mutation is
+  applied in place, but when a later handler then blocks, the tool never
+  executes, so the mutation has no separately observable effect — probed
+  directly, not inferred. Probed with five throwaway extensions against Pi
+  0.85.1 across every load-order combination, cross-checked against Pi's
+  own bundled `docs/extensions.md`
+  (`docs/design/fixtures/pi-multi-extension-consolidation/`, §3.1). Timeout
+  behaviour for a hung `tool_call` handler was not probed — no such knob is
+  documented for it — and stays open if it's raised as its own item.
 - **Doctor visibility into Claude Code / Codex plugin caches.** `doctor` can
   already read Cursor's `hooks.json`; whether it can read Claude Code's or
   Codex's plugin caches to detect a handler registered both as a yard entry
@@ -4153,7 +4176,9 @@ that raised it; and, settled by a ruling rather than new evidence, Claude
 Code's `defer` verdict and the manifest's handling of non-command handler
 types. Also resolved, from the Pi investigation: whether Pi's
 auto-discovery loads an unregistered extension (yes, after a wrong first
-reading corrected above), and whether Pi has Cursor's empty-`cwd` trap (no).
+reading corrected above), whether Pi has Cursor's empty-`cwd` trap (no), and
+Pi's multi-extension `tool_call` consolidation (deny-wins by
+first-handler-to-block short-circuit, detailed above).
 
 Still **open**, in the order it should be closed: three residuals this pass's
 own code creates — engine detection unverified for `SessionStart` and `Stop`
@@ -4165,7 +4190,7 @@ closing the same way; the per-engine gate lists for Codex and Cursor beyond
 workspace trust — this pass tried Cursor's shipped bundles and found nothing
 beyond what was already known, and couldn't try Codex at all, for want of the
 binary on this host; Codex's `apply_patch` sub-tool mapping; Codex's
-`PreToolUse` consolidation rule (§3.1) and Pi's; whether fail-open
+`PreToolUse` consolidation rule (§3.1); whether fail-open
 should be conditional
 for security-classed handlers; the exact preimage of Codex's trust hash; the
 prior pass's drift-count arithmetic; and HookBus's carried facts. Moved from
