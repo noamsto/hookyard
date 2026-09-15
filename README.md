@@ -1,204 +1,92 @@
 # hookyard
 
-Write agent hooks once, ship them to every coding agent.
+**Write an agent hook once. Run it in Claude Code, Codex, Cursor and Pi.**
 
-hookyard is one Go binary and one manifest schema behind two front ends.
-**Build mode** is the decided OSS default: `hookyard build` generates what a
-plugin ships per engine — Claude Code and Codex plugin hooks.json, a
-generated Pi package, and Cursor plugin hooks.json for the `cursor-agent`
-CLI, with the Cursor IDE's separate bundle still gated pending
-verification — bundling the
-hookyard binary itself as the shim, so end users install a tool's plugin
-through their engine's own plugin flow and never see hookyard at all. It's
-the hooks layer Agent Plugins lacks (Agent Plugins 1.0, agent-plugins.org,
-covers skills and MCP only; hooks are explicitly out of scope). Claude Code
-is implemented — `hookyard build --engine claude-code` (below); Codex, Pi
-and Cursor build targets are not yet implemented. **Yard mode** is the other
-front end: install/emit/route, machine-wide deny-wins consolidation across
-every tool's handlers, and the always-on event record, aimed at Nix and
-power users and at security guards that need machine-wide enforcement.
+Every coding agent has its own hook config, its own event names and its own
+payload shape. hookyard is one static binary that sits between them and your
+handlers: declare each handler once in a manifest, and hookyard registers it
+with every engine, translates each hook call into one normalized envelope, and
+answers each engine in the format it expects.
 
-Yard mode works like this: Claude Code, Codex, Cursor and Pi each declare
-hooks in their own config format, under their own event names, with their
-own payload shape — Pi has no config-level hook at all, and gets a
-generated bridge extension instead (more below). hookyard is a standalone
-static binary that holds one declarative table of which handler runs on
-which event on which engine, renders that table into each engine's native
-config, and — when an engine fires a hook — decodes the payload into a
-normalized shape, runs the matching handlers concurrently under a shared
-deadline, folds their verdicts with a deny-wins consolidation, and renders
-the result in the shape the calling engine accepts. All four engines have a
-confirmed deny path, so a guard enforces on all four; a decision only has
-somewhere to land on `pre_tool` (plus a handful of Cursor-scoped events), so
-a verdict on any other event is recorded but not enforced, and an `allow`
-rendered to Codex or Pi is recorded rather than enforced too — hookyard
-prints no allow to Codex (an older Codex binary was read as rejecting one;
-current Codex docs describe `allow` with `updatedInput`), and Pi's decision
-channel has no allow wire form at all, so on both nothing is printed and the
-engine's own default flow runs instead. An `ask` is not one of those cases:
-on Codex and Pi, whose decision shapes are binary, a consolidated `ask`
-degrades to an enforced `deny` with a reason explaining why.
+- **One manifest, four engines.** No per-agent copies of the same guard.
+- **Deny wins.** Handlers run concurrently and their verdicts fold
+  `deny > ask > allow`; a handler with nothing to say never overrides one that
+  objects.
+- **Bounded.** Every call shares one 4.5s deadline, so a slow or broken handler
+  abstains instead of hanging the agent.
+- **On the record.** Every routed call is appended to a local event log, so a
+  guard that quietly stopped firing shows up after the fact.
+- **`hookyard doctor`** checks trust, registration and router paths per engine.
 
-What follows: build mode's Claude Code slice, then yard mode in full.
+## Status
 
-## Build mode (Claude Code)
+**Yard mode** ships today: machine-wide install, routing and the event record,
+aimed at Nix users and at guards that need machine-wide enforcement.
+**Build mode**, generating per-engine plugin hooks so end users never see
+hookyard, is the planned open-source default and not yet implemented
+([design §3.1](docs/design/hookyard.md)).
 
-```
-hookyard build --engine claude-code --manifest <file> [--manifest ...] --out <plugin-root> [--name <plugin-name>]
-```
+## How it works
 
-`--engine` only accepts `claude-code` today; naming any other engine is an
-error, not a stub. `--out` is the plugin root, and it must already exist —
-it's the author's own plugin tree (skills, handler scripts, an optional
-hand-written `.claude-plugin/plugin.json`), and the handlers' `exec` paths
-live inside it. `build` owns and rewrites exactly these generated paths,
-refusing to touch any of them if the file is a symlink, or if its directory is
-a symlink or resolves outside `--out`:
-
-- `hooks/hooks.json` — **merged, not overwritten**. An existing file is the
-  base every foreign (non-hookyard) hook is preserved out of; only prior
-  hookyard-generated entries are stripped and replaced, so re-running `build`
-  is idempotent and an author's hand-written hooks survive.
-- `hookyard/table.json` — the baked handler table, mode `0644` because it
-  ships inside the plugin's git tree or zip archive.
-- `bin/hookyard` — a POSIX `sh` launcher, mode `0755`.
-- `bin/hookyard-<GOOS>-<GOARCH>` — a copy of the `hookyard` binary that ran
-  `build`, mode `0755`. This slice bundles only the host arch that built the
-  plugin; multi-arch packaging is out of scope for now.
-- `.claude-plugin/plugin.json` — written only when absent, as `{"name":
-  <--name>}` (`--name` is then required); left untouched when it already
-  exists, since it's the author's file.
-
-Every generated `hooks.json` entry runs:
-
-```
-"${CLAUDE_PLUGIN_ROOT}/bin/hookyard" route --registered-for claude-code --event <event> --plugin-root "${CLAUDE_PLUGIN_ROOT}"
-```
-
-The launcher maps `uname -s`/`uname -m` to the bundled binary's `GOOS`/
-`GOARCH` name and execs it; on a host it doesn't recognize, or when the
-matching binary isn't there or isn't executable, it exits 0 with no
-output — the same fail-open every engine already reads as "no opinion,"
-never a record. Handler `exec` paths in a build-mode manifest are relative
-to the plugin root, with no `..` segments; `route --plugin-root` resolves
-and checks that each selected handler's exec is actually contained inside
-the root at fire time, and `build` runs the same check against `--out` at
-bake time as a lint. A handler whose exec fails to resolve — missing, or
-escaping the root via `..` or a symlink — is never exec'd; it becomes its
-own error result, and the rest of the plugin's handlers still run and fold
-as usual. `hookyard validate --plugin-root <dir> --manifest <file>
-[--manifest ...]` runs that same resolution check without building
-anything, for CI or a pre-release sanity pass.
-
-One collision is worth naming: the hooks.json merge strips any *author*
-hook whose command also contains `/bin/hookyard` — the same substring the
-merge uses to recognize hookyard's own prior entries — so a hand-written
-hook like `${CLAUDE_PLUGIN_ROOT}/bin/hookyard-lint.sh` would be silently
-removed on the next `build`. Name your own scripts around that substring if
-you're authoring hooks by hand in the same tree.
-
-The event record follows yard mode's default-state-dir chain
-(`$HOOKYARD_STATE_DIR`, else `$XDG_STATE_HOME/hookyard`, else
-`~/.local/state/hookyard`), but build mode only **appends** to a state
-directory that already exists there — it never creates one on an end user's
-machine the way yard mode's installer does. The first append also tightens
-that existing directory's mode to `0700` and creates `stream/` inside it if
-it isn't already there. A host with no such directory gets no build-mode
-records at all; that's a stated limitation, not a bug.
-
-To try a built plugin locally without a marketplace: `claude --plugin-dir
-<out>`.
-
-## How yard mode works
-
-Two passes. `hookyard install` writes the table down into Codex's, Cursor's
-and Pi's config and hookyard's own state table; `hookyard emit` prints
-Claude Code's hooks block as JSON on stdout, for Nix to place — Claude
-Code's own destination is Nix-managed on this machine and unwriteable by
-`install`'s usual rename-based strip (more below). `hookyard route` is what
-an engine actually invokes when a hook fires.
-
-Several repos' manifests fold into one `hookyard install` pass, out to
-Codex's, Cursor's and Pi's native config plus hookyard's own state table.
-`hookyard emit` is a separate pass Nix runs at build time for Claude Code,
-and it reads none of those manifests: it renders one route row per event in
-a fixed, eight-event catalog (below), and it's the state table — the same
-one `install` writes — that decides which handlers actually run for that
-event, same as for the other three engines:
+Manifests from any number of repos fold into one `hookyard install` pass, out
+to Codex's, Cursor's and Pi's native config plus hookyard's own state table.
+`hookyard emit` is a separate pass Nix runs at build time for Claude Code: it
+reads no manifests, and instead renders one route row per event in a fixed,
+eight-event catalog — it's the state table, the same one `install` writes,
+that decides which handlers actually run for Claude Code, same as for the
+other three engines:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/registration-dark.svg">
   <img alt="Registration: repo A's and repo B's hookyard.json manifests fold into one hookyard install pass, which writes into Codex's config.toml, Cursor's hooks.json, and Pi's two artifacts — a generated bridge extension file and an extensions[] entry in Pi's own settings.json — and records the installed handlers in hookyard's state table; a separate hookyard emit pass, reading no manifests, renders a fixed Claude event catalog that Nix places into Claude Code's --settings overlay." src="docs/diagrams/registration.svg">
 </picture>
 
-An engine firing a hook decodes its native payload into one normalized
-envelope, fans out to the matching handlers under a shared deadline, folds
-their verdicts deny-wins, and renders the result for the calling engine
-before the record is appended:
+When a hook fires, `hookyard route` normalizes the payload, runs the matching
+handlers, folds their verdicts and renders the answer for the calling engine:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/routing-dark.svg">
   <img alt="Routing: Claude Code, Codex, Cursor, and Pi each decode their own native hook payload into a normalized envelope; the matching handlers run concurrently under one 4.5s deadline; their verdicts fold deny-wins; the result renders for the calling engine, including Pi's binary block-or-nothing verdict; and the event record is appended on every path." src="docs/diagrams/routing.svg">
 </picture>
 
-A few things worth calling out because they're not visible from the
-`hookyard` label alone: each engine's writer strips only its own
-marker-tagged entries out of a config file it shares with other writers, and
-refuses to touch a file it cannot parse rather than clobbering it — on Codex
-that matters because `config.toml` also holds the per-project trust store.
-Each engine's payload and rendered verdict are genuinely different shapes,
-not the same JSON dressed up four ways — Codex's `hookSpecificOutput` has no
-`ask` or advisory field at all, Cursor folds a reason and any advice into one
-`user_message` string because it has exactly one text slot, and Pi has no
-subprocess payload to dress up in the first place: hookyard's own bridge
-extension authors what looks like one, and renders its verdict as a bare
-`{block, reason}` return value rather than any wire format Pi defines. And the
-record is appended on every path through `route`, including a call that
-belongs to another engine's config entirely (`route` and its `--registered-for`
-flag disagree, so nothing runs and the record says `suppressed`) — the record
-is what makes a silently misfiring or disabled guard recoverable after the
-fact, so it can't depend on anything actually firing.
-
-## Build and install
+## Quick start
 
 ```
 nix build .#default   # -> result/bin/hookyard
 nix develop            # devShell with the Go toolchain and formatters
 ```
 
-Once you have a binary on `PATH`:
+Write a manifest:
+
+```json
+{
+  "handlers": [
+    {
+      "id": "block-secrets",
+      "exec": "/home/you/bin/guard-secrets",
+      "events": ["pre_tool"],
+      "engines": ["claude-code", "codex", "cursor"],
+      "match": ["Bash"],
+      "timeout_ms": 2000
+    }
+  ]
+}
+```
+
+A handler reads hookyard's envelope on stdin, with the engine's own payload
+under `.native`, and, to object, prints a `hookSpecificOutput` with a
+`permissionDecision`. Then:
 
 ```
-hookyard validate --manifest path/to/hookyard.json
-hookyard validate --plugin-root path/to/plugin --manifest path/to/hookyard.json
-hookyard install  --manifest path/to/hookyard.json [--manifest ...]
+hookyard validate --manifest hookyard.json
+hookyard install  --manifest hookyard.json [--manifest ...]
 hookyard emit     --engine claude-code --router-path <path> --state-dir <path> [--base <file>]
-hookyard build    --engine claude-code --manifest path/to/hookyard.json [--manifest ...] --out path/to/plugin [--name plugin-name]
 hookyard doctor
 ```
 
-`install` renders every manifest it is given into Codex's, Cursor's and
-Pi's native config in one pass — it takes the full list, never one repo at a
-time, because its strip is keyed on a marker that does not record which
-manifest produced a row. `emit` covers Claude Code instead: it is
-Claude-Code-only (`--engine claude-code` is required), takes no manifest at
-all, and prints a `hooks` block with one route row per event in the fixed
-Claude Code event catalog — `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
-`PostToolUse`, `PreCompact`, `Stop`, `claude-code:Notification` and
-`claude-code:SessionEnd` — to stdout rather than writing a file. It's meant
-to run inside a Nix build rather than at activation time — Nix is what
-places its output into the `--settings` overlay, and it's the state table
-`install` writes that decides which handlers actually run on each of those
-events. `build` is the other front end entirely — see "Build mode (Claude
-Code)" above.
+## With Nix
 
-`doctor` answers the question the event record cannot: every engine skips
-hooks entirely in a directory the user has not trusted, and a handler that
-never runs cannot report that it didn't.
-
-## Wiring hookyard into a consumer repo
-
-A consumer takes hookyard as a flake input and imports its home-manager
+Take hookyard as a flake input and contribute manifests to its home-manager
 module:
 
 ```nix
@@ -214,168 +102,33 @@ module:
 }
 ```
 
-`manifests` is the whole of a consumer's contribution, and it is a shared
-list: every module that sets it contributes paths to the same list, rendered
-into Codex's, Cursor's and Pi's native config, and into hookyard's own state
-table, by one `hookyard install` invocation, owned by hookyard's own module
-and run from `home.activation.hookyardInstall`. That state table is also
-what decides which handlers run for Claude Code — `manifests` itself never
-reaches `programs.hookyard.claudeOverlay.merged`, a build-time `hookyard
-emit` derivation that varies only with hookyard's version, the router path,
-the state dir and `claudeOverlay.base`. The consumer wires `merged` into
-Claude Code's `--settings` overlay itself — Claude Code's destination is
-Nix-managed, not something hookyard's own activation entry can reach (more
-below). A consumer never pins its own
-hookyard input and never adds its own activation entry that calls `hookyard
-install` directly: the strip that removes hookyard's rows on re-render is
-keyed on a marker that does not record which manifest produced a row, so a
-second invocation would silently delete the first one's rows rather than
-merge with them. One input, one binary, one rendering pass per destination,
-and consumers contribute data to it rather than a second copy of the
-mechanism.
-
-A manifest's `exec` must be an absolute path that already exists at
-activation time — `install` stats it, and a manifest that fails the stat
-aborts the whole home-manager generation switch. That is deliberate: the
-alternative is registering a handler that silently never runs, which is the
-same fail-open the guard exists to prevent, just moved from hook-fire time to
-install time instead of caught at all. The practical consequence is that a
-handler built by the same flake needs a manifest generated with
-`pkgs.writeText`, embedding the handler's own store path, rather than a
-checked-in JSON file naming a path Nix had no chance to fill in.
-
-Turning hookyard off goes in a specific order for Codex, Cursor and Pi: empty
-`manifests`, activate, *then* set `enable = false`. Flipping `enable` off
-first removes the binary from the profile while those three engines' configs
-still name it, so the path each config points at now fails at `exec` instead
-of resolving — exactly the fail-open §9 of the design doc spends its argument
-on. Emptying `manifests` first runs `install` with nothing registered, which
-strips hookyard's rows from all three configs while the binary is still there
-to do it; only then is it safe to drop the package itself. `hookyard doctor`'s
-`router path` check is what catches a machine left in the wrong order — it
-confirms the path each engine's config names is actually there to exec,
-alongside the trust and confirmed-deny checks it already runs. This ordering
-rule does not apply to Claude Code: `emit` never reads `manifests` in the
-first place, so emptying the list leaves the overlay untouched, and
-`enable = false` yields `claudeOverlay.base` verbatim — or `{\n}\n` when
-there is no base — without building hookyard at all, so it's safe in any
-order.
-
-The destination files hookyard writes into — Codex's `config.toml`, Cursor's
-`hooks.json`, and Pi's `settings.json` — must be plain files that hookyard
-itself owns, not symlinks placed by another Nix module. Pi also gets a
-generated bridge extension file, written wholesale rather than merged into,
-and that gets the same symlink refusal. `install` refuses to render into any
-of these rather than replace it, because replacing it would silently detach
-whatever manages the link with no warning at the next switch. The same
-escape hatch exists for these three engines as `codexConfig`, `cursorHooks`,
-and `piSettings`, each pointed at a file hookyard can own instead of the
-default path.
-
-Claude Code has no such option, and needs none: `programs.hookyard.claudeHooks`
-is the package holding hookyard's own emitted block — the fixed event
-catalog, not anything derived from `manifests` — and
-`programs.hookyard.claudeOverlay.merged` is that block merged into an
-optional `claudeOverlay.base` the consumer already places as the `--settings`
-overlay — both read-only outputs of `emit`, not files `install` writes, so
-there is no destination for a symlink to collide with. On this machine
-`~/.claude/settings.json`
-is itself a home-manager-managed symlink, which is exactly why Claude Code's
-registration goes through the overlay rather than through a destination
-option at all (#29).
+Every module adds to the same `manifests` list, and hookyard's own module runs
+the single `install` pass. Wire `programs.hookyard.claudeOverlay.merged` into
+Claude Code's `--settings` overlay — it's a build-time `hookyard emit`
+derivation, not something `manifests` reaches. Before relying on it, read
+[yard mode in depth](docs/yard-mode.md#consumer-repos): it covers why a
+consumer must never run its own `install`, the order for turning hookyard off,
+and which destination files it refuses to write.
 
 ## The manifest
 
-A manifest is a JSON file with a list of handlers. Each handler declares
-which events it wants, on which engines, and — optionally — which normalized
-tool names to filter on:
-
-```json
-{
-  "handlers": [
-    {
-      "id": "block-secrets",
-      "exec": "/home/you/bin/guard-secrets",
-      "events": ["pre_tool"],
-      "engines": ["claude-code", "codex", "cursor"],
-      "lane": "verdict",
-      "match": ["Bash"],
-      "timeout_ms": 2000
-    }
-  ]
-}
-```
-
-- `exec`'s form depends on which mode the manifest is for — a given manifest
-  file serves **one** mode, not both. In **yard mode** (`install`,
-  `validate`; `emit` reads no manifest at all), `exec` must be an absolute
-  path to an executable file, checked at install time; a relative path or a
-  bare name would let
-  whatever happens to sit on the agent's own `PATH` or working directory
-  stand in, so it's rejected. In **build mode** (`build`, `validate
-  --plugin-root`, and the table `route --plugin-root` reads), `exec` must be
-  relative to the plugin root with no `..` segments (`filepath.IsLocal`) —
-  an absolute path would name somewhere on the plugin author's own machine,
-  meaningless once the plugin ships. Each mode's `validate` rejects the
-  other mode's form with an error naming which mode the exec should have
-  used.
-- `events` are one of the six canonical events, or `engine:NativeName` for an
-  event only one engine has. For `claude-code:NativeName`, `NativeName` must
-  be one of the eight events in Claude Code's catalog — `SessionStart`,
-  `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `Stop`,
-  `Notification`, `SessionEnd` — the same eight `emit` renders; anything else
-  fails validation with a message naming the catalog, whatever the handler's
-  `engines` say.
-- `engines` is any of `claude-code`, `codex`, `cursor`.
-- `lane` is `"verdict"` (the default, safe to omit) or `"fire_and_forget"`,
-  for a handler with no verdict to give (design doc §4). A fire-and-forget
-  handler can never guard, so `validate` refuses one declared on a decision
-  event or carrying a non-zero `timeout_ms`. Using `lane` at all needs the
-  hookyard version that introduced it — an older binary silently drops the
-  field and runs the entry in the verdict lane instead.
-- `match` filters by normalized tool name; an empty list matches every tool.
-  A tool with no equivalent on a claimed engine — Codex has no `Grep` or
-  `Glob`, Cursor has no `Glob` — fails validation rather than installing a
-  handler that would never fire there.
-- `timeout_ms` is optional and capped at 4300ms (`manifest.MaxHandlerTimeoutMS`):
-  the router's own 4.5s deadline minus the margin it needs to consolidate and
-  return before the engine's own timeout.
-
-This exact manifest, with `exec` pointed at a real executable, validates
-clean:
-
-```
-$ hookyard validate --manifest hookyard.json
-1 manifests, 1 handlers, no problems found
-```
+Each handler names its `events`, `engines`, an optional tool `match` and a
+`timeout_ms` (capped at 4300ms). Handlers that return no verdict can run in the
+`fire_and_forget` lane. The full field reference and the normalized event and
+tool names are in [yard mode in depth](docs/yard-mode.md#manifest-fields).
 
 ## The event record
 
-Every call routed through `hookyard route` appends one JSON line to an
-append-only stream, whether or not anything is subscribed to it and
-regardless of what the verdict was. It lives at
-`$HOOKYARD_STATE_DIR/stream/YYYY-MM-DD.jsonl` (falling back to
-`$XDG_STATE_HOME/hookyard`, then `~/.local/state/hookyard`), one file per UTC
-day, written at `0600`. Files older than 14 days are swept on the first write
-of a new day. This is the thing that makes a silently disabled or misfiring
-guard recoverable: `doctor` tells you whether hooks are wired up right now,
-and the record tells you what actually happened over the last two weeks even
-if they weren't.
-
-## Vocabulary
-
-hookyard translates between its own normalized names and each engine's
-native ones; see [`internal/vocab`](internal/vocab) for the full tables.
-The six canonical events are `session_start`, `prompt_submit`, `pre_tool`,
-`post_tool`, `pre_compact` and `turn_end`. The normalized tool names are
-`Read`, `Write`, `Bash`, `Grep` and `Glob`.
+Every call through `hookyard route` appends one JSON line to
+`~/.local/state/hookyard/stream/`, whatever the verdict, and keeps 14 days.
+`doctor` tells you whether hooks are wired up right now; the record tells you
+what actually happened.
 
 ## More
 
-The design, and the verification behind it, is in
-[`docs/design/hookyard.md`](docs/design/hookyard.md). Real captured hook
-payloads for all four engines are in
-[`docs/design/fixtures/hook-payloads/`](docs/design/fixtures/hook-payloads/) —
-Pi's are hookyard's own bridge output rather than a native payload, and the
-fixtures' own README says so. The build-mode/yard-mode distribution
-decision is in [`docs/design/hookyard.md`](docs/design/hookyard.md) §3.1.
+- [Yard mode in depth](docs/yard-mode.md): per-engine verdict rendering,
+  consumer wiring, manifest reference.
+- [Design doc](docs/design/hookyard.md): the design and the verification
+  behind it.
+- [Captured hook payloads](docs/design/fixtures/hook-payloads/) for all four
+  engines.
