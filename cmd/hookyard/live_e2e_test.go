@@ -139,7 +139,7 @@ func TestLiveClaudeCodeRefusesTheDeniedToolCall(t *testing.T) {
 
 	baseMarker := filepath.Join(root, "base-hook-fired")
 	basePath := liveWriteClaudeBaseWithOwnHook(t, root, baseMarker)
-	overlayPath := liveEmitClaudeOverlay(t, hookyardBin, root, manifestPath, hookyardBin, stateDir, basePath)
+	overlayPath := liveEmitClaudeOverlay(t, hookyardBin, root, hookyardBin, stateDir, basePath)
 
 	// claudeConfigDir/settings.json is never written: emit's whole point is
 	// that Claude Code's overlay comes from --settings rather than from
@@ -330,11 +330,10 @@ func liveWriteClaudeBaseWithOwnHook(t *testing.T, dir, marker string) string {
 // as --settings itself. Driving emit rather than calling render.ClaudeSettings
 // directly is the point of this test: a hand-written overlay would pass
 // against bugs the CLI's own flag wiring could still have.
-func liveEmitClaudeOverlay(t *testing.T, hookyardBin, root, manifestPath, routerPath, stateDir, basePath string) string {
+func liveEmitClaudeOverlay(t *testing.T, hookyardBin, root, routerPath, stateDir, basePath string) string {
 	t.Helper()
 	emit := exec.Command(hookyardBin, "emit",
 		"--engine", "claude-code",
-		"--manifest", manifestPath,
 		"--router-path", routerPath,
 		"--state-dir", stateDir,
 		"--base", basePath,

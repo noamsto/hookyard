@@ -27,8 +27,8 @@
   # Claude's `command` fields, and `installCommand` passes it as
   # `--router-path` for the router table `install` writes — one router path,
   # two renderers of it, and that is precisely the invariant that both read it
-  # from the same `cfg.manifests`/`cfg.stateDir` so the table and the emitted
-  # commands never disagree about what they name.
+  # from the same `cfg.stateDir` so the table and the emitted commands never
+  # disagree about what they name.
   routerPath = "${config.home.profileDirectory}/bin/hookyard";
 
   # §9: hookyard is invoked by its **store** path here, because a store path
@@ -69,17 +69,6 @@
     ]
   );
 
-  # Gated on `enable`, and that gate is the whole of what makes turning
-  # hookyard off safe. `home.packages` is inside `mkIf cfg.enable`, so a
-  # disabled generation has no binary at the profile path — while the two
-  # Claude options stay defined regardless, because the consumer's `claude`
-  # wrapper interpolates `merged` on every evaluation. Emitting a consumer's
-  # manifests anyway would leave Claude Code started with entries naming a
-  # path that no longer resolves, failing at exec on every tool call.
-  # Relying on `manifests` merely happening to be empty would not do: a
-  # consumer can contribute handlers and disable hookyard in one generation.
-  emittedManifestFlags = lib.optionalString cfg.enable manifestFlags;
-
   # No import-from-derivation: this only ever produces a derivation, never
   # `builtins.readFile`/`fromJSON` over it, so a consumer referencing it does
   # not force a build at eval time. That matters for a darwin host evaluated
@@ -88,19 +77,34 @@
   emitClaudeHooks = extraArgs:
     pkgs.runCommand "hookyard-claude-hooks.json" {} ''
       ${cfg.package}/bin/hookyard emit --engine claude-code \
-        ${emittedManifestFlags} \
         --router-path ${lib.escapeShellArg routerPath} \
         --state-dir ${lib.escapeShellArg cfg.stateDir} \
         ${extraArgs} \
         > $out
     '';
 
-  claudeHooksDrv = emitClaudeHooks "";
+  # Turning hookyard off must leave a working Claude Code, and that must not
+  # cost a build: with `enable = false`, neither `claudeHooksDrv` nor
+  # `claudeOverlayMergedDrv` below ever calls `emitClaudeHooks`, so disabling
+  # hookyard never touches `cfg.package`. When `claudeOverlay.base` is set,
+  # the disabled branch copies `base` verbatim instead of merging into it —
+  # never `builtins.readFile`/`writeText` over `base`, since nix-config's
+  # `base` is itself a derivation (`nix-settings-json`) and reading it at
+  # eval time would be IFD. That copy rests on the assumption that a
+  # consumer-authored `base` carries no hookyard-marked rows of its own to
+  # strip; only hookyard's own re-render (the enabled branch, via
+  # `emitClaudeHooks`) ever needs to do that stripping.
+  claudeHooksDrv =
+    if cfg.enable
+    then emitClaudeHooks ""
+    else pkgs.writeText "hookyard-claude-hooks.json" "{\n}\n";
 
   claudeOverlayMergedDrv =
     if cfg.claudeOverlay.base == null
     then claudeHooksDrv
-    else emitClaudeHooks "--base ${lib.escapeShellArg cfg.claudeOverlay.base}";
+    else if cfg.enable
+    then emitClaudeHooks "--base ${lib.escapeShellArg cfg.claudeOverlay.base}"
+    else pkgs.runCommand "hookyard-claude-overlay.json" {} "cp ${lib.escapeShellArg cfg.claudeOverlay.base} $out";
 in {
   imports = [
     (lib.mkRemovedOptionModule ["programs" "hookyard" "claudeSettings"]
@@ -176,9 +180,10 @@ in {
       type = lib.types.package;
       readOnly = true;
       description = ''
-        The store file holding only hookyard's own `{"hooks": {...}}` block,
-        rendered from this module's `manifests`. Do **not** wire this as
-        Claude Code's `--settings` overlay: it carries none of the consumer's
+        The store file holding only hookyard's own `{"hooks": {...}}` block:
+        one matcher-less route row per Claude Code catalog event, or `{}`
+        when `enable = false`. Do **not** wire this as Claude Code's
+        `--settings` overlay: it carries none of the consumer's
         `statusLine`, `enabledPlugins`, `extraKnownMarketplaces` or
         `permissions` — that overlay is `claudeOverlay.merged`. This
         option exists so `claudeOverlay.merged` has something to fall back to

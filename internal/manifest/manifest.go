@@ -106,11 +106,12 @@ func (m *Manifest) normalizeLanes() {
 	}
 }
 
-// validateAll holds every rule Load and LoadStatic share, so the two cannot
-// drift into disagreeing about which manifest files are legal — a build that
-// accepts one activation then refuses fails after the store paths are already
-// realised. extra runs per handler on top of the shared rules; it is nil for
-// the caller that cannot afford to touch the filesystem.
+// validateAll holds every rule Load and loadStatic share — id pattern, event
+// and engine vocabulary, coverage, lane, and the Claude Code catalog — so a
+// manifest build mode's loadStatic accepts (via LoadPlugin) and one Load
+// accepts cannot silently diverge on a rule that has nothing to do with exec
+// form. extra runs per handler on top of the shared rules; it is nil for the
+// caller that cannot afford to touch the filesystem.
 func (m *Manifest) validateAll(form ExecForm, extra func(where string, h Handler) error) error {
 	if len(m.Handlers) == 0 {
 		return fmt.Errorf("%s: no handlers declared", m.Source)
@@ -119,6 +120,9 @@ func (m *Manifest) validateAll(form ExecForm, extra func(where string, h Handler
 	for _, h := range m.Handlers {
 		where := fmt.Sprintf("%s: handler %q", m.Source, h.ID)
 		if err := validateStatic(where, h, form); err != nil {
+			return err
+		}
+		if err := validateClaudeCatalog(where, h); err != nil {
 			return err
 		}
 		if extra != nil {
@@ -225,6 +229,34 @@ func validateStatic(where string, h Handler, form ExecForm) error {
 	return validateLane(where, h, engines)
 }
 
+// validateClaudeCatalog refuses a "claude-code:X" event whose native half
+// isn't one of the eight events vocab.ClaudeCodeCatalog documents evidence
+// for (R-A/R-C). It applies whatever the handler's engines say, because the
+// event name itself claims claude-code regardless.
+//
+// It runs from validateAll, not validateStatic, so ReadTable — which calls
+// validateStatic alone — stays exempt: a table an older hookyard wrote before
+// some catalog row existed would otherwise turn every event for every engine
+// into a router error until the next successful install rewrites it (#59),
+// rather than leaving the stale row alone until then.
+func validateClaudeCatalog(where string, h Handler) error {
+	for _, event := range h.Events {
+		engine, native, scoped := vocab.SplitEngineScoped(event)
+		if !scoped || engine != vocab.ClaudeCode {
+			continue
+		}
+		if !vocab.IsClaudeCodeEvent(native) {
+			natives := make([]string, len(vocab.ClaudeCodeCatalog))
+			for i, e := range vocab.ClaudeCodeCatalog {
+				natives[i] = e.Native
+			}
+			return fmt.Errorf("%s: event %q is not a Claude Code event hookyard routes (want one of %s)",
+				where, event, strings.Join(natives, ", "))
+		}
+	}
+	return nil
+}
+
 func parseEngines(where string, names []string) ([]vocab.Engine, error) {
 	engines := make([]vocab.Engine, 0, len(names))
 	for _, name := range names {
@@ -326,36 +358,27 @@ func execIsRunnable(path string) error {
 	return nil
 }
 
-// LoadStatic reads and validates one manifest the way Load does, minus
-// execIsRunnable: it runs validateStatic alone, the same carve-out ReadTable
-// already makes. `emit` runs inside a Nix build sandbox, where a manifest's
-// `exec` may be an ordinary absolute path like `/home/you/bin/guard` that
-// simply does not exist yet — it will, at activation, when `install` runs and
-// re-validates through Load. So `emit` must not fail a build over a manifest
-// `install` would accept minutes later in the same activation.
-//
-// The narrowing is exactly one check wide, and every other rule stays shared
-// through validateAll. validateStatic still refuses a relative or bare exec —
-// that rule lives there, not in the stat, so nothing about §9's hook-fire-time
-// argument is given up. A file declaring zero handlers is still refused, as it
-// is under Load: `install --allow-empty` is about a caller passing no
-// `--manifest` flag at all, not about a manifest file whose handlers array is
-// empty, so accepting one here would let a Nix build succeed over a manifest
-// set activation then rejects. Duplicate ids within one file are still
-// refused, matching both Load and ReadTable — only Merge's cross-manifest
-// check is left to the caller, who must still run it: LoadStatic dedupes
-// one file, not a caller's whole --manifest list.
-func LoadStatic(path string) (*Manifest, error) {
-	return loadStatic(path, ExecAbsolute)
-}
-
-// LoadPlugin is LoadStatic for build mode: exec must be plugin-root-relative.
-// It does not stat execs, because only the caller knows the plugin root;
-// CheckPluginExecs is that check.
+// LoadPlugin reads and validates one manifest for build mode: exec must be
+// plugin-root-relative. It does not stat execs, because only the caller knows
+// the plugin root; CheckPluginExecs is that check, run later against a real
+// plugin root.
 func LoadPlugin(path string) (*Manifest, error) {
 	return loadStatic(path, ExecPluginRelative)
 }
 
+// loadStatic reads and validates one manifest the way Load does, minus
+// execIsRunnable: it runs validateStatic alone, the same carve-out ReadTable
+// already makes, because LoadPlugin's caller cannot stat a plugin-relative
+// exec until it is resolved against a real plugin root.
+//
+// The narrowing is exactly one check wide, and every other rule stays shared
+// through validateAll. validateStatic still refuses a relative-to-cwd or bare
+// exec under ExecAbsolute — that rule lives there, not in the stat, so
+// nothing about §9's hook-fire-time argument is given up. A file declaring
+// zero handlers is still refused, as it is under Load. Duplicate ids within
+// one file are still refused, matching both Load and ReadTable — only
+// Merge's cross-manifest check is left to the caller, who must still run it:
+// loadStatic dedupes one file, not a caller's whole --manifest list.
 func loadStatic(path string, form ExecForm) (*Manifest, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {

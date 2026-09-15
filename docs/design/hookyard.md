@@ -871,8 +871,9 @@ rendering it.
 Whether one `hookyard.json` file can serve both modes at once is now
 decided, settling the §12 bullet this section previously deferred it to:
 **no — a given manifest file serves one mode**, and the manifest's own
-`exec` form is what says which. Yard mode (`install`, `emit`, `validate`,
-`ReadTable`) keeps `exec` absolute, unchanged. Build mode (`build`,
+`exec` form is what says which. Yard mode (`install`, `validate`,
+`ReadTable`) keeps `exec` absolute, unchanged — `emit` reads no manifest at
+all, and so has no `exec` form to keep (#58). Build mode (`build`,
 `validate --plugin-root`, and the baked table `route` reads) requires
 `exec` plugin-root-relative — non-empty, not absolute, no `..` escape
 (`filepath.IsLocal`). Each mode's validation rejects the other form with an
@@ -1959,6 +1960,38 @@ discriminator: `cursor_version` appears only in Cursor's, `effort` and
 always tell which engine it is talking to; it cannot tell which file told the
 engine to call it.
 
+**Live 2.1.272 captures narrow that claim for four Claude Code events.** Four
+captures taken 2026-09-15 from a real `claude -p --model haiku 'Reply with
+the single word ok.'` run —
+[`claude-SessionStart.json`](fixtures/hook-payloads/claude-SessionStart.json),
+`claude-UserPromptSubmit.json`, `claude-Stop.json`, `claude-SessionEnd.json`,
+all in `docs/design/fixtures/hook-payloads/` — show `SessionStart`'s payload
+carries neither `prompt_id` nor `effort`: Claude's own payload base builder
+sets `prompt_id` only once a prompt exists and `effort` only when the caller
+passes model state, and `SessionStart` fires before either does. So a
+`SessionStart` (and, whenever a session ends with no prompt, `SessionEnd`)
+payload has no discriminator at all, and `envelope.Decode` returns
+`ErrUnknownEngine` for it. This is not theoretical: halo's own live records
+show 15 `session_start` router errors with reason `envelope: unknown engine`,
+plus one `claude-code:SessionEnd` error for a promptless session. R-G (#58)
+adds a narrow, yard-mode-only fallback for exactly this gap: in `runRoute`,
+when decode fails only for a missing discriminator, `--registered-for` names
+`claude-code`, and the payload's `hook_event_name` is exactly (case-sensitive)
+one of the catalog natives above, the payload is decoded as Claude Code
+anyway, and the record's reason notes that the engine was taken from
+`--registered-for` rather than detected — so the detection gap stays visible
+in the record even though routing succeeds. It stops there deliberately:
+Cursor's own event names are camelCase (`sessionStart`, `stop`), so a
+same-named-but-wrong-case Cursor payload does not match and still errors,
+and the fallback is wired into yard mode's Claude Code path only, because the
+yard-mode Claude entries live solely in the Nix `--settings` overlay — a
+store file only the consumer's own `claude` wrapper ever passes to Claude
+Code — so no other engine's traffic can reach this code path through it.
+Build-mode plugin `hooks.json` files can be loaded by other engines (a Codex
+plugin can carry one), so the fallback is not extended to build mode, and a
+payload the router *does* detect as another engine keeps today's suppression
+path unchanged.
+
 **Pi's discriminator is not evidence about Pi — it is a promise hookyard
 makes to itself.** Pi sends no payload of its own at all: it has no
 subprocess hook protocol (below), so there is no wire format for it to author
@@ -2342,7 +2375,7 @@ emitted entries carry. The four targets, and what already lives in each:
 |---|---|---|---|
 | Cursor | `~/.cursor/hooks.json` | `jq` merge: validate, marker-scoped strip, append, atomic rename | four declared, three live |
 | Codex | `~/.codex/config.toml` | marker-guarded `sed`/heredoc append | lazytmux only, two blocks |
-| Claude Code | Nix `--settings` overlay | `hookyard emit` prints the merged `hooks` block on stdout; Nix places it, hookyard writes nothing | hand edits to `~/.claude/settings.json` (a separate file the overlay's union does not touch), plugin `--plugin-dir` trees, and houston's installer as a *potential* writer of that separate file (it has never run here) |
+| Claude Code | Nix `--settings` overlay | `hookyard emit` prints one route row per event in a fixed, manifest-independent catalog on stdout (below); Nix places it, hookyard writes nothing | hand edits to `~/.claude/settings.json` (a separate file the overlay's union does not touch), plugin `--plugin-dir` trees, and houston's installer as a *potential* writer of that separate file (it has never run here) |
 | Pi | `<config dir>/bin/hookyard-bridge.ts` (generated, hookyard's own template) **and** the `extensions` array in `~/.pi/agent/settings.json` | write the bridge file whole (it is not merged with anything); JSON merge of the `extensions` entry under the same marker-scoped-strip discipline as the other three | the Nix wrapper's `-e`/`PI_AGENT_HOOKS` injection (below); pi itself, into the same `settings.json` |
 
 **Cursor.** Independent `jq` mergers already write `~/.cursor/hooks.json`,
@@ -2433,7 +2466,38 @@ machine `~/.claude/settings.json` is a home-manager `mkOutOfStoreSymlink`, and
 writer here lands through a rename that would replace the link rather than
 write through it. So hookyard emits its block for Nix to place in the overlay
 instead of ever writing to that file (#29) — the `emit` subcommand below,
-not a writer in this section's usual sense.
+not a writer in this section's usual sense. Unlike the other three targets,
+`emit` does not render `manifests` at all: it takes no manifest input, and
+what it prints is a fixed catalog of route rows, one per Claude Code event
+hookyard routes, with no matcher. The table `install` writes is what then
+decides, per event, which handlers actually run — the overlay itself only
+changes with hookyard's version, the router path, the state dir and an
+optional base (below).
+
+That catalog is eight events, not the 33 Claude Code 2.1.272 knows about.
+The shipped `claude-code-2.1.272` executable
+(`…-claude-code-2.1.272/bin/.claude-wrapped`) carries its hook-event enum as
+a literal 33-entry array, plus a `hook_event_name:"<Name>"` payload literal
+for each — found with `rg -a -o '\["PreToolUse","PostToolUse"[^\]]{0,800}\]'`
+and `rg -a -o 'hook_event_name:"[A-Za-z]+"'` against the binary. hookyard's
+catalog is six of those routed under their canonical names plus two routed
+`claude-code:Notification`/`claude-code:SessionEnd` — the two houston
+already consumes (`nix-config home/ai/houston/default.nix:57-58`) — and
+deliberately not the rest: every catalog row costs a router spawn on every
+occurrence, whether or not any handler subscribes to it, and nobody
+currently needs the other 25. Measured, that spawn costs about 1ms for an
+event nothing subscribes to (§4.1) — the router still runs, decodes the
+payload, reads the table, finds no matching handler, and writes a record
+with `handlers: []`, which is the honest cost of "every catalog event
+reaches the table" rather than a bug to chase. The catalog grows when a
+consumer needs a row, which means it has to track Claude Code's own
+releases rather than being derived from them automatically — there is no
+enum this could read out of the binary at build time, only the grep above,
+re-run by hand. `ReadTable`, alone among the loaders, does not enforce this
+catalog: a table baked by an older hookyard that named a since-renamed or
+now-invalid `claude-code:X` would otherwise make the router refuse every
+event for every engine until the next successful `install`, which is worse
+than routing one stale event wrong (#59).
 
 The overlay's hook inventory, re-counted first-hand this pass:
 `home/ai/claude-code/default.nix` declares **twelve hook entries** —
@@ -4100,16 +4164,33 @@ being more capable than this document assumed rather than less.
 **Three items the normalized-envelope implementation itself adds, unverified
 because the captures don't reach them yet, not because they were missed.**
 
-- **Engine detection is unverified for `SessionStart` and `Stop` payloads.**
-  The three discriminators the router uses (`cursor_version`; `prompt_id` /
-  `effort`; `turn_id`) are observed only on `PreToolUse`, `PostToolUse`,
-  `UserPromptSubmit` and `beforeShellExecution` payloads. No `SessionStart` or
-  `Stop` payload has been captured for any engine. If those turn-scoped fields
-  are absent there, detection fails and those events fail open — a whole-event
-  outage no fixture can catch today. The envelope deliberately does not paper
-  over it with a `--registered-for` fallback, because a fallback that silently
-  rescues an undetectable payload also silently hides that detection does not
-  cover the event.
+- **Engine detection is unverified for `SessionStart` and `Stop` payloads —
+  resolved for yard-mode Claude Code (#58), still open for Codex and
+  Cursor.** The three discriminators the router uses (`cursor_version`;
+  `prompt_id` / `effort`; `turn_id`) are observed only on `PreToolUse`,
+  `PostToolUse`, `UserPromptSubmit` and `beforeShellExecution` payloads. When
+  this item was first raised, no `SessionStart` or `Stop` payload had been
+  captured for any engine, and the concern was that if those turn-scoped
+  fields are absent there, detection fails and those events fail open — a
+  whole-event outage no fixture could catch. Four live 2.1.272 Claude Code
+  captures (`claude-SessionStart.json`, `claude-UserPromptSubmit.json`,
+  `claude-Stop.json`, `claude-SessionEnd.json`, §7) turned that concern into a
+  confirmed gap for `SessionStart` specifically — it carries neither
+  `prompt_id` nor `effort` — and halo's live records back it with 15
+  `session_start` router errors. The envelope originally chose not to paper
+  over that with a `--registered-for` fallback, on the grounds that rescuing
+  an undetectable payload would also hide that detection doesn't cover the
+  event. R-G revisits that ruling for yard-mode Claude Code only, on three
+  narrowing conditions that keep the gap visible instead of hiding it: the
+  fallback fires solely on the overlay-only yard-mode path (`--plugin-root`
+  empty), only when `--registered-for claude-code` and the payload's
+  `hook_event_name` is exactly a catalog native, and every record it produces
+  carries the reason `engine taken from --registered-for claude-code: payload
+  carried no engine discriminator` — so an operator reading the stream still
+  sees that detection, not observation, put the record there. Codex and
+  Cursor equivalents, and Claude Code's build mode, are unchanged: this item
+  stays open for `SessionStart`/`Stop` on those engines, since no equivalent
+  capture or fallback exists for them.
 - **Payload-level `hook_event_name` spellings are unverified for twelve of the
   table's eighteen rows.** Only `PreToolUse`/`PostToolUse` (Claude Code),
   `PreToolUse`/`UserPromptSubmit` (Codex) and `preToolUse`/`postToolUse`

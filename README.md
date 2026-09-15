@@ -119,12 +119,16 @@ Code's own destination is Nix-managed on this machine and unwriteable by
 an engine actually invokes when a hook fires.
 
 Several repos' manifests fold into one `hookyard install` pass, out to
-Codex's, Cursor's and Pi's native config plus hookyard's own state table,
-and into one `hookyard emit` pass Nix runs at build time for Claude Code:
+Codex's, Cursor's and Pi's native config plus hookyard's own state table.
+`hookyard emit` is a separate pass Nix runs at build time for Claude Code,
+and it reads none of those manifests: it renders one route row per event in
+a fixed, eight-event catalog (below), and it's the state table — the same
+one `install` writes — that decides which handlers actually run for that
+event, same as for the other three engines:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/registration-dark.svg">
-  <img alt="Registration: repo A's and repo B's hookyard.json manifests fold into one hookyard install pass, which writes into Codex's config.toml, Cursor's hooks.json, and Pi's two artifacts — a generated bridge extension file and an extensions[] entry in Pi's own settings.json — and records the installed handlers in hookyard's state table; the same manifests also feed a hookyard emit pass that Nix places into Claude Code's --settings overlay." src="docs/diagrams/registration.svg">
+  <img alt="Registration: repo A's and repo B's hookyard.json manifests fold into one hookyard install pass, which writes into Codex's config.toml, Cursor's hooks.json, and Pi's two artifacts — a generated bridge extension file and an extensions[] entry in Pi's own settings.json — and records the installed handlers in hookyard's state table; a separate hookyard emit pass, reading no manifests, renders a fixed Claude event catalog that Nix places into Claude Code's --settings overlay." src="docs/diagrams/registration.svg">
 </picture>
 
 An engine firing a hook decodes its native payload into one normalized
@@ -168,7 +172,7 @@ Once you have a binary on `PATH`:
 hookyard validate --manifest path/to/hookyard.json
 hookyard validate --plugin-root path/to/plugin --manifest path/to/hookyard.json
 hookyard install  --manifest path/to/hookyard.json [--manifest ...]
-hookyard emit     --engine claude-code --manifest path/to/hookyard.json [--manifest ...] --router-path <path> --state-dir <path> [--base <file>]
+hookyard emit     --engine claude-code --router-path <path> --state-dir <path> [--base <file>]
 hookyard build    --engine claude-code --manifest path/to/hookyard.json [--manifest ...] --out path/to/plugin [--name plugin-name]
 hookyard doctor
 ```
@@ -177,11 +181,16 @@ hookyard doctor
 Pi's native config in one pass — it takes the full list, never one repo at a
 time, because its strip is keyed on a marker that does not record which
 manifest produced a row. `emit` covers Claude Code instead: it is
-Claude-Code-only (`--engine claude-code` is required), prints the merged
-`hooks` block to stdout rather than writing a file, and is meant to run
-inside a Nix build rather than at activation time — Nix is what places its
-output into the `--settings` overlay. `build` is the other front end
-entirely — see "Build mode (Claude Code)" above.
+Claude-Code-only (`--engine claude-code` is required), takes no manifest at
+all, and prints a `hooks` block with one route row per event in the fixed
+Claude Code event catalog — `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+`PostToolUse`, `PreCompact`, `Stop`, `claude-code:Notification` and
+`claude-code:SessionEnd` — to stdout rather than writing a file. It's meant
+to run inside a Nix build rather than at activation time — Nix is what
+places its output into the `--settings` overlay, and it's the state table
+`install` writes that decides which handlers actually run on each of those
+events. `build` is the other front end entirely — see "Build mode (Claude
+Code)" above.
 
 `doctor` answers the question the event record cannot: every engine skips
 hooks entirely in a directory the user has not trusted, and a handler that
@@ -207,13 +216,16 @@ module:
 
 `manifests` is the whole of a consumer's contribution, and it is a shared
 list: every module that sets it contributes paths to the same list, rendered
-into Codex's, Cursor's and Pi's native config by one `hookyard install`
-invocation, owned by hookyard's own module and run from
-`home.activation.hookyardInstall`. The same list also feeds
-`programs.hookyard.claudeOverlay.merged`, a build-time `hookyard emit`
-derivation the consumer wires into Claude Code's `--settings` overlay itself
-— Claude Code's destination is Nix-managed, not something hookyard's own
-activation entry can reach (more below). A consumer never pins its own
+into Codex's, Cursor's and Pi's native config, and into hookyard's own state
+table, by one `hookyard install` invocation, owned by hookyard's own module
+and run from `home.activation.hookyardInstall`. That state table is also
+what decides which handlers run for Claude Code — `manifests` itself never
+reaches `programs.hookyard.claudeOverlay.merged`, a build-time `hookyard
+emit` derivation that varies only with hookyard's version, the router path,
+the state dir and `claudeOverlay.base`. The consumer wires `merged` into
+Claude Code's `--settings` overlay itself — Claude Code's destination is
+Nix-managed, not something hookyard's own activation entry can reach (more
+below). A consumer never pins its own
 hookyard input and never adds its own activation entry that calls `hookyard
 install` directly: the strip that removes hookyard's rows on re-render is
 keyed on a marker that does not record which manifest produced a row, so a
@@ -243,10 +255,11 @@ to do it; only then is it safe to drop the package itself. `hookyard doctor`'s
 `router path` check is what catches a machine left in the wrong order — it
 confirms the path each engine's config names is actually there to exec,
 alongside the trust and confirmed-deny checks it already runs. This ordering
-rule does not apply to Claude Code: it has no rows in a hookyard-owned file
-to strip, since `emit` never writes one, so emptying `manifests` just
-regenerates the overlay without hookyard's block and `enable = false` is safe
-in any order.
+rule does not apply to Claude Code: `emit` never reads `manifests` in the
+first place, so emptying the list leaves the overlay untouched, and
+`enable = false` yields `claudeOverlay.base` verbatim — or `{\n}\n` when
+there is no base — without building hookyard at all, so it's safe in any
+order.
 
 The destination files hookyard writes into — Codex's `config.toml`, Cursor's
 `hooks.json`, and Pi's `settings.json` — must be plain files that hookyard
@@ -260,7 +273,8 @@ and `piSettings`, each pointed at a file hookyard can own instead of the
 default path.
 
 Claude Code has no such option, and needs none: `programs.hookyard.claudeHooks`
-is the package holding hookyard's own emitted block, and
+is the package holding hookyard's own emitted block — the fixed event
+catalog, not anything derived from `manifests` — and
 `programs.hookyard.claudeOverlay.merged` is that block merged into an
 optional `claudeOverlay.base` the consumer already places as the `--settings`
 overlay — both read-only outputs of `emit`, not files `install` writes, so
@@ -293,9 +307,10 @@ tool names to filter on:
 ```
 
 - `exec`'s form depends on which mode the manifest is for — a given manifest
-  file serves **one** mode, not both. In **yard mode** (`install`, `emit`,
-  `validate`), `exec` must be an absolute path to an executable file,
-  checked at install time; a relative path or a bare name would let
+  file serves **one** mode, not both. In **yard mode** (`install`,
+  `validate`; `emit` reads no manifest at all), `exec` must be an absolute
+  path to an executable file, checked at install time; a relative path or a
+  bare name would let
   whatever happens to sit on the agent's own `PATH` or working directory
   stand in, so it's rejected. In **build mode** (`build`, `validate
   --plugin-root`, and the table `route --plugin-root` reads), `exec` must be
@@ -305,7 +320,12 @@ tool names to filter on:
   other mode's form with an error naming which mode the exec should have
   used.
 - `events` are one of the six canonical events, or `engine:NativeName` for an
-  event only one engine has.
+  event only one engine has. For `claude-code:NativeName`, `NativeName` must
+  be one of the eight events in Claude Code's catalog — `SessionStart`,
+  `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `Stop`,
+  `Notification`, `SessionEnd` — the same eight `emit` renders; anything else
+  fails validation with a message naming the catalog, whatever the handler's
+  `engines` say.
 - `engines` is any of `claude-code`, `codex`, `cursor`.
 - `lane` is `"verdict"` (the default, safe to omit) or `"fire_and_forget"`,
   for a handler with no verdict to give (design doc §4). A fire-and-forget

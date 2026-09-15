@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -139,12 +140,12 @@ func install(args []string) error {
 	if len(paths) == 0 && !*allowEmpty {
 		return fmt.Errorf("no --manifest given")
 	}
-	return runInstall(paths, *routerPath, *stateDir, *codex, *cursor, *pi, *dryRun)
+	return runInstall(os.Stdout, paths, *routerPath, *stateDir, *codex, *cursor, *pi, *dryRun)
 }
 
 // runInstall is install's pipeline, split out so tests can drive it with
 // explicit paths instead of os.Args.
-func runInstall(paths manifestPaths, routerPath, stateDir, codex, cursor, pi string, dryRun bool) error {
+func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex, cursor, pi string, dryRun bool) error {
 	handlers, err := loadAll(paths)
 	if err != nil {
 		return err
@@ -166,9 +167,17 @@ func runInstall(paths manifestPaths, routerPath, stateDir, codex, cursor, pi str
 	if err != nil {
 		return err
 	}
+	// install never writes Claude Code's config (R-B), so its reporting uses
+	// the fixed catalog rather than whatever BuildPlan derived for claude-code
+	// out of the handlers above.
+	claudeEntries, err := render.ClaudeCatalogPlan(router, stateDir)
+	if err != nil {
+		return err
+	}
+	plan[vocab.ClaudeCode] = claudeEntries
 
 	if dryRun {
-		printPlan(plan, pi)
+		printPlan(out, plan, pi)
 		return nil
 	}
 	// Checked here, over every path at once, rather than inside each writer:
@@ -214,15 +223,33 @@ func runInstall(paths manifestPaths, routerPath, stateDir, codex, cursor, pi str
 	}
 	for _, engine := range vocab.Engines {
 		if engine == vocab.ClaudeCode {
-			// install never reaches settings.json: the count is real, but
-			// saying only "N entries" here would read exactly like the other
-			// three engines and tell an operator a file was written that was not.
-			fmt.Printf("%-12s %d entries (emitted for Nix to place, not written by install)\n", engine, len(plan[engine]))
+			// install never reaches settings.json: the catalog is fixed and
+			// registers every event regardless of what the table holds, so the
+			// line reports both halves — what the Nix overlay always routes,
+			// and how many of the merged handlers the table actually carries
+			// for claude-code — rather than "N entries", which would read
+			// exactly like the other three engines and imply a file was
+			// written that was not.
+			fmt.Fprintf(out, "%-12s %d catalog events routed by the Nix overlay; table holds %d claude-code handlers (not written by install)\n",
+				engine, len(plan[engine]), claudeCodeHandlerCount(handlers))
 			continue
 		}
-		fmt.Printf("%-12s %d entries\n", engine, len(plan[engine]))
+		fmt.Fprintf(out, "%-12s %d entries\n", engine, len(plan[engine]))
 	}
 	return nil
+}
+
+// claudeCodeHandlerCount counts merged handlers whose Engines names
+// claude-code, for install's report line (R-E). It is not plan[vocab.ClaudeCode]'s
+// length: that is always the fixed 8-event catalog, not the table's contents.
+func claudeCodeHandlerCount(handlers []manifest.Handler) int {
+	n := 0
+	for _, h := range handlers {
+		if slices.Contains(h.Engines, string(vocab.ClaudeCode)) {
+			n++
+		}
+	}
+	return n
 }
 
 // piVersion is the value envelope.Detect keys on to recognise a Pi payload at
@@ -264,9 +291,8 @@ func checkShellSafe(flagName, path string) error {
 // with other writers or executable state of their own (§4.2), so a store path
 // would lose what they already hold — they stay on install.
 func emit(args []string) error {
-	fs := flag.NewFlagSet("emit", flag.ExitOnError)
-	var paths manifestPaths
-	fs.Var(&paths, "manifest", "path to a handler manifest (repeatable)")
+	fs := flag.NewFlagSet("emit", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
 	engine := fs.String("engine", "", "engine to emit for; only claude-code is supported")
 	routerPath := fs.String("router-path", "", "absolute path hookyard is invoked by, embedded in each entry")
 	stateDir := fs.String("state-dir", "", "state dir embedded in each entry as text; emit never creates it")
@@ -294,39 +320,7 @@ func emit(args []string) error {
 		return err
 	}
 
-	// LoadStatic, not loadAll (which calls manifest.Load): emit runs inside a
-	// Nix build sandbox, where a manifest's $HOME-rooted exec does not exist,
-	// and stat-ing it would fail the build for a reason that has nothing to do
-	// with the manifest being wrong. Merge still runs on top of it, so a
-	// duplicate id across manifests is refused here exactly as install refuses
-	// it later in the same activation — build time and activation time cannot
-	// disagree about what a legal manifest set is.
-	manifests := make([]*manifest.Manifest, 0, len(paths))
-	for _, p := range paths {
-		m, err := manifest.LoadStatic(p)
-		if err != nil {
-			return err
-		}
-		manifests = append(manifests, m)
-	}
-	handlers, err := manifest.Merge(manifests)
-	if err != nil {
-		return err
-	}
-
-	plan, err := render.BuildPlan(handlers, *routerPath, *stateDir)
-	if err != nil {
-		return err
-	}
-
-	var baseBytes []byte
-	if *base != "" {
-		baseBytes, err = os.ReadFile(*base)
-		if err != nil {
-			return err
-		}
-	}
-	doc, err := render.ClaudeSettings(baseBytes, plan[vocab.ClaudeCode])
+	doc, err := renderClaudeOverlay(*routerPath, *stateDir, *base)
 	if err != nil {
 		return err
 	}
@@ -335,6 +329,24 @@ func emit(args []string) error {
 	// as if it were a valid overlay.
 	_, err = os.Stdout.Write(doc)
 	return err
+}
+
+// renderClaudeOverlay renders the fixed Claude Code catalog over base. It is
+// split out from emit so a test can compare its bytes directly against
+// render.ClaudeSettings without shelling out or capturing stdout.
+func renderClaudeOverlay(routerPath, stateDir, base string) ([]byte, error) {
+	entries, err := render.ClaudeCatalogPlan(routerPath, stateDir)
+	if err != nil {
+		return nil, err
+	}
+	var baseBytes []byte
+	if base != "" {
+		baseBytes, err = os.ReadFile(base)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return render.ClaudeSettings(baseBytes, entries)
 }
 
 // runBuild is named unlike every other command (not "build"): a package-level
@@ -761,14 +773,14 @@ func loadAll(paths []string) ([]manifest.Handler, error) {
 	return manifest.Merge(manifests)
 }
 
-func printPlan(plan render.Plan, piSettings string) {
+func printPlan(out io.Writer, plan render.Plan, piSettings string) {
 	for _, engine := range vocab.Engines {
-		fmt.Printf("%s\n", engine)
+		fmt.Fprintf(out, "%s\n", engine)
 		if engine == vocab.ClaudeCode {
-			fmt.Println("  (emitted for Nix to place, not written by install)")
+			fmt.Fprintln(out, "  (emitted for Nix to place, not written by install)")
 		}
 		if len(plan[engine]) == 0 {
-			fmt.Println("  (nothing)")
+			fmt.Fprintln(out, "  (nothing)")
 			continue
 		}
 		for _, e := range plan[engine] {
@@ -776,10 +788,10 @@ func printPlan(plan render.Plan, piSettings string) {
 			if matcher == "" {
 				matcher = "(every tool)"
 			}
-			fmt.Printf("  %-22s %-24s %s\n", e.Event, matcher, e.Command)
+			fmt.Fprintf(out, "  %-22s %-24s %s\n", e.Event, matcher, e.Command)
 		}
 	}
 	// Pi is the one engine whose install writes a second file, and it is the
 	// executable half.
-	fmt.Printf("pi writes two files\n  %s\n  %s\n", piSettings, render.PiBridgePath(piSettings))
+	fmt.Fprintf(out, "pi writes two files\n  %s\n  %s\n", piSettings, render.PiBridgePath(piSettings))
 }
