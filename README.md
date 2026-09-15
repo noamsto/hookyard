@@ -3,19 +3,20 @@
 Write agent hooks once, ship them to every coding agent.
 
 hookyard is one Go binary and one manifest schema behind two front ends.
-**Build mode** is the decided OSS default: `hookyard build` would generate
-what a plugin ships per engine — Claude Code and Codex plugin hooks.json, a
+**Build mode** is the decided OSS default: `hookyard build` generates what a
+plugin ships per engine — Claude Code and Codex plugin hooks.json, a
 generated Pi package, and Cursor plugin hooks.json for the `cursor-agent`
 CLI, with the Cursor IDE's separate bundle still gated pending
 verification — bundling the
 hookyard binary itself as the shim, so end users install a tool's plugin
 through their engine's own plugin flow and never see hookyard at all. It's
 the hooks layer Agent Plugins lacks (Agent Plugins 1.0, agent-plugins.org,
-covers skills and MCP only; hooks are explicitly out of scope) — but it is
-not yet implemented. **Yard mode** is what ships today: install/emit/route,
-machine-wide deny-wins consolidation across every tool's handlers, and the
-always-on event record, aimed at Nix and power users and at security guards
-that need machine-wide enforcement.
+covers skills and MCP only; hooks are explicitly out of scope). Claude Code
+is implemented — `hookyard build --engine claude-code` (below); Codex, Pi
+and Cursor build targets are not yet implemented. **Yard mode** is the other
+front end: install/emit/route, machine-wide deny-wins consolidation across
+every tool's handlers, and the always-on event record, aimed at Nix and
+power users and at security guards that need machine-wide enforcement.
 
 Yard mode works like this: Claude Code, Codex, Cursor and Pi each declare
 hooks in their own config format, under their own event names, with their
@@ -38,7 +39,75 @@ engine's own default flow runs instead. An `ask` is not one of those cases:
 on Codex and Pi, whose decision shapes are binary, a consolidated `ask`
 degrades to an enforced `deny` with a reason explaining why.
 
-Everything below documents yard mode, the part that ships today.
+What follows: build mode's Claude Code slice, then yard mode in full.
+
+## Build mode (Claude Code)
+
+```
+hookyard build --engine claude-code --manifest <file> [--manifest ...] --out <plugin-root> [--name <plugin-name>]
+```
+
+`--engine` only accepts `claude-code` today; naming any other engine is an
+error, not a stub. `--out` is the plugin root, and it must already exist —
+it's the author's own plugin tree (skills, handler scripts, an optional
+hand-written `.claude-plugin/plugin.json`), and the handlers' `exec` paths
+live inside it. `build` owns and rewrites exactly these generated paths,
+refusing to touch any of them if the file is a symlink, or if its directory is
+a symlink or resolves outside `--out`:
+
+- `hooks/hooks.json` — **merged, not overwritten**. An existing file is the
+  base every foreign (non-hookyard) hook is preserved out of; only prior
+  hookyard-generated entries are stripped and replaced, so re-running `build`
+  is idempotent and an author's hand-written hooks survive.
+- `hookyard/table.json` — the baked handler table, mode `0644` because it
+  ships inside the plugin's git tree or zip archive.
+- `bin/hookyard` — a POSIX `sh` launcher, mode `0755`.
+- `bin/hookyard-<GOOS>-<GOARCH>` — a copy of the `hookyard` binary that ran
+  `build`, mode `0755`. This slice bundles only the host arch that built the
+  plugin; multi-arch packaging is out of scope for now.
+- `.claude-plugin/plugin.json` — written only when absent, as `{"name":
+  <--name>}` (`--name` is then required); left untouched when it already
+  exists, since it's the author's file.
+
+Every generated `hooks.json` entry runs:
+
+```
+"${CLAUDE_PLUGIN_ROOT}/bin/hookyard" route --registered-for claude-code --event <event> --plugin-root "${CLAUDE_PLUGIN_ROOT}"
+```
+
+The launcher maps `uname -s`/`uname -m` to the bundled binary's `GOOS`/
+`GOARCH` name and execs it; on a host it doesn't recognize, or when the
+matching binary isn't there or isn't executable, it exits 0 with no
+output — the same fail-open every engine already reads as "no opinion,"
+never a record. Handler `exec` paths in a build-mode manifest are relative
+to the plugin root, with no `..` segments; `route --plugin-root` resolves
+and checks that each selected handler's exec is actually contained inside
+the root at fire time, and `build` runs the same check against `--out` at
+bake time as a lint. A handler whose exec fails to resolve — missing, or
+escaping the root via `..` or a symlink — is never exec'd; it becomes its
+own error result, and the rest of the plugin's handlers still run and fold
+as usual. `hookyard validate --plugin-root <dir> --manifest <file>
+[--manifest ...]` runs that same resolution check without building
+anything, for CI or a pre-release sanity pass.
+
+One collision is worth naming: the hooks.json merge strips any *author*
+hook whose command also contains `/bin/hookyard` — the same substring the
+merge uses to recognize hookyard's own prior entries — so a hand-written
+hook like `${CLAUDE_PLUGIN_ROOT}/bin/hookyard-lint.sh` would be silently
+removed on the next `build`. Name your own scripts around that substring if
+you're authoring hooks by hand in the same tree.
+
+The event record follows yard mode's default-state-dir chain
+(`$HOOKYARD_STATE_DIR`, else `$XDG_STATE_HOME/hookyard`, else
+`~/.local/state/hookyard`), but build mode only **appends** to a state
+directory that already exists there — it never creates one on an end user's
+machine the way yard mode's installer does. The first append also tightens
+that existing directory's mode to `0700` and creates `stream/` inside it if
+it isn't already there. A host with no such directory gets no build-mode
+records at all; that's a stated limitation, not a bug.
+
+To try a built plugin locally without a marketplace: `claude --plugin-dir
+<out>`.
 
 ## How yard mode works
 
@@ -97,8 +166,10 @@ Once you have a binary on `PATH`:
 
 ```
 hookyard validate --manifest path/to/hookyard.json
+hookyard validate --plugin-root path/to/plugin --manifest path/to/hookyard.json
 hookyard install  --manifest path/to/hookyard.json [--manifest ...]
 hookyard emit     --engine claude-code --manifest path/to/hookyard.json [--manifest ...] --router-path <path> --state-dir <path> [--base <file>]
+hookyard build    --engine claude-code --manifest path/to/hookyard.json [--manifest ...] --out path/to/plugin [--name plugin-name]
 hookyard doctor
 ```
 
@@ -109,7 +180,8 @@ manifest produced a row. `emit` covers Claude Code instead: it is
 Claude-Code-only (`--engine claude-code` is required), prints the merged
 `hooks` block to stdout rather than writing a file, and is meant to run
 inside a Nix build rather than at activation time — Nix is what places its
-output into the `--settings` overlay.
+output into the `--settings` overlay. `build` is the other front end
+entirely — see "Build mode (Claude Code)" above.
 
 `doctor` answers the question the event record cannot: every engine skips
 hooks entirely in a directory the user has not trusted, and a handler that
@@ -220,10 +292,18 @@ tool names to filter on:
 }
 ```
 
-- `exec` must be an absolute path to an executable file — it's resolved at
-  hook-fire time against the agent's own working directory and `PATH`, not
-  the installer's, so a relative path or a bare name would let whatever
-  happens to sit there stand in.
+- `exec`'s form depends on which mode the manifest is for — a given manifest
+  file serves **one** mode, not both. In **yard mode** (`install`, `emit`,
+  `validate`), `exec` must be an absolute path to an executable file,
+  checked at install time; a relative path or a bare name would let
+  whatever happens to sit on the agent's own `PATH` or working directory
+  stand in, so it's rejected. In **build mode** (`build`, `validate
+  --plugin-root`, and the table `route --plugin-root` reads), `exec` must be
+  relative to the plugin root with no `..` segments (`filepath.IsLocal`) —
+  an absolute path would name somewhere on the plugin author's own machine,
+  meaningless once the plugin ships. Each mode's `validate` rejects the
+  other mode's form with an error naming which mode the exec should have
+  used.
 - `events` are one of the six canonical events, or `engine:NativeName` for an
   event only one engine has.
 - `engines` is any of `claude-code`, `codex`, `cursor`.

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/noamsto/hookyard/internal/build"
 	"github.com/noamsto/hookyard/internal/doctor"
 	"github.com/noamsto/hookyard/internal/envelope"
 	"github.com/noamsto/hookyard/internal/manifest"
@@ -26,6 +27,7 @@ const usage = `hookyard — register agent hooks once, route them to every codin
 
   hookyard install   render every manifest into every engine's native config
   hookyard emit      print Claude Code's overlay to stdout for Nix to place
+  hookyard build     generate a native plugin that bundles hookyard (Claude Code only, for now)
   hookyard validate  check manifests without writing anything
   hookyard doctor    report whether each engine will actually run the hooks
   hookyard route     dispatch one hook event to every handler that matches it
@@ -42,6 +44,8 @@ func main() {
 		err = install(os.Args[2:])
 	case "emit":
 		err = emit(os.Args[2:])
+	case "build":
+		err = runBuild(os.Args[2:])
 	case "validate":
 		err = validate(os.Args[2:])
 	case "doctor":
@@ -333,18 +337,90 @@ func emit(args []string) error {
 	return err
 }
 
+// runBuild is named unlike every other command (not "build"): a package-level
+// build would collide with the internal/build import it calls into.
+func runBuild(args []string) error {
+	fs := flag.NewFlagSet("build", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	engineFlag := fs.String("engine", "", "engine to build a plugin for; only claude-code is supported")
+	var paths manifestPaths
+	fs.Var(&paths, "manifest", "path to a handler manifest (repeatable)")
+	out := fs.String("out", "", "plugin root to write into (must already exist)")
+	name := fs.String("name", "", "plugin name, required only when .claude-plugin/plugin.json does not already exist")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *engineFlag == "" {
+		return fmt.Errorf("--engine is required")
+	}
+	engine, err := vocab.ParseEngine(*engineFlag)
+	if err != nil {
+		return err
+	}
+	if len(paths) == 0 {
+		return fmt.Errorf("no --manifest given")
+	}
+	if *out == "" {
+		return fmt.Errorf("--out is required")
+	}
+	binary, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if err := build.Build(engine, build.Options{
+		Manifests: paths,
+		Out:       *out,
+		Name:      *name,
+		Binary:    binary,
+	}); err != nil {
+		return err
+	}
+	fmt.Printf("built %s plugin at %s\n", engine, *out)
+	return nil
+}
+
 func validate(args []string) error {
 	fs := flag.NewFlagSet("validate", flag.ExitOnError)
 	var paths manifestPaths
 	fs.Var(&paths, "manifest", "path to a handler manifest (repeatable)")
+	pluginRoot := fs.String("plugin-root", "", "built plugin's root directory; validates manifests in build form against it")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if len(paths) == 0 {
 		return fmt.Errorf("no --manifest given")
 	}
+	if *pluginRoot != "" {
+		return validatePlugin(paths, *pluginRoot)
+	}
 	handlers, err := loadAll(paths)
 	if err != nil {
+		return err
+	}
+	fmt.Printf("%d manifests, %d handlers, no problems found\n", len(paths), len(handlers))
+	return nil
+}
+
+// validatePlugin is validate's build-mode path: manifests in plugin form,
+// checked against root exactly as build would check them at bake time.
+func validatePlugin(paths []string, root string) error {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	manifests := make([]*manifest.Manifest, 0, len(paths))
+	for _, p := range paths {
+		m, err := manifest.LoadPlugin(p)
+		if err != nil {
+			return err
+		}
+		manifests = append(manifests, m)
+	}
+	handlers, err := manifest.Merge(manifests)
+	if err != nil {
+		return err
+	}
+	if err := manifest.CheckPluginExecs(absRoot, handlers); err != nil {
 		return err
 	}
 	fmt.Printf("%d manifests, %d handlers, no problems found\n", len(paths), len(handlers))
@@ -396,6 +472,7 @@ type routeOptions struct {
 	registeredFor string
 	event         string
 	stateDir      string
+	pluginRoot    string
 	parseErr      error
 }
 
@@ -413,6 +490,7 @@ func route(args []string) error {
 	registeredFor := fs.String("registered-for", "", "engine this invocation was registered for")
 	event := fs.String("event", "", "canonical or engine-scoped event name")
 	stateDir := fs.String("state-dir", "", "directory holding the handler table and the record stream")
+	pluginRoot := fs.String("plugin-root", "", "built plugin's root directory (build mode; mutually exclusive with --state-dir)")
 	parseErr := fs.Parse(args)
 
 	runRoute(context.Background(), routeOptions{
@@ -420,6 +498,7 @@ func route(args []string) error {
 		registeredFor: *registeredFor,
 		event:         *event,
 		stateDir:      *stateDir,
+		pluginRoot:    *pluginRoot,
 		parseErr:      parseErr,
 	}, os.Stdin, os.Stdout)
 	return nil
@@ -428,7 +507,12 @@ func route(args []string) error {
 // runRoute is route's pipeline (§4), split out so tests can drive §5's
 // failure paths with an explicit stdin and stdout instead of the process's own.
 func runRoute(ctx context.Context, opts routeOptions, in io.Reader, out io.Writer) {
-	stateDir, fallbackNote := resolveStateDir(opts.stateDir)
+	var stateDir, fallbackNote string
+	if opts.pluginRoot != "" {
+		stateDir = existingDefaultStateDir()
+	} else {
+		stateDir, fallbackNote = resolveStateDir(opts.stateDir)
+	}
 
 	// appendRecord ends every path. The error is swallowed because by the time
 	// this runs the verdict is already on stdout, and a failed append must
@@ -465,6 +549,14 @@ func runRoute(ctx context.Context, opts routeOptions, in io.Reader, out io.Write
 		routerError(fmt.Sprintf("parsing flags: %v", opts.parseErr))
 		return
 	}
+	if opts.pluginRoot != "" && opts.stateDir != "" {
+		routerError("--plugin-root and --state-dir are mutually exclusive")
+		return
+	}
+	if opts.pluginRoot != "" && !filepath.IsAbs(opts.pluginRoot) {
+		routerError(fmt.Sprintf("--plugin-root %q must be an absolute path", opts.pluginRoot))
+		return
+	}
 	registered, err := vocab.ParseEngine(opts.registeredFor)
 	if err != nil {
 		routerError(fmt.Sprintf("--registered-for: %v", err))
@@ -491,20 +583,32 @@ func runRoute(ctx context.Context, opts routeOptions, in io.Reader, out io.Write
 		})
 		return
 	}
-	if stateDir == "" {
+	var table []manifest.Handler
+	if opts.pluginRoot != "" {
+		table, err = manifest.ReadPluginTable(filepath.Join(opts.pluginRoot, manifest.PluginTablePath))
+	} else if stateDir == "" {
 		// Joining an empty directory would read ./table.json out of the agent's
 		// own working directory, i.e. execute whatever the repo under review
 		// happens to ship.
 		routerError("no --state-dir and no default state directory")
 		return
+	} else {
+		table, err = manifest.ReadTable(filepath.Join(stateDir, "table.json"))
 	}
-	table, err := manifest.ReadTable(filepath.Join(stateDir, "table.json"))
 	if err != nil {
 		routerError(fmt.Sprintf("reading the handler table: %v", err))
 		return
 	}
 
-	result := router.Run(ctx, router.Select(table, env), env, router.DefaultBudget())
+	selected := router.Select(table, env)
+	var result router.Result
+	if opts.pluginRoot != "" {
+		runnable, failed := resolvePluginHandlers(opts.pluginRoot, selected)
+		result = router.Run(ctx, runnable, env, router.DefaultBudget())
+		result.Handlers = mergeInOrder(selected, result.Handlers, failed)
+	} else {
+		result = router.Run(ctx, selected, env, router.DefaultBudget())
+	}
 	rendered := verdict.Render(verdict.Input{
 		Engine:         env.Engine,
 		CanonicalEvent: env.CanonicalEvent,
@@ -532,6 +636,58 @@ func runRoute(ctx context.Context, opts routeOptions, in io.Reader, out io.Write
 		Router:         routerStatus(result),
 		Handlers:       handlerOutcomes(result.Handlers, rendered.AdviceDelivered),
 	})
+}
+
+// existingDefaultStateDir is build mode's record rule (§3.1): a plugin appends only to a
+// state directory that already exists, and never creates one on an end user's machine.
+func existingDefaultStateDir() string {
+	dir, err := record.DefaultStateDir()
+	if err != nil || !filepath.IsAbs(dir) {
+		return ""
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return ""
+	}
+	return dir
+}
+
+// resolvePluginHandlers rewrites each selected handler's plugin-relative exec to its real
+// path. A handler that does not resolve inside the root is never exec'd; it becomes its
+// own error outcome so the rest of the plugin's handlers still run (§3.1, §5).
+func resolvePluginHandlers(root string, selected []manifest.Handler) (runnable []manifest.Handler, failed map[string]router.HandlerResult) {
+	failed = map[string]router.HandlerResult{}
+	for _, h := range selected {
+		target, err := manifest.ResolvePluginExec(root, h.Exec)
+		if err != nil {
+			failed[h.ID] = router.HandlerResult{
+				ID:      h.ID,
+				Outcome: record.OutcomeError,
+				Verdict: verdict.Abstain,
+				Message: err.Error(),
+			}
+			continue
+		}
+		h.Exec = target
+		runnable = append(runnable, h)
+	}
+	return runnable, failed
+}
+
+// mergeInOrder restores the table order Select produced over Run's results, which cover
+// only the handlers that were runnable; failed supplies the rest by ID. Run preserves the
+// input order of the handlers it was given, so ran is walked in lockstep.
+func mergeInOrder(selected []manifest.Handler, ran []router.HandlerResult, failed map[string]router.HandlerResult) []router.HandlerResult {
+	merged := make([]router.HandlerResult, 0, len(selected))
+	next := 0
+	for _, h := range selected {
+		if f, ok := failed[h.ID]; ok {
+			merged = append(merged, f)
+			continue
+		}
+		merged = append(merged, ran[next])
+		next++
+	}
+	return merged
 }
 
 // resolveStateDir handles a stale config entry emitted by an older hookyard,

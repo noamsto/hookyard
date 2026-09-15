@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 
 	"github.com/noamsto/hookyard/internal/atomicfile"
 	"github.com/noamsto/hookyard/internal/verdict"
@@ -51,6 +52,20 @@ type Manifest struct {
 	Source string `json:"-"`
 }
 
+// ExecForm is the shape a handler's exec must take, and so which mode a
+// manifest serves: an absolute exec cannot ship inside a plugin, and a
+// relative one has nothing trustworthy to resolve against in the yard.
+type ExecForm int
+
+const (
+	ExecAbsolute       ExecForm = iota // yard mode
+	ExecPluginRelative                 // build mode
+)
+
+// PluginTablePath is where a built plugin's baked handler table lives,
+// relative to the plugin root.
+const PluginTablePath = "hookyard/table.json"
+
 var idPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_./-]*$`)
 
 // eventPattern constrains the native half of an engine-scoped event name.
@@ -72,7 +87,7 @@ func Load(path string) (*Manifest, error) {
 	}
 	m.Source = path
 	m.normalizeLanes()
-	if err := m.validateAll(validateExec); err != nil {
+	if err := m.validateAll(ExecAbsolute, validateExec); err != nil {
 		return nil, err
 	}
 	return &m, nil
@@ -96,14 +111,14 @@ func (m *Manifest) normalizeLanes() {
 // accepts one activation then refuses fails after the store paths are already
 // realised. extra runs per handler on top of the shared rules; it is nil for
 // the caller that cannot afford to touch the filesystem.
-func (m *Manifest) validateAll(extra func(where string, h Handler) error) error {
+func (m *Manifest) validateAll(form ExecForm, extra func(where string, h Handler) error) error {
 	if len(m.Handlers) == 0 {
 		return fmt.Errorf("%s: no handlers declared", m.Source)
 	}
 	seen := map[string]bool{}
 	for _, h := range m.Handlers {
 		where := fmt.Sprintf("%s: handler %q", m.Source, h.ID)
-		if err := validateStatic(where, h); err != nil {
+		if err := validateStatic(where, h, form); err != nil {
 			return err
 		}
 		if extra != nil {
@@ -133,19 +148,33 @@ func validateExec(where string, h Handler) error {
 // buys nothing the exec attempt does not already report as a handler error.
 // Callers normalize an empty Lane to LaneVerdict before reaching here, so this
 // treats "" as invalid rather than re-normalizing it a second place.
-func validateStatic(where string, h Handler) error {
+func validateStatic(where string, h Handler, form ExecForm) error {
 	if !idPattern.MatchString(h.ID) {
 		return fmt.Errorf("%s: id must match %s", where, idPattern)
 	}
-	// Same rule §9 applies to the emitted router command, applied to handlers.
-	// A relative exec resolves at hook-fire time against the directory the
-	// agent's tool call runs in, and a bare name against the PATH the engine
-	// hands down — neither is hookyard's to choose, so either would let a file
-	// that happens to sit there stand in for the guard.
-	if !filepath.IsAbs(h.Exec) {
-		return fmt.Errorf("%s: exec %q must be an absolute path, because it is resolved at "+
-			"hook-fire time against the agent's working directory and PATH, not the installer's",
-			where, h.Exec)
+	switch form {
+	case ExecAbsolute:
+		// Same rule §9 applies to the emitted router command, applied to handlers.
+		// A relative exec resolves at hook-fire time against the directory the
+		// agent's tool call runs in, and a bare name against the PATH the engine
+		// hands down — neither is hookyard's to choose, so either would let a file
+		// that happens to sit there stand in for the guard.
+		if !filepath.IsAbs(h.Exec) {
+			return fmt.Errorf("%s: exec %q must be an absolute path, because it is resolved at "+
+				"hook-fire time against the agent's working directory and PATH, not the installer's; "+
+				"a plugin-root-relative exec is build mode's form (hookyard build)",
+				where, h.Exec)
+		}
+	case ExecPluginRelative:
+		// The router joins it onto the plugin root rather than the agent's cwd,
+		// so relative is safe here; ResolvePluginExec still enforces containment
+		// after symlinks, which a lexical check cannot see.
+		if !filepath.IsLocal(h.Exec) {
+			return fmt.Errorf("%s: exec %q must be relative to the plugin root with no .. segments, "+
+				"because an absolute path names the author's machine rather than the end user's; "+
+				"an absolute exec is yard mode's form (hookyard install)",
+				where, h.Exec)
+		}
 	}
 	if h.Lane != LaneVerdict && h.Lane != LaneFireAndForget {
 		return fmt.Errorf("%s: lane %q must be %q or %q", where, h.Lane, LaneVerdict, LaneFireAndForget)
@@ -317,6 +346,17 @@ func execIsRunnable(path string) error {
 // check is left to the caller, who must still run it: LoadStatic dedupes
 // one file, not a caller's whole --manifest list.
 func LoadStatic(path string) (*Manifest, error) {
+	return loadStatic(path, ExecAbsolute)
+}
+
+// LoadPlugin is LoadStatic for build mode: exec must be plugin-root-relative.
+// It does not stat execs, because only the caller knows the plugin root;
+// CheckPluginExecs is that check.
+func LoadPlugin(path string) (*Manifest, error) {
+	return loadStatic(path, ExecPluginRelative)
+}
+
+func loadStatic(path string, form ExecForm) (*Manifest, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -327,7 +367,7 @@ func LoadStatic(path string) (*Manifest, error) {
 	}
 	m.Source = path
 	m.normalizeLanes()
-	if err := m.validateAll(nil); err != nil {
+	if err := m.validateAll(form, nil); err != nil {
 		return nil, err
 	}
 	return &m, nil
@@ -356,11 +396,21 @@ func Merge(manifests []*Manifest) ([]Handler, error) {
 // manifest, at a fixed 0600: the table is hookyard's own file, so a
 // pre-existing one left looser must be tightened rather than honoured.
 func WriteTable(path string, handlers []Handler) error {
+	return writeTable(path, handlers, 0o600)
+}
+
+// WritePluginTable writes a built plugin's baked table. Unlike WriteTable's it
+// is 0644, because it ships to end users inside git and zip artifacts.
+func WritePluginTable(path string, handlers []Handler) error {
+	return writeTable(path, handlers, 0o644)
+}
+
+func writeTable(path string, handlers []Handler, perm fs.FileMode) error {
 	raw, err := json.Marshal(Manifest{Handlers: handlers})
 	if err != nil {
 		return err
 	}
-	return atomicfile.Write(path, raw, 0o600)
+	return atomicfile.Write(path, raw, perm)
 }
 
 // ReadTable reads the table WriteTable produces and re-runs every validation
@@ -370,6 +420,16 @@ func WriteTable(path string, handlers []Handler) error {
 // does not reject a zero-handler table: "nothing is registered" is a
 // legitimate table state, distinct from "the table is gone".
 func ReadTable(path string) ([]Handler, error) {
+	return readTable(path, ExecAbsolute)
+}
+
+// ReadPluginTable is ReadTable for a built plugin's baked table, whose execs
+// are plugin-root-relative.
+func ReadPluginTable(path string) ([]Handler, error) {
+	return readTable(path, ExecPluginRelative)
+}
+
+func readTable(path string, form ExecForm) ([]Handler, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -382,7 +442,7 @@ func ReadTable(path string) ([]Handler, error) {
 	seen := map[string]bool{}
 	for _, h := range t.Handlers {
 		where := fmt.Sprintf("%s: handler %q", path, h.ID)
-		if err := validateStatic(where, h); err != nil {
+		if err := validateStatic(where, h, form); err != nil {
 			return nil, err
 		}
 		if seen[h.ID] {
@@ -391,4 +451,51 @@ func ReadTable(path string) ([]Handler, error) {
 		seen[h.ID] = true
 	}
 	return t.Handlers, nil
+}
+
+// ResolvePluginExec returns the real path of exec under root, refusing one that
+// resolves outside it.
+//
+// The containment check runs on symlink-resolved paths on both sides: a
+// lexically local exec can still be a link out of the plugin, and a root that
+// is itself reached through a link (a store path, a symlinked install dir)
+// would otherwise make every target look outside it.
+func ResolvePluginExec(root, exec string) (string, error) {
+	if !filepath.IsAbs(root) {
+		return "", fmt.Errorf("plugin root %q must be an absolute path", root)
+	}
+	if !filepath.IsLocal(exec) {
+		return "", fmt.Errorf("exec %q must be relative to the plugin root with no .. segments", exec)
+	}
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("plugin root %q: %w", root, err)
+	}
+	target, err := filepath.EvalSymlinks(filepath.Join(root, exec))
+	if err != nil {
+		return "", fmt.Errorf("exec %q: %w", exec, err)
+	}
+	rel, err := filepath.Rel(realRoot, target)
+	if err != nil {
+		return "", fmt.Errorf("exec %q resolves to %s, outside the plugin root %s: %w", exec, target, realRoot, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("exec %q resolves to %s, outside the plugin root %s", exec, target, realRoot)
+	}
+	return target, nil
+}
+
+// CheckPluginExecs is Load's exec check for build mode: every handler's exec
+// must resolve inside root and be runnable there.
+func CheckPluginExecs(root string, handlers []Handler) error {
+	for _, h := range handlers {
+		target, err := ResolvePluginExec(root, h.Exec)
+		if err == nil {
+			err = execIsRunnable(target)
+		}
+		if err != nil {
+			return fmt.Errorf("handler %q: exec %q: %w", h.ID, h.Exec, err)
+		}
+	}
+	return nil
 }

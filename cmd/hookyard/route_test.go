@@ -396,3 +396,223 @@ func TestRunRouteSuppressesAPayloadFromAnotherEngine(t *testing.T) {
 		t.Errorf("want no handler entries, got %+v", rec.Handlers)
 	}
 }
+
+// pluginOpts is routeOpts for build mode: --plugin-root instead of --state-dir. It always
+// points HOOKYARD_STATE_DIR and XDG_STATE_HOME at temp paths, so no test can ever reach the
+// developer's real ~/.local/state/hookyard. The returned state dir does not exist yet — a
+// test that wants a record creates it first with record.EnsureStateDir.
+func pluginOpts(t *testing.T, root string) (opts routeOptions, stateDir string) {
+	t.Helper()
+	stateDir = filepath.Join(t.TempDir(), "state")
+	t.Setenv("HOOKYARD_STATE_DIR", stateDir)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	return routeOptions{
+		start:         time.Now(),
+		registeredFor: "claude-code",
+		event:         "PreToolUse",
+		pluginRoot:    root,
+	}, stateDir
+}
+
+// writePluginTable writes a built plugin's table at root. handlerScript and decides return
+// handlers with an absolute exec rooted under the directory the caller passed them, so this
+// converts each to the root-relative form a plugin table actually holds.
+func writePluginTable(t *testing.T, root string, handlers ...manifest.Handler) {
+	t.Helper()
+	for i, h := range handlers {
+		rel, err := filepath.Rel(root, h.Exec)
+		if err != nil {
+			t.Fatalf("rel exec: %v", err)
+		}
+		handlers[i].Exec = rel
+	}
+	if err := manifest.WritePluginTable(filepath.Join(root, manifest.PluginTablePath), handlers); err != nil {
+		t.Fatalf("write plugin table: %v", err)
+	}
+}
+
+func TestRunRouteBuildModeDeny(t *testing.T) {
+	root := t.TempDir()
+	handlersDir := filepath.Join(root, "handlers")
+	if err := os.MkdirAll(handlersDir, 0o700); err != nil {
+		t.Fatalf("mkdir handlers: %v", err)
+	}
+	opts, _ := pluginOpts(t, root)
+	writePluginTable(t, root, decides(t, handlersDir, "deny-a", "deny", "A"))
+
+	printed := runPipeline(t, opts, claudePreTool)
+
+	if printed != denyStdout {
+		t.Errorf("want the deny printed as %q, got %q", denyStdout, printed)
+	}
+}
+
+// A handler whose exec went missing after build is never exec'd, but it must not stop the
+// rest of the plugin's handlers from running (§3.1, §5).
+func TestRunRouteBuildModeMissingExecStillRendersDeny(t *testing.T) {
+	root := t.TempDir()
+	handlersDir := filepath.Join(root, "handlers")
+	if err := os.MkdirAll(handlersDir, 0o700); err != nil {
+		t.Fatalf("mkdir handlers: %v", err)
+	}
+	opts, stateDir := pluginOpts(t, root)
+	if err := record.EnsureStateDir(stateDir); err != nil {
+		t.Fatalf("create state dir: %v", err)
+	}
+	gone := handlerScript(t, handlersDir, "gone", "exit 0")
+	if err := os.Remove(gone.Exec); err != nil {
+		t.Fatalf("remove gone script: %v", err)
+	}
+	writePluginTable(t, root, gone, decides(t, handlersDir, "deny-a", "deny", "A"))
+
+	printed := runPipeline(t, opts, claudePreTool)
+
+	if printed != denyStdout {
+		t.Errorf("want the deny printed as %q, got %q", denyStdout, printed)
+	}
+	rec := readRecord(t, stateDir)
+	if len(rec.Handlers) != 2 {
+		t.Fatalf("want two handler entries, got %+v", rec.Handlers)
+	}
+	if rec.Handlers[0].Name != "gone" || rec.Handlers[0].Outcome != record.OutcomeError {
+		t.Errorf("want gone recorded as error first, got %+v", rec.Handlers[0])
+	}
+	if rec.Handlers[1].Name != "deny-a" || rec.Handlers[1].Outcome != record.OutcomeDeny {
+		t.Errorf("want deny-a recorded as deny second, got %+v", rec.Handlers[1])
+	}
+}
+
+// A symlink inside the root that resolves outside it is exactly what ResolvePluginExec's
+// containment check exists to catch; the sibling deny still wins.
+func TestRunRouteBuildModeEscapingSymlinkExecErrors(t *testing.T) {
+	root := t.TempDir()
+	handlersDir := filepath.Join(root, "handlers")
+	if err := os.MkdirAll(handlersDir, 0o700); err != nil {
+		t.Fatalf("mkdir handlers: %v", err)
+	}
+	opts, stateDir := pluginOpts(t, root)
+	if err := record.EnsureStateDir(stateDir); err != nil {
+		t.Fatalf("create state dir: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.sh")
+	if err := os.WriteFile(outside, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write outside script: %v", err)
+	}
+	escaping := filepath.Join(handlersDir, "escaping")
+	if err := os.Symlink(outside, escaping); err != nil {
+		t.Fatalf("symlink escaping handler: %v", err)
+	}
+	escapeHandler := manifest.Handler{
+		ID:      "escaping",
+		Exec:    escaping,
+		Events:  []string{"pre_tool"},
+		Engines: []string{"claude-code"},
+	}
+	writePluginTable(t, root, escapeHandler, decides(t, handlersDir, "deny-a", "deny", "A"))
+
+	printed := runPipeline(t, opts, claudePreTool)
+
+	if printed != denyStdout {
+		t.Errorf("want the deny printed as %q, got %q", denyStdout, printed)
+	}
+	rec := readRecord(t, stateDir)
+	if len(rec.Handlers) != 2 {
+		t.Fatalf("want two handler entries, got %+v", rec.Handlers)
+	}
+	if rec.Handlers[0].Name != "escaping" || rec.Handlers[0].Outcome != record.OutcomeError {
+		t.Errorf("want escaping recorded as error first, got %+v", rec.Handlers[0])
+	}
+	if rec.Handlers[1].Name != "deny-a" || rec.Handlers[1].Outcome != record.OutcomeDeny {
+		t.Errorf("want deny-a recorded as deny second, got %+v", rec.Handlers[1])
+	}
+}
+
+// Build mode never creates the record's state directory on an end user's machine (§3.1): it
+// only ever appends to one that is already there.
+func TestRunRouteBuildModeNonexistentStateDirStaysAbsent(t *testing.T) {
+	root := t.TempDir()
+	handlersDir := filepath.Join(root, "handlers")
+	if err := os.MkdirAll(handlersDir, 0o700); err != nil {
+		t.Fatalf("mkdir handlers: %v", err)
+	}
+	opts, stateDir := pluginOpts(t, root)
+	writePluginTable(t, root, decides(t, handlersDir, "deny-a", "deny", "A"))
+
+	printed := runPipeline(t, opts, claudePreTool)
+
+	if printed != denyStdout {
+		t.Errorf("want the deny printed as %q, got %q", denyStdout, printed)
+	}
+	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+		t.Errorf("want the state dir to stay absent, got err=%v", err)
+	}
+}
+
+func TestRunRouteBuildModeRelativePluginRootIsARouterError(t *testing.T) {
+	opts, stateDir := pluginOpts(t, "relative/root")
+	if err := record.EnsureStateDir(stateDir); err != nil {
+		t.Fatalf("create state dir: %v", err)
+	}
+
+	printed := runPipeline(t, opts, claudePreTool)
+
+	wantRouterError(t, printed, readRecord(t, stateDir))
+}
+
+// --plugin-root and --state-dir together are ambiguous about which mode is meant, so the
+// call is refused before either is consulted — but the refusal itself is still recorded
+// under the build-mode rule, never into --state-dir.
+func TestRunRouteBuildModeBothFlagsIsARouterError(t *testing.T) {
+	opts, stateDir := pluginOpts(t, t.TempDir())
+	opts.stateDir = t.TempDir()
+	if err := record.EnsureStateDir(stateDir); err != nil {
+		t.Fatalf("create state dir: %v", err)
+	}
+
+	printed := runPipeline(t, opts, claudePreTool)
+
+	wantRouterError(t, printed, readRecord(t, stateDir))
+}
+
+func TestRunRouteBuildModeMissingTableIsARouterError(t *testing.T) {
+	root := t.TempDir()
+	opts, stateDir := pluginOpts(t, root)
+	if err := record.EnsureStateDir(stateDir); err != nil {
+		t.Fatalf("create state dir: %v", err)
+	}
+
+	printed := runPipeline(t, opts, claudePreTool)
+
+	wantRouterError(t, printed, readRecord(t, stateDir))
+}
+
+// A relative HOOKYARD_STATE_DIR would resolve against the agent's own cwd, not a
+// trustworthy location, so build mode treats it the same as no state directory at all: the
+// verdict still renders, and nothing is created.
+func TestRunRouteBuildModeRelativeStateDirEnvCreatesNothing(t *testing.T) {
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	t.Setenv("HOOKYARD_STATE_DIR", "rel-state")
+
+	root := t.TempDir()
+	handlersDir := filepath.Join(root, "handlers")
+	if err := os.MkdirAll(handlersDir, 0o700); err != nil {
+		t.Fatalf("mkdir handlers: %v", err)
+	}
+	writePluginTable(t, root, decides(t, handlersDir, "deny-a", "deny", "A"))
+
+	opts := routeOptions{
+		start:         time.Now(),
+		registeredFor: "claude-code",
+		event:         "PreToolUse",
+		pluginRoot:    root,
+	}
+	printed := runPipeline(t, opts, claudePreTool)
+
+	if printed != denyStdout {
+		t.Errorf("want the deny printed as %q, got %q", denyStdout, printed)
+	}
+	if _, err := os.Stat(filepath.Join(cwd, "rel-state")); !os.IsNotExist(err) {
+		t.Errorf("want no rel-state directory created, got err=%v", err)
+	}
+}

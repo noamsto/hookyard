@@ -380,6 +380,143 @@ func liveFindBashDenyRecord(t *testing.T, stateDir string) (record.Record, bool)
 	return record.Record{}, false
 }
 
+// TestLiveClaudeCodePluginRefusesTheDeniedToolCall is
+// TestLiveClaudeCodeRefusesTheDeniedToolCall's build-mode counterpart: instead
+// of a hand-run `hookyard emit` overlay merged over a base settings.json, this
+// drives the real `hookyard build` artifact — a self-contained plugin
+// directory carrying its own launcher, bundled binary, and table.json — via
+// claude's own `--plugin-dir`. It proves the same thing emit's sibling test
+// proves (a real claude process actually enforces the deny, not just that
+// hookyard renders JSON an engine is documented to read), but through the
+// distribution path build mode ships instead of yard mode's.
+//
+// Gated identically: HOOKYARD_E2E=1 and claude on PATH, for the same reasons
+// (no credentials in the repo gate, claude not a build dependency).
+func TestLiveClaudeCodePluginRefusesTheDeniedToolCall(t *testing.T) {
+	if os.Getenv("HOOKYARD_E2E") != "1" {
+		t.Skip("set HOOKYARD_E2E=1 to run this test against a live claude binary")
+	}
+	claudeBin, err := exec.LookPath("claude")
+	if err != nil {
+		t.Skip("claude binary not found on PATH")
+	}
+
+	hookyardBin := liveBuildHookyard(t)
+	root := t.TempDir()
+
+	claudeConfigDir := filepath.Join(root, "claude-config")
+	projectDir := filepath.Join(root, "project")
+	pluginDir := filepath.Join(root, "plugin")
+	stateDir := filepath.Join(root, "state")
+	xdgStateDir := filepath.Join(root, "xdg-state")
+	for _, dir := range []string{claudeConfigDir, projectDir, pluginDir, stateDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	projectDir, err = filepath.EvalSymlinks(projectDir)
+	if err != nil {
+		t.Fatalf("resolve project dir: %v", err)
+	}
+
+	liveSeedClaudeTrust(t, claudeConfigDir, projectDir)
+	liveLinkClaudeAuth(t, claudeConfigDir)
+
+	reasonToken := fmt.Sprintf("hookyard-e2e-build-deny-%d", time.Now().UnixNano())
+	firedMarker := filepath.Join(root, "handler-fired")
+	manifestPath := liveWritePluginDenyHandlerAndManifest(t, root, pluginDir, firedMarker, reasonToken)
+
+	build := exec.Command(hookyardBin, "build",
+		"--engine", "claude-code",
+		"--manifest", manifestPath,
+		"--out", pluginDir,
+		"--name", "hookyard-live-probe",
+	)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("hookyard build: %v\n%s", err, out)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), liveE2EBudget)
+	defer cancel()
+	probe := exec.CommandContext(ctx, claudeBin, "-p", "--model", "claude-haiku-4-5-20251001",
+		"--plugin-dir", pluginDir, liveProbePrompt)
+	probe.Dir = projectDir
+	probe.Env = append(os.Environ(),
+		"CLAUDE_CONFIG_DIR="+claudeConfigDir,
+		"HOOKYARD_STATE_DIR="+stateDir,
+		"XDG_STATE_HOME="+xdgStateDir,
+	)
+	output, runErr := probe.CombinedOutput()
+
+	if _, statErr := os.Stat(firedMarker); os.IsNotExist(statErr) {
+		t.Fatalf("the deny handler was never invoked: claude never fired the PreToolUse hook at all "+
+			"(claude run error: %v)\n--- claude output ---\n%s", runErr, output)
+	}
+
+	rec, ok := liveFindBashDenyRecord(t, stateDir)
+	if !ok {
+		t.Fatalf("the deny handler fired, but hookyard's own record has no Bash pre_tool entry for it — "+
+			"a hookyard-side problem, not an engine one\n--- claude output ---\n%s", output)
+	}
+	if rec.Verdict != record.OutcomeDeny || !rec.Enforced {
+		t.Fatalf("hookyard did not render an enforced deny for the probe call (verdict=%q enforced=%v) — "+
+			"a hookyard-side problem, not an engine one\n--- claude output ---\n%s", rec.Verdict, rec.Enforced, output)
+	}
+	if rec.Reason != reasonToken {
+		t.Fatalf("hookyard recorded the deny with reason %q, want the handler's own %q — the reason the "+
+			"engine was handed is not the one the handler returned\n--- claude output ---\n%s",
+			rec.Reason, reasonToken, output)
+	}
+
+	// Enforcement, not verdict shape: every assertion above would still hold
+	// if claude had recorded the deny and run the command anyway.
+	if _, statErr := os.Stat(filepath.Join(projectDir, liveProbeSideEffect)); statErr == nil {
+		t.Fatalf("the denied shell command ran anyway: %s exists despite an enforced deny\n"+
+			"--- claude output ---\n%s", liveProbeSideEffect, output)
+	}
+
+	t.Logf("claude refused the probe call through the built plugin; full output:\n%s", output)
+}
+
+// liveWritePluginDenyHandlerAndManifest writes a build-mode handler
+// (plugin-root-relative exec, per manifest.ExecPluginRelative) under pluginDir
+// and a manifest naming it, mirroring setupBuildPlugin in build_test.go. The
+// handler touches firedMarker before printing its deny JSON, same contract as
+// liveWriteDenyHandler's yard-mode script. The manifest is written outside
+// pluginDir, since an author's manifest does not itself ship inside the
+// plugin build reads it to produce.
+func liveWritePluginDenyHandlerAndManifest(t *testing.T, manifestDir, pluginDir, firedMarker, reason string) string {
+	t.Helper()
+	handlerRel := filepath.Join("handlers", "deny")
+	handlerPath := filepath.Join(pluginDir, handlerRel)
+	if err := os.MkdirAll(filepath.Dir(handlerPath), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(handlerPath), err)
+	}
+	script := "#!/bin/sh\n" +
+		"touch " + firedMarker + "\n" +
+		"printf '%s' '{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"" + reason + "\"}}'\n"
+	if err := os.WriteFile(handlerPath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write deny handler: %v", err)
+	}
+
+	m := manifest.Manifest{Handlers: []manifest.Handler{{
+		ID:      "e2e-build-deny",
+		Exec:    filepath.ToSlash(handlerRel),
+		Events:  []string{"pre_tool"},
+		Engines: []string{"claude-code"},
+		Match:   []string{"Bash"},
+	}}}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	manifestPath := filepath.Join(manifestDir, "hookyard.json")
+	if err := os.WriteFile(manifestPath, raw, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	return manifestPath
+}
+
 // The Pi arm. Unlike Claude Code above, Pi's capture runs fully offline
 // against a local model with no credentials and no API cost
 // (docs/design/fixtures/hook-payloads/README.md, "How they were captured"),

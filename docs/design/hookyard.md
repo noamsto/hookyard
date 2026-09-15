@@ -505,8 +505,9 @@ at least fails at a path `doctor` can `test -x`, while a bare name's failure
 mode is "resolves to nothing, on some machines, some of the time."
 
 **B. Build-time author tool.** **Author cost:** run `hookyard build`
-(decided direction, not yet implemented) once per release, producing a
-native plugin per engine with the router baked in. **End-user cost:**
+(implemented for Claude Code, issue #51; Codex, Cursor and Pi targets not
+yet implemented) once per release, producing a native plugin per engine
+with the router baked in. **End-user cost:**
 install the plugin the way they install every other plugin on that engine;
 never install, path, or name hookyard. **Trade-off:** the "fifth thing" cost
 moves to the author's release pipeline instead of the end user's machine,
@@ -595,8 +596,10 @@ binary-free, and one CI job produces the ref consumers actually point at.
 The cost is real and named rather than assumed away — a CI job per consumer
 repo, a cross-compile matrix per supported arch, and ref-bump discipline so
 the marketplace entry and the release branch do not drift apart. Built
-plugin size per arch is unmeasured — flagged, not estimated, and routed to
-§12.
+plugin size for `linux/amd64` is now measured — 3,568,376 bytes (3.4 MiB)
+for the Nix-built, statically linked binary and 3,569,401 bytes for a full
+example plugin directory (§12), about 1.3% of Claude Code's 256 MiB archive
+cap; every other arch is still unmeasured.
 
 **2. Pi.** `build` emits a Pi package whose extension derives from
 `internal/render/pi_bridge.ts`'s template — but not unchanged. Today's
@@ -832,13 +835,24 @@ executable path the installer can check before it ever reaches a rendered
 config (§8, "Manifest trust, validation, and safe rendering" — "a manifest
 that cannot be parsed, or whose `exec` does not resolve to an executable
 path, fails the install outright"). **Build mode's `exec` is relative to
-the plugin root**, resolved by the router itself at **fire time**, not by
-`build` at bake time — there is no install-time filesystem to check
+the plugin root**, and its authority is **the router itself at fire time**,
+not `build` at bake time — there is no install-time filesystem to check
 against, because the plugin has not been installed onto *this* machine yet
-when `build` runs on the author's. A relative path that escapes the plugin
-root (`../`, an absolute path, a symlink resolving outside the plugin
-directory) is rejected by the router before it execs anything, the
-fire-time analogue of yard mode's install-time rejection.
+when `build` runs on the author's. `build` does check anyway, but only as a
+lint against the author's own `--out` tree: `hookyard build` and `hookyard
+validate --plugin-root` both resolve and verify every handler's exec at
+bake time, the same way `hookyard validate` already does for yard mode
+(§8) — a bake-time error catches an author's typo before release, but it is
+advisory, not the rule an end user's machine relies on, because bake time
+sees the author's tree, not the one the plugin ships into. A relative path
+that escapes the plugin root (`../`, an absolute path, a symlink resolving
+outside the plugin directory) is rejected by the router before it execs
+anything, the fire-time analogue of yard mode's install-time rejection —
+and that rejection is scoped to the one handler, not the whole call: a
+handler whose exec fails to resolve becomes its own error result, and every
+other selected handler for that event still runs and folds into the
+verdict as usual (§4), the same "one bad handler doesn't take down its
+siblings" property yard mode already has for a missing binary.
 
 The consequence for §8's registration interface and manifest-trust sections
 is one clarification, not a new schema: "the same `hookyard.json`" means
@@ -854,14 +868,40 @@ has. hookyard does not weaken or strengthen that boundary any more than it
 does nix-config's — it inherits whichever one applies to the mode
 rendering it.
 
-Whether one `hookyard.json` file can serve both modes at once — for
-example, a yard-mode consumer resolving the same relative `exec` field
-against a Nix store path instead of a plugin root — is not decided here.
-The two resolution rules are different enough (fire-time vs. install-time,
-plugin-root-relative vs. absolute) that unifying them is plausible but
-unproven, and forcing an answer without evidence would be exactly the kind
-of speculative generality this document argues against elsewhere.
-**Deferred to §12**, with that reason.
+Whether one `hookyard.json` file can serve both modes at once is now
+decided, settling the §12 bullet this section previously deferred it to:
+**no — a given manifest file serves one mode**, and the manifest's own
+`exec` form is what says which. Yard mode (`install`, `emit`, `validate`,
+`ReadTable`) keeps `exec` absolute, unchanged. Build mode (`build`,
+`validate --plugin-root`, and the baked table `route` reads) requires
+`exec` plugin-root-relative — non-empty, not absolute, no `..` escape
+(`filepath.IsLocal`). Each mode's validation rejects the other form with an
+error naming the other mode by name, so a manifest written for the wrong
+mode fails legibly instead of resolving to the wrong thing. The reason
+isn't a schema limitation — the two forms *could* share a field name and
+still be told apart by an `IsAbs` check — it's that a relative `exec` in
+yard mode has nothing trustworthy to resolve against at hook-fire time (the
+same argument §8/§9 already make against relative execs generally), and an
+absolute `exec` baked into a plugin names a path on the *author's* machine,
+which fails open on every end user's host it ships to. Using the exec
+form itself as the discriminator turns a wrong-mode manifest into a
+validation error instead of a silent fail-open, which is the property this
+document has argued for at every other layer. A consumer that wants both
+keeps two manifest files rather than one shared between modes — a Nix
+consumer already generates its yard-mode manifest with `pkgs.writeText` to
+embed store paths, so a second, build-mode manifest alongside it is no new
+kind of artifact.
+
+Build mode's plugin layout follows from that: `build` writes a plugin root
+containing `hooks/hooks.json` (merged with any pre-existing file, not
+overwritten), `hookyard/table.json` (the baked handler table), a POSIX `sh`
+launcher at `bin/hookyard`, and the bundled binary alongside it as
+`bin/hookyard-<GOOS>-<GOARCH>`; `.claude-plugin/plugin.json` is written only
+when absent. `route` gains a `--plugin-root` flag, mutually exclusive with
+yard mode's `--state-dir`, that reads the baked table instead of the
+installed one and resolves each selected handler's exec against that root
+before running it — see the README's "Build mode (Claude Code)" section for
+the full generated layout and command form.
 
 ### What this amends
 
@@ -4201,19 +4241,34 @@ detection and canonicalization first become load-bearing.
   Codex's plugin caches to detect a handler registered both as a yard entry
   and a built plugin is **unverified** (§3.1).
 - **Built plugin size per arch.** Flagged as a real packaging cost against
-  Claude Code's zip/archive caps and npm's, but unmeasured — a `build`
-  implementation question, not decided here (§3.1).
+  Claude Code's zip/archive caps and npm's. **Measured for `linux/amd64`**:
+  3,568,376 bytes for the Nix-built, statically linked `hookyard` binary
+  (the plain `go build` default is 4,859,950 bytes) and 3,569,401 bytes for
+  a full example plugin directory built around it — the launcher, table,
+  `hooks.json` and `plugin.json` together add about 1 KiB — against Claude
+  Code's 256 MiB archive cap (issue #51); every other arch stays unmeasured
+  (§3.1).
 - **Windows behaviour of the build-mode launcher, per engine.** The launcher
   assumes POSIX `sh`; on Windows the hook command itself errors,
   engine-specifically, rather than following the exit-0 fail-open path —
   **unverified**, per engine (§3.1).
+- **A bundled binary that is present and executable but cannot run.** The
+  launcher's `[ -x "$bin" ]` check only asks whether the exec bit is set,
+  not whether the binary can actually run — a wrong-ABI binary, `ENOEXEC`,
+  or a `noexec`-mounted plugin directory all pass that check and then fail
+  inside `exec "$bin" "$@"` itself, which makes `sh` exit 126 or 127 instead
+  of following the launcher's own exit-0 fail-open path. Whether an engine
+  reads that nonzero exit the same way it reads "no opinion," or surfaces it
+  to the user as a broken hook, is **unverified**, per engine (§3.1).
 - **Claude Code workspace trust for user-scope plugins.** §8's
   workspace-trust finding was about settings hooks; whether the same gate
   applies to a user-scope plugin install is **unverified** (§3.1).
-- **Whether one `hookyard.json` can serve both modes.** A yard-mode consumer
-  resolving the same relative `exec` field against a Nix store path instead
-  of a plugin root is plausible but unproven, and deliberately not decided
-  here (§3.1).
+- **Whether one `hookyard.json` can serve both modes. Resolved: no.** A
+  manifest's `exec` form is the discriminator — absolute for yard mode,
+  plugin-root-relative for build mode — so a given manifest file serves one
+  mode, and each mode's validation rejects the other's form with an error
+  naming which mode it belongs to. A consumer wanting both keeps two
+  manifests (§3.1, "Build-mode manifest semantics").
 - **Codex CLI absent on this host.** `codex-cli` is not installed, so every
   Codex plugin fact in the per-engine facts table is DOC grade only, not
   corroborated against a live install the way Claude Code's and Cursor's
@@ -4260,5 +4315,5 @@ prerequisites: aeye's three `session_start` handlers wait on the SessionStart
 capture and, for `session-reset.sh`/`session-backfill.sh` on claude/codex, on
 the `.source`/`.transcript_path` envelope promotion, so that capture is the
 gate on aeye's wave 2 (§10), not an item without a user. The distribution
-decision adds twelve more items to this list, listed above under "Items the
-distribution decision (§3.1) adds."
+decision adds thirteen more items to this list, listed above under "Items
+the distribution decision (§3.1) adds."
