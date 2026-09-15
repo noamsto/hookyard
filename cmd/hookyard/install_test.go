@@ -229,6 +229,28 @@ func TestRunInstallReportsCatalogCountAndZeroClaudeCodeHandlers(t *testing.T) {
 	}
 }
 
+// writeAllEnginesManifest's one handler names claude-code among its engines,
+// so the report's second count — the table's own claude-code handlers,
+// distinct from the fixed 8-event catalog above it — must read 1, not 0.
+func TestRunInstallReportsNonzeroClaudeCodeHandlerCount(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := writeAllEnginesManifest(t, dir)
+	stateDir := filepath.Join(dir, "state")
+	codex := filepath.Join(dir, "config.toml")
+	cursor := filepath.Join(dir, "hooks.json")
+	pi := filepath.Join(dir, "pi-settings.json")
+
+	var buf bytes.Buffer
+	if err := runInstall(&buf, manifestPaths{manifestPath}, testRouterPath, stateDir, codex, cursor, pi, false); err != nil {
+		t.Fatal(err)
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, "table holds 1 claude-code handlers") {
+		t.Errorf("want the report to name 1 claude-code handler, got:\n%s", got)
+	}
+}
+
 // symlinkedDestination stands in for a path something else manages — on a
 // Nix machine home-manager places engine configs as store links.
 func symlinkedDestination(t *testing.T, dir, name string) string {
