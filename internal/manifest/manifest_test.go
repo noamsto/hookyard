@@ -545,3 +545,176 @@ func TestMergeRejectsDuplicateIDAcrossManifests(t *testing.T) {
 		}
 	}
 }
+
+func writeFile(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestLoadPluginExecForm(t *testing.T) {
+	cases := []struct {
+		name string
+		exec string
+		want string // empty means accepted
+	}{
+		{name: "plugin-relative", exec: "handlers/guard.sh"},
+		{name: "absolute", exec: "/opt/hookyard/guard.sh", want: "must be relative to the plugin root"},
+		{name: "escaping", exec: "../x", want: "must be relative to the plugin root"},
+		{name: "empty", exec: "", want: "must be relative to the plugin root"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeFile(t, t.TempDir(), "hookyard.json",
+				`{"handlers":[{"id":"a","exec":"`+tc.exec+`","events":["pre_tool"],"engines":["claude-code"]}]}`)
+			_, err := LoadPlugin(path)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want an error containing %q", err, tc.want)
+			}
+			if tc.exec != "" && tc.exec[0] == '/' && !strings.Contains(err.Error(), "hookyard install") {
+				t.Errorf("error should name yard mode: %v", err)
+			}
+		})
+	}
+}
+
+// Each mode's refusal of the other's exec form names the other mode, so a
+// manifest handed to the wrong command explains itself.
+func TestYardReadersRejectRelativeExecNamingBuildMode(t *testing.T) {
+	path := writeFile(t, t.TempDir(), "hookyard.json",
+		`{"handlers":[{"id":"a","exec":"handlers/guard.sh","events":["pre_tool"],"engines":["cursor"]}]}`)
+	readers := map[string]func(string) error{
+		"Load":       func(p string) error { _, err := Load(p); return err },
+		"LoadStatic": func(p string) error { _, err := LoadStatic(p); return err },
+		"ReadTable":  func(p string) error { _, err := ReadTable(p); return err },
+	}
+	for name, read := range readers {
+		err := read(path)
+		if err == nil || !strings.Contains(err.Error(), "must be an absolute path") {
+			t.Errorf("%s: got %v, want an error about an absolute path", name, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), "hookyard build") {
+			t.Errorf("%s: error should name build mode: %v", name, err)
+		}
+	}
+}
+
+func TestWritePluginTableThenReadPluginTableRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "table.json")
+	want := []Handler{{
+		ID: "a", Exec: "handlers/guard.sh", Events: []string{"pre_tool"},
+		Engines: []string{"claude-code"}, Match: []string{"Bash"}, Lane: LaneVerdict,
+	}}
+	if err := WritePluginTable(path, want); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Errorf("mode = %v, want 0644", info.Mode().Perm())
+	}
+	got, err := ReadPluginTable(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "a" || got[0].Exec != "handlers/guard.sh" {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestReadPluginTableRejectsAbsoluteExec(t *testing.T) {
+	path := writeFile(t, t.TempDir(), "table.json",
+		`{"handlers":[{"id":"a","exec":"/opt/hookyard/guard.sh","events":["pre_tool"],"engines":["claude-code"]}]}`)
+	if _, err := ReadPluginTable(path); err == nil || !strings.Contains(err.Error(), "must be relative to the plugin root") {
+		t.Errorf("got %v, want an error about a plugin-relative exec", err)
+	}
+}
+
+func TestResolvePluginExec(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "handlers"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	guard := writeFile(t, filepath.Join(root, "handlers"), "guard.sh", "#!/bin/sh\n")
+	outside := writeFile(t, t.TempDir(), "evil.sh", "#!/bin/sh\n")
+	if err := os.Symlink(outside, filepath.Join(root, "handlers", "escape.sh")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(guard, filepath.Join(root, "handlers", "inside.sh")); err != nil {
+		t.Fatal(err)
+	}
+	linkedRoot := filepath.Join(t.TempDir(), "plugin")
+	if err := os.Symlink(root, linkedRoot); err != nil {
+		t.Fatal(err)
+	}
+	realGuard, err := filepath.EvalSymlinks(guard)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		root string
+		exec string
+		want string // error substring; empty means resolves to realGuard
+	}{
+		{name: "file", root: root, exec: "handlers/guard.sh"},
+		{name: "symlink to a file inside root", root: root, exec: "handlers/inside.sh"},
+		{name: "root reached through a symlink", root: linkedRoot, exec: "handlers/guard.sh"},
+		{name: "missing file", root: root, exec: "handlers/gone.sh", want: "handlers/gone.sh"},
+		{name: "symlink escaping root", root: root, exec: "handlers/escape.sh", want: "outside the plugin root"},
+		{name: "dot-dot exec", root: root, exec: "../evil.sh", want: "no .. segments"},
+		{name: "relative root", root: "plugin", exec: "handlers/guard.sh", want: "must be an absolute path"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolvePluginExec(tc.root, tc.exec)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got != realGuard {
+					t.Errorf("got %q, want %q", got, realGuard)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got (%q, %v), want an error containing %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestCheckPluginExecs(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "guard.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, root, "plain.sh", "#!/bin/sh\n")
+	if err := os.Mkdir(filepath.Join(root, "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := CheckPluginExecs(root, []Handler{{ID: "ok", Exec: "guard.sh"}}); err != nil {
+		t.Fatalf("executable file: %v", err)
+	}
+	for exec, want := range map[string]string{"plain.sh": "not executable", "dir": "is a directory"} {
+		err := CheckPluginExecs(root, []Handler{{ID: "ok", Exec: "guard.sh"}, {ID: "bad", Exec: exec}})
+		if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), `handler "bad"`) {
+			t.Errorf("%s: got %v, want an error naming handler \"bad\" containing %q", exec, err, want)
+		}
+	}
+}

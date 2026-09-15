@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/hookyard\" route --registered-for claude-code --event post_tool --plugin-root \"${CLAUDE_PLUGIN_ROOT}\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/hookyard\" route --registered-for claude-code --event pre_tool --plugin-root \"${CLAUDE_PLUGIN_ROOT}\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

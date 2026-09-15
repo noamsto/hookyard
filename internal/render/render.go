@@ -31,6 +31,14 @@ const Marker = "/bin/hookyard"
 // entry declares none, so an omitted timeout stalls the turn indefinitely.
 const EmittedTimeoutSeconds = 5
 
+// PluginLauncher is the launcher's path relative to a built plugin's root.
+const PluginLauncher = "bin/hookyard"
+
+// pluginRootVar names the environment variable each engine exports with the
+// plugin's own root, so a built plugin's command never hardcodes an install
+// path. Only claude-code is populated; other engines are build mode's seam.
+var pluginRootVar = map[vocab.Engine]string{vocab.ClaudeCode: "CLAUDE_PLUGIN_ROOT"}
+
 // Entry is one hook registration in one engine's config.
 type Entry struct {
 	// Event is the engine's own native key.
@@ -68,6 +76,31 @@ func BuildPlan(handlers []manifest.Handler, routerPath, stateDir string) (Plan, 
 			"hook-fire time against the agent's working directory, not the installer's", routerPath)
 	}
 
+	return buildPlan(handlers, func(engine vocab.Engine, event string) string {
+		return command(routerPath, engine, event, stateDir)
+	})
+}
+
+// PluginPlan renders the table into one engine's built-plugin entries: the
+// same per-(engine,event) collapsing as BuildPlan, but the command invokes
+// the bundled launcher through the engine's own plugin-root variable instead
+// of a yard-mode router path.
+func PluginPlan(handlers []manifest.Handler, engine vocab.Engine) ([]Entry, error) {
+	v, ok := pluginRootVar[engine]
+	if !ok {
+		return nil, fmt.Errorf("hookyard build does not support %s yet", engine)
+	}
+	plan, err := buildPlan(handlers, func(e vocab.Engine, event string) string {
+		return fmt.Sprintf(`"${%[1]s}/%[2]s" route --registered-for %[3]s --event %[4]s --plugin-root "${%[1]s}"`,
+			v, PluginLauncher, e, event)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return plan[engine], nil
+}
+
+func buildPlan(handlers []manifest.Handler, commandFor func(engine vocab.Engine, event string) string) (Plan, error) {
 	matchers := map[planKey]map[string]bool{}
 	everyTool := map[planKey]bool{}
 
@@ -101,7 +134,7 @@ func BuildPlan(handlers []manifest.Handler, routerPath, stateDir string) (Plan, 
 		native, _ := vocab.NativeEvent(k.engine, k.event)
 		entry := Entry{
 			Event:   native,
-			Command: command(routerPath, k.engine, k.event, stateDir),
+			Command: commandFor(k.engine, k.event),
 		}
 		if !everyTool[k] {
 			entry.Matcher = strings.Join(sorted(matchers[k]), "|")

@@ -1,0 +1,1 @@
+{"handlers":[{"id":"deny","exec":"handlers/deny.sh","events":["pre_tool"],"engines":["claude-code","codex"],"match":["Bash"],"timeout_ms":0,"lane":"verdict"},{"id":"log","exec":"handlers/log.sh","events":["post_tool"],"engines":["claude-code"],"match":null,"timeout_ms":0,"lane":"fire_and_forget"}]}
