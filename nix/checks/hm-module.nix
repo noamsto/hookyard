@@ -31,11 +31,9 @@
           # Chosen so the rendered plan is non-empty for the engine
           # dryRunScript exercises: Bash -> Cursor's native Shell matcher. An
           # empty plan would make its grep below pass vacuously against a
-          # literal "(nothing)". `claude-code` stays in `engines` too, so
-          # `install` still writes a claude-code row into table.json for a
-          # manifest that names one — `claudeOverlay.merged` no longer
-          # renders from `manifests` at all, so this handler plays no part in
-          # the emit checks below; the fixed catalog does that alone.
+          # literal "(nothing)". `claude-code` in `engines` gives table.json a
+          # claude-code row; the emit checks below render the fixed catalog
+          # and never read this handler.
           events = ["pre_tool"];
           engines = ["cursor" "claude-code"];
           match = ["Bash"];
@@ -137,10 +135,8 @@
   # asserts about it — is undefined. Both go through mkScratch rather than a
   # hand-rolled homeManagerConfiguration, so they exercise the exact same
   # module instantiation as every scratch above; only the module's own config
-  # differs. `package` is a `throw`, not merely absent: forcing it anywhere
-  # in the disabled branch — the real regression this guards against — turns
-  # into an eval error immediately, instead of quietly building the package
-  # because some code path still reached for `cfg.package`.
+  # differs. `package` is a `throw`, so anything in the disabled branch that
+  # forces `cfg.package` fails eval instead of quietly building it.
   disabled = mkScratch "disabled" {} {
     enable = false;
     package = throw "hookyard package must not be forced when enable = false";
@@ -359,11 +355,8 @@
   # eval-vs-execute split scratchChecks' --state-dir assertion and
   # expansionScript already draw for hostile (see the comment above
   # pwnedMarker). This is the executed half for disabled/disabledWithBase/
-  # emptyManifests: it forces `claudeOverlay.merged` to actually build — with
-  # `cfg.enable = false` routing straight to a `writeText`/`cp` that never
-  # touches `cfg.package` (see `claudeHooksDrv`/`claudeOverlayMergedDrv` in
-  # ../hm-module.nix), or with an empty `manifests` list — and only then
-  # reads its output.
+  # emptyManifests: it forces `claudeOverlay.merged` to actually build and
+  # only then reads its output.
   mergedBuildsScript = {
     name,
     cfg,
@@ -374,13 +367,9 @@
 
   emptyOverlay = pkgs.writeText "hookyard-check-empty-overlay.json" "{\n}\n";
 
-  # Item 4 (Revision 3)'s build-time proof that the disabled branch never
-  # touches the emitted render: `disabled`'s merged file is byte-identical to
-  # an empty overlay, and `disabledWithBase`'s is byte-identical to the base
-  # it was given — a real `cmp`, not a content re-derivation, so a stray
-  # trailing newline or reformatting from a future `emitClaudeHooks` call
-  # would be caught even where jq would consider the two documents
-  # equivalent.
+  # `disabled`'s merged file must be byte-identical to an empty overlay, and
+  # `disabledWithBase`'s to the base it was given. `cmp` rather than jq, so a
+  # stray newline or reformatting counts as a difference.
   cmpMergedScript = {
     name,
     cfg,

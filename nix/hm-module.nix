@@ -83,17 +83,12 @@
         > $out
     '';
 
-  # Turning hookyard off must leave a working Claude Code, and that must not
-  # cost a build: with `enable = false`, neither `claudeHooksDrv` nor
-  # `claudeOverlayMergedDrv` below ever calls `emitClaudeHooks`, so disabling
-  # hookyard never touches `cfg.package`. When `claudeOverlay.base` is set,
-  # the disabled branch copies `base` verbatim instead of merging into it —
-  # never `builtins.readFile`/`writeText` over `base`, since nix-config's
-  # `base` is itself a derivation (`nix-settings-json`) and reading it at
-  # eval time would be IFD. That copy rests on the assumption that a
-  # consumer-authored `base` carries no hookyard-marked rows of its own to
-  # strip; only hookyard's own re-render (the enabled branch, via
-  # `emitClaudeHooks`) ever needs to do that stripping.
+  # Turning hookyard off must leave a working Claude Code without costing a
+  # build, so the disabled branch never touches `cfg.package`. A set
+  # `claudeOverlay.base` is copied verbatim, never read at eval time:
+  # nix-config's `base` is itself a derivation (`nix-settings-json`), so
+  # reading it would be IFD. The copy assumes a consumer-authored `base`
+  # carries no hookyard-marked rows to strip.
   claudeHooksDrv =
     if cfg.enable
     then emitClaudeHooks ""

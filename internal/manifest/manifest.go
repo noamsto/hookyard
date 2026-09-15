@@ -106,11 +106,9 @@ func (m *Manifest) normalizeLanes() {
 	}
 }
 
-// validateAll holds every rule Load and loadStatic share — id pattern, event
-// and engine vocabulary, coverage, lane, and the Claude Code catalog — so a
-// manifest build mode's loadStatic accepts (via LoadPlugin) and one Load
-// accepts cannot silently diverge on a rule that has nothing to do with exec
-// form. extra runs per handler on top of the shared rules; it is nil for the
+// validateAll holds every rule Load and loadStatic share, so build mode and
+// yard mode cannot diverge on a rule that has nothing to do with exec form.
+// extra runs per handler on top of the shared rules; it is nil for the
 // caller that cannot afford to touch the filesystem.
 func (m *Manifest) validateAll(form ExecForm, extra func(where string, h Handler) error) error {
 	if len(m.Handlers) == 0 {
@@ -237,8 +235,7 @@ func validateStatic(where string, h Handler, form ExecForm) error {
 // It runs from validateAll, not validateStatic, so ReadTable — which calls
 // validateStatic alone — stays exempt: a table an older hookyard wrote before
 // some catalog row existed would otherwise turn every event for every engine
-// into a router error until the next successful install rewrites it (#59),
-// rather than leaving the stale row alone until then.
+// into a router error until the next successful install rewrites it (#59).
 func validateClaudeCatalog(where string, h Handler) error {
 	for _, event := range h.Events {
 		engine, native, scoped := vocab.SplitEngineScoped(event)
@@ -360,25 +357,17 @@ func execIsRunnable(path string) error {
 
 // LoadPlugin reads and validates one manifest for build mode: exec must be
 // plugin-root-relative. It does not stat execs, because only the caller knows
-// the plugin root; CheckPluginExecs is that check, run later against a real
-// plugin root.
+// the plugin root; CheckPluginExecs is that check.
 func LoadPlugin(path string) (*Manifest, error) {
 	return loadStatic(path, ExecPluginRelative)
 }
 
 // loadStatic reads and validates one manifest the way Load does, minus
-// execIsRunnable: it runs validateStatic alone, the same carve-out ReadTable
-// already makes, because LoadPlugin's caller cannot stat a plugin-relative
-// exec until it is resolved against a real plugin root.
-//
-// The narrowing is exactly one check wide, and every other rule stays shared
-// through validateAll. validateStatic still refuses a relative-to-cwd or bare
-// exec under ExecAbsolute — that rule lives there, not in the stat, so
-// nothing about §9's hook-fire-time argument is given up. A file declaring
-// zero handlers is still refused, as it is under Load. Duplicate ids within
-// one file are still refused, matching both Load and ReadTable — only
-// Merge's cross-manifest check is left to the caller, who must still run it:
-// loadStatic dedupes one file, not a caller's whole --manifest list.
+// execIsRunnable — the same carve-out ReadTable makes. Every other rule stays
+// shared through validateAll, including the exec-form rule, which lives in
+// validateStatic rather than in the stat. Merge's cross-manifest duplicate-id
+// check is left to the caller: loadStatic dedupes one file, not a caller's
+// whole --manifest list.
 func loadStatic(path string, form ExecForm) (*Manifest, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {

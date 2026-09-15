@@ -169,9 +169,8 @@ func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex,
 	if err != nil {
 		return err
 	}
-	// install never writes Claude Code's config (R-B), so its reporting uses
-	// the fixed catalog rather than whatever BuildPlan derived for claude-code
-	// out of the handlers above.
+	// install never writes Claude Code's config (R-B): what the Nix overlay
+	// routes is the fixed catalog, whatever the handlers above name.
 	claudeEntries, err := render.ClaudeCatalogPlan(router, stateDir)
 	if err != nil {
 		return err
@@ -225,13 +224,9 @@ func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex,
 	}
 	for _, engine := range vocab.Engines {
 		if engine == vocab.ClaudeCode {
-			// install never reaches settings.json: the catalog is fixed and
-			// registers every event regardless of what the table holds, so the
-			// line reports both halves — what the Nix overlay always routes,
-			// and how many of the merged handlers the table actually carries
-			// for claude-code — rather than "N entries", which would read
-			// exactly like the other three engines and imply a file was
-			// written that was not.
+			// install never reaches settings.json, and the catalog registers
+			// every event whatever the table holds; a bare "N entries" would
+			// read like the other three engines and imply a file was written.
 			_, _ = fmt.Fprintf(out, "%-12s %d catalog events routed by the Nix overlay; table holds %d claude-code handlers (not written by install)\n",
 				engine, len(plan[engine]), claudeCodeHandlerCount(handlers))
 			continue

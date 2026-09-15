@@ -90,8 +90,7 @@ func ClaudeCatalogPlan(routerPath, stateDir string) ([]Entry, error) {
 	return entries, nil
 }
 
-// checkRouterPath is the router-path validity check BuildPlan and
-// ClaudeCatalogPlan both apply before formatting any command.
+// checkRouterPath refuses a router path an emitted command must not embed.
 func checkRouterPath(routerPath string) error {
 	if !strings.Contains(routerPath, Marker) {
 		return fmt.Errorf("router path %q does not contain the marker %q, so emitted entries "+

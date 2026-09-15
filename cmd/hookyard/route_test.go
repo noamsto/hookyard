@@ -130,9 +130,7 @@ func TestRouteReturnsNilOnAnUnknownFlag(t *testing.T) {
 
 // The payload is the thing that failed on both of these, so argv is all that
 // is left to identify the call (§8). A payload with no engine discriminator is
-// no longer one of them for yard-mode claude-code, which falls back to
-// --registered-for; TestRunRouteRegisteredForFallbackIsNarrow covers the
-// registrations where it still fails.
+// covered by TestRunRouteRegisteredForFallbackIsNarrow.
 func TestRunRouteRecordsDecodeFailuresAsRouterErrors(t *testing.T) {
 	cases := []struct {
 		name  string
