@@ -5,7 +5,9 @@ Write agent hooks once, ship them to every coding agent.
 hookyard is one Go binary and one manifest schema behind two front ends.
 **Build mode** is the decided OSS default: `hookyard build` would generate
 what a plugin ships per engine — Claude Code and Codex plugin hooks.json, a
-generated Pi package, with Cursor gated pending verification — bundling the
+generated Pi package, and Cursor plugin hooks.json for the `cursor-agent`
+CLI, with the Cursor IDE's separate bundle still gated pending
+verification — bundling the
 hookyard binary itself as the shim, so end users install a tool's plugin
 through their engine's own plugin flow and never see hookyard at all. It's
 the hooks layer Agent Plugins lacks (Agent Plugins 1.0, agent-plugins.org,
