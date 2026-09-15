@@ -2,7 +2,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -230,11 +232,11 @@ func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex,
 			// for claude-code — rather than "N entries", which would read
 			// exactly like the other three engines and imply a file was
 			// written that was not.
-			fmt.Fprintf(out, "%-12s %d catalog events routed by the Nix overlay; table holds %d claude-code handlers (not written by install)\n",
+			_, _ = fmt.Fprintf(out, "%-12s %d catalog events routed by the Nix overlay; table holds %d claude-code handlers (not written by install)\n",
 				engine, len(plan[engine]), claudeCodeHandlerCount(handlers))
 			continue
 		}
-		fmt.Fprintf(out, "%-12s %d entries\n", engine, len(plan[engine]))
+		_, _ = fmt.Fprintf(out, "%-12s %d entries\n", engine, len(plan[engine]))
 	}
 	return nil
 }
@@ -519,7 +521,7 @@ func route(args []string) error {
 // runRoute is route's pipeline (§4), split out so tests can drive §5's
 // failure paths with an explicit stdin and stdout instead of the process's own.
 func runRoute(ctx context.Context, opts routeOptions, in io.Reader, out io.Writer) {
-	var stateDir, fallbackNote string
+	var stateDir, fallbackNote, registeredForNote string
 	if opts.pluginRoot != "" {
 		stateDir = existingDefaultStateDir()
 	} else {
@@ -533,7 +535,7 @@ func runRoute(ctx context.Context, opts routeOptions, in io.Reader, out io.Write
 		if stateDir == "" {
 			return
 		}
-		e.Reason = joinReason(e.Reason, fallbackNote)
+		e.Reason = joinReason(joinReason(e.Reason, registeredForNote), fallbackNote)
 		e.RouterElapsed = time.Since(opts.start)
 		w := &record.Writer{StateDir: stateDir}
 		_ = w.Append(e)
@@ -574,7 +576,24 @@ func runRoute(ctx context.Context, opts routeOptions, in io.Reader, out io.Write
 		routerError(fmt.Sprintf("--registered-for: %v", err))
 		return
 	}
-	env, err := envelope.Decode(in)
+	raw, err := envelope.ReadPayload(in)
+	if err != nil {
+		routerError(fmt.Sprintf("decoding the payload: %v", err))
+		return
+	}
+	env, err := envelope.Decode(bytes.NewReader(raw))
+	// Claude Code omits prompt_id and effort on some events (SessionStart), so
+	// Detect cannot place them (§12). Trusting --registered-for is safe only in
+	// yard mode: the Claude overlay is the only yard-mode surface registered for
+	// claude-code and only Claude Code reads it, whereas a build-mode plugin can
+	// be loaded by another engine. The exact catalog name keeps a look-alike
+	// payload from riding the fallback.
+	if errors.Is(err, envelope.ErrUnknownEngine) && opts.pluginRoot == "" && registered == vocab.ClaudeCode {
+		if fallback, fallbackErr := envelope.DecodeAs(raw, vocab.ClaudeCode); fallbackErr == nil && vocab.IsClaudeCodeEvent(fallback.NativeEvent) {
+			env, err = fallback, nil
+			registeredForNote = "engine taken from --registered-for claude-code: payload carried no engine discriminator"
+		}
+	}
 	if err != nil {
 		routerError(fmt.Sprintf("decoding the payload: %v", err))
 		return
@@ -775,12 +794,12 @@ func loadAll(paths []string) ([]manifest.Handler, error) {
 
 func printPlan(out io.Writer, plan render.Plan, piSettings string) {
 	for _, engine := range vocab.Engines {
-		fmt.Fprintf(out, "%s\n", engine)
+		_, _ = fmt.Fprintf(out, "%s\n", engine)
 		if engine == vocab.ClaudeCode {
-			fmt.Fprintln(out, "  (emitted for Nix to place, not written by install)")
+			_, _ = fmt.Fprintln(out, "  (emitted for Nix to place, not written by install)")
 		}
 		if len(plan[engine]) == 0 {
-			fmt.Fprintln(out, "  (nothing)")
+			_, _ = fmt.Fprintln(out, "  (nothing)")
 			continue
 		}
 		for _, e := range plan[engine] {
@@ -788,10 +807,10 @@ func printPlan(out io.Writer, plan render.Plan, piSettings string) {
 			if matcher == "" {
 				matcher = "(every tool)"
 			}
-			fmt.Fprintf(out, "  %-22s %-24s %s\n", e.Event, matcher, e.Command)
+			_, _ = fmt.Fprintf(out, "  %-22s %-24s %s\n", e.Event, matcher, e.Command)
 		}
 	}
 	// Pi is the one engine whose install writes a second file, and it is the
 	// executable half.
-	fmt.Fprintf(out, "pi writes two files\n  %s\n  %s\n", piSettings, render.PiBridgePath(piSettings))
+	_, _ = fmt.Fprintf(out, "pi writes two files\n  %s\n  %s\n", piSettings, render.PiBridgePath(piSettings))
 }

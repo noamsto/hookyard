@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/noamsto/hookyard/internal/envelope"
 	"github.com/noamsto/hookyard/internal/manifest"
 	"github.com/noamsto/hookyard/internal/record"
+	"github.com/noamsto/hookyard/internal/vocab"
 )
 
 // claudePreTool is a Claude Code PreToolUse payload trimmed to the fields
@@ -126,8 +128,11 @@ func TestRouteReturnsNilOnAnUnknownFlag(t *testing.T) {
 	wantRouterError(t, "", readRecord(t, stateDir))
 }
 
-// The payload is the thing that failed on all three of these, so argv is all
-// that is left to identify the call (§8).
+// The payload is the thing that failed on both of these, so argv is all that
+// is left to identify the call (§8). A payload with no engine discriminator is
+// no longer one of them for yard-mode claude-code, which falls back to
+// --registered-for; TestRunRouteRegisteredForFallbackIsNarrow covers the
+// registrations where it still fails.
 func TestRunRouteRecordsDecodeFailuresAsRouterErrors(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -135,7 +140,6 @@ func TestRunRouteRecordsDecodeFailuresAsRouterErrors(t *testing.T) {
 	}{
 		{"over the 1 MiB cap", strings.Repeat("a", 1<<20+1)},
 		{"not JSON", "definitely not json"},
-		{"no engine discriminator", `{"hook_event_name":"PreToolUse"}`},
 	}
 
 	for _, c := range cases {
@@ -144,6 +148,172 @@ func TestRunRouteRecordsDecodeFailuresAsRouterErrors(t *testing.T) {
 			printed := runPipeline(t, routeOpts(stateDir), c.stdin)
 			wantRouterError(t, printed, readRecord(t, stateDir))
 		})
+	}
+}
+
+const wantRegisteredForNote = "engine taken from --registered-for claude-code: payload carried no engine discriminator"
+
+// withoutDiscriminator returns a committed fixture with prompt_id and effort
+// stripped, the shape Claude Code sends on events that carry neither.
+func withoutDiscriminator(t *testing.T, fixture string) string {
+	t.Helper()
+	var native map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(readFixture(t, fixture)), &native); err != nil {
+		t.Fatalf("decode fixture %s: %v", fixture, err)
+	}
+	delete(native, "prompt_id")
+	delete(native, "effort")
+	raw, err := json.Marshal(native)
+	if err != nil {
+		t.Fatalf("encode fixture %s: %v", fixture, err)
+	}
+	return string(raw)
+}
+
+// Every catalog event routes in yard mode whether or not Claude Code sent a
+// discriminator, and only the payloads that lacked one say so in the record.
+func TestRunRouteRoutesEveryClaudeCatalogEventInYardMode(t *testing.T) {
+	const notification = `{"session_id":"s","transcript_path":"/t.jsonl","cwd":"/w","hook_event_name":"Notification",` +
+		`"message":"m","title":"t","notification_type":"idle_prompt"}`
+	const preCompact = `{"session_id":"s","transcript_path":"/t.jsonl","cwd":"/w","hook_event_name":"PreCompact",` +
+		`"trigger":"manual","custom_instructions":""}`
+
+	type payload struct {
+		name         string
+		stdin        string
+		wantFallback bool
+	}
+	payloads := map[string][]payload{
+		"SessionStart":     {{"fixture", readFixture(t, "claude-SessionStart.json"), true}},
+		"UserPromptSubmit": {{"fixture", readFixture(t, "claude-UserPromptSubmit.json"), false}},
+		"PreToolUse":       {{"fixture", readFixture(t, "claude-PreToolUse.json"), false}},
+		"PostToolUse":      {{"fixture", readFixture(t, "claude-PostToolUse.json"), false}},
+		"PreCompact":       {{"synthesized", preCompact, true}},
+		"Stop":             {{"fixture", readFixture(t, "claude-Stop.json"), false}},
+		"Notification":     {{"synthesized", notification, true}},
+		"SessionEnd": {
+			{"fixture", readFixture(t, "claude-SessionEnd.json"), false},
+			{"prompt-less", withoutDiscriminator(t, "claude-SessionEnd.json"), true},
+		},
+	}
+
+	for _, row := range vocab.ClaudeCodeCatalog {
+		cases, ok := payloads[row.Native]
+		if !ok {
+			t.Fatalf("no payload for catalog event %s", row.Native)
+		}
+		for _, c := range cases {
+			t.Run(row.Native+"/"+c.name, func(t *testing.T) {
+				stateDir := t.TempDir()
+				writeTable(t, stateDir)
+				opts := routeOpts(stateDir)
+				opts.event = row.Routed
+
+				printed := runPipeline(t, opts, c.stdin)
+
+				if printed != "" {
+					t.Errorf("want nothing printed, got %q", printed)
+				}
+				rec := readRecord(t, stateDir)
+				if rec.Engine != "claude-code" {
+					t.Errorf("want engine claude-code, got %q", rec.Engine)
+				}
+				if rec.NativeEvent != row.Native {
+					t.Errorf("want native_event %q, got %q", row.Native, rec.NativeEvent)
+				}
+				if rec.Router == record.RouterError {
+					t.Errorf("want a routed run, got a router error: %q", rec.Reason)
+				}
+				if len(rec.Handlers) != 0 {
+					t.Errorf("want no handler entries, got %+v", rec.Handlers)
+				}
+				if got := strings.Contains(rec.Reason, wantRegisteredForNote); got != c.wantFallback {
+					t.Errorf("reason carries the --registered-for note = %v, want %v (reason %q)", got, c.wantFallback, rec.Reason)
+				}
+			})
+		}
+	}
+}
+
+// The fallback is scoped to the one surface only Claude Code reads: anything
+// else without a discriminator is still a router error, and says nothing
+// about --registered-for.
+func TestRunRouteRegisteredForFallbackIsNarrow(t *testing.T) {
+	sessionStart := readFixture(t, "claude-SessionStart.json")
+
+	wantUnknownEngine := func(t *testing.T, printed string, rec record.Record, engine string) {
+		t.Helper()
+		if printed != "" {
+			t.Errorf("want nothing printed, got %q", printed)
+		}
+		if rec.Router != record.RouterError {
+			t.Errorf("want router %q, got %q", record.RouterError, rec.Router)
+		}
+		if rec.Engine != engine {
+			t.Errorf("want engine from --registered-for %q, got %q", engine, rec.Engine)
+		}
+		if !strings.Contains(rec.Reason, envelope.ErrUnknownEngine.Error()) {
+			t.Errorf("want the unknown-engine error in the reason, got %q", rec.Reason)
+		}
+		if strings.Contains(rec.Reason, wantRegisteredForNote) {
+			t.Errorf("want no --registered-for note on a router error, got %q", rec.Reason)
+		}
+	}
+
+	yardCases := []struct {
+		name          string
+		registeredFor string
+		stdin         string
+	}{
+		{"registered for codex", "codex", sessionStart},
+		{"registered for codex, bare PreToolUse", "codex", `{"hook_event_name":"PreToolUse"}`},
+		{"not an exact catalog event", "claude-code", `{"hook_event_name":"sessionStart","session_id":"s","cwd":"/w"}`},
+	}
+	for _, c := range yardCases {
+		t.Run(c.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			writeTable(t, stateDir)
+			opts := routeOpts(stateDir)
+			opts.registeredFor = c.registeredFor
+
+			printed := runPipeline(t, opts, c.stdin)
+
+			wantUnknownEngine(t, printed, readRecord(t, stateDir), c.registeredFor)
+		})
+	}
+
+	t.Run("build mode", func(t *testing.T) {
+		root := t.TempDir()
+		handlersDir := filepath.Join(root, "handlers")
+		if err := os.MkdirAll(handlersDir, 0o700); err != nil {
+			t.Fatalf("mkdir handlers: %v", err)
+		}
+		opts, stateDir := pluginOpts(t, root)
+		if err := record.EnsureStateDir(stateDir); err != nil {
+			t.Fatalf("create state dir: %v", err)
+		}
+		writePluginTable(t, root, decides(t, handlersDir, "deny-a", "deny", "A"))
+
+		printed := runPipeline(t, opts, sessionStart)
+
+		wantUnknownEngine(t, printed, readRecord(t, stateDir), "claude-code")
+	})
+}
+
+// The note is joined inside appendRecord, so a failure after the fallback
+// still records that the engine came from argv rather than the payload.
+func TestRunRouteRegisteredForNoteSurvivesALaterRouterError(t *testing.T) {
+	stateDir := t.TempDir()
+
+	printed := runPipeline(t, routeOpts(stateDir), readFixture(t, "claude-SessionStart.json"))
+
+	rec := readRecord(t, stateDir)
+	wantRouterError(t, printed, rec)
+	if !strings.Contains(rec.Reason, "reading the handler table") {
+		t.Errorf("want the table error kept in the reason, got %q", rec.Reason)
+	}
+	if !strings.Contains(rec.Reason, wantRegisteredForNote) {
+		t.Errorf("want the --registered-for note joined into the reason, got %q", rec.Reason)
 	}
 }
 
