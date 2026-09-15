@@ -2,13 +2,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -139,12 +142,12 @@ func install(args []string) error {
 	if len(paths) == 0 && !*allowEmpty {
 		return fmt.Errorf("no --manifest given")
 	}
-	return runInstall(paths, *routerPath, *stateDir, *codex, *cursor, *pi, *dryRun)
+	return runInstall(os.Stdout, paths, *routerPath, *stateDir, *codex, *cursor, *pi, *dryRun)
 }
 
 // runInstall is install's pipeline, split out so tests can drive it with
 // explicit paths instead of os.Args.
-func runInstall(paths manifestPaths, routerPath, stateDir, codex, cursor, pi string, dryRun bool) error {
+func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex, cursor, pi string, dryRun bool) error {
 	handlers, err := loadAll(paths)
 	if err != nil {
 		return err
@@ -166,9 +169,16 @@ func runInstall(paths manifestPaths, routerPath, stateDir, codex, cursor, pi str
 	if err != nil {
 		return err
 	}
+	// install never writes Claude Code's config (R-B): what the Nix overlay
+	// routes is the fixed catalog, whatever the handlers above name.
+	claudeEntries, err := render.ClaudeCatalogPlan(router, stateDir)
+	if err != nil {
+		return err
+	}
+	plan[vocab.ClaudeCode] = claudeEntries
 
 	if dryRun {
-		printPlan(plan, pi)
+		printPlan(out, plan, pi)
 		return nil
 	}
 	// Checked here, over every path at once, rather than inside each writer:
@@ -214,15 +224,29 @@ func runInstall(paths manifestPaths, routerPath, stateDir, codex, cursor, pi str
 	}
 	for _, engine := range vocab.Engines {
 		if engine == vocab.ClaudeCode {
-			// install never reaches settings.json: the count is real, but
-			// saying only "N entries" here would read exactly like the other
-			// three engines and tell an operator a file was written that was not.
-			fmt.Printf("%-12s %d entries (emitted for Nix to place, not written by install)\n", engine, len(plan[engine]))
+			// install never reaches settings.json, and the catalog registers
+			// every event whatever the table holds; a bare "N entries" would
+			// read like the other three engines and imply a file was written.
+			_, _ = fmt.Fprintf(out, "%-12s %d catalog events routed by the Nix overlay; table holds %d claude-code handlers (not written by install)\n",
+				engine, len(plan[engine]), claudeCodeHandlerCount(handlers))
 			continue
 		}
-		fmt.Printf("%-12s %d entries\n", engine, len(plan[engine]))
+		_, _ = fmt.Fprintf(out, "%-12s %d entries\n", engine, len(plan[engine]))
 	}
 	return nil
+}
+
+// claudeCodeHandlerCount counts merged handlers whose Engines names
+// claude-code, for install's report line (R-E). It is not plan[vocab.ClaudeCode]'s
+// length: that is always the fixed 8-event catalog, not the table's contents.
+func claudeCodeHandlerCount(handlers []manifest.Handler) int {
+	n := 0
+	for _, h := range handlers {
+		if slices.Contains(h.Engines, string(vocab.ClaudeCode)) {
+			n++
+		}
+	}
+	return n
 }
 
 // piVersion is the value envelope.Detect keys on to recognise a Pi payload at
@@ -264,9 +288,8 @@ func checkShellSafe(flagName, path string) error {
 // with other writers or executable state of their own (§4.2), so a store path
 // would lose what they already hold — they stay on install.
 func emit(args []string) error {
-	fs := flag.NewFlagSet("emit", flag.ExitOnError)
-	var paths manifestPaths
-	fs.Var(&paths, "manifest", "path to a handler manifest (repeatable)")
+	fs := flag.NewFlagSet("emit", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
 	engine := fs.String("engine", "", "engine to emit for; only claude-code is supported")
 	routerPath := fs.String("router-path", "", "absolute path hookyard is invoked by, embedded in each entry")
 	stateDir := fs.String("state-dir", "", "state dir embedded in each entry as text; emit never creates it")
@@ -294,39 +317,7 @@ func emit(args []string) error {
 		return err
 	}
 
-	// LoadStatic, not loadAll (which calls manifest.Load): emit runs inside a
-	// Nix build sandbox, where a manifest's $HOME-rooted exec does not exist,
-	// and stat-ing it would fail the build for a reason that has nothing to do
-	// with the manifest being wrong. Merge still runs on top of it, so a
-	// duplicate id across manifests is refused here exactly as install refuses
-	// it later in the same activation — build time and activation time cannot
-	// disagree about what a legal manifest set is.
-	manifests := make([]*manifest.Manifest, 0, len(paths))
-	for _, p := range paths {
-		m, err := manifest.LoadStatic(p)
-		if err != nil {
-			return err
-		}
-		manifests = append(manifests, m)
-	}
-	handlers, err := manifest.Merge(manifests)
-	if err != nil {
-		return err
-	}
-
-	plan, err := render.BuildPlan(handlers, *routerPath, *stateDir)
-	if err != nil {
-		return err
-	}
-
-	var baseBytes []byte
-	if *base != "" {
-		baseBytes, err = os.ReadFile(*base)
-		if err != nil {
-			return err
-		}
-	}
-	doc, err := render.ClaudeSettings(baseBytes, plan[vocab.ClaudeCode])
+	doc, err := renderClaudeOverlay(*routerPath, *stateDir, *base)
 	if err != nil {
 		return err
 	}
@@ -335,6 +326,24 @@ func emit(args []string) error {
 	// as if it were a valid overlay.
 	_, err = os.Stdout.Write(doc)
 	return err
+}
+
+// renderClaudeOverlay renders the fixed Claude Code catalog over base. It is
+// split out from emit so a test can compare its bytes directly against
+// render.ClaudeSettings without shelling out or capturing stdout.
+func renderClaudeOverlay(routerPath, stateDir, base string) ([]byte, error) {
+	entries, err := render.ClaudeCatalogPlan(routerPath, stateDir)
+	if err != nil {
+		return nil, err
+	}
+	var baseBytes []byte
+	if base != "" {
+		baseBytes, err = os.ReadFile(base)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return render.ClaudeSettings(baseBytes, entries)
 }
 
 // runBuild is named unlike every other command (not "build"): a package-level
@@ -507,7 +516,7 @@ func route(args []string) error {
 // runRoute is route's pipeline (§4), split out so tests can drive §5's
 // failure paths with an explicit stdin and stdout instead of the process's own.
 func runRoute(ctx context.Context, opts routeOptions, in io.Reader, out io.Writer) {
-	var stateDir, fallbackNote string
+	var stateDir, fallbackNote, registeredForNote string
 	if opts.pluginRoot != "" {
 		stateDir = existingDefaultStateDir()
 	} else {
@@ -521,7 +530,7 @@ func runRoute(ctx context.Context, opts routeOptions, in io.Reader, out io.Write
 		if stateDir == "" {
 			return
 		}
-		e.Reason = joinReason(e.Reason, fallbackNote)
+		e.Reason = joinReason(joinReason(e.Reason, registeredForNote), fallbackNote)
 		e.RouterElapsed = time.Since(opts.start)
 		w := &record.Writer{StateDir: stateDir}
 		_ = w.Append(e)
@@ -562,7 +571,24 @@ func runRoute(ctx context.Context, opts routeOptions, in io.Reader, out io.Write
 		routerError(fmt.Sprintf("--registered-for: %v", err))
 		return
 	}
-	env, err := envelope.Decode(in)
+	raw, err := envelope.ReadPayload(in)
+	if err != nil {
+		routerError(fmt.Sprintf("decoding the payload: %v", err))
+		return
+	}
+	env, err := envelope.Decode(bytes.NewReader(raw))
+	// Claude Code omits prompt_id and effort on some events (SessionStart), so
+	// Detect cannot place them (§12). Trusting --registered-for is safe only in
+	// yard mode: the Claude overlay is the only yard-mode surface registered for
+	// claude-code and only Claude Code reads it, whereas a build-mode plugin can
+	// be loaded by another engine. The exact catalog name keeps a look-alike
+	// payload from riding the fallback.
+	if errors.Is(err, envelope.ErrUnknownEngine) && opts.pluginRoot == "" && registered == vocab.ClaudeCode {
+		if fallback, fallbackErr := envelope.DecodeAs(raw, vocab.ClaudeCode); fallbackErr == nil && vocab.IsClaudeCodeEvent(fallback.NativeEvent) {
+			env, err = fallback, nil
+			registeredForNote = "engine taken from --registered-for claude-code: payload carried no engine discriminator"
+		}
+	}
 	if err != nil {
 		routerError(fmt.Sprintf("decoding the payload: %v", err))
 		return
@@ -761,14 +787,14 @@ func loadAll(paths []string) ([]manifest.Handler, error) {
 	return manifest.Merge(manifests)
 }
 
-func printPlan(plan render.Plan, piSettings string) {
+func printPlan(out io.Writer, plan render.Plan, piSettings string) {
 	for _, engine := range vocab.Engines {
-		fmt.Printf("%s\n", engine)
+		_, _ = fmt.Fprintf(out, "%s\n", engine)
 		if engine == vocab.ClaudeCode {
-			fmt.Println("  (emitted for Nix to place, not written by install)")
+			_, _ = fmt.Fprintln(out, "  (emitted for Nix to place, not written by install)")
 		}
 		if len(plan[engine]) == 0 {
-			fmt.Println("  (nothing)")
+			_, _ = fmt.Fprintln(out, "  (nothing)")
 			continue
 		}
 		for _, e := range plan[engine] {
@@ -776,10 +802,10 @@ func printPlan(plan render.Plan, piSettings string) {
 			if matcher == "" {
 				matcher = "(every tool)"
 			}
-			fmt.Printf("  %-22s %-24s %s\n", e.Event, matcher, e.Command)
+			_, _ = fmt.Fprintf(out, "  %-22s %-24s %s\n", e.Event, matcher, e.Command)
 		}
 	}
 	// Pi is the one engine whose install writes a second file, and it is the
 	// executable half.
-	fmt.Printf("pi writes two files\n  %s\n  %s\n", piSettings, render.PiBridgePath(piSettings))
+	_, _ = fmt.Fprintf(out, "pi writes two files\n  %s\n  %s\n", piSettings, render.PiBridgePath(piSettings))
 }

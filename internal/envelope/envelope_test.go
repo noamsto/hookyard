@@ -238,12 +238,20 @@ func TestMarshalledShapeOmitsOnlyToolInputWhenEmpty(t *testing.T) {
 	}
 }
 
-// The drift pin: every fixture's hook_event_name must resolve either through
-// InboundEvent (fifteen of sixteen) or as a known engine-only protocol-split
-// spelling (beforeShellExecution). A spelling in neither set means the
-// fixture and vocab's tables have drifted apart, and must fail loudly rather
-// than being patched by inventing a fake canonical mapping (§7, §8's
-// double-fire rule) for beforeShellExecution.
+// discriminatorless lists the fixtures Detect cannot place: real Claude Code
+// payloads that carry neither prompt_id nor effort. The router routes these
+// through the yard-mode --registered-for fallback (R-G) instead.
+var discriminatorless = map[string]bool{
+	"claude-SessionStart.json": true,
+}
+
+// The drift pin: every fixture's hook_event_name must resolve through
+// InboundEvent, as a known engine-only protocol-split spelling
+// (beforeShellExecution), or, for Claude Code only, as an engine-scoped
+// catalog event (SessionEnd). A spelling in none of those means the fixture
+// and vocab's tables have drifted apart, and must fail loudly rather than
+// being patched by inventing a fake canonical mapping (§7, §8's double-fire
+// rule) for beforeShellExecution.
 func TestEveryFixtureEventIsKnownToVocab(t *testing.T) {
 	entries, err := os.ReadDir(fixtureDir)
 	if err != nil {
@@ -255,12 +263,18 @@ func TestEveryFixtureEventIsKnownToVocab(t *testing.T) {
 		}
 		name := entry.Name()
 		t.Run(name, func(t *testing.T) {
-			env := decodeFixture(t, name)
+			var env *Envelope
+			if discriminatorless[name] {
+				env = decodeFixtureAs(t, name, vocab.ClaudeCode)
+			} else {
+				env = decodeFixture(t, name)
+			}
 			_, resolvesCanonically := vocab.InboundEvent(env.Engine, env.NativeEvent)
 			isKnownSplit := vocab.Protocol(env.NativeEvent) != ""
-			if !resolvesCanonically && !isKnownSplit {
-				t.Errorf("native_event %q for %s resolves to neither a canonical event nor a known "+
-					"protocol-split spelling", env.NativeEvent, env.Engine)
+			isClaudeCatalog := env.Engine == vocab.ClaudeCode && vocab.IsClaudeCodeEvent(env.NativeEvent)
+			if !resolvesCanonically && !isKnownSplit && !isClaudeCatalog {
+				t.Errorf("native_event %q for %s resolves to neither a canonical event, a known "+
+					"protocol-split spelling, nor a Claude Code catalog event", env.NativeEvent, env.Engine)
 			}
 		})
 	}
@@ -269,7 +283,9 @@ func TestEveryFixtureEventIsKnownToVocab(t *testing.T) {
 // Each fixture must match exactly one of Detect's four rules, not merely
 // the first one checked. The likeliest future overlap is Codex growing an
 // effort field of its own; this turns that into a red test here rather than
-// a silent misdetection.
+// a silent misdetection. The discriminatorless fixtures must instead match
+// none and carry an exact Claude Code catalog hook_event_name, the only
+// shape the router's fallback accepts.
 func TestEachFixtureMatchesExactlyOneDetectionRule(t *testing.T) {
 	entries, err := os.ReadDir(fixtureDir)
 	if err != nil {
@@ -294,6 +310,15 @@ func TestEachFixtureMatchesExactlyOneDetectionRule(t *testing.T) {
 			}
 			if present(native, "pi_version") {
 				matches++
+			}
+			if discriminatorless[name] {
+				if matches != 0 {
+					t.Errorf("%s matched %d of Detect's four rules, want 0", name, matches)
+				}
+				if event := stringField(native, "hook_event_name"); !vocab.IsClaudeCodeEvent(event) {
+					t.Errorf("%s hook_event_name %q is not a Claude Code catalog event", name, event)
+				}
+				return
 			}
 			if matches != 1 {
 				t.Errorf("%s matched %d of Detect's four rules, want exactly 1", name, matches)
@@ -500,6 +525,74 @@ func TestDecodeRejectsNonObjectJSON(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDecodeAsBuildsTheNamedEngineWithoutDetect(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(fixtureDir, "claude-SessionStart.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(bytes.NewReader(raw)); !errors.Is(err, ErrUnknownEngine) {
+		t.Fatalf("Decode: got %v, want ErrUnknownEngine", err)
+	}
+
+	env, err := DecodeAs(raw, vocab.ClaudeCode)
+	if err != nil {
+		t.Fatalf("DecodeAs: %v", err)
+	}
+	if env.Engine != vocab.ClaudeCode {
+		t.Errorf("Engine = %q, want claude-code", env.Engine)
+	}
+	if env.CanonicalEvent != vocab.SessionStart {
+		t.Errorf("CanonicalEvent = %q, want %q", env.CanonicalEvent, vocab.SessionStart)
+	}
+	if env.NativeEvent != "SessionStart" {
+		t.Errorf("NativeEvent = %q, want SessionStart", env.NativeEvent)
+	}
+}
+
+func TestDecodeAsRejectsOneByteOverCap(t *testing.T) {
+	_, err := DecodeAs(paddedPayload(t, maxPayload+1), vocab.ClaudeCode)
+	if !errors.Is(err, ErrTooLarge) {
+		t.Errorf("DecodeAs one byte over the cap: got %v, want ErrTooLarge", err)
+	}
+}
+
+func TestDecodeAsRejectsMalformedJSON(t *testing.T) {
+	_, err := DecodeAs([]byte(`{not valid`), vocab.ClaudeCode)
+	if err == nil {
+		t.Fatal("want an error for malformed JSON")
+	}
+	if errors.Is(err, ErrTooLarge) || errors.Is(err, ErrUnknownEngine) {
+		t.Errorf("malformed JSON should match neither sentinel, got %v", err)
+	}
+}
+
+func TestReadPayloadRejectsOneByteOverCap(t *testing.T) {
+	_, err := ReadPayload(bytes.NewReader(paddedPayload(t, maxPayload+1)))
+	if !errors.Is(err, ErrTooLarge) {
+		t.Errorf("ReadPayload one byte over the cap: got %v, want ErrTooLarge", err)
+	}
+	raw, err := ReadPayload(bytes.NewReader(paddedPayload(t, maxPayload)))
+	if err != nil {
+		t.Fatalf("ReadPayload at exactly the cap: %v", err)
+	}
+	if len(raw) != maxPayload {
+		t.Errorf("ReadPayload returned %d bytes, want %d", len(raw), maxPayload)
+	}
+}
+
+func decodeFixtureAs(t *testing.T, name string, engine vocab.Engine) *Envelope {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(fixtureDir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := DecodeAs(raw, engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return env
 }
 
 func decodeFixture(t *testing.T, name string) *Envelope {

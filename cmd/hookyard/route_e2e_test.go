@@ -334,17 +334,7 @@ func TestRouteDeliversAdvisoryOnAdvisoryOnlyEvents(t *testing.T) {
 		stateDir := filepath.Join(dir, "state")
 		writeTable(t, stateDir, e2eAdvise(t, dir, "claude-code", "session_start", "fyi"))
 
-		// No committed fixture captures a real Claude Code SessionStart
-		// payload, so this is a literal inline payload. envelope.Detect
-		// identifies Claude Code by prompt_id or effort — never by
-		// hook_event_name — so prompt_id must be present or Decode fails with
-		// ErrUnknownEngine. vocab.InboundEvent(ClaudeCode, "SessionStart") ->
-		// session_start is likewise assumed, not fixture-backed (§7), so this
-		// test pins hookyard's own contract on that mapping rather than
-		// verifying it against a captured payload.
-		payload := `{"hook_event_name":"SessionStart","session_id":"e2e","cwd":"/tmp","prompt_id":"e2e","source":"startup"}`
-
-		printed, code := runRouteBinary(t, bin, nil, payload,
+		printed, code := runRouteBinary(t, bin, nil, readFixture(t, "claude-SessionStart.json"),
 			routeArgs("claude-code", "session_start", stateDir)...)
 		if code != 0 {
 			t.Fatalf("want exit 0, got %d", code)

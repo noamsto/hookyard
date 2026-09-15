@@ -75,12 +75,12 @@ func InboundTool(engine Engine, native string) string {
 // and config spellings are not guaranteed to move together for any engine.
 var inboundEvents = map[Engine]map[string]string{
 	ClaudeCode: {
-		"SessionStart":     SessionStart, // assumed
-		"UserPromptSubmit": PromptSubmit, // assumed
+		"SessionStart":     SessionStart, // observed: claude-SessionStart.json
+		"UserPromptSubmit": PromptSubmit, // observed: claude-UserPromptSubmit.json
 		"PreToolUse":       PreTool,      // observed: claude-PreToolUse.json
 		"PostToolUse":      PostTool,     // observed: claude-PostToolUse.json
 		"PreCompact":       PreCompact,   // assumed
-		"Stop":             TurnEnd,      // assumed
+		"Stop":             TurnEnd,      // observed: claude-Stop.json
 	},
 	Codex: {
 		"SessionStart":     SessionStart, // assumed

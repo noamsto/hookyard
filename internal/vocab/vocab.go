@@ -96,6 +96,51 @@ var nativeEvents = map[Engine]map[string]string{
 	},
 }
 
+// ClaudeCodeEvent pairs a Claude Code native hook key with the --event value
+// hookyard's router command uses to route it.
+type ClaudeCodeEvent struct {
+	Native string // Claude Code hook key, e.g. "Notification"
+	Routed string // route --event value: canonical name, or "claude-code:<Native>"
+}
+
+// ClaudeCodeCatalog is the fixed set of Claude Code hook events yard mode
+// registers (R-A/R-B) and the only ones a manifest may name as
+// "claude-code:<Native>" (R-C). The shipped claude-code-2.1.272 executable
+// (.../claude-code-2.1.272/bin/.claude-wrapped) declares its hook-event enum
+// as a literal 33-name array — found with
+// `rg -a -o '\["PreToolUse","PostToolUse"[^\]]{0,800}\]'`, which is a superset
+// containing all eight rows below — and a `hook_event_name:"<Name>"` payload
+// literal for each of the eight, found with
+// `rg -a -o 'hook_event_name:"[A-Za-z]+"'`. The catalog is deliberately not
+// the full 33: every row costs a router spawn per occurrence (§4), and
+// nothing consumes the rest. Notification and SessionEnd are the two houston
+// already relies on (nix-config home/ai/houston/default.nix:57-58); a new row
+// is added only when a consumer needs it, and R-C makes that need loud rather
+// than silently registering nothing.
+var ClaudeCodeCatalog = buildClaudeCodeCatalog()
+
+func buildClaudeCodeCatalog() []ClaudeCodeEvent {
+	catalog := make([]ClaudeCodeEvent, 0, len(CanonicalEvents)+2)
+	for _, canonical := range CanonicalEvents {
+		catalog = append(catalog, ClaudeCodeEvent{Native: nativeEvents[ClaudeCode][canonical], Routed: canonical})
+	}
+	return append(catalog,
+		ClaudeCodeEvent{Native: "Notification", Routed: "claude-code:Notification"},
+		ClaudeCodeEvent{Native: "SessionEnd", Routed: "claude-code:SessionEnd"},
+	)
+}
+
+// IsClaudeCodeEvent reports whether native is one of ClaudeCodeCatalog's
+// eight Claude Code hook keys.
+func IsClaudeCodeEvent(native string) bool {
+	for _, e := range ClaudeCodeCatalog {
+		if e.Native == native {
+			return true
+		}
+	}
+	return false
+}
+
 // NormalizedTools is Claude Code's own tool vocabulary, which §7 normalizes
 // onto. A manifest matcher outside this set is rejected on entry.
 var NormalizedTools = []string{"Read", "Write", "Bash", "Grep", "Glob"}

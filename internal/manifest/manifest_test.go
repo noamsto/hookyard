@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/noamsto/hookyard/internal/vocab"
 )
 
 // writeManifest writes a manifest whose exec points at a real executable, so
@@ -136,6 +138,10 @@ func TestLoadRejects(t *testing.T) {
 		body: `{"handlers":[{"id":"a","exec":"EXEC","events":["post_tool"],"engines":["cursor"],
 		  "lane":"detached"}]}`,
 		want: `lane "detached" must be`,
+	}, {
+		name: "claude-code event outside the catalog",
+		body: `{"handlers":[{"id":"a","exec":"EXEC","events":["claude-code:Notifcation"],"engines":["claude-code"]}]}`,
+		want: "not a Claude Code event hookyard routes",
 	}}
 
 	for _, tc := range cases {
@@ -266,6 +272,21 @@ func TestLoadAcceptsEngineScopedEventAlongsideOtherEngines(t *testing.T) {
 	}
 }
 
+// Every catalog native is accepted as "claude-code:<Native>", including the
+// six canonical ones, which a manifest can also name scoped.
+func TestLoadAcceptsEveryClaudeCodeCatalogNative(t *testing.T) {
+	for _, row := range vocab.ClaudeCodeCatalog {
+		t.Run(row.Native, func(t *testing.T) {
+			path := writeManifest(t, `{"handlers":[
+			  {"id":"a","exec":"EXEC","events":["claude-code:`+row.Native+`"],
+			   "engines":["claude-code"]}]}`)
+			if _, err := Load(path); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestWriteTableThenReadTableRoundTrips(t *testing.T) {
 	dir := t.TempDir()
 	exec := filepath.Join(dir, "guard.sh")
@@ -369,6 +390,26 @@ func TestReadTableAcceptsZeroHandlers(t *testing.T) {
 	}
 }
 
+// ReadTable calls validateStatic alone, not validateAll, so a table an older
+// hookyard wrote before the catalog covered some event stays readable — the
+// #59 carve-out — even though Load would refuse the same row today.
+func TestReadTableAcceptsClaudeCodeEventOutsideCatalog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "table.json")
+	body := `{"handlers":[{"id":"a","exec":"/nonexistent/guard","events":["claude-code:Notifcation"],"engines":["claude-code"]}]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadTable(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Errorf("got %d handlers, want 1", len(got))
+	}
+}
+
 // ReadTable does not re-stat exec, so a table naming a handler hookyard could
 // never run is still accepted; Load is what catches that, at merge time.
 func TestReadTableAcceptsNonExistentExecButLoadRejectsIt(t *testing.T) {
@@ -409,118 +450,6 @@ func TestWriteTableLandsFixed0600EvenOverALooserExistingFile(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Errorf("mode = %v, want 0600", info.Mode().Perm())
-	}
-}
-
-// emit's sandbox does not have the exec a manifest names,
-// but LoadStatic must accept the manifest anyway because install will
-// re-validate it, with a stat, at activation.
-func TestLoadStaticAcceptsNonExistentExecButLoadRejectsIt(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "hookyard.json")
-	body := `{"handlers":[{"id":"a","exec":"/nonexistent/guard","events":["pre_tool"],"engines":["cursor"]}]}`
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	m, err := LoadStatic(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(m.Handlers) != 1 {
-		t.Fatalf("got %d handlers, want 1", len(m.Handlers))
-	}
-
-	if _, err := Load(path); err == nil {
-		t.Fatal("want Load to reject the same manifest, got nil")
-	}
-}
-
-// The absolute-path rule lives in validateStatic, not in the exec stat, so
-// LoadStatic gives up nothing about it.
-func TestLoadStaticRejectsRelativeExecLikeLoadDoes(t *testing.T) {
-	body := `{"handlers":[{"id":"a","exec":"hooks/guard.sh","events":["pre_tool"],"engines":["cursor"]}]}`
-	dir := t.TempDir()
-	path := filepath.Join(dir, "hookyard.json")
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := LoadStatic(path); err == nil || !strings.Contains(err.Error(), "must be an absolute path") {
-		t.Errorf("LoadStatic: got %v, want an error about an absolute path", err)
-	}
-	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "must be an absolute path") {
-		t.Errorf("Load: got %v, want an error about an absolute path", err)
-	}
-}
-
-func TestLoadStaticRejectsDuplicateIDInsideOneManifest(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "hookyard.json")
-	body := `{"handlers":[
-	  {"id":"a","exec":"/nonexistent/guard","events":["pre_tool"],"engines":["cursor"]},
-	  {"id":"a","exec":"/nonexistent/guard","events":["post_tool"],"engines":["cursor"]}]}`
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := LoadStatic(path); err == nil || !strings.Contains(err.Error(), "declared twice") {
-		t.Errorf("got %v, want an error about a duplicate id", err)
-	}
-}
-
-// An empty handlers array is not `install --allow-empty`, which is about a
-// caller passing no --manifest at all. Were LoadStatic to accept this file the
-// Nix build would succeed and home-manager activation would then fail on
-// Load's refusal of the same bytes, after the store paths are realised.
-func TestLoadStaticRejectsZeroHandlersLikeLoadDoes(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "hookyard.json")
-	if err := os.WriteFile(path, []byte(`{"handlers":[]}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := LoadStatic(path); err == nil || !strings.Contains(err.Error(), "no handlers declared") {
-		t.Errorf("LoadStatic: got %v, want an error about no handlers", err)
-	}
-	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "no handlers declared") {
-		t.Errorf("Load: got %v, want an error about no handlers", err)
-	}
-}
-
-// LoadStatic's shape composes with Merge, which is the caller's separate,
-// later call that catches a duplicate id across manifests — the case
-// LoadStatic itself cannot see because it only dedupes within one file.
-func TestLoadStaticComposesWithMergeAcrossManifests(t *testing.T) {
-	dir1 := t.TempDir()
-	dir2 := t.TempDir()
-	body := `{"handlers":[{"id":"shared","exec":"/nonexistent/guard","events":["pre_tool"],"engines":["cursor"]}]}`
-	path1 := filepath.Join(dir1, "hookyard.json")
-	path2 := filepath.Join(dir2, "hookyard.json")
-	if err := os.WriteFile(path1, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path2, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	first, err := LoadStatic(path1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := LoadStatic(path2)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = Merge([]*Manifest{first, second})
-	if err == nil {
-		t.Fatal("want an error for a duplicate id across manifests, got nil")
-	}
-	for _, want := range []string{first.Source, second.Source} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error should name both manifests, missing %q: %v", want, err)
-		}
 	}
 }
 
@@ -587,15 +516,24 @@ func TestLoadPluginExecForm(t *testing.T) {
 	}
 }
 
+// The catalog check runs through loadStatic too, since LoadPlugin uses it.
+func TestLoadPluginRejectsClaudeCodeEventOutsideCatalog(t *testing.T) {
+	path := writeFile(t, t.TempDir(), "hookyard.json",
+		`{"handlers":[{"id":"a","exec":"handlers/guard.sh","events":["claude-code:Notifcation"],"engines":["claude-code"]}]}`)
+	_, err := LoadPlugin(path)
+	if err == nil || !strings.Contains(err.Error(), "not a Claude Code event hookyard routes") {
+		t.Fatalf("got %v, want an error about the Claude Code catalog", err)
+	}
+}
+
 // Each mode's refusal of the other's exec form names the other mode, so a
 // manifest handed to the wrong command explains itself.
 func TestYardReadersRejectRelativeExecNamingBuildMode(t *testing.T) {
 	path := writeFile(t, t.TempDir(), "hookyard.json",
 		`{"handlers":[{"id":"a","exec":"handlers/guard.sh","events":["pre_tool"],"engines":["cursor"]}]}`)
 	readers := map[string]func(string) error{
-		"Load":       func(p string) error { _, err := Load(p); return err },
-		"LoadStatic": func(p string) error { _, err := LoadStatic(p); return err },
-		"ReadTable":  func(p string) error { _, err := ReadTable(p); return err },
+		"Load":      func(p string) error { _, err := Load(p); return err },
+		"ReadTable": func(p string) error { _, err := ReadTable(p); return err },
 	}
 	for name, read := range readers {
 		err := read(path)

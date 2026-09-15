@@ -49,9 +49,9 @@ var ErrUnknownEngine = errors.New("envelope: unknown engine")
 // is an absent value, not evidence of an engine.
 //
 // The order is load-bearing only if the rules ever overlap. Across the
-// sixteen captured fixtures they are disjoint, so first-match-wins picks the
-// same engine any order would; an engine that later grows another's
-// discriminator would silently be claimed by whichever rule sits higher.
+// captured fixtures they are disjoint, so first-match-wins picks the same
+// engine any order would; an engine that later grows another's discriminator
+// would silently be claimed by whichever rule sits higher.
 //
 // pi_version is unlike the other three discriminators: Pi sends no version
 // field of its own, so this key is one hookyard's own bridge injects into
@@ -60,10 +60,12 @@ var ErrUnknownEngine = errors.New("envelope: unknown engine")
 // lands on a non-empty string: cmd/hookyard's piVersion falls back to
 // "unknown" at install time, and the bridge falls back again at emit time.
 //
-// Known residual: these discriminators are observed only on
-// PreToolUse/PostToolUse/UserPromptSubmit/beforeShellExecution payloads. No
-// SessionStart or Stop payload has been captured for any engine, so
-// detection on those event kinds is unverified.
+// Known residual: Claude Code does not send prompt_id or effort on every
+// event. The live 2.1.272 SessionStart capture carries neither, so Detect
+// returns ErrUnknownEngine for it; cmd/hookyard's router recovers the engine
+// from --registered-for in yard mode only, and records that it did (§12).
+// Codex and Cursor SessionStart/Stop payloads remain uncaptured, so detection
+// on those event kinds is unverified.
 func Detect(native map[string]json.RawMessage) (vocab.Engine, error) {
 	if present(native, "cursor_version") {
 		return vocab.Cursor, nil
@@ -212,11 +214,10 @@ const maxPayload = 1 << 20 // 1 MiB
 // meaning of the JSON.
 var ErrTooLarge = errors.New("envelope: payload exceeds 1 MiB cap")
 
-// Decode reads one native hook payload from r, detects its engine, and
-// normalizes it. r is an io.Reader rather than os.Stdin: cmd/hookyard/main.go's
-// route stays a stub, so a cap wired to the process's stdin would have
-// nothing testable.
-func Decode(r io.Reader) (*Envelope, error) {
+// ReadPayload reads one native hook payload from r under the same cap Decode
+// enforces, so a caller that must decode the bytes more than once (stdin can
+// be read only once) never reads past it.
+func ReadPayload(r io.Reader) ([]byte, error) {
 	// Read one byte past the cap: a reader that just stops at maxPayload
 	// cannot tell an exactly-at-limit payload from an over-limit one.
 	raw, err := io.ReadAll(io.LimitReader(r, maxPayload+1))
@@ -226,7 +227,44 @@ func Decode(r io.Reader) (*Envelope, error) {
 	if len(raw) > maxPayload {
 		return nil, ErrTooLarge
 	}
+	return raw, nil
+}
 
+// Decode reads one native hook payload from r, detects its engine, and
+// normalizes it. r is an io.Reader rather than os.Stdin: cmd/hookyard/main.go's
+// route stays a stub, so a cap wired to the process's stdin would have
+// nothing testable.
+func Decode(r io.Reader) (*Envelope, error) {
+	raw, err := ReadPayload(r)
+	if err != nil {
+		return nil, err
+	}
+	native, err := decodeBytes(raw)
+	if err != nil {
+		return nil, err
+	}
+	engine, err := Detect(native)
+	if err != nil {
+		return nil, err
+	}
+	return From(engine, native), nil
+}
+
+// DecodeAs normalizes raw as engine's payload without consulting Detect. It
+// exists only for a caller that already knows the engine from somewhere
+// Detect cannot see (§12: yard-mode Claude Code's --registered-for).
+func DecodeAs(raw []byte, engine vocab.Engine) (*Envelope, error) {
+	native, err := decodeBytes(raw)
+	if err != nil {
+		return nil, err
+	}
+	return From(engine, native), nil
+}
+
+func decodeBytes(raw []byte) (map[string]json.RawMessage, error) {
+	if len(raw) > maxPayload {
+		return nil, ErrTooLarge
+	}
 	var native map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &native); err != nil {
 		return nil, fmt.Errorf("envelope: decoding payload: %w", err)
@@ -237,10 +275,5 @@ func Decode(r io.Reader) (*Envelope, error) {
 		// or string already fails to unmarshal into this map type above.
 		return nil, fmt.Errorf("envelope: payload is not a JSON object")
 	}
-
-	engine, err := Detect(native)
-	if err != nil {
-		return nil, err
-	}
-	return From(engine, native), nil
+	return native, nil
 }

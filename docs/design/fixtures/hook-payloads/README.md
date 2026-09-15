@@ -1,8 +1,8 @@
 # Captured hook payloads
 
-Real hook payloads, captured from live agent sessions on 2026-09-10. These are
-the ground truth behind §7's inbound field table; before them, that table was
-derived from each engine's documentation.
+Real hook payloads, captured from live agent sessions on 2026-09-10 and
+2026-09-15. These are the ground truth behind §7's inbound field table; before
+them, that table was derived from each engine's documentation.
 
 | File | Engine | Event | Notes |
 |---|---|---|---|
@@ -22,6 +22,10 @@ derived from each engine's documentation.
 | `pi-tool_call-DENY.json` | Pi 0.85.1 | `tool_call` | denied a `touch`; the file did not exist afterward |
 | `pi-tool_result.json` | Pi 0.85.1 | `tool_result` | does not fire at all on a denied call |
 | `pi-turn_end.json` | Pi 0.85.1 | `turn_end` | carries `turn_index`, an integer, not a correlation id |
+| `claude-SessionStart.json` | Claude Code 2.1.272 | `SessionStart` | no `prompt_id`/`effort`; the router's yard-mode fallback exists because of this (R-G) |
+| `claude-UserPromptSubmit.json` | Claude Code 2.1.272 | `UserPromptSubmit` | carries the literal probe `prompt` |
+| `claude-Stop.json` | Claude Code 2.1.272 | `Stop` | `last_assistant_message` is `"ok"`; `background_tasks`/`session_crons` are empty |
+| `claude-SessionEnd.json` | Claude Code 2.1.272 | `SessionEnd` | `reason` is `"other"` |
 
 Pi's payloads are not like the other ten. Pi has no subprocess hook
 protocol of its own — it fires in-process TypeScript extension callbacks,
@@ -46,12 +50,20 @@ an output path, appends one record per firing, then answers per mode — exit 0
 to observe, a per-engine deny verdict to test enforcement, or one tick a
 second to measure an engine's undeclared timeout.
 
-Each engine ran one trivial prompt — "Run the shell command: echo
-hookyard-probe" — against a hook that appended its stdin verbatim before
-answering. Nothing in the real configuration was touched: Codex ran under a
-scratch `CODEX_HOME`, Claude Code under a scratch `CLAUDE_CONFIG_DIR`, and
-Cursor from a scratch directory with its own project-level
-`.cursor/hooks.json`. Authentication was reached by symlink, never copied.
+The 2026-09-10 captures ran one trivial prompt per engine — "Run the shell
+command: echo hookyard-probe" — against a hook that appended its stdin
+verbatim before answering. Nothing in the real configuration was touched:
+Codex ran under a scratch `CODEX_HOME`, Claude Code under a scratch
+`CLAUDE_CONFIG_DIR`, and Cursor from a scratch directory with its own
+project-level `.cursor/hooks.json`. Authentication was reached by symlink,
+never copied.
+
+The four `claude-*.json` fixtures dated 2026-09-15 (`SessionStart`,
+`UserPromptSubmit`, `Stop`, `SessionEnd`) were captured differently: unlike
+the 2026-09-10 captures, these ran under the real `CLAUDE_CONFIG_DIR`, with a
+scratch `--settings` overlay whose hooks dumped stdin, via `claude -p --model
+haiku 'Reply with the single word ok.'`. `Notification` and `PreCompact`
+don't fire in a headless `-p` run, so they were not captured this way.
 
 Cursor, Codex and Claude Code all refused to load hooks until their
 directory was trusted, which is recorded in §8. Pi does not belong in that

@@ -1,0 +1,12 @@
+{
+  "background_tasks": [],
+  "cwd": "<PROBE>/capture",
+  "hook_event_name": "Stop",
+  "last_assistant_message": "ok",
+  "permission_mode": "default",
+  "prompt_id": "894436e3-b9fa-4b66-a9ed-05d246a5d115",
+  "session_crons": [],
+  "session_id": "2e836ac9-0906-468f-b575-1a3ce651e3dc",
+  "stop_hook_active": false,
+  "transcript_path": "<PROBE>/capture/claude-home/projects/-tmp-claude-1000--home-noams-Data-git--worktrees-git-hookyard-feat-58-make-the-claude-code-overlay-manifest-in-89de17ab-6577-42a8-8703-4901b7086c88-scratchpad-capture/2e836ac9-0906-468f-b575-1a3ce651e3dc.jsonl"
+}

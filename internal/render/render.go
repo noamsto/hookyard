@@ -62,8 +62,38 @@ type planKey struct {
 // union of that event's handlers' matchers, and the router decides which
 // handlers a given call actually reaches.
 func BuildPlan(handlers []manifest.Handler, routerPath, stateDir string) (Plan, error) {
+	if err := checkRouterPath(routerPath); err != nil {
+		return nil, err
+	}
+
+	return buildPlan(handlers, func(engine vocab.Engine, event string) string {
+		return command(routerPath, engine, event, stateDir)
+	})
+}
+
+// ClaudeCatalogPlan renders the fixed Claude Code catalog (vocab.ClaudeCodeCatalog)
+// into one matcher-less entry per catalog event, in catalog order. Unlike
+// BuildPlan it takes no handlers: yard mode registers every catalog event
+// unconditionally, and the table decides at hook-fire time which handlers
+// each one actually reaches (R-B).
+func ClaudeCatalogPlan(routerPath, stateDir string) ([]Entry, error) {
+	if err := checkRouterPath(routerPath); err != nil {
+		return nil, err
+	}
+	entries := make([]Entry, 0, len(vocab.ClaudeCodeCatalog))
+	for _, e := range vocab.ClaudeCodeCatalog {
+		entries = append(entries, Entry{
+			Event:   e.Native,
+			Command: command(routerPath, vocab.ClaudeCode, e.Routed, stateDir),
+		})
+	}
+	return entries, nil
+}
+
+// checkRouterPath refuses a router path an emitted command must not embed.
+func checkRouterPath(routerPath string) error {
 	if !strings.Contains(routerPath, Marker) {
-		return nil, fmt.Errorf("router path %q does not contain the marker %q, so emitted entries "+
+		return fmt.Errorf("router path %q does not contain the marker %q, so emitted entries "+
 			"could not be found again to strip", routerPath, Marker)
 	}
 	// The rule validateStatic applies to a handler's exec, applied to the
@@ -72,13 +102,10 @@ func BuildPlan(handlers []manifest.Handler, routerPath, stateDir string) (Plan, 
 	// resolves at hook-fire time against whatever directory the agent's tool
 	// call runs in — the repo under review.
 	if !filepath.IsAbs(routerPath) {
-		return nil, fmt.Errorf("router path %q must be an absolute path, because it is resolved at "+
+		return fmt.Errorf("router path %q must be an absolute path, because it is resolved at "+
 			"hook-fire time against the agent's working directory, not the installer's", routerPath)
 	}
-
-	return buildPlan(handlers, func(engine vocab.Engine, event string) string {
-		return command(routerPath, engine, event, stateDir)
-	})
+	return nil
 }
 
 // PluginPlan renders the table into one engine's built-plugin entries: the
