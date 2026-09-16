@@ -431,7 +431,30 @@ func codexFindings(p Paths, dir string) []Finding {
 		}
 	}
 
-	return []Finding{trust, hookTrust, registration(vocab.Codex, config), routerPath(vocab.Codex, config)}
+	return []Finding{trust, hookTrust, codexRegistration(config), routerPath(vocab.Codex, config)}
+}
+
+func codexRegistration(path string) Finding {
+	f := Finding{Engine: vocab.Codex, Check: "hookyard registered", Detail: path}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		f.Status = Fail
+		f.Detail = fmt.Sprintf("%s: %v", path, err)
+		return f
+	}
+	n := strings.Count(string(raw), "route --registered-for codex")
+	switch {
+	case n == 1:
+		f.Status = Pass
+		f.Detail = "1 hookyard entry in " + path
+	case n == 0:
+		f.Status = Fail
+		f.Detail = "no hookyard entry in " + path + "; run hookyard install"
+	default:
+		f.Status = Fail
+		f.Detail = fmt.Sprintf("%d hookyard entries in %s; run hookyard install", n, path)
+	}
+	return f
 }
 
 func cursorFindings(p Paths, dir, stateDir string) []Finding {
@@ -861,15 +884,19 @@ func routerPathIn(engine vocab.Engine, source string, raw []byte) Finding {
 	// path, so hookyard's own re-render always leaves one form; a second
 	// path can only come from a hand-edit or a foreign writer, and is
 	// reported rather than collapsed.
-	var bad []string
+	var listed []string
+	bad := false
 	for _, p := range paths {
 		if reason := notExecutable(p); reason != "" {
-			bad = append(bad, fmt.Sprintf("%s (%s)", p, reason))
+			bad = true
+			listed = append(listed, fmt.Sprintf("%s (%s)", p, reason))
+			continue
 		}
+		listed = append(listed, fmt.Sprintf("%s (executable)", p))
 	}
-	if len(bad) > 0 {
+	if bad {
 		f.Status = Fail
-		f.Detail = "not runnable: " + strings.Join(bad, "; ")
+		f.Detail = strings.Join(listed, "; ")
 		return f
 	}
 	f.Status = Pass
