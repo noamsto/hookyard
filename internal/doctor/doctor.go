@@ -431,7 +431,56 @@ func codexFindings(p Paths, dir string) []Finding {
 		}
 	}
 
-	return []Finding{trust, hookTrust, registration(vocab.Codex, config), routerPath(vocab.Codex, config)}
+	return []Finding{trust, hookTrust, codexRegistration(config), routerPath(vocab.Codex, config)}
+}
+
+// codexEventPattern recovers the --event argument from a hookyard router
+// command. Duplication is the *same* event registered more than once: BuildPlan
+// emits one entry per (engine, event), so a healthy install spanning several
+// Codex events legitimately carries several commands and must not read as
+// duplication.
+var codexEventPattern = regexp.MustCompile(`route --registered-for codex --event ([^\s"']+)`)
+
+func codexRegistration(path string) Finding {
+	f := Finding{Engine: vocab.Codex, Check: "hookyard registered", Detail: path}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		f.Status = Fail
+		f.Detail = fmt.Sprintf("%s: %v", path, err)
+		return f
+	}
+	body := string(raw)
+	total := strings.Count(body, "route --registered-for codex")
+	if total == 0 {
+		f.Status = Fail
+		f.Detail = "no hookyard entry in " + path + "; run hookyard install"
+		return f
+	}
+	perEvent := map[string]int{}
+	matches := codexEventPattern.FindAllStringSubmatch(body, -1)
+	for _, m := range matches {
+		perEvent[m[1]]++
+	}
+	// A command whose event cannot be recovered still counts, grouped under one
+	// key, so a repeated unparsable command reads as duplication rather than
+	// passing on a technicality.
+	if missing := total - len(matches); missing > 0 {
+		perEvent[""] += missing
+	}
+	for _, n := range perEvent {
+		if n > 1 {
+			f.Status = Fail
+			f.Detail = fmt.Sprintf("%d hookyard entries in %s; run hookyard install", total, path)
+			return f
+		}
+	}
+	f.Status = Pass
+	noun := "entry"
+	if total != 1 {
+		noun = "entries"
+	}
+	f.Detail = fmt.Sprintf("%d hookyard %s in %s", total, noun, path)
+	return f
 }
 
 func cursorFindings(p Paths, dir, stateDir string) []Finding {
@@ -861,15 +910,19 @@ func routerPathIn(engine vocab.Engine, source string, raw []byte) Finding {
 	// path, so hookyard's own re-render always leaves one form; a second
 	// path can only come from a hand-edit or a foreign writer, and is
 	// reported rather than collapsed.
-	var bad []string
+	var listed []string
+	bad := false
 	for _, p := range paths {
 		if reason := notExecutable(p); reason != "" {
-			bad = append(bad, fmt.Sprintf("%s (%s)", p, reason))
+			bad = true
+			listed = append(listed, fmt.Sprintf("%s (%s)", p, reason))
+			continue
 		}
+		listed = append(listed, fmt.Sprintf("%s (executable)", p))
 	}
-	if len(bad) > 0 {
+	if bad {
 		f.Status = Fail
-		f.Detail = "not runnable: " + strings.Join(bad, "; ")
+		f.Detail = strings.Join(listed, "; ")
 		return f
 	}
 	f.Status = Pass

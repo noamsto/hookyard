@@ -1,10 +1,13 @@
 package render
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/BurntSushi/toml"
 )
 
 // A config with the two trust stores hookyard must never disturb, plus
@@ -95,10 +98,7 @@ func TestWriteCodexIsIdempotent(t *testing.T) {
 	if first != second {
 		t.Errorf("second write differs from the first\n--- first ---\n%s\n--- second ---\n%s", first, second)
 	}
-	if n := strings.Count(second, codexBegin); n != 1 {
-		t.Errorf("want exactly one hookyard block, got %d", n)
-	}
-	if n := strings.Count(second, "--registered-for codex"); n != 1 {
+	if n := strings.Count(second, "route --registered-for codex"); n != 1 {
 		t.Errorf("want exactly one hookyard entry, got %d", n)
 	}
 }
@@ -172,7 +172,7 @@ func TestWriteCodexOnAnEmptyPlanWithNoConfigFileWritesNothing(t *testing.T) {
 // it.
 func TestWriteCodexOnAnEmptyPlanStillStripsAStaleBlockEvenWithNoNewEntries(t *testing.T) {
 	stale := codexInherited + "\n" + codexBegin + "\n\n[[hooks.PreToolUse]]\nmatcher = \"Bash\"\n\n" +
-		"[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"/x/bin/hookyard route\"\n\n" + codexEnd + "\n"
+		"[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"/x/bin/hookyard route --registered-for codex\"\n\n" + codexEnd + "\n"
 	path := writeCodexFixture(t, stale)
 
 	if err := WriteCodex(path, nil); err != nil {
@@ -182,8 +182,135 @@ func TestWriteCodexOnAnEmptyPlanStillStripsAStaleBlockEvenWithNoNewEntries(t *te
 	if strings.Contains(got, codexBegin) {
 		t.Errorf("stale hookyard block survived\n--- got ---\n%s", got)
 	}
+	if strings.Contains(got, "route --registered-for codex") {
+		t.Errorf("stale hookyard command survived\n--- got ---\n%s", got)
+	}
 	if !strings.Contains(got, `model_reasoning_effort = "low"`) {
 		t.Errorf("stripping the stale block dropped inherited content\n--- got ---\n%s", got)
+	}
+}
+
+func TestWriteCodexConvergesAfterTomlRoundTrip(t *testing.T) {
+	path := writeCodexFixture(t, codexInherited)
+	entries := []Entry{{Event: "PreToolUse", Matcher: "Bash", Command: "/nix/store/x/bin/hookyard route --registered-for codex --event pre_tool"}}
+	if err := WriteCodex(path, entries); err != nil {
+		t.Fatal(err)
+	}
+
+	raw := readFile(t, path)
+	var doc map[string]any
+	if _, err := toml.Decode(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rewritten := readFile(t, path)
+	if strings.Contains(rewritten, "# hookyard-managed: begin") {
+		t.Fatal("round-trip did not drop the standalone begin comment; the test is not exercising the bug")
+	}
+
+	if err := WriteCodex(path, entries); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, path)
+	if n := strings.Count(got, "route --registered-for codex"); n != 1 {
+		t.Errorf("want exactly one hookyard command after round-trip, got %d\n--- got ---\n%s", n, got)
+	}
+	for _, want := range []string{
+		`trusted_hash = "sha256:09216baa019df4f66b6b388b6708cda968a48714d8e8aac1106137104d86c2ab"`,
+		`[projects."/home/noams/Data/git/noamsto/hookyard"]`,
+		`command = "/etc/profiles/per-user/noams/bin/claude-status-update idle"`,
+		`[mcp_servers.context7]`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("round-trip write dropped inherited content %q\n--- got ---\n%s", want, got)
+		}
+	}
+}
+
+func TestWriteCodexConvergesLegacyOrphansAndDuplicates(t *testing.T) {
+	dup := `
+[[hooks.PreToolUse]]
+matcher = "Bash"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/old/bin/hookyard route --registered-for codex --event pre_tool"
+timeout = 5
+# hookyard-managed: end
+`
+	content := codexInherited + strings.Repeat(dup, 3)
+	path := writeCodexFixture(t, content)
+	entries := []Entry{{Event: "PostToolUse", Command: "/nix/store/x/bin/hookyard route --registered-for codex --event post_tool"}}
+	if err := WriteCodex(path, entries); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, path)
+	if n := strings.Count(got, "route --registered-for codex"); n != 1 {
+		t.Errorf("want exactly one hookyard command, got %d\n--- got ---\n%s", n, got)
+	}
+	if strings.Contains(got, "/old/bin/hookyard") {
+		t.Errorf("legacy command survived\n--- got ---\n%s", got)
+	}
+	if strings.Count(got, "# hookyard-managed:") != 0 {
+		t.Errorf("legacy markers survived\n--- got ---\n%s", got)
+	}
+	if !strings.Contains(got, `command = "/etc/profiles/per-user/noams/bin/claude-status-update idle"`) {
+		t.Errorf("strip dropped foreign hook\n--- got ---\n%s", got)
+	}
+}
+
+// A foreign hook appended to hookyard's own matcher table must keep that
+// matcher when hookyard's child is stripped; otherwise it silently runs on
+// every tool instead of its registered matcher.
+func TestWriteCodexKeepsSharedMatcherForForeignSibling(t *testing.T) {
+	content := codexInherited + `
+[[hooks.PreToolUse]]
+matcher = "Bash"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/nix/store/x/bin/hookyard route --registered-for codex --event pre_tool"
+hookyard = true
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/foreign/script --keep-me"
+`
+	path := writeCodexFixture(t, content)
+	entries := []Entry{{Event: "PostToolUse", Command: "/nix/store/y/bin/hookyard route --registered-for codex --event post_tool"}}
+	if err := WriteCodex(path, entries); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, path)
+	if !strings.Contains(got, "/foreign/script --keep-me") {
+		t.Errorf("foreign sibling hook was dropped\n--- got ---\n%s", got)
+	}
+	if !strings.Contains(got, `matcher = "Bash"`) {
+		t.Errorf("shared matcher table was dropped, widening the foreign hook's scope\n--- got ---\n%s", got)
+	}
+}
+
+// Foreign bytes must survive a write that strips hookyard's block: in
+// particular a multi-line string's interior blank lines are value bytes, not
+// inter-table whitespace, so they must not be collapsed.
+func TestWriteCodexPreservesForeignMultilineStringVerbatim(t *testing.T) {
+	content := codexInherited + "note = \"\"\"\nline1\n\n\nline3\n\"\"\"\n\n" + codexBegin +
+		"\n\n[[hooks.PreToolUse]]\nmatcher = \"Bash\"\n\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"/old/bin/hookyard route --registered-for codex --event pre_tool\"\n\n" + codexEnd + "\n"
+	path := writeCodexFixture(t, content)
+	entries := []Entry{{Event: "PostToolUse", Command: "/nix/store/x/bin/hookyard route --registered-for codex --event post_tool"}}
+	if err := WriteCodex(path, entries); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, path)
+	want := "note = \"\"\"\nline1\n\n\nline3\n\"\"\""
+	if !strings.Contains(got, want) {
+		t.Errorf("foreign multi-line string was rewritten\n--- got ---\n%s", got)
 	}
 }
 

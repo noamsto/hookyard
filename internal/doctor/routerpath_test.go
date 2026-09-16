@@ -186,11 +186,20 @@ func TestRouterPathChecksEachDistinctPath(t *testing.T) {
 	if f.Status != Fail {
 		t.Fatalf("status = %v, want Fail", f.Status)
 	}
+	if !strings.Contains(f.Detail, good) {
+		t.Errorf("detail = %q, want it to name the runnable path %s", f.Detail, good)
+	}
+	if !strings.Contains(f.Detail, good+" (executable)") {
+		t.Errorf("detail = %q, want %s classified as executable", f.Detail, good)
+	}
+	if strings.Contains(f.Detail, good+" (missing") || strings.Contains(f.Detail, good+" (not runnable") {
+		t.Errorf("detail = %q, should not classify %s as missing/not-runnable", f.Detail, good)
+	}
 	if !strings.Contains(f.Detail, bad) {
 		t.Errorf("detail = %q, want it to name %s", f.Detail, bad)
 	}
-	if strings.Contains(f.Detail, good+" (") {
-		t.Errorf("detail = %q, should not report the good path as bad", f.Detail)
+	if !strings.Contains(f.Detail, "missing") {
+		t.Errorf("detail = %q, want the missing path's failure reason", f.Detail)
 	}
 }
 

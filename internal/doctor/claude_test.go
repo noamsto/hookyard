@@ -346,7 +346,7 @@ func TestOtherEnginesFindingsAreUnchanged(t *testing.T) {
 	want := []Finding{
 		{vocab.Codex, "workspace trust", Pass, "trusted in " + codexConfig},
 		{vocab.Codex, "hook trust", Pass, "1 reviewed hook entries in " + codexConfig},
-		{vocab.Codex, "hookyard registered", Pass, "present in " + codexConfig},
+		{vocab.Codex, "hookyard registered", Pass, "1 hookyard entry in " + codexConfig},
 		{vocab.Codex, "router path", Pass, executable},
 		{vocab.Cursor, "workspace trust", Pass, "trusted, per " + cursorMarker},
 		{vocab.Cursor, "hookyard registered", Fail, "no hookyard entry in " + cursorHooks + "; run hookyard install"},

@@ -16,9 +16,10 @@ const (
 )
 
 type codexHook struct {
-	Type    string `toml:"type"`
-	Command string `toml:"command"`
-	Timeout int    `toml:"timeout"`
+	Type     string `toml:"type"`
+	Command  string `toml:"command"`
+	Timeout  int    `toml:"timeout"`
+	Hookyard bool   `toml:"hookyard"`
 }
 
 type codexMatcher struct {
@@ -48,7 +49,7 @@ func WriteCodex(path string, entries []Entry) error {
 	// never touch un-asked. A zero-entry plan with no prior hookyard block to
 	// strip has nothing to add and nothing to remove, so it takes no rename
 	// at all and leaves the file exactly as Codex last wrote it.
-	if len(entries) == 0 && !strings.Contains(existing, codexBegin) {
+	if len(entries) == 0 && !codexOwnsContent(existing) {
 		return nil
 	}
 
@@ -104,7 +105,6 @@ func WriteCodex(path string, entries []Entry) error {
 // a quote or a newline goes through the encoder.
 func encodeCodexBlock(entries []Entry) (string, error) {
 	var buf strings.Builder
-	buf.WriteString(codexBegin + "\n")
 	for _, e := range entries {
 		fmt.Fprintf(&buf, "\n[[hooks.%s]]\n", e.Event)
 		if e.Matcher != "" {
@@ -116,16 +116,16 @@ func encodeCodexBlock(entries []Entry) (string, error) {
 		}
 		fmt.Fprintf(&buf, "\n[[hooks.%s.hooks]]\n", e.Event)
 		encoded, err := encodeTOML(codexHook{
-			Type:    "command",
-			Command: e.Command,
-			Timeout: EmittedTimeoutSeconds,
+			Type:     "command",
+			Command:  e.Command,
+			Timeout:  EmittedTimeoutSeconds,
+			Hookyard: true,
 		})
 		if err != nil {
 			return "", err
 		}
 		buf.WriteString(encoded)
 	}
-	buf.WriteString(codexEnd + "\n")
 	return buf.String(), nil
 }
 
@@ -137,16 +137,221 @@ func encodeTOML(v any) (string, error) {
 	return buf.String(), nil
 }
 
-func stripCodexBlock(content, path string) (string, error) {
-	begin := strings.Index(content, codexBegin)
-	if begin < 0 {
+func codexOwnsContent(s string) bool {
+	return strings.Contains(s, "route --registered-for codex") ||
+		strings.Contains(s, "hookyard = true") ||
+		strings.Contains(s, "# hookyard-managed:")
+}
+
+type tomlSection struct {
+	header string
+	raw    string
+}
+
+func isTOMLHeaderLine(line string) bool {
+	for _, r := range line {
+		if r == ' ' || r == '\t' {
+			continue
+		}
+		return r == '['
+	}
+	return false
+}
+
+func splitTOMLSections(content string) (string, []tomlSection) {
+	var headers []int
+	i := 0
+	for i < len(content) {
+		lineStart := i
+		nl := strings.IndexByte(content[i:], '\n')
+		var line string
+		if nl < 0 {
+			line = content[i:]
+			i = len(content)
+		} else {
+			line = content[i : i+nl]
+			i += nl + 1
+		}
+		if isTOMLHeaderLine(line) {
+			headers = append(headers, lineStart)
+		}
+	}
+	if len(headers) == 0 {
 		return content, nil
 	}
-	end := strings.Index(content[begin:], codexEnd)
-	if end < 0 {
-		return "", fmt.Errorf("%s has a hookyard block that starts but never ends; "+
-			"refusing to guess where it stops", path)
+	preamble := content[:headers[0]]
+	sections := make([]tomlSection, 0, len(headers))
+	for j, start := range headers {
+		end := len(content)
+		if j+1 < len(headers) {
+			end = headers[j+1]
+		}
+		raw := content[start:end]
+		header := raw
+		if nl := strings.IndexByte(raw, '\n'); nl >= 0 {
+			header = raw[:nl]
+		}
+		sections = append(sections, tomlSection{header: header, raw: raw})
 	}
-	tail := content[begin+end+len(codexEnd):]
-	return strings.TrimRight(content[:begin], "\n") + strings.TrimLeft(tail, "\n"), nil
+	return preamble, sections
+}
+
+func parseHooksArrayHeader(header string) (event string, inner bool, ok bool) {
+	s := strings.TrimSpace(header)
+	if !strings.HasPrefix(s, "[[") || !strings.HasSuffix(s, "]]") {
+		return "", false, false
+	}
+	name := s[2 : len(s)-2]
+	if !strings.HasPrefix(name, "hooks.") {
+		return "", false, false
+	}
+	rest := strings.TrimPrefix(name, "hooks.")
+	if strings.HasSuffix(rest, ".hooks") {
+		event = strings.TrimSuffix(rest, ".hooks")
+		return event, true, event != ""
+	}
+	return rest, false, rest != ""
+}
+
+func sectionHasCommandLine(raw string) bool {
+	nl := strings.IndexByte(raw, '\n')
+	if nl < 0 {
+		return false
+	}
+	body := raw[nl+1:]
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "command") {
+			return true
+		}
+	}
+	return false
+}
+
+func dropLegacyMarkerLines(content string) string {
+	lines := strings.Split(content, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		t := strings.TrimSpace(line)
+		if t == codexBegin || t == codexEnd {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
+// hasSurvivingSibling reports whether any non-owned .hooks table for event
+// remains after ownership stripping. Such a survivor shares the matcher table
+// that precedes the owned sibling, so removing that matcher table would
+// silently widen the foreign hook's scope (its matcher becomes "every tool").
+// Only tables contiguous with the owned one belong to the same matcher group.
+func hasSurvivingSibling(sections []tomlSection, owned []bool, from int, event string) bool {
+	for j := from + 1; j < len(sections); j++ {
+		ev, inner, ok := parseHooksArrayHeader(sections[j].header)
+		if !ok || !inner || ev != event {
+			break
+		}
+		if !owned[j] {
+			return true
+		}
+	}
+	return false
+}
+
+func stripCodexBlockOnce(content, path string) (string, bool, error) {
+	preamble, sections := splitTOMLSections(content)
+	if len(sections) == 0 {
+		return content, false, nil
+	}
+	// First pass: mark every hookyard-owned .hooks table. Ownership is decided
+	// before any matcher decision so a sibling's survival is known regardless
+	// of section order.
+	owned := make([]bool, len(sections))
+	for i, sec := range sections {
+		if !strings.Contains(sec.header, ".hooks]]") {
+			continue
+		}
+		if !strings.Contains(sec.raw, "hookyard = true") &&
+			!strings.Contains(sec.raw, "route --registered-for codex") {
+			continue
+		}
+		if _, inner, ok := parseHooksArrayHeader(sec.header); !ok || !inner {
+			return "", false, fmt.Errorf("%s: cannot parse hookyard-owned table header %q", path, strings.TrimSpace(sec.header))
+		}
+		owned[i] = true
+	}
+	// Second pass: drop each owned .hooks table, and the matcher table it
+	// hangs under only when no foreign sibling still needs that matcher.
+	drop := append([]bool(nil), owned...)
+	for i := range sections {
+		if !owned[i] || i == 0 {
+			continue
+		}
+		prev := sections[i-1]
+		if strings.Contains(prev.header, ".hooks") {
+			continue
+		}
+		event, _, _ := parseHooksArrayHeader(sections[i].header)
+		prevEvent, prevInner, prevOK := parseHooksArrayHeader(prev.header)
+		if !prevOK || prevInner || prevEvent != event {
+			continue
+		}
+		if sectionHasCommandLine(prev.raw) {
+			continue
+		}
+		// hookyard matcher tables carry only a matcher and blanks. A table
+		// with a surviving foreign child must stay: the child keeps its
+		// matcher. Drop it only when every child it hosts is hookyard's.
+		if hasSurvivingSibling(sections, owned, i, event) {
+			continue
+		}
+		drop[i-1] = true
+	}
+	changed := false
+	for _, d := range drop {
+		if d {
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		return content, false, nil
+	}
+	var b strings.Builder
+	b.WriteString(preamble)
+	for i, sec := range sections {
+		if drop[i] {
+			continue
+		}
+		b.WriteString(sec.raw)
+	}
+	return b.String(), true, nil
+}
+
+func stripCodexBlock(content, path string) (string, error) {
+	if !codexOwnsContent(content) {
+		return content, nil
+	}
+	for {
+		next, changed, err := stripCodexBlockOnce(content, path)
+		if err != nil {
+			return "", err
+		}
+		if !changed {
+			break
+		}
+		content = next
+	}
+	if strings.Contains(content, codexBegin) || strings.Contains(content, codexEnd) {
+		content = dropLegacyMarkerLines(content)
+	}
+	// Normalize only the file's own trailing newline. The inherited document is
+	// Codex's, so interior bytes — blank-line runs and the contents of a
+	// foreign multi-line string included — must survive verbatim rather than
+	// being collapsed as whitespace.
+	content = strings.TrimRight(content, "\n")
+	if strings.TrimSpace(content) == "" {
+		return "", nil
+	}
+	return content + "\n", nil
 }
