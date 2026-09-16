@@ -77,6 +77,15 @@ var eventPattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]*$`)
 // that describes a handler hookyard could not run, fails here rather than
 // after some of three engines' configs have been rewritten.
 func Load(path string) (*Manifest, error) {
+	return loadAbsolute(path, validateExec)
+}
+
+// loadAbsolute is Load's and LoadBuildTime's shared body: both read
+// yard-mode manifests with absolute execs, and differ only in what extra can
+// afford to check — Load stats every exec because it runs at activation
+// time; LoadBuildTime cannot, because a build sandbox does not see every
+// exec a real activation would (see validateExecBuildTime).
+func loadAbsolute(path string, extra func(where string, h Handler) error) (*Manifest, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -87,7 +96,7 @@ func Load(path string) (*Manifest, error) {
 	}
 	m.Source = path
 	m.normalizeLanes()
-	if err := m.validateAll(ExecAbsolute, validateExec); err != nil {
+	if err := m.validateAll(ExecAbsolute, extra); err != nil {
 		return nil, err
 	}
 	return &m, nil
@@ -360,6 +369,74 @@ func execIsRunnable(path string) error {
 // the plugin root; CheckPluginExecs is that check.
 func LoadPlugin(path string) (*Manifest, error) {
 	return loadStatic(path, ExecPluginRelative)
+}
+
+// LoadBuildTime reads and validates one yard-mode manifest for a Nix build
+// sandbox, which is a third caller with its own carve-out alongside Load
+// (stats every exec) and LoadPlugin (stats none): it stats an exec only when
+// the sandbox could plausibly have that exec in its closure at all. See
+// validateExecBuildTime for why that is not the same as "exec looks like a
+// store path".
+func LoadBuildTime(path string) (*Manifest, error) {
+	return loadAbsolute(path, validateExecBuildTime)
+}
+
+// storeDir is the Nix store root a build sandbox exposes. The fallback to the
+// conventional path only matters for callers that never set NIX_STORE — real
+// builds always export it — but keeping the fallback is what lets the tests
+// below point it at a tempdir instead of asserting against the real store.
+func storeDir() string {
+	if dir := os.Getenv("NIX_STORE"); dir != "" {
+		return dir
+	}
+	return "/nix/store"
+}
+
+// storeRoot reports the top-level store entry exec lives under — the
+// directory whose store path would show up as one of a derivation's
+// scanned references — and whether exec is under the store at all.
+// filepath.Rel compares on path-separator boundaries, so a lookalike
+// directory next to the store (/nix/storefoo/...) does not read as "under"
+// it the way a raw string-prefix check would.
+func storeRoot(exec string) (string, bool) {
+	dir := storeDir()
+	rel, err := filepath.Rel(dir, exec)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return "", false
+	}
+	first, _, _ := strings.Cut(rel, string(filepath.Separator))
+	return filepath.Join(dir, first), true
+}
+
+// validateExecBuildTime is the decidability boundary a build-time check must
+// respect. Whether a manifest's execs are visible in the sandbox depends on
+// how the manifest itself entered the store: one written by a derivation
+// (writeText and friends) has its store-path references scanned, so its
+// execs are pulled into the sandbox closure — measured, nix-store --query
+// --references on a live consumer manifest returns its 6 exec store paths.
+// One added as a bare source path does not get scanned — measured, running a
+// file naming an exec through nix-store --add yields a store path with zero
+// references. So a present store root means the sandbox was actually handed
+// this exec, the same as install would be at activation time, and a missing
+// exec there is a real typo worth failing the build over. A missing root
+// means the opposite: this manifest took the source-path route, the exec was
+// never handed to the sandbox, and stat-ing it would fail every such build
+// regardless of whether the exec is fine on the target machine.
+func validateExecBuildTime(where string, h Handler) error {
+	root, ok := storeRoot(h.Exec)
+	if !ok {
+		return nil
+	}
+	if _, err := os.Stat(root); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if err := execIsRunnable(h.Exec); err != nil {
+		return fmt.Errorf("%s: exec %q: %w", where, h.Exec, err)
+	}
+	return nil
 }
 
 // loadStatic reads and validates one manifest the way Load does, minus

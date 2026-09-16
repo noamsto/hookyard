@@ -6,10 +6,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/noamsto/hookyard/internal/envelope"
+	"github.com/noamsto/hookyard/internal/installstate"
 	"github.com/noamsto/hookyard/internal/manifest"
 	"github.com/noamsto/hookyard/internal/render"
 	"github.com/noamsto/hookyard/internal/vocab"
@@ -435,8 +437,9 @@ func symlinkedDestination(t *testing.T, dir, name string) string {
 }
 
 // The refusal is a pre-flight over all three destinations, so a symlink at
-// one engine must leave the other two — and the table — untouched. Anything
-// less is a half-applied failed install.
+// one engine must leave the other two — and the table — unwritten by
+// anything an engine reads. The receipt is the exception: it records the
+// refusal rather than leaving no trace of the attempt.
 func TestRunInstallRefusesASymlinkedDestinationBeforeWritingAnything(t *testing.T) {
 	dir := t.TempDir()
 	manifestPath := writeTestManifest(t, dir)
@@ -453,7 +456,7 @@ func TestRunInstallRefusesASymlinkedDestinationBeforeWritingAnything(t *testing.
 		t.Errorf("error does not name the symlinked path: %v", err)
 	}
 
-	for _, path := range []string{cursor, pi, render.PiBridgePath(pi), stateDir, filepath.Join(stateDir, "table.json")} {
+	for _, path := range []string{cursor, pi, render.PiBridgePath(pi), filepath.Join(stateDir, "table.json")} {
 		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
 			t.Errorf("want %s left unwritten by the refused install, got stat err: %v", path, statErr)
 		}
@@ -465,10 +468,19 @@ func TestRunInstallRefusesASymlinkedDestinationBeforeWritingAnything(t *testing.
 	if info.Mode()&os.ModeSymlink == 0 {
 		t.Errorf("the destination is no longer a symlink: %v", info.Mode())
 	}
+	receipt, err := installstate.ReadReceipt(stateDir)
+	if err != nil {
+		t.Fatalf("want a receipt recording the refusal: %v", err)
+	}
+	if receipt.Complete {
+		t.Error("want Complete false for a refused install")
+	}
 }
 
 // The bridge is the second destination Pi contributes, and its refusal has to
-// arrive before the table, exactly as a symlinked engine config's does.
+// arrive before the table — and before every other engine config — exactly
+// as a symlinked engine config's does. The receipt is the exception: it
+// records the refusal rather than leaving no trace of the attempt.
 func TestRunInstallRefusesASymlinkedPiBridgeBeforeWritingAnything(t *testing.T) {
 	dir := t.TempDir()
 	manifestPath := writeAllEnginesManifest(t, dir)
@@ -497,7 +509,7 @@ func TestRunInstallRefusesASymlinkedPiBridgeBeforeWritingAnything(t *testing.T) 
 		t.Errorf("error does not name the symlinked bridge: %v", err)
 	}
 
-	for _, path := range []string{codex, cursor, pi, stateDir, filepath.Join(stateDir, "table.json")} {
+	for _, path := range []string{codex, cursor, pi, filepath.Join(stateDir, "table.json")} {
 		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
 			t.Errorf("want %s left unwritten by the refused install, got stat err: %v", path, statErr)
 		}
@@ -509,6 +521,13 @@ func TestRunInstallRefusesASymlinkedPiBridgeBeforeWritingAnything(t *testing.T) 
 	if info.Mode()&os.ModeSymlink == 0 {
 		t.Errorf("the bridge is no longer a symlink: %v", info.Mode())
 	}
+	receipt, err := installstate.ReadReceipt(stateDir)
+	if err != nil {
+		t.Fatalf("want a receipt recording the refusal: %v", err)
+	}
+	if receipt.Complete {
+		t.Error("want Complete false for a refused install")
+	}
 }
 
 // A link one segment up is the same hazard with none of the visibility: the
@@ -516,6 +535,8 @@ func TestRunInstallRefusesASymlinkedPiBridgeBeforeWritingAnything(t *testing.T) 
 // the link without a word, and the bridge lands wherever it points — executable
 // code, redirected, with the install reporting success. bin/ is a segment
 // hookyard invents and creates, so nothing a user manages can already be there.
+// Nothing an engine reads gets written by the refusal; the receipt is the
+// exception, since it records the refusal rather than leaving no trace.
 func TestRunInstallRefusesASymlinkedPiBinDirectoryBeforeWritingAnything(t *testing.T) {
 	dir := t.TempDir()
 	manifestPath := writeAllEnginesManifest(t, dir)
@@ -541,11 +562,19 @@ func TestRunInstallRefusesASymlinkedPiBinDirectoryBeforeWritingAnything(t *testi
 		t.Errorf("error does not name the symlinked directory: %v", err)
 	}
 
-	// The last path is the one the link would have redirected the bridge to.
-	for _, path := range []string{codex, cursor, pi, stateDir, filepath.Join(elsewhere, filepath.Base(bridge))} {
+	// The last two paths are the table, and the one the link would have
+	// redirected the bridge to.
+	for _, path := range []string{codex, cursor, pi, filepath.Join(stateDir, "table.json"), filepath.Join(elsewhere, filepath.Base(bridge))} {
 		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
 			t.Errorf("want %s left unwritten by the refused install, got stat err: %v", path, statErr)
 		}
+	}
+	receipt, err := installstate.ReadReceipt(stateDir)
+	if err != nil {
+		t.Fatalf("want a receipt recording the refusal: %v", err)
+	}
+	if receipt.Complete {
+		t.Error("want Complete false for a refused install")
 	}
 }
 
@@ -741,4 +770,158 @@ func bridgeConstant(t *testing.T, source string) string {
 	}
 	t.Fatalf("no %q line in the written bridge:\n%s", prefix, source)
 	return ""
+}
+
+// A successful install's receipt is the positive half of the drift check
+// doctor runs: Complete must flip true, and the identity it records must be
+// exactly the arguments this call was given.
+func TestInstallReceiptCompleteOnSuccess(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := writeAllEnginesManifest(t, dir)
+	stateDir := filepath.Join(dir, "state")
+	codex := filepath.Join(dir, "config.toml")
+	cursor := filepath.Join(dir, "hooks.json")
+	pi := filepath.Join(dir, "pi-settings.json")
+
+	if err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath, stateDir, codex, cursor, pi, false); err != nil {
+		t.Fatal(err)
+	}
+
+	receipt, err := installstate.ReadReceipt(stateDir)
+	if err != nil {
+		t.Fatalf("ReadReceipt: %v", err)
+	}
+	if !receipt.Complete {
+		t.Error("want Complete true after a successful install")
+	}
+	if !slices.Equal(receipt.Manifests, []string{manifestPath}) {
+		t.Errorf("Manifests = %v, want [%s]", receipt.Manifests, manifestPath)
+	}
+	if receipt.RouterPath != testRouterPath {
+		t.Errorf("RouterPath = %q, want %q", receipt.RouterPath, testRouterPath)
+	}
+	if receipt.StateDir != stateDir {
+		t.Errorf("StateDir = %q, want %q", receipt.StateDir, stateDir)
+	}
+	if receipt.CodexConfig != codex {
+		t.Errorf("CodexConfig = %q, want %q", receipt.CodexConfig, codex)
+	}
+	if receipt.CursorHooks != cursor {
+		t.Errorf("CursorHooks = %q, want %q", receipt.CursorHooks, cursor)
+	}
+	if receipt.PiSettings != pi {
+		t.Errorf("PiSettings = %q, want %q", receipt.PiSettings, pi)
+	}
+}
+
+// A manifest whose exec fails its stat is the abort path loadAll exists to
+// catch, and it now runs after the incomplete receipt is written: the
+// receipt has to say an install started and did not finish, not stay silent
+// the way a run that never reached loadAll would leave doctor guessing.
+func TestInstallReceiptIncompleteOnExecStat(t *testing.T) {
+	dir := t.TempDir()
+	exec := filepath.Join(dir, "guard.sh")
+	if err := os.WriteFile(exec, []byte("#!/bin/sh\n"), 0o644); err != nil { // not executable
+		t.Fatal(err)
+	}
+	body := `{"handlers":[{"id":"a","exec":"` + exec + `","events":["pre_tool"],"engines":["cursor"],"match":["Bash"]}]}`
+	manifestPath := filepath.Join(dir, "hookyard.json")
+	if err := os.WriteFile(manifestPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(dir, "state")
+	codex := filepath.Join(dir, "config.toml")
+	cursor := filepath.Join(dir, "hooks.json")
+	pi := filepath.Join(dir, "pi-settings.json")
+
+	err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath, stateDir, codex, cursor, pi, false)
+	if err == nil {
+		t.Fatal("want an error from the unexecutable exec, got nil")
+	}
+
+	receipt, readErr := installstate.ReadReceipt(stateDir)
+	if readErr != nil {
+		t.Fatalf("want a receipt recording the aborted install: %v", readErr)
+	}
+	if receipt.Complete {
+		t.Error("want Complete false when loadAll fails")
+	}
+	if _, statErr := os.Stat(filepath.Join(stateDir, "table.json")); !os.IsNotExist(statErr) {
+		t.Errorf("want table.json not written when loadAll fails, got stat err: %v", statErr)
+	}
+}
+
+// The inverse drift: an engine writer refuses after the table is already on
+// disk, so the table is ahead of that engine's config. Nothing else in this
+// file exercises a post-table-write failure, so this is the only coverage of
+// that half of the drift the receipt exists to make visible.
+func TestInstallReceiptIncompleteAfterTableWrite(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := writeAllEnginesManifest(t, dir)
+	stateDir := filepath.Join(dir, "state")
+	codex := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(codex, []byte("not = [valid toml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cursor := filepath.Join(dir, "hooks.json")
+	pi := filepath.Join(dir, "pi-settings.json")
+
+	err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath, stateDir, codex, cursor, pi, false)
+	if err == nil {
+		t.Fatal("want an error from the unparsable codex config, got nil")
+	}
+
+	receipt, readErr := installstate.ReadReceipt(stateDir)
+	if readErr != nil {
+		t.Fatalf("want a receipt recording the aborted install: %v", readErr)
+	}
+	if receipt.Complete {
+		t.Error("want Complete false when WriteCodex refuses")
+	}
+	if _, statErr := os.Stat(filepath.Join(stateDir, "table.json")); statErr != nil {
+		t.Errorf("want table.json written before the codex writer ran: %v", statErr)
+	}
+}
+
+// --dry-run stays completely side-effect-free: nix/checks/hm-module.nix runs
+// the real activation command with --dry-run against destinations that do
+// not exist, and depends on that.
+func TestInstallDryRunWritesNoReceipt(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := writeTestManifest(t, dir)
+	stateDir := filepath.Join(dir, "state")
+
+	if err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath, stateDir,
+		filepath.Join(dir, "config.toml"), filepath.Join(dir, "hooks.json"), filepath.Join(dir, "pi-settings.json"), true); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(installstate.ReceiptPath(stateDir)); !os.IsNotExist(err) {
+		t.Errorf("want no receipt written by --dry-run, got stat err: %v", err)
+	}
+}
+
+// A second successful run over the same state dir must land the same
+// Complete=true outcome as the first — the receipt is overwritten each time,
+// not merged or left stale from a prior generation.
+func TestInstallIdempotentRerun(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := writeAllEnginesManifest(t, dir)
+	stateDir := filepath.Join(dir, "state")
+	codex := filepath.Join(dir, "config.toml")
+	cursor := filepath.Join(dir, "hooks.json")
+	pi := filepath.Join(dir, "pi-settings.json")
+
+	for i := 0; i < 2; i++ {
+		if err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath, stateDir, codex, cursor, pi, false); err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
+		receipt, err := installstate.ReadReceipt(stateDir)
+		if err != nil {
+			t.Fatalf("run %d: ReadReceipt: %v", i, err)
+		}
+		if !receipt.Complete {
+			t.Errorf("run %d: want Complete true", i)
+		}
+	}
 }

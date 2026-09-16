@@ -3467,6 +3467,113 @@ path is now one step removed from the profile, not the profile path itself.
 |---|---|---|
 | §9, path form | Amended | The stable path is now a stateDir symlink `install` maintains, not `${config.home.profileDirectory}`; stable across activation-mode flips as well as version bumps (issue #61) |
 
+## 9.2 Amendment: build-time manifest gate and the generation witness (issue #59)
+
+Issue #59 asked whether the overlay half of the "install vs. what's live" gap
+could close the same way §9.1 closed the router-path gap. It was filed before
+#60 ("manifest-independent Claude Code overlay with a fixed event catalog",
+`0557697`), and two of its premises moved under it. First, the overlay no
+longer derives from the manifests at all: `hookyard emit --engine claude-code`
+takes no `--manifest` flag, and `render.ClaudeCatalogPlan` (`internal/render/render.go:79`)
+takes only a router path and a state dir, iterating the compiled-in Claude
+catalog to emit one matcher-less row per event. Second, the issue's proposed
+"check every destination before the first write" option had already shipped:
+`runInstall` (`cmd/hookyard/main.go:151`) runs `render.CheckDestinations` and
+`render.CheckPiBridgeDir` over all engine destinations before writing
+`table.json`, and writes `table.json` before any engine config.
+
+What survives is close to, but not exactly, the issue's prediction that "only
+the table half of this drift remains". A stale `table.json` still means
+handlers added in a new generation never fire and removed ones keep firing —
+that limb is intact. But event *coverage* never mismatches for Claude, since
+it routes every catalog event regardless of the table; what mismatches is
+which handlers each routed event reaches once it's there. A second, overlay-
+side limb survives too: if the catalog grows in a new binary and `install`
+never completed, the router symlink `install` maintains (§9.1) was never
+repointed, so the new generation's overlay hands a brand-new event name to the
+old binary. `route` returns `nil` on every path by design — a non-zero exit
+blocks Cursor, and §5 requires fail-open — so that lands as a `RouterError`
+record and exit 0: the engine is told everything is fine. #60 removed the
+overlay's *manifest* dependence, not its *binary* dependence. The one loud
+limb left is an absent router symlink, where the engine's own hook exec fails
+outright. And one window the issue does not mention at all: `install` can
+abort *after* `table.json` is written — an existing engine config a writer
+refuses to parse, `ENOSPC`, `EACCES` — leaving the table ahead of an engine's
+config, the inverse of the drift the issue describes.
+
+"Install failed" is not even the commonest shape of the gap. Read off a real
+generation's activation script (`.../home-manager-generation/activate`):
+`linkGeneration` runs at line 297, `installPackages` at 455, `hookyardInstall`
+at 594, all under `set -eu`. Roughly forty activation entries sit between
+`linkGeneration` and `hookyardInstall`, and under `set -e` any one of them
+failing aborts the switch before `hookyard install` is ever invoked — with the
+new generation's overlay already placed by `linkGeneration`. The honest
+restatement of #59 against today's `main`: the activated generation and
+hookyard's on-disk state can diverge in either direction, because `install`
+aborted or because it was never reached, and nothing on the machine can tell.
+
+The fix splits across the sandbox/target-machine boundary rather than trying
+to close the gap from one side. Build time decides everything decidable from
+the manifests alone; activation-time state decides what is a property of this
+machine and this generation. The issue's two named abort paths land one on
+each side: whether an `exec` stat will succeed is knowable from the manifest
+alone (mostly), a symlinked destination is not.
+
+The build-time half is `hookyard validate --build-time`
+(`internal/manifest/manifest.go:425`, `validateExecBuildTime`), which
+`nix/hm-module.nix`'s `validatedManifests` derivation runs over every
+configured manifest before `installCommand` (`manifestFlags`, §46) is ever
+allowed to reference it. Decidability keys on the exec's **store root**
+(`internal/manifest/manifest.go:401`, `storeRoot`), not on whether the path
+looks like a store path. Measured: `nix-store --query --references` on a live
+consumer manifest that is a derivation output returns its exec store paths in
+full, while a manifest added as a bare source path and run through
+`nix-store --add` yields a store path with zero references. A present store
+root means the sandbox was actually handed that exec, so a missing or
+non-executable exec under it is a build failure — the typo case. An absent
+root is undecidable and is skipped, never failed; a prefix rule would hard-
+fail builds for source manifests that work fine on the machine, which is the
+one outcome the design explicitly avoids.
+
+Detection needs two things Nix and `install` did not previously write: a
+receipt naming what `install` actually did, and a witness naming what the
+current generation expects. `internal/installstate` (`internal/installstate/installstate.go`)
+holds the shared `Identity` both sides marshal — manifest set, router path,
+state dir, the three engine destinations, and the running `hookyard` binary.
+`install` writes the receipt to `<stateDir>/install.json` with `Complete:
+false` before its first check that can refuse, and again with `Complete: true`
+only after the last engine write succeeds, so both the exec-stat abort and the
+post-table abort above leave an un-finalised receipt. `--dry-run` writes
+nothing. The witness could have been a stamp folded into the Claude overlay —
+it is the one artifact guaranteed to reflect the new generation — but that
+would re-couple the overlay to the manifests, exactly what #60 decoupled. It
+is instead `xdg.configFile."hookyard/generation.json"`
+(`nix/hm-module.nix:345`), a plain Nix-placed file with no dependency on
+`hookyard` itself, so it cannot fail to land: home-manager writes it at
+`linkGeneration` (line 297), before `installPackages` (455) and
+`hookyardInstall` (594). That ordering is the mechanism, not an incidental
+choice — a file `install` itself wrote could never report its own absence.
+`internal/doctor`'s `generationFindings` (`internal/doctor/doctor.go:1073`)
+reads both and reports `Fail` on any disagreement, or `Unknown` when no
+witness exists (a standalone, non-Nix install).
+
+The fix is detection plus prevention, not a transactional install, and that
+is a deliberate bound rather than a gap. `internal/atomicfile` guarantees
+per-file atomicity through a single rename and nothing more; a cross-file
+transaction over files hookyard only partially owns — Codex's `config.toml`
+also holds the trust stores — is a much larger design than this issue asks
+for. The receipt makes a partial write visible instead of invisible, which is
+the honest bound on what this layer can promise.
+
+### What this amends
+
+| Section | Disposition | Reason |
+|---|---|---|
+| §9, "one profile path, stable across bumps" and the table/overlay drift discussion | Amended | The overlay is manifest-independent (issue #60), so the surviving drift is not "table vs. overlay" but four specific limbs — two silent, one loud, one inverse — enumerated above (issue #59) |
+| §9.1, router symlink | Extended | The symlink `install` maintains is also the mechanism behind silent limb (b): an unrepointed symlink after an incomplete install hands a new event name to an old binary, silently, via §5's fail-open |
+| New: build-time validation gate (`hookyard validate --build-time`) | Added | Closes every manifest error the build can decide, keyed on the exec's store root rather than its path form (issue #59) |
+| New: install receipt and generation witness (`internal/installstate`) | Added | Makes the residual activation-time drift — install aborted, or never reached — visible to `hookyard doctor` instead of invisible (issue #59) |
+
 ## 10. Migration order
 
 The task's working assumption was aeye first, lazytmux second. That order was

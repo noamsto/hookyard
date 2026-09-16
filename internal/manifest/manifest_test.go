@@ -656,3 +656,136 @@ func TestCheckPluginExecs(t *testing.T) {
 		}
 	}
 }
+
+// writeBuildTimeManifest writes a manifest naming exec verbatim, unlike
+// writeManifest, which always points EXEC at a real executable it just
+// created. LoadBuildTime's whole point is behaving differently depending on
+// whether exec exists and whether its store root exists, so these tests need
+// to control both independently.
+func writeBuildTimeManifest(t *testing.T, id, exec string) string {
+	t.Helper()
+	body := `{"handlers":[{"id":"` + id + `","exec":"` + exec + `","events":["pre_tool"],"engines":["cursor"]}]}`
+	return writeFile(t, t.TempDir(), "hookyard.json", body)
+}
+
+func TestLoadBuildTimeAcceptsExecUnderAPresentStoreRoot(t *testing.T) {
+	store := t.TempDir()
+	t.Setenv("NIX_STORE", store)
+	exec := filepath.Join(store, "abc-jq", "bin", "jq")
+	if err := os.MkdirAll(filepath.Dir(exec), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(exec, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadBuildTime(writeBuildTimeManifest(t, "a", exec)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadBuildTimeRejectsMissingExecUnderAPresentStoreRoot(t *testing.T) {
+	store := t.TempDir()
+	t.Setenv("NIX_STORE", store)
+	root := filepath.Join(store, "abc-jq")
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exec := filepath.Join(root, "bin", "jq") // never created
+
+	_, err := LoadBuildTime(writeBuildTimeManifest(t, "missing-exec", exec))
+	if err == nil {
+		t.Fatal("want an error for a missing exec under a present store root, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing-exec") {
+		t.Errorf("error should name the handler id, got: %v", err)
+	}
+}
+
+func TestLoadBuildTimeRejectsNonExecutableModeUnderAPresentStoreRoot(t *testing.T) {
+	store := t.TempDir()
+	t.Setenv("NIX_STORE", store)
+	exec := filepath.Join(store, "abc-jq", "bin", "jq")
+	if err := os.MkdirAll(filepath.Dir(exec), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(exec, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadBuildTime(writeBuildTimeManifest(t, "not-executable", exec))
+	if err == nil {
+		t.Fatal("want an error for a non-executable exec under a present store root, got nil")
+	}
+	if !strings.Contains(err.Error(), "not-executable") {
+		t.Errorf("error should name the handler id, got: %v", err)
+	}
+}
+
+func TestLoadBuildTimeRejectsExecThatIsADirectoryUnderAPresentStoreRoot(t *testing.T) {
+	store := t.TempDir()
+	t.Setenv("NIX_STORE", store)
+	exec := filepath.Join(store, "abc-jq", "bin", "jq")
+	if err := os.MkdirAll(exec, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadBuildTime(writeBuildTimeManifest(t, "a", exec)); err == nil {
+		t.Fatal("want an error for an exec that is a directory, got nil")
+	}
+}
+
+// This is the regression LoadBuildTime exists to prevent: a manifest added
+// to the store as a source path (rather than a derivation output) never gets
+// its exec references scanned, so the store root below is never created in
+// the sandbox even though the exec is perfectly fine on the target machine.
+// Failing the build here would be exactly the false positive §Background
+// warns about.
+func TestLoadBuildTimeAcceptsExecUnderAnAbsentStoreRoot(t *testing.T) {
+	store := t.TempDir()
+	t.Setenv("NIX_STORE", store)
+	exec := filepath.Join(store, "abc-jq", "bin", "jq") // store root "abc-jq" never created
+
+	if _, err := LoadBuildTime(writeBuildTimeManifest(t, "a", exec)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadBuildTimeAcceptsExecNotUnderTheStoreAtAll(t *testing.T) {
+	t.Setenv("NIX_STORE", t.TempDir())
+
+	path := writeBuildTimeManifest(t, "a", "/usr/local/bin/definitely-absent")
+	if _, err := LoadBuildTime(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// LoadBuildTime must still run every other validateAll rule; only the exec
+// check gets the build-time carve-out.
+func TestLoadBuildTimeStillRejectsANonExecIssue(t *testing.T) {
+	t.Setenv("NIX_STORE", t.TempDir())
+	body := `{"handlers":[{"id":"a","exec":"/usr/local/bin/anything","events":["pre_tool"],"engines":["emacs"]}]}`
+	path := writeFile(t, t.TempDir(), "hookyard.json", body)
+
+	_, err := LoadBuildTime(path)
+	if err == nil || !strings.Contains(err.Error(), "unknown engine") {
+		t.Errorf("want an error mentioning unknown engine, got: %v", err)
+	}
+}
+
+// storeRoot must compare on a path-separator boundary: a sibling directory
+// that merely starts with the store dir's name (.../storefoo/...) is not
+// under .../store, the same way /nix/storefoo is not under /nix/store.
+func TestLoadBuildTimeTreatsALookalikeSiblingDirAsNotUnderTheStore(t *testing.T) {
+	parent := t.TempDir()
+	store := filepath.Join(parent, "store")
+	if err := os.Mkdir(store, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NIX_STORE", store)
+
+	lookalike := filepath.Join(parent, "storefoo", "abc-jq", "bin", "jq")
+	if _, err := LoadBuildTime(writeBuildTimeManifest(t, "a", lookalike)); err != nil {
+		t.Fatal(err)
+	}
+}

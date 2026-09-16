@@ -13,12 +13,37 @@
 }: let
   cfg = config.programs.hookyard;
 
+  # Build-time gate: `hookyard validate --build-time` applies every static
+  # manifest rule, plus the exec runnable rules for execs whose store root is
+  # present in the sandbox, skipping execs the build cannot see. With
+  # `cfg.manifests == []` the `imap0` below yields `[]` without ever forcing
+  # this derivation, and `manifestFlags` below is already `""` in that case,
+  # so the `--allow-empty` branch on `installCommand` stays reachable exactly
+  # as before.
+  validatedManifests = pkgs.runCommand "hookyard-manifests-validated" {} ''
+    ${cfg.package}/bin/hookyard validate --build-time \
+      ${lib.concatMapStringsSep " " (p: "--manifest ${lib.escapeShellArg p}") cfg.manifests}
+    mkdir -p $out
+    ${lib.concatStringsSep "\n" (lib.imap0 (i: p: "cp ${lib.escapeShellArg p} $out/${lib.fixedWidthNumber 2 i}-${baseNameOf p}") cfg.manifests)}
+  '';
+
+  # Index-prefixed so two manifests sharing a basename cannot collide, and so
+  # the copy order is cfg.manifests' order.
+  validatedManifestPaths =
+    lib.imap0 (i: p: "${validatedManifests}/${lib.fixedWidthNumber 2 i}-${baseNameOf p}")
+    cfg.manifests;
+
   # The aggregation point (§8): the marker strip that removes hookyard's rows
   # on re-render does not record which manifest produced a row, so a second
   # per-repo invocation would strip the first repo's rows and those handlers
   # would vanish with no error. Consumers contribute to this one list; they
   # cannot express a second invocation.
-  manifestFlags = lib.concatMapStringsSep " " (p: "--manifest ${lib.escapeShellArg p}") cfg.manifests;
+  #
+  # Renders `validatedManifestPaths`, not `cfg.manifests`: the build-time gate
+  # above is structural, not incidental — there is no path by which
+  # activation can install a manifest the build did not accept, because the
+  # only paths it is handed here are outputs of the accepting derivation.
+  manifestFlags = lib.concatMapStringsSep " " (p: "--manifest ${lib.escapeShellArg p}") validatedManifestPaths;
 
   # §9: the router path is a stateDir-relative symlink (`<stateDir>/bin/hookyard`)
   # that `hookyard install` itself atomically creates/repoints at the running
@@ -241,6 +266,16 @@ in {
       readOnly = true;
       description = "The exact command home.activation.hookyardInstall runs. Read-only.";
     };
+
+    # Same reason as installCommand above: nix/checks/hm-module.nix cannot
+    # see a `let` binding inside this file. Keep the name in sync with that
+    # check.
+    validatedManifestPaths = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      internal = true;
+      readOnly = true;
+      description = "The validated manifest copies installCommand is handed. Read-only.";
+    };
   };
 
   # `claudeHooks` and `claudeOverlay.merged` sit outside `mkIf cfg.enable`
@@ -272,6 +307,7 @@ in {
       ];
 
       programs.hookyard.installCommand = installCommand;
+      programs.hookyard.validatedManifestPaths = validatedManifestPaths;
 
       # Ordered after writeBoundary per the task, and after installPackages
       # because writeBoundary alone lets this activation entry run before
@@ -282,6 +318,39 @@ in {
       home.activation.hookyardInstall = lib.hm.dag.entryAfter ["writeBoundary" "installPackages"] ''
         run ${installCommand}
       '';
+
+      # Generation witness: `doctor` compares this against
+      # `<stateDir>/install.json`, which `hookyard install` writes with the
+      # same shape — Go's `internal/installstate.Identity`. Do not rename any
+      # of these fields; they are a cross-language contract.
+      #
+      # `xdg.configFile`, not `home.file`: it follows `config.xdg.configHome`,
+      # which is the path `doctor.DefaultPaths` resolves at run time. And
+      # `stateDir` is carried as a field *inside* the file rather than as
+      # part of the file's location, because `home.file` keys are
+      # `$HOME`-relative while `stateDir` is a free absolute `types.str` —
+      # deriving the location from `stateDir` would be unsatisfiable for an
+      # operator whose state lives outside `$HOME`, and that operator would
+      # silently lose the whole detection layer.
+      #
+      # The placement is the mechanism, not an incidental detail:
+      # home-manager writes this at `linkGeneration` (line 297 of a real
+      # generation's activate script), before `installPackages` (455) and
+      # before `hookyardInstall` (594). That ordering is the entire reason the
+      # witness can see the case where `install` was never reached at all — a
+      # file `install` wrote could never report its own absence.
+      #
+      # This whole block is `mkIf cfg.enable`, so turning hookyard off leaves
+      # no witness and `doctor` reports Unknown rather than a false Fail.
+      xdg.configFile."hookyard/generation.json".text = builtins.toJSON {
+        schema = 1;
+        manifests = validatedManifestPaths;
+        # `inherit` keeps the attribute names, which is what matters here:
+        # every one of them is a JSON key installstate.Identity decodes.
+        inherit routerPath;
+        inherit (cfg) stateDir codexConfig cursorHooks piSettings;
+        hookyard = "${cfg.package}/bin/hookyard";
+      };
     })
   ];
 }
