@@ -18,7 +18,8 @@ the review batch; updated before each push.
 
 | invariant/family | finding or thread IDs | observed head | fix commit | proof | disposition | rounds used |
 | --- | --- | --- | --- | --- | --- | --- |
-| WriteCodex converges to exactly one hookyard-owned Codex hook command after a TOML rewrite / duplicated legacy blocks | review round 1 pending | 0413433 | pending | `go test ./internal/render/ ./internal/doctor/ ./cmd/hookyard/ -count=1` | open | 1 |
-| doctor reports the Codex hookyard entry count and names every distinct router path with its runnable state | review round 1 pending | 0413433 | pending | same | open | 1 |
+| WriteCodex preserves foreign bytes verbatim (no global whitespace normalization) | reviewer HIGH round 1 | 4909c78 | dc76d6e | `TestWriteCodexPreservesForeignMultilineStringVerbatim`; `go test ./internal/render/ ./internal/doctor/ ./cmd/hookyard/ -count=1`; `golangci-lint run ./...` | fixed (targeted re-review pending) | 1 |
+| strip keeps a matcher table that a surviving foreign sibling still needs | reviewer HIGH round 1 | 4909c78 | dc76d6e | `TestWriteCodexKeepsSharedMatcherForForeignSibling`; same gate | fixed (targeted re-review pending) | 1 |
+| codexRegistration distinguishes distinct events from same-event duplication | reviewer MEDIUM round 1 | 4909c78 | dc76d6e | `TestCodexRegistrationPassesWhenDistinctEvents`; same gate | fixed (targeted re-review pending) | 1 |
 
 recurrence_escalation: unused
