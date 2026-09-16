@@ -443,11 +443,11 @@ func codexRegistration(path string) Finding {
 		return f
 	}
 	n := strings.Count(string(raw), "route --registered-for codex")
-	switch {
-	case n == 1:
+	switch n {
+	case 1:
 		f.Status = Pass
 		f.Detail = "1 hookyard entry in " + path
-	case n == 0:
+	case 0:
 		f.Status = Fail
 		f.Detail = "no hookyard entry in " + path + "; run hookyard install"
 	default:

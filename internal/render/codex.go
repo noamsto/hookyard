@@ -214,12 +214,11 @@ func parseHooksArrayHeader(header string) (event string, inner bool, ok bool) {
 }
 
 func sectionHasCommandLine(raw string) bool {
-	body := raw
-	if nl := strings.IndexByte(raw, '\n'); nl >= 0 {
-		body = raw[nl+1:]
-	} else {
+	nl := strings.IndexByte(raw, '\n')
+	if nl < 0 {
 		return false
 	}
+	body := raw[nl+1:]
 	for _, line := range strings.Split(body, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "command") {
 			return true
