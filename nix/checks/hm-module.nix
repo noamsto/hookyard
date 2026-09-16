@@ -150,6 +150,20 @@
   };
   emptyManifests = mkScratch "empty-manifests" {} {manifests = [];};
 
+  # Item 4's scratch: a normal, non-hostile configuration like standalone,
+  # just pointed at its own /build subtree so installCommand's real `install`
+  # (not --dry-run) can run without colliding with any other scratch's
+  # destinations.
+  e2e = mkScratch "e2e" {} {stateDir = "/build/hookyard-check-e2e/state";};
+
+  # The witness half of item 4's comparison: the exact text hm-module.nix
+  # would place at xdg.configFile."hookyard/generation.json" for e2e, copied
+  # out to its own store path so the runCommand script below can jq against
+  # it after the real install has written its receipt.
+  witnessFile =
+    pkgs.writeText "hookyard-check-e2e-witness.json"
+    e2e.cfg.xdg.configFile."hookyard/generation.json".text;
+
   # Counts non-overlapping occurrences of `needle` in `haystack` — how the
   # "hookyard install occurs exactly once" assertion is made without a
   # second, hand-maintained count living next to it.
@@ -204,6 +218,16 @@
         msg = "expected ${toString (builtins.length hy.manifests)} --manifest flags, found ${toString (countOccurrences "--manifest" hy.installCommand)}: ${hy.installCommand}";
       }
       {
+        # What makes the build-time gate (nix/hm-module.nix's
+        # hookyard-manifests-validated) structural rather than a promise in a
+        # comment: installCommand's --manifest flags must be the *validated*
+        # copies, read from the option itself — never from a `let` binding
+        # inside that file, which installCommand's own comment there says
+        # this check cannot see.
+        cond = lib.all (m: hasInfixCtx "--manifest ${lib.escapeShellArg m}" hy.installCommand) hy.validatedManifestPaths;
+        msg = "installCommand is missing a --manifest flag for one of hy.validatedManifestPaths: ${hy.installCommand}";
+      }
+      {
         cond = hasInfixCtx "--state-dir ${lib.escapeShellArg hy.stateDir}" hy.installCommand;
         msg = "installCommand is missing --state-dir ${lib.escapeShellArg hy.stateDir}: ${hy.installCommand}";
       }
@@ -222,6 +246,28 @@
       {
         cond = builtins.elem hy.package cfg.home.packages;
         msg = "programs.hookyard.package is not in home.packages";
+      }
+      {
+        # `builtins.fromJSON` throws on a string carrying string context, and
+        # `text` carries plenty — cfg.manifests are derivation outputs and
+        # `hookyard` is `${cfg.package}/bin/hookyard`. Discarding context
+        # here is the same discipline hasInfixCtx already applies above, for
+        # the same reason: the comparison below is pure text, not
+        # import-from-derivation — nothing here ever reads a derivation's
+        # *output*, only this eval-time string. `generated` is checked before
+        # `parsed` is ever forced, via `&&`'s laziness, so a missing witness
+        # reports this message instead of throwing "attribute missing".
+        cond = let
+          generated = builtins.hasAttr "hookyard/generation.json" cfg.xdg.configFile;
+          parsed =
+            builtins.fromJSON
+            (builtins.unsafeDiscardStringContext cfg.xdg.configFile."hookyard/generation.json".text);
+        in
+          generated
+          && parsed.stateDir == hy.stateDir
+          && parsed.routerPath == "${hy.stateDir}/bin/hookyard"
+          && parsed.manifests == hy.validatedManifestPaths;
+        msg = "xdg.configFile.\"hookyard/generation.json\" is missing, or its stateDir/routerPath/manifests don't match hy";
       }
     ];
 
@@ -259,10 +305,24 @@
       cond = !(builtins.hasAttr "hookyardInstall" disabled.cfg.home.activation);
       msg = "home.activation.hookyardInstall exists with enable = false — disabling hookyard should leave no activation entry";
     }
+    {
+      # Turning hookyard off leaves no witness, so `doctor` reports Unknown
+      # rather than a false Fail — the same shape as the "no activation
+      # entry" and "no hookyard package" assertions above, just for the
+      # generation witness.
+      cond = !(builtins.hasAttr "hookyard/generation.json" disabled.cfg.xdg.configFile);
+      msg = "xdg.configFile contains hookyard/generation.json with enable = false — disabling hookyard should leave no generation witness";
+    }
   ];
 
   allChecks =
-    lib.concatMap scratchChecks [standalone submodule hostile]
+    # e2e is added here alongside standalone/submodule/hostile because it is
+    # itself an ordinary, non-hostile scratch (see its comment above) — every
+    # eval-time assertion scratchChecks makes about installCommand,
+    # activation, --manifest flags and the generation witness holds for it
+    # too, and running them costs nothing extra since e2e is evaluated
+    # regardless for the build-time comparison below.
+    lib.concatMap scratchChecks [standalone submodule hostile e2e]
     ++ disabledChecks
     ++ [
       (mergedIsReadable disabledWithBase)
@@ -378,6 +438,21 @@
     cat ${cfg.programs.hookyard.claudeOverlay.merged} >/dev/null
   '';
 
+  # The build-time half of the --manifest assertion above: `ls`ing the
+  # directory validatedManifestPaths' elements live in forces
+  # hookyard-manifests-validated to actually build, which is what makes
+  # `hookyard validate --build-time` really run and accept the two manifests
+  # mkManifest built. mkManifest points `exec` at `${pkgs.coreutils}/bin/true`
+  # — a store path whose root IS present in the sandbox — so this exercises
+  # the deciding arm of the build-time exec-runnable rule, not the skipped
+  # one; leave mkManifest alone.
+  validateBuildTimeScript = let
+    validated = dirOf (builtins.head standalone.cfg.programs.hookyard.validatedManifestPaths);
+  in ''
+    echo "=== standalone (manifests validated at build time) ==="
+    ls ${validated}
+  '';
+
   emptyOverlay = pkgs.writeText "hookyard-check-empty-overlay.json" "{\n}\n";
 
   # `disabled`'s merged file must be byte-identical to an empty overlay, and
@@ -391,11 +466,45 @@
     echo "=== ${name} (claudeOverlay.merged content) ==="
     cmp ${expected} ${cfg.programs.hookyard.claudeOverlay.merged}
   '';
+
+  # Item 4, the important one: nothing else anywhere compares a
+  # module-produced witness against a Go-produced receipt. Without this,
+  # `hookyard` (Nix writes `${cfg.package}/bin/hookyard`; Go writes
+  # `filepath.EvalSymlinks(os.Executable())`) and `manifests` (two
+  # independent renderers of one list) could disagree while every unit test
+  # on both sides still passes. Runs the real `install` (no --dry-run) and
+  # compares its receipt against witnessFile above. No `mkdir -p` beforehand:
+  # Go's `atomicfile.Write` `MkdirAll`s its parent at 0755, so every engine
+  # writer creates its own directory, and this script must not come to depend
+  # on `EnsureStateDir` having made one for it first. `piVersion()` shells out
+  # to `pi`, absent in the sandbox — it already falls back to a non-empty
+  # string by design, so that is not a failure path.
+  e2eScript = ''
+    echo "=== e2e (witness matches receipt) ==="
+    ${e2e.cfg.programs.hookyard.installCommand}
+    if ! ${pkgs.jq}/bin/jq -e --slurpfile w ${witnessFile} '
+          .complete == true
+          and .schema      == $w[0].schema
+          and .manifests   == $w[0].manifests
+          and .routerPath  == $w[0].routerPath
+          and .stateDir    == $w[0].stateDir
+          and .codexConfig == $w[0].codexConfig
+          and .cursorHooks == $w[0].cursorHooks
+          and .piSettings  == $w[0].piSettings
+          and .hookyard    == $w[0].hookyard
+        ' /build/hookyard-check-e2e/state/install.json >/dev/null; then
+      echo "hm-module check (e2e): install.json does not match the generation witness" >&2
+      echo "--- witness ---" >&2; cat ${witnessFile} >&2
+      echo "--- receipt ---" >&2; cat /build/hookyard-check-e2e/state/install.json >&2
+      exit 1
+    fi
+  '';
 in
   builtins.seq guard (pkgs.runCommand "hookyard-hm-module-check" {} ''
     set -euo pipefail
     ${dryRunScript standalone}
     ${dryRunScript submodule}
+    ${validateBuildTimeScript}
     ${expansionScript}
     ${emitScript standalone}
     ${mergedBuildsScript disabled}
@@ -409,5 +518,6 @@ in
       expected = overlayBase;
     }}
     ${mergedBuildsScript emptyManifests}
+    ${e2eScript}
     touch $out
   '')

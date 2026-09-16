@@ -18,6 +18,7 @@ import (
 	"github.com/noamsto/hookyard/internal/build"
 	"github.com/noamsto/hookyard/internal/doctor"
 	"github.com/noamsto/hookyard/internal/envelope"
+	"github.com/noamsto/hookyard/internal/installstate"
 	"github.com/noamsto/hookyard/internal/manifest"
 	"github.com/noamsto/hookyard/internal/record"
 	"github.com/noamsto/hookyard/internal/render"
@@ -148,10 +149,6 @@ func install(args []string) error {
 // runInstall is install's pipeline, split out so tests can drive it with
 // explicit paths instead of os.Args.
 func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex, cursor, pi string, dryRun bool) error {
-	handlers, err := loadAll(paths)
-	if err != nil {
-		return err
-	}
 	router := routerPath
 	if router == "" {
 		router = filepath.Join(stateDir, "bin", "hookyard")
@@ -168,6 +165,51 @@ func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex,
 	// different explicit path (a plain store path, say) is used as-is and no
 	// link is managed for it.
 	manageRouterLink := filepath.Clean(router) == filepath.Join(stateDir, "bin", "hookyard")
+
+	// Canonicalised the same way Nix writes ${cfg.package}/bin/hookyard, so
+	// the identity nix/checks/hm-module.nix compares against matches without
+	// a symlink-depth false positive. A failed EvalSymlinks (e.g. the binary
+	// isn't a symlink at all) falls back to the raw path rather than aborting
+	// the install over a canonicalisation nicety.
+	hookyardBin, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("hookyard: install receipt: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(hookyardBin); err == nil {
+		hookyardBin = resolved
+	}
+	id := installstate.Identity{
+		Manifests:   []string(paths),
+		RouterPath:  router,
+		StateDir:    stateDir,
+		CodexConfig: codex,
+		CursorHooks: cursor,
+		PiSettings:  pi,
+		Hookyard:    hookyardBin,
+	}
+	// Written before anything else touches disk, and again at the very end:
+	// if install aborts anywhere in between, doctor finds Complete=false
+	// here rather than a stale receipt from the previous generation's run,
+	// or (worse) no receipt at all implying nothing has run since.
+	if !dryRun {
+		if err := record.EnsureStateDir(stateDir); err != nil {
+			return err
+		}
+		if err := installstate.WriteReceipt(stateDir, installstate.Receipt{Complete: false, Identity: id}); err != nil {
+			return err
+		}
+	}
+
+	// loadAll runs after the receipt write, not before: a manifest whose exec
+	// fails its stat is one of the two abort paths this feature exists to
+	// catch, and loading it earlier would let the install abort with no
+	// receipt at all — which doctor could only read as a stale *finalised*
+	// receipt from the last successful run, not as "an install started here
+	// and did not finish".
+	handlers, err := loadAll(paths)
+	if err != nil {
+		return err
+	}
 	plan, err := render.BuildPlan(handlers, router, stateDir)
 	if err != nil {
 		return err
@@ -205,9 +247,8 @@ func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex,
 	// The table must exist before any engine config can point at it: an
 	// entry pointing at a --state-dir whose table isn't there yet is a
 	// fail-open with a wider window than a config write failing outright.
-	if err := record.EnsureStateDir(stateDir); err != nil {
-		return err
-	}
+	// (stateDir itself already exists — the incomplete receipt write above
+	// created it.)
 	if err := manifest.WriteTable(filepath.Join(stateDir, "table.json"), handlers); err != nil {
 		return err
 	}
@@ -228,6 +269,9 @@ func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex,
 		return err
 	}
 	if err := render.WriteCodex(codex, plan[vocab.Codex]); err != nil {
+		return err
+	}
+	if err := installstate.WriteReceipt(stateDir, installstate.Receipt{Complete: true, Identity: id}); err != nil {
 		return err
 	}
 	for _, engine := range vocab.Engines {
@@ -435,16 +479,24 @@ func validate(args []string) error {
 	var paths manifestPaths
 	fs.Var(&paths, "manifest", "path to a handler manifest (repeatable)")
 	pluginRoot := fs.String("plugin-root", "", "built plugin's root directory; validates manifests in build form against it")
+	buildTime := fs.Bool("build-time", false, "validate as a Nix build sandbox would: every static rule, plus the exec runnable rules for execs whose store root is present in the sandbox; an exec the build cannot see is skipped rather than failed")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if len(paths) == 0 {
 		return fmt.Errorf("no --manifest given")
 	}
+	if *buildTime && *pluginRoot != "" {
+		return fmt.Errorf("--build-time and --plugin-root are mutually exclusive: plugin form does not stat execs at all, so the two modes have nothing to combine")
+	}
 	if *pluginRoot != "" {
 		return validatePlugin(paths, *pluginRoot)
 	}
-	handlers, err := loadAll(paths)
+	load := manifest.Load
+	if *buildTime {
+		load = manifest.LoadBuildTime
+	}
+	handlers, err := loadAllWith(paths, load)
 	if err != nil {
 		return err
 	}
@@ -818,9 +870,13 @@ func handlerOutcomes(results []router.HandlerResult, adviceDelivered bool) []rec
 }
 
 func loadAll(paths []string) ([]manifest.Handler, error) {
+	return loadAllWith(paths, manifest.Load)
+}
+
+func loadAllWith(paths []string, load func(string) (*manifest.Manifest, error)) ([]manifest.Handler, error) {
 	manifests := make([]*manifest.Manifest, 0, len(paths))
 	for _, p := range paths {
-		m, err := manifest.Load(p)
+		m, err := load(p)
 		if err != nil {
 			return nil, err
 		}

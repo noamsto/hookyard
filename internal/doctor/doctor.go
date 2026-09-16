@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/noamsto/hookyard/internal/installstate"
 	"github.com/noamsto/hookyard/internal/manifest"
 	"github.com/noamsto/hookyard/internal/record"
 	"github.com/noamsto/hookyard/internal/render"
@@ -81,6 +82,10 @@ type Paths struct {
 	// configs already name, rather than treating empty as shorthand for
 	// record.DefaultStateDir().
 	StateDir string
+	// GenerationWitness is the Nix-placed file describing what the current
+	// home-manager generation expects `hookyard install` to have produced.
+	// Tests set it directly; DefaultPaths derives it from the environment.
+	GenerationWitness string
 }
 
 func DefaultPaths() (Paths, error) {
@@ -104,6 +109,10 @@ func DefaultPaths() (Paths, error) {
 		piAgentDir = filepath.Join(home, ".pi", "agent")
 	}
 	settingsFlags, launcherUnread := claudeLauncherSettings()
+	configHome := os.Getenv("XDG_CONFIG_HOME")
+	if configHome == "" {
+		configHome = filepath.Join(home, ".config")
+	}
 	return Paths{
 		ClaudeConfigDir:      claude,
 		CodexHome:            codex,
@@ -111,6 +120,7 @@ func DefaultPaths() (Paths, error) {
 		PiAgentDir:           piAgentDir,
 		ClaudeSettingsFlags:  settingsFlags,
 		ClaudeLauncherUnread: launcherUnread,
+		GenerationWitness:    filepath.Join(configHome, "hookyard", "generation.json"),
 	}, nil
 }
 
@@ -141,6 +151,7 @@ func Run(p Paths, dir string) []Finding {
 	findings = append(findings, claudeFindings(p, dir, claude)...)
 	findings = append(findings, codexFindings(p, dir)...)
 	findings = append(findings, cursorFindings(p, dir, stateDir)...)
+	findings = append(findings, generationFindings(p, stateDir)...)
 	findings = append(findings, piFindings(p)...)
 	findings = append(findings, streamFindings(stateDir, disagreement, time.Now())...)
 	return findings
@@ -1037,5 +1048,86 @@ func streamFindings(stateDir string, disagreement []string, now time.Time) []Fin
 
 	f.Status = Pass
 	f.Detail = fmt.Sprintf("%d/%d events today had a computed verdict the engine could not enforce", enforcedFalse, total)
+	return []Finding{f}
+}
+
+// generationFindings compares what the current home-manager generation
+// expects (the witness nix/hm-module.nix wrote at linkGeneration) against
+// what `hookyard install` actually did (the receipt it wrote into stateDir).
+// Engine is left at its zero value for the same reason streamFindings'
+// "enforcement" check leaves it unset: this isn't a per-engine finding.
+//
+// Every disagreement below is worded "the current generation and the
+// installed state disagree", never "the table is stale". They are not the
+// same claim: activation runs `linkGeneration`, then ~forty other entries,
+// then `installPackages`, then `hookyard install`, all under `set -e`. An
+// abort anywhere before `hookyard install` reaches its own work leaves the
+// witness naming the new generation while the live `claude` wrapper (and
+// everything else install would have touched) is still whatever the
+// previous, fully-installed generation left behind — a self-consistent
+// machine that this check nonetheless must fail, because the *next*
+// generation's assumptions no longer hold for it. "Stale" implies something
+// on disk fell behind its own past state; what actually happened is that two
+// declarations of intent — the generation's and install's — stopped
+// agreeing.
+func generationFindings(p Paths, stateDir string) []Finding {
+	f := Finding{Check: "generation"}
+
+	if p.GenerationWitness == "" {
+		f.Status = Unknown
+		f.Detail = "no Nix-placed generation witness; hookyard is not managed by the home-manager module here"
+		return []Finding{f}
+	}
+
+	w, witnessErr := installstate.ReadWitness(p.GenerationWitness)
+
+	// Read the receipt from the generation the witness names, not the
+	// stateDir Run resolved for the other checks: comparing the witness
+	// against a receipt from an unrelated install would report drift between
+	// two installs that were never meant to agree with each other. The
+	// stateDir argument is only a fallback for when there is no witness
+	// identity to read one from.
+	receiptDir := stateDir
+	if witnessErr == nil {
+		receiptDir = w.StateDir
+	}
+
+	if errors.Is(witnessErr, fs.ErrNotExist) {
+		f.Status = Unknown
+		f.Detail = fmt.Sprintf("no Nix-placed generation witness at %s; hookyard is not managed by the home-manager module here", p.GenerationWitness)
+		return []Finding{f}
+	}
+	if witnessErr != nil {
+		f.Status = Unknown
+		f.Detail = fmt.Sprintf("%s: %v", p.GenerationWitness, witnessErr)
+		return []Finding{f}
+	}
+
+	r, err := installstate.ReadReceipt(receiptDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		f.Status = Fail
+		f.Detail = fmt.Sprintf("hookyard install has never completed for %s; re-run home-manager switch", receiptDir)
+		return []Finding{f}
+	}
+	if err != nil {
+		f.Status = Fail
+		f.Detail = fmt.Sprintf("%s: %v; re-run home-manager switch", installstate.ReceiptPath(receiptDir), err)
+		return []Finding{f}
+	}
+
+	if !r.Complete {
+		f.Status = Fail
+		f.Detail = "the last hookyard install did not finish, so the current generation and the installed state disagree; re-run home-manager switch"
+		return []Finding{f}
+	}
+
+	if diffs := installstate.Diff(w, r); len(diffs) > 0 {
+		f.Status = Fail
+		f.Detail = fmt.Sprintf("the current generation and the installed state disagree: %s; re-run home-manager switch", strings.Join(diffs, ", "))
+		return []Finding{f}
+	}
+
+	f.Status = Pass
+	f.Detail = "the installed state matches the current generation"
 	return []Finding{f}
 }
