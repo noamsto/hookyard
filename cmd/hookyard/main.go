@@ -10,9 +10,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/noamsto/hookyard/internal/build"
@@ -22,6 +24,7 @@ import (
 	"github.com/noamsto/hookyard/internal/record"
 	"github.com/noamsto/hookyard/internal/render"
 	"github.com/noamsto/hookyard/internal/router"
+	"github.com/noamsto/hookyard/internal/serve"
 	"github.com/noamsto/hookyard/internal/verdict"
 	"github.com/noamsto/hookyard/internal/vocab"
 )
@@ -33,6 +36,7 @@ const usage = `hookyard — register agent hooks once, route them to every codin
   hookyard build     generate a native plugin that bundles hookyard (Claude Code only, for now)
   hookyard validate  check manifests without writing anything
   hookyard doctor    report whether each engine will actually run the hooks
+  hookyard serve     watch the routed-call record in a local read-only web view
   hookyard route     dispatch one hook event to every handler that matches it
 `
 
@@ -55,6 +59,8 @@ func main() {
 		err = runDoctor(os.Args[2:])
 	case "route":
 		err = route(os.Args[2:])
+	case "serve":
+		err = runServe(os.Args[2:])
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return
@@ -850,4 +856,44 @@ func printPlan(out io.Writer, plan render.Plan, piSettings string) {
 	// Pi is the one engine whose install writes a second file, and it is the
 	// executable half.
 	_, _ = fmt.Fprintf(out, "pi writes two files\n  %s\n  %s\n", piSettings, render.PiBridgePath(piSettings))
+}
+
+// runServe resolves the state directory, makes it absolute, and starts the
+// read-only HTTP view. It refuses to start rather than tolerating an
+// unresolvable state dir — route treats an empty state dir as "skip the
+// append", but the same empty value here would resolve to ./stream and
+// ./table.json relative to wherever the operator launched the server.
+func runServe(args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	stateDir := fs.String("state-dir", "", "hookyard state directory")
+	port := fs.Int("port", serve.DefaultPort, "listen port")
+	_ = fs.Parse(args)
+
+	dir := *stateDir
+	if dir == "" {
+		var err error
+		dir, err = record.DefaultStateDir()
+		if err != nil {
+			return fmt.Errorf("cannot resolve a state directory: %w", err)
+		}
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("cannot resolve a state directory: %w", err)
+	}
+	if absDir == "" {
+		return fmt.Errorf("cannot resolve a state directory: empty path")
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	if err := serve.Run(ctx, serve.Options{
+		StateDir: absDir,
+		Port:     *port,
+		Out:      os.Stdout,
+	}); err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+	return nil
 }

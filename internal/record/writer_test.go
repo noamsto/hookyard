@@ -104,6 +104,20 @@ func TestAppendRotatesAcrossUTCMidnight(t *testing.T) {
 	}
 }
 
+func TestStreamPathIsUnderStreamDir(t *testing.T) {
+	stateDir := "/state"
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+
+	got := StreamPath(stateDir, now)
+	want := filepath.Join(stateDir, "stream", "2026-09-10.jsonl")
+	if got != want {
+		t.Errorf("StreamPath(%q, %v) = %q, want %q", stateDir, now, got, want)
+	}
+	if dir := filepath.Dir(got); dir != StreamDir(stateDir) {
+		t.Errorf("StreamPath's parent = %q, want StreamDir(%q) = %q", dir, stateDir, StreamDir(stateDir))
+	}
+}
+
 func TestAppendFailsWhenStateDirComponentIsAFile(t *testing.T) {
 	tmp := t.TempDir()
 	notADir := filepath.Join(tmp, "not-a-dir")
