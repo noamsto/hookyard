@@ -103,6 +103,174 @@ func TestRunInstallTightensAPreexistingStateDir(t *testing.T) {
 	}
 }
 
+// An empty --router-path must make install manage a stable symlink at
+// <state-dir>/bin/hookyard pointing at the running binary (issue #61), and
+// every engine's emitted config must name that link, not the binary's own
+// volatile path.
+func TestRunInstallCreatesRouterSymlinkAtStateDir(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := writeTestManifest(t, dir)
+	stateDir := filepath.Join(dir, "state")
+	codex := filepath.Join(dir, "config.toml")
+	cursor := filepath.Join(dir, "hooks.json")
+	pi := filepath.Join(dir, "pi-settings.json")
+
+	if err := runInstall(io.Discard, manifestPaths{manifestPath}, "", stateDir, codex, cursor, pi, false); err != nil {
+		t.Fatal(err)
+	}
+
+	link := filepath.Join(stateDir, "bin", "hookyard")
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("lstat router link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("want %s to be a symlink, got mode %v", link, info.Mode())
+	}
+
+	wantTarget, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotTarget, err := os.Readlink(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotTarget != wantTarget {
+		t.Errorf("want router link target %q, got %q", wantTarget, gotTarget)
+	}
+
+	got := readFile(t, cursor)
+	if !strings.Contains(got, link) {
+		t.Errorf("want cursor config to name the router link %q, got:\n%s", link, got)
+	}
+}
+
+// A pre-existing router link naming some other, possibly stale target must
+// be repointed at the running binary, not left alone or appended to.
+func TestRunInstallRepointsAnExistingRouterSymlinkAtomically(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := writeTestManifest(t, dir)
+	stateDir := filepath.Join(dir, "state")
+	codex := filepath.Join(dir, "config.toml")
+	cursor := filepath.Join(dir, "hooks.json")
+	pi := filepath.Join(dir, "pi-settings.json")
+
+	link := filepath.Join(stateDir, "bin", "hookyard")
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/nonexistent/old-target", link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runInstall(io.Discard, manifestPaths{manifestPath}, "", stateDir, codex, cursor, pi, false); err != nil {
+		t.Fatal(err)
+	}
+
+	wantTarget, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotTarget, err := os.Readlink(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotTarget != wantTarget {
+		t.Errorf("want router link repointed to %q, got %q", wantTarget, gotTarget)
+	}
+}
+
+// Running install twice against the same state dir must not error the
+// second time around, and must leave the link naming the correct target.
+func TestRunInstallRouterSymlinkIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := writeTestManifest(t, dir)
+	stateDir := filepath.Join(dir, "state")
+	codex := filepath.Join(dir, "config.toml")
+	cursor := filepath.Join(dir, "hooks.json")
+	pi := filepath.Join(dir, "pi-settings.json")
+
+	if err := runInstall(io.Discard, manifestPaths{manifestPath}, "", stateDir, codex, cursor, pi, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := runInstall(io.Discard, manifestPaths{manifestPath}, "", stateDir, codex, cursor, pi, false); err != nil {
+		t.Fatal(err)
+	}
+
+	link := filepath.Join(stateDir, "bin", "hookyard")
+	wantTarget, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotTarget, err := os.Readlink(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotTarget != wantTarget {
+		t.Errorf("want router link target %q after a second install, got %q", wantTarget, gotTarget)
+	}
+}
+
+// An explicit --router-path naming anything other than the computed
+// state-dir link is used as-is: install must not create or manage a link
+// for it.
+func TestRunInstallExplicitRouterPathManagesNoLink(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := writeTestManifest(t, dir)
+	stateDir := filepath.Join(dir, "state")
+	codex := filepath.Join(dir, "config.toml")
+	cursor := filepath.Join(dir, "hooks.json")
+	pi := filepath.Join(dir, "pi-settings.json")
+
+	if err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath, stateDir, codex, cursor, pi, false); err != nil {
+		t.Fatal(err)
+	}
+
+	link := filepath.Join(stateDir, "bin", "hookyard")
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Errorf("want no router link created for an unrelated --router-path, got stat err: %v", err)
+	}
+}
+
+// The Nix home-manager module passes --router-path explicitly, but with the
+// same value the Go default computes. install must still manage the link:
+// gating only on the flag being empty would silently stop managing it the
+// moment the module started passing it explicitly.
+func TestRunInstallExplicitRouterPathEqualToComputedLinkManagesIt(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := writeTestManifest(t, dir)
+	stateDir := filepath.Join(dir, "state")
+	codex := filepath.Join(dir, "config.toml")
+	cursor := filepath.Join(dir, "hooks.json")
+	pi := filepath.Join(dir, "pi-settings.json")
+	link := filepath.Join(stateDir, "bin", "hookyard")
+
+	if err := runInstall(io.Discard, manifestPaths{manifestPath}, link, stateDir, codex, cursor, pi, false); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("lstat router link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("want %s to be a symlink, got mode %v", link, info.Mode())
+	}
+
+	wantTarget, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotTarget, err := os.Readlink(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotTarget != wantTarget {
+		t.Errorf("want router link target %q, got %q", wantTarget, gotTarget)
+	}
+}
+
 // render.command formats one unquoted string that each engine's own shell
 // splits itself, so a path with whitespace or a shell metacharacter in it
 // must be rejected before anything is written.

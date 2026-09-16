@@ -20,21 +20,30 @@
   # cannot express a second invocation.
   manifestFlags = lib.concatMapStringsSep " " (p: "--manifest ${lib.escapeShellArg p}") cfg.manifests;
 
-  # §9: the profile path is what every engine calls at hook-fire time —
-  # never the store path, which would churn all four engines' config on
-  # every hookyard bump and invalidate Codex's per-entry hook trust hash.
-  # `claudeHooks`/`claudeOverlay.merged` below render this same value into
-  # Claude's `command` fields, and `installCommand` passes it as
+  # §9: the router path is a stateDir-relative symlink (`<stateDir>/bin/hookyard`)
+  # that `hookyard install` itself atomically creates/repoints at the running
+  # binary every time it runs — never the store path, which would churn all
+  # four engines' config on every hookyard bump and invalidate Codex's
+  # per-entry hook trust hash, and never `config.home.profileDirectory`
+  # either, since that path itself flips depending on which home-manager
+  # activation mode last ran on the host (NixOS submodule `nh os switch` →
+  # `/etc/profiles/per-user/<user>`, vs standalone `nh home switch` →
+  # `~/.nix-profile`), which used to break hooks after every flip (issue
+  # #61). `claudeHooks`/`claudeOverlay.merged` below render this same value
+  # into Claude's `command` fields, and `installCommand` passes it as
   # `--router-path` for the router table `install` writes — one router path,
   # two renderers of it, and that is precisely the invariant that both read it
   # from the same `cfg.stateDir` so the table and the emitted commands never
   # disagree about what they name.
-  routerPath = "${config.home.profileDirectory}/bin/hookyard";
+  routerPath = "${cfg.stateDir}/bin/hookyard";
 
   # §9: hookyard is invoked by its **store** path here, because a store path
   # is a dependency of the generation and so is always present during
-  # activation, while the **profile** path is what gets emitted via
-  # --router-path for the three engines to call at hook-fire time.
+  # activation — and that running store-path binary is exactly what resolves
+  # `os.Executable()` when `install` repoints the router symlink — while the
+  # **stateDir symlink** (`routerPath` above, not a profile path any more) is
+  # what gets emitted via --router-path for the three engines to call at
+  # hook-fire time.
   installCommand = lib.concatStringsSep " " (
     [
       "env"
@@ -247,9 +256,12 @@ in {
     }
 
     (lib.mkIf cfg.enable {
-      # §9: putting the binary in the profile is this module's job, because a
-      # profile path only resolves if it is there. §10's first-deployment
-      # failure is precisely config wired without the binary installed.
+      # §9.1: `installCommand` invokes `${cfg.package}/bin/hookyard` directly
+      # (a store path, not the router symlink), so that store path has to
+      # actually exist on the system for activation to run it at all — this
+      # is what puts hookyard on `home.packages`, independent of the router
+      # path emitted via --router-path. §10's first-deployment failure is
+      # precisely config wired without the binary installed.
       home.packages = [cfg.package];
 
       assertions = [
@@ -262,10 +274,10 @@ in {
       programs.hookyard.installCommand = installCommand;
 
       # Ordered after writeBoundary per the task, and after installPackages
-      # because writeBoundary alone lets the config naming the profile path be
-      # written before the profile that resolves it exists — home-manager's own
-      # comment on installPackages gives this exact reason, and dconf, xfconf
-      # and vicinae all depend on it the same way. `run` is home-manager's own
+      # because writeBoundary alone lets this activation entry run before
+      # cfg.package's store path exists to exec — home-manager's own comment
+      # on installPackages gives this exact reason, and dconf, xfconf and
+      # vicinae all depend on it the same way. `run` is home-manager's own
       # wrapper, so `home-manager switch -n` does not install for real.
       home.activation.hookyardInstall = lib.hm.dag.entryAfter ["writeBoundary" "installPackages"] ''
         run ${installCommand}

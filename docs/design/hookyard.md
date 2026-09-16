@@ -1538,7 +1538,7 @@ gets noticed.
 | Router starts, a handler errors or times out | Yes — per-handler `error`/`timeout` outcome, on every event |
 | Router starts, then fails before consolidating (unreadable manifest, malformed inbound payload, internal panic) | Yes — it prints the fail-open verdict and appends `router: "error"` with the reason before exiting |
 | Router starts, exceeds its own 4.5 s deadline | Yes — the 500 ms margin under the emitted 5 s exists so it can print and append `router: "timeout"` rather than being killed mid-event |
-| Router exec fails: hookyard absent from the profile, or the wired path not executable | **No.** Nothing runs |
+| Router exec fails: the router symlink missing, dangling (target GC'd), or otherwise not executable | **No.** Nothing runs |
 
 The last row is the one that has to be answered on other terms, and §9's path
 form changes what it means. Because native config carries one absolute path
@@ -1550,10 +1550,13 @@ a *decidable* check rather than a reproduce-the-hook-environment guess. Two
 consequences follow:
 
 **It is rare by construction.** Native config is re-rendered on every
-home-manager activation, and §9's profile path resolves through the active
-profile, which is itself a GC root. Reaching this state requires hookyard to
-be absent from the profile outright — never installed on this host, removed
-from `home.packages`, or an activation that failed partway — or the config to
+home-manager activation, and the emitted path — the state-dir router symlink
+`install` maintains (see §9.1) — resolves through its target, a `/nix/store`
+path kept live by the live generation's activation script still referencing
+it; the generation is the GC root, not the target itself. Reaching this state
+requires hookyard to be absent from the profile outright
+— never installed on this host, removed from `home.packages` and its old
+generation collected, or an activation that failed partway — or the config to
 have been hand-edited past hookyard's own writer.
 
 **Its detection is by absence, and absence is polled, not pushed.** Two
@@ -3412,6 +3415,57 @@ The path form does not change fail-open's verdict. It changes the diagnosis,
 from "an environment problem that could be anything" to a single absolute
 path that either resolves or does not, checkable with one `test -x` and
 reported by `hookyard doctor` (§5).
+
+## 9.1 Amendment: state-dir router symlink (issue #61)
+
+§9's "one profile path, stable across bumps" argument assumed a host runs
+home-manager in exactly one activation mode. It does not hold on a host that
+activates home-manager **both** as a NixOS submodule (`nh os switch`, which
+resolves `config.home.profileDirectory` to
+`/etc/profiles/per-user/<user>`) **and** standalone (`nh home switch`, which
+resolves it to `~/.nix-profile`). On such a host `profileDirectory` flips
+with every switch of the *other* activation form, not just with a hookyard
+rebuild — so the emitted command string changes underneath every engine's
+config on activations that never touched hookyard's own table, and a hook
+wired against yesterday's profile path can fail at `exec` today. §9 did not
+consider this case; it argued single-mode stability, not cross-mode
+stability, and issue #61 is that gap made concrete.
+
+The fix moves the stable point one layer down, out of the profile entirely.
+`hookyard install` now maintains its own symlink, `<stateDir>/bin/hookyard`,
+and this — not `${config.home.profileDirectory}/bin/hookyard` — is the path
+every engine's emitted hook command names. `install` (re)points the link at
+`os.Executable()` in the same run that writes the handler table: it creates
+a new symlink in the link's directory and renames it over the existing one,
+so the repoint is atomic and never leaves a window with no link at all. The
+link is independent of which activation form last ran, because nothing about
+`nh os switch` versus `nh home switch` touches `stateDir` — only `install`
+does.
+
+This does not change §9's other conclusion, that the emitted path is not a
+store path: it is still one indirection away from one, and GC safety is
+unchanged. What changes is which indirection does the rooting. §9's version
+(§3400–3414 above) rooted through the *profile*, itself a GC root, so the
+emitted path stayed live as long as hookyard stayed in `home.packages`. The
+state-dir symlink instead roots through **itself**: its target is a
+`/nix/store` path, kept live only by the *live* generation's activation
+script still referencing that store path (the same generation that last ran
+`install`). A generation that no longer installs hookyard, once
+garbage-collected, leaves the link's target gone while the link itself is
+untouched — a dangling symlink, not a missing one, and `hookyard doctor`'s
+router-path check is extended to tell the two apart (§5) rather than
+reporting a bare "not found" for both. §9's earlier framing of this same
+rooting argument, in the "rare by construction" paragraph above, originally
+described the profile itself as the GC root the emitted path resolved
+through; that paragraph has been updated in place (by this same amendment) to
+describe the *symlink's target*, not the emitted path directly — the emitted
+path is now one step removed from the profile, not the profile path itself.
+
+### What this amends
+
+| Section | Disposition | Reason |
+|---|---|---|
+| §9, path form | Amended | The stable path is now a stateDir symlink `install` maintains, not `${config.home.profileDirectory}`; stable across activation-mode flips as well as version bumps (issue #61) |
 
 ## 10. Migration order
 
