@@ -42,6 +42,25 @@ command = "/nix/store/x/bin/hookyard route --registered-for codex --event pre_to
 	}
 }
 
+func TestCodexRegistrationPassesWhenDistinctEvents(t *testing.T) {
+	root := t.TempDir()
+	config := writeFile(t, root+"/config.toml", []byte(
+		`[[hooks.PreToolUse.hooks]]
+command = "/nix/store/x/bin/hookyard route --registered-for codex --event pre_tool --state-dir /s"
+
+[[hooks.PostToolUse.hooks]]
+command = "/nix/store/x/bin/hookyard route --registered-for codex --event post_tool --state-dir /s"
+`))
+
+	f := findByCheck(t, []Finding{codexRegistration(config)}, "hookyard registered")
+	if f.Status != Pass {
+		t.Fatalf("status = %v, want Pass; detail=%q", f.Status, f.Detail)
+	}
+	if !strings.Contains(f.Detail, "2 hookyard entries") {
+		t.Errorf("detail = %q, want the count 2", f.Detail)
+	}
+}
+
 func TestCodexRegistrationFailsWhenNone(t *testing.T) {
 	root := t.TempDir()
 	config := writeFile(t, root+"/config.toml", []byte("[hooks.state]\nreviewed = true\n"))

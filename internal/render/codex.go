@@ -240,11 +240,22 @@ func dropLegacyMarkerLines(content string) string {
 	return strings.Join(kept, "\n")
 }
 
-func collapseNewlines(s string) string {
-	for strings.Contains(s, "\n\n\n") {
-		s = strings.ReplaceAll(s, "\n\n\n", "\n\n")
+// hasSurvivingSibling reports whether any non-owned .hooks table for event
+// remains after ownership stripping. Such a survivor shares the matcher table
+// that precedes the owned sibling, so removing that matcher table would
+// silently widen the foreign hook's scope (its matcher becomes "every tool").
+// Only tables contiguous with the owned one belong to the same matcher group.
+func hasSurvivingSibling(sections []tomlSection, owned []bool, from int, event string) bool {
+	for j := from + 1; j < len(sections); j++ {
+		ev, inner, ok := parseHooksArrayHeader(sections[j].header)
+		if !ok || !inner || ev != event {
+			break
+		}
+		if !owned[j] {
+			return true
+		}
 	}
-	return s
+	return false
 }
 
 func stripCodexBlockOnce(content, path string) (string, bool, error) {
@@ -252,33 +263,46 @@ func stripCodexBlockOnce(content, path string) (string, bool, error) {
 	if len(sections) == 0 {
 		return content, false, nil
 	}
-	drop := make([]bool, len(sections))
+	// First pass: mark every hookyard-owned .hooks table. Ownership is decided
+	// before any matcher decision so a sibling's survival is known regardless
+	// of section order.
+	owned := make([]bool, len(sections))
 	for i, sec := range sections {
 		if !strings.Contains(sec.header, ".hooks]]") {
 			continue
 		}
-		owned := strings.Contains(sec.raw, "hookyard = true") ||
-			strings.Contains(sec.raw, "route --registered-for codex")
-		if !owned {
+		if !strings.Contains(sec.raw, "hookyard = true") &&
+			!strings.Contains(sec.raw, "route --registered-for codex") {
 			continue
 		}
-		event, inner, ok := parseHooksArrayHeader(sec.header)
-		if !ok || !inner {
+		if _, inner, ok := parseHooksArrayHeader(sec.header); !ok || !inner {
 			return "", false, fmt.Errorf("%s: cannot parse hookyard-owned table header %q", path, strings.TrimSpace(sec.header))
 		}
-		drop[i] = true
-		if i == 0 {
+		owned[i] = true
+	}
+	// Second pass: drop each owned .hooks table, and the matcher table it
+	// hangs under only when no foreign sibling still needs that matcher.
+	drop := append([]bool(nil), owned...)
+	for i := range sections {
+		if !owned[i] || i == 0 {
 			continue
 		}
 		prev := sections[i-1]
 		if strings.Contains(prev.header, ".hooks") {
 			continue
 		}
+		event, _, _ := parseHooksArrayHeader(sections[i].header)
 		prevEvent, prevInner, prevOK := parseHooksArrayHeader(prev.header)
 		if !prevOK || prevInner || prevEvent != event {
 			continue
 		}
 		if sectionHasCommandLine(prev.raw) {
+			continue
+		}
+		// hookyard matcher tables carry only a matcher and blanks. A table
+		// with a surviving foreign child must stay: the child keeps its
+		// matcher. Drop it only when every child it hosts is hookyard's.
+		if hasSurvivingSibling(sections, owned, i, event) {
 			continue
 		}
 		drop[i-1] = true
@@ -305,6 +329,9 @@ func stripCodexBlockOnce(content, path string) (string, bool, error) {
 }
 
 func stripCodexBlock(content, path string) (string, error) {
+	if !codexOwnsContent(content) {
+		return content, nil
+	}
 	for {
 		next, changed, err := stripCodexBlockOnce(content, path)
 		if err != nil {
@@ -315,10 +342,16 @@ func stripCodexBlock(content, path string) (string, error) {
 		}
 		content = next
 	}
-	out := collapseNewlines(dropLegacyMarkerLines(content))
-	out = strings.TrimSpace(out)
-	if out == "" {
+	if strings.Contains(content, codexBegin) || strings.Contains(content, codexEnd) {
+		content = dropLegacyMarkerLines(content)
+	}
+	// Normalize only the file's own trailing newline. The inherited document is
+	// Codex's, so interior bytes — blank-line runs and the contents of a
+	// foreign multi-line string included — must survive verbatim rather than
+	// being collapsed as whitespace.
+	content = strings.TrimRight(content, "\n")
+	if strings.TrimSpace(content) == "" {
 		return "", nil
 	}
-	return out + "\n", nil
+	return content + "\n", nil
 }

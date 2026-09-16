@@ -265,6 +265,55 @@ timeout = 5
 	}
 }
 
+// A foreign hook appended to hookyard's own matcher table must keep that
+// matcher when hookyard's child is stripped; otherwise it silently runs on
+// every tool instead of its registered matcher.
+func TestWriteCodexKeepsSharedMatcherForForeignSibling(t *testing.T) {
+	content := codexInherited + `
+[[hooks.PreToolUse]]
+matcher = "Bash"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/nix/store/x/bin/hookyard route --registered-for codex --event pre_tool"
+hookyard = true
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/foreign/script --keep-me"
+`
+	path := writeCodexFixture(t, content)
+	entries := []Entry{{Event: "PostToolUse", Command: "/nix/store/y/bin/hookyard route --registered-for codex --event post_tool"}}
+	if err := WriteCodex(path, entries); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, path)
+	if !strings.Contains(got, "/foreign/script --keep-me") {
+		t.Errorf("foreign sibling hook was dropped\n--- got ---\n%s", got)
+	}
+	if !strings.Contains(got, `matcher = "Bash"`) {
+		t.Errorf("shared matcher table was dropped, widening the foreign hook's scope\n--- got ---\n%s", got)
+	}
+}
+
+// Foreign bytes must survive a write that strips hookyard's block: in
+// particular a multi-line string's interior blank lines are value bytes, not
+// inter-table whitespace, so they must not be collapsed.
+func TestWriteCodexPreservesForeignMultilineStringVerbatim(t *testing.T) {
+	content := codexInherited + "note = \"\"\"\nline1\n\n\nline3\n\"\"\"\n\n" + codexBegin +
+		"\n\n[[hooks.PreToolUse]]\nmatcher = \"Bash\"\n\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"/old/bin/hookyard route --registered-for codex --event pre_tool\"\n\n" + codexEnd + "\n"
+	path := writeCodexFixture(t, content)
+	entries := []Entry{{Event: "PostToolUse", Command: "/nix/store/x/bin/hookyard route --registered-for codex --event post_tool"}}
+	if err := WriteCodex(path, entries); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, path)
+	want := "note = \"\"\"\nline1\n\n\nline3\n\"\"\""
+	if !strings.Contains(got, want) {
+		t.Errorf("foreign multi-line string was rewritten\n--- got ---\n%s", got)
+	}
+}
+
 func TestWriteCodexCreatesMissingFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	entries := []Entry{{Event: "PreToolUse", Command: "/x/bin/hookyard route --registered-for codex --event pre_tool"}}

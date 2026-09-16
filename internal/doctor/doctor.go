@@ -434,6 +434,13 @@ func codexFindings(p Paths, dir string) []Finding {
 	return []Finding{trust, hookTrust, codexRegistration(config), routerPath(vocab.Codex, config)}
 }
 
+// codexEventPattern recovers the --event argument from a hookyard router
+// command. Duplication is the *same* event registered more than once: BuildPlan
+// emits one entry per (engine, event), so a healthy install spanning several
+// Codex events legitimately carries several commands and must not read as
+// duplication.
+var codexEventPattern = regexp.MustCompile(`route --registered-for codex --event ([^\s"']+)`)
+
 func codexRegistration(path string) Finding {
 	f := Finding{Engine: vocab.Codex, Check: "hookyard registered", Detail: path}
 	raw, err := os.ReadFile(path)
@@ -442,18 +449,37 @@ func codexRegistration(path string) Finding {
 		f.Detail = fmt.Sprintf("%s: %v", path, err)
 		return f
 	}
-	n := strings.Count(string(raw), "route --registered-for codex")
-	switch n {
-	case 1:
-		f.Status = Pass
-		f.Detail = "1 hookyard entry in " + path
-	case 0:
+	body := string(raw)
+	total := strings.Count(body, "route --registered-for codex")
+	if total == 0 {
 		f.Status = Fail
 		f.Detail = "no hookyard entry in " + path + "; run hookyard install"
-	default:
-		f.Status = Fail
-		f.Detail = fmt.Sprintf("%d hookyard entries in %s; run hookyard install", n, path)
+		return f
 	}
+	perEvent := map[string]int{}
+	matches := codexEventPattern.FindAllStringSubmatch(body, -1)
+	for _, m := range matches {
+		perEvent[m[1]]++
+	}
+	// A command whose event cannot be recovered still counts, grouped under one
+	// key, so a repeated unparsable command reads as duplication rather than
+	// passing on a technicality.
+	if missing := total - len(matches); missing > 0 {
+		perEvent[""] += missing
+	}
+	for _, n := range perEvent {
+		if n > 1 {
+			f.Status = Fail
+			f.Detail = fmt.Sprintf("%d hookyard entries in %s; run hookyard install", total, path)
+			return f
+		}
+	}
+	f.Status = Pass
+	noun := "entry"
+	if total != 1 {
+		noun = "entries"
+	}
+	f.Detail = fmt.Sprintf("%d hookyard %s in %s", total, noun, path)
 	return f
 }
 
