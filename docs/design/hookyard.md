@@ -1554,9 +1554,9 @@ home-manager activation, and the emitted path — the state-dir router symlink
 `install` maintains (see §9.1) — resolves through its target, a `/nix/store`
 path kept live by the live generation's activation script still referencing
 it; the generation is the GC root, not the target itself. Reaching this state
-requires hookyard to be absent from the profile outright
-— never installed on this host, removed from `home.packages` and its old
-generation collected, or an activation that failed partway — or the config to
+requires hookyard to be absent from the profile outright — never installed
+on this host, removed from `home.packages` and its old generation collected,
+or an activation that failed partway — or the config to
 have been hand-edited past hookyard's own writer.
 
 **Its detection is by absence, and absence is polled, not pushed.** Two
