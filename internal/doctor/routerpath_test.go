@@ -95,6 +95,27 @@ func TestRouterPathFailWhenNotExecutable(t *testing.T) {
 	}
 }
 
+func TestRouterPathFailWhenDangling(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	router := filepath.Join(binDir, "hookyard")
+	if err := os.Symlink(filepath.Join(root, "nonexistent-target"), router); err != nil {
+		t.Fatal(err)
+	}
+	config := claudeConfig(t, root, routedCommand(router, vocab.ClaudeCode, filepath.Join(root, "state")))
+
+	f := routerPath(vocab.ClaudeCode, config)
+	if f.Status != Fail {
+		t.Fatalf("status = %v, want Fail", f.Status)
+	}
+	if !strings.Contains(f.Detail, "dangling symlink") {
+		t.Errorf("detail = %q, want it to say dangling symlink", f.Detail)
+	}
+}
+
 func TestRouterPathFailWhenADirectory(t *testing.T) {
 	root := t.TempDir()
 	binDir := filepath.Join(root, "bin")

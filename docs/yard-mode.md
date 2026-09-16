@@ -99,19 +99,26 @@ chance to fill in.
 
 Turning hookyard off goes in a specific order for Codex, Cursor and Pi: empty
 `manifests`, activate, *then* set `enable = false`. Flipping `enable` off first
-removes the binary from the profile while those three engines' configs still
-name it, so the path each config points at now fails at `exec` instead of
-resolving — exactly the fail-open §9 of the design doc spends its argument on.
-Emptying `manifests` first runs `install` with nothing registered, which strips
-hookyard's rows from all three configs while the binary is still there to do
-it; only then is it safe to drop the package itself. `hookyard doctor`'s
-`router path` check is what catches a machine left in the wrong order — it
-confirms the path each engine's config names is actually there to exec,
-alongside the trust and confirmed-deny checks it already runs. This ordering
-rule does not apply to Claude Code: `emit` never reads `manifests` in the
-first place, so emptying the list leaves the overlay untouched, and
-`enable = false` yields `claudeOverlay.base` verbatim — or `{\n}\n` when there
-is no base — without building hookyard at all, so it's safe in any order.
+drops hookyard from `home.packages`, and once that generation's own build is
+garbage-collected the router symlink each engine's config names — the
+stateDir link `install` maintains, see the design doc's §9.1 — is left
+pointing at a target that no longer exists. Those configs still name the
+symlink itself, so the failure lands one step later than it used to: not at
+the next activation, but whenever the old generation's store path is swept.
+Nothing removes the link when hookyard is disabled, so a host that is
+disabled and never installs again is left with a permanently dangling
+symlink and no automatic cleanup. Emptying `manifests` first runs `install`
+with nothing registered, which strips hookyard's rows from all three configs
+while the binary is still there to do it; only then is it safe to drop the
+package itself. `hookyard doctor`'s `router path` check is what catches a
+machine left in the wrong order — it confirms the path each engine's config
+names is actually there to exec, now distinguishing a dangling symlink from
+one that's simply missing, alongside the trust and confirmed-deny checks it
+already runs. This ordering rule does not apply to Claude Code: `emit` never
+reads `manifests` in the first place, so emptying the list leaves the overlay
+untouched, and `enable = false` yields `claudeOverlay.base` verbatim — or
+`{\n}\n` when there is no base — without building hookyard at all, so it's
+safe in any order.
 
 ### Destination files
 

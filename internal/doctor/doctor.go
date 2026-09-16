@@ -11,7 +11,9 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -826,7 +828,7 @@ var stateDirPattern = regexp.MustCompile(`--state-dir\s+([^\s"']+)`)
 // routerPath reports whether the absolute path this
 // engine's emitted command names is actually there to exec. §9's closing
 // argument is why doctor, not the event record, has to catch this: a broken
-// profile symlink fails at exec, before any hookyard code runs, so there is
+// state-dir symlink fails at exec, before any hookyard code runs, so there is
 // nothing running to write a record for streamFindings to read.
 func routerPath(engine vocab.Engine, configPath string) Finding {
 	raw, err := os.ReadFile(configPath)
@@ -882,10 +884,17 @@ func routerPathIn(engine vocab.Engine, source string, raw []byte) Finding {
 // enumerates, and the difference is not worth a unix.Access call that would
 // cost portability.
 func notExecutable(path string) string {
-	info, err := os.Stat(path)
+	lstatInfo, lstatErr := os.Lstat(path)
+	info, err := os.Stat(path) // follows symlinks
 	switch {
+	case errors.Is(lstatErr, fs.ErrNotExist):
+		return "missing (run hookyard install or home-manager switch)"
+	case lstatErr != nil:
+		return fmt.Sprintf("not accessible: %v", lstatErr)
+	case errors.Is(err, fs.ErrNotExist) && lstatInfo.Mode()&os.ModeSymlink != 0:
+		return "dangling symlink (run hookyard install or home-manager switch)"
 	case err != nil:
-		return "missing"
+		return fmt.Sprintf("not accessible: %v", err)
 	case info.IsDir():
 		return "a directory"
 	case !info.Mode().IsRegular() || info.Mode()&0o111 == 0:

@@ -121,7 +121,7 @@ func install(args []string) error {
 	if err != nil {
 		return err
 	}
-	routerPath := fs.String("router-path", "", "absolute path hookyard is invoked by (defaults to this binary)")
+	routerPath := fs.String("router-path", "", "absolute path hookyard is invoked by (defaults to <state-dir>/bin/hookyard, a symlink install points at this binary; a different explicit path is used as-is and no link is managed)")
 	stateDir := fs.String("state-dir", defaultStateDir, "directory the router reads its table from and writes records to")
 	codex := fs.String("codex-config", defaults.codex, "Codex config.toml to write")
 	cursor := fs.String("cursor-hooks", defaults.cursor, "Cursor hooks.json to write")
@@ -154,10 +154,7 @@ func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex,
 	}
 	router := routerPath
 	if router == "" {
-		router, err = os.Executable()
-		if err != nil {
-			return err
-		}
+		router = filepath.Join(stateDir, "bin", "hookyard")
 	}
 	if err := checkShellSafe("--router-path", router); err != nil {
 		return err
@@ -165,6 +162,12 @@ func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex,
 	if err := checkShellSafe("--state-dir", stateDir); err != nil {
 		return err
 	}
+	// True whenever router names hookyard's own state-dir link, whether that
+	// came from the empty-flag default above or from a caller (e.g. the Nix
+	// home-manager module) passing --router-path explicitly equal to it. A
+	// different explicit path (a plain store path, say) is used as-is and no
+	// link is managed for it.
+	manageRouterLink := filepath.Clean(router) == filepath.Join(stateDir, "bin", "hookyard")
 	plan, err := render.BuildPlan(handlers, router, stateDir)
 	if err != nil {
 		return err
@@ -208,6 +211,11 @@ func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex,
 	if err := manifest.WriteTable(filepath.Join(stateDir, "table.json"), handlers); err != nil {
 		return err
 	}
+	if manageRouterLink {
+		if err := linkRouter(router); err != nil {
+			return err
+		}
+	}
 	// Each writer is independent, so a later failure does not undo an earlier
 	// write. They are ordered least to most consequential: Codex last, because
 	// its file also holds the trust stores.
@@ -232,6 +240,40 @@ func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex,
 			continue
 		}
 		_, _ = fmt.Fprintf(out, "%-12s %d entries\n", engine, len(plan[engine]))
+	}
+	return nil
+}
+
+// linkRouter atomically (re)points router at the running binary so every
+// engine's emitted command names a link that survives an activation-mode
+// flip untouched (issue #61) — nix's os<->home switch, or a plain hookyard
+// version bump, both leave this path resolving without any config rewrite.
+func linkRouter(router string) error {
+	target, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("hookyard: router symlink: %w", err)
+	}
+	dir := filepath.Dir(router)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("hookyard: router symlink: %w", err)
+	}
+	// PID-suffixed so two concurrent installs (e.g. overlapping
+	// home-manager switch invocations) never race on the same temp path.
+	// Best-effort sweep of any stale sibling first: a PID-suffixed name means
+	// a run that crashed between Symlink and Rename leaves a file no later
+	// run's own PID will ever match, so nothing else would ever remove it.
+	if stale, err := filepath.Glob(router + ".tmp-*"); err == nil {
+		for _, f := range stale {
+			_ = os.Remove(f)
+		}
+	}
+	tmp := fmt.Sprintf("%s.tmp-%d", router, os.Getpid())
+	if err := os.Symlink(target, tmp); err != nil {
+		return fmt.Errorf("hookyard: router symlink: %w", err)
+	}
+	if err := os.Rename(tmp, router); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("hookyard: router symlink: %w", err)
 	}
 	return nil
 }

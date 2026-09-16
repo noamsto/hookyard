@@ -1,8 +1,10 @@
 # Evaluates the exported home-manager module against several scratch
 # configurations and then executes the rendered install command. Three
 # properties are silent when broken and nothing else in the repo checks any
-# of them: the emitted router path must be the rebuild-stable *profile* path,
-# never a store path; `hookyard install` must be invoked exactly once across
+# of them: the emitted router path must be the rebuild-stable `<stateDir>/bin/hookyard`
+# symlink, independent of which activation form (NixOS-submodule vs
+# standalone) last ran — never a store path, and no longer the profile path
+# either; `hookyard install` must be invoked exactly once across
 # the whole merged activation script; and every interpolated path must reach
 # bash escaped, since the activation script runs with the user's own
 # privileges. Two more join them now that the Claude Code emit options exist:
@@ -176,7 +178,7 @@
     entry = cfg.home.activation.hookyardInstall;
     # Built with escapeShellArg, like the module itself, so the two cannot
     # drift into agreeing on a hand-copied quoting style that neither uses.
-    expectedRouterFlag = "--router-path ${lib.escapeShellArg "${cfg.home.profileDirectory}/bin/hookyard"}";
+    expectedRouterFlag = "--router-path ${lib.escapeShellArg "${hy.stateDir}/bin/hookyard"}";
   in
     lib.optionals (name == "submodule") [
       {
@@ -269,6 +271,15 @@
         cond = builtins.unsafeDiscardStringContext standalone.cfg.programs.hookyard.claudeOverlay.merged.outPath == builtins.unsafeDiscardStringContext emptyManifests.cfg.programs.hookyard.claudeOverlay.merged.outPath;
         msg = "claudeOverlay.merged's outPath differs between standalone and empty-manifests — merged must not depend on cfg.manifests";
       }
+      {
+        cond =
+          standalone.cfg.programs.hookyard.stateDir
+          == submodule.cfg.programs.hookyard.stateDir
+          && hasInfixCtx
+          "--router-path ${lib.escapeShellArg "${standalone.cfg.programs.hookyard.stateDir}/bin/hookyard"}"
+          submodule.cfg.programs.hookyard.installCommand;
+        msg = "submodule installCommand's router flag is not the same fixed stateDir path as standalone's — router must not depend on activation form (nix/hm-module.nix, issue #61)";
+      }
     ];
   failures = lib.filter (c: !c.cond) allChecks;
 
@@ -294,8 +305,8 @@
     echo "=== ${name} ==="
     # named plan_out, not out: $out is the derivation's own output path below.
     plan_out=$(${cfg.programs.hookyard.installCommand} --dry-run)
-    if ! grep -qF "${cfg.home.profileDirectory}/bin/hookyard" <<<"$plan_out"; then
-      echo "hm-module check (${name}): --dry-run output did not contain the profile router path ${cfg.home.profileDirectory}/bin/hookyard" >&2
+    if ! grep -qF "${cfg.programs.hookyard.stateDir}/bin/hookyard" <<<"$plan_out"; then
+      echo "hm-module check (${name}): --dry-run output did not contain the fixed stateDir router path ${cfg.programs.hookyard.stateDir}/bin/hookyard" >&2
       echo "$plan_out" >&2
       exit 1
     fi
@@ -303,17 +314,19 @@
 
   # The regression escapeShellArg exists to prevent, executed rather than
   # asserted about. hostile deliberately does not go through dryRunScript:
-  # checkShellSafe refuses a space and a `$` in --state-dir before any real
-  # install, so a success-path check there would exercise the CLI's own guard
-  # rather than this module's escaping. What is proved here instead is that
-  # bash handed the binary the substitution as literal text — the command is
-  # refused, and the marker was never created. Unescaped, bash runs `touch`
-  # first and hookyard only ever sees the harmless empty expansion.
+  # checkShellSafe refuses a space and a `$` in --state-dir (and, since
+  # routerPath is now derived from cfg.stateDir, in --router-path too) before
+  # any real install, so a success-path check there would exercise the CLI's
+  # own guard rather than this module's escaping. What is proved here instead
+  # is that bash handed the binary the substitution as literal text — the
+  # command is refused, whichever of the two guards catches it first, and the
+  # marker was never created. Unescaped, bash runs `touch` first and hookyard
+  # only ever sees the harmless empty expansion.
   expansionScript = ''
     echo "=== hostile ==="
     rm -f ${pwnedMarker}
     if ${hostile.cfg.programs.hookyard.installCommand} --dry-run; then
-      echo "hm-module check (hostile): install accepted a --state-dir it should have refused" >&2
+      echo "hm-module check (hostile): install accepted a --router-path/--state-dir it should have refused" >&2
       exit 1
     fi
     if [ -e ${pwnedMarker} ]; then
@@ -338,8 +351,8 @@
   }: ''
     echo "=== ${name} (emit) ==="
     emit_out=$(cat ${cfg.programs.hookyard.claudeOverlay.merged})
-    if ! grep -qF "${cfg.home.profileDirectory}/bin/hookyard" <<<"$emit_out"; then
-      echo "hm-module check (${name}): claudeOverlay.merged did not contain the profile router path ${cfg.home.profileDirectory}/bin/hookyard" >&2
+    if ! grep -qF "${cfg.programs.hookyard.stateDir}/bin/hookyard" <<<"$emit_out"; then
+      echo "hm-module check (${name}): claudeOverlay.merged did not contain the fixed stateDir router path ${cfg.programs.hookyard.stateDir}/bin/hookyard" >&2
       echo "$emit_out" >&2
       exit 1
     fi
