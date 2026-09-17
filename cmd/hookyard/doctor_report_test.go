@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/noamsto/hookyard/internal/doctor"
 	"github.com/noamsto/hookyard/internal/vocab"
@@ -88,13 +89,20 @@ func TestRenderDoctorJSONSchemaAndNoANSI(t *testing.T) {
 }
 
 func TestDoctorDetailBoundsLongCommaSegment(t *testing.T) {
-	detail := doctorDetail(strings.Repeat("/very-long-path-segment", 8) + ", /short")
+	detail := doctorDetail(strings.Repeat("/very-long-path-segment", 8) + ", /短い")
 	for _, line := range strings.Split(detail, "\n") {
-		if len(line) > 88 {
+		if utf8.RuneCountInString(line) > 88 {
 			t.Fatalf("detail line length = %d, want at most 88: %q", len(line), line)
 		}
 	}
-	if !strings.Contains(detail, "…") || !strings.Contains(detail, "/short") {
+	if !strings.Contains(detail, "…") || !strings.Contains(detail, "/短い") {
 		t.Fatalf("detail = %q, want truncation and later segment", detail)
+	}
+
+	if got := doctorTruncate("é"+strings.Repeat("x", 88), 88); utf8.RuneCountInString(got) != 88 || !strings.HasSuffix(got, "…") {
+		t.Fatalf("exact-boundary truncation = %q, want 88 runes ending in ellipsis", got)
+	}
+	if got := doctorTruncate(strings.Repeat("界", 89), 88); utf8.RuneCountInString(got) != 88 || !strings.HasSuffix(got, "…") {
+		t.Fatalf("unicode truncation = %q, want 88 runes ending in ellipsis", got)
 	}
 }

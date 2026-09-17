@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/noamsto/hookyard/internal/build"
 	"github.com/noamsto/hookyard/internal/doctor"
@@ -727,25 +728,23 @@ func doctorDetail(detail string) string {
 	const width = 88
 	const continuationIndent = 17
 	const segmentWidth = width - continuationIndent
-	if len(detail) <= width {
+	if utf8.RuneCountInString(detail) <= width {
 		return detail
 	}
 	parts := strings.Split(detail, ",")
 	if len(parts) == 1 {
-		return detail[:width-1] + "…"
+		return doctorTruncate(detail, width)
 	}
 	var lines []string
 	line := ""
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
-		if len(part) >= segmentWidth {
-			part = part[:segmentWidth-1] + "…"
-		}
+		part = doctorTruncate(part, segmentWidth)
 		candidate := part
 		if line != "" {
 			candidate = line + ", " + part
 		}
-		if len(candidate) > width && line != "" {
+		if utf8.RuneCountInString(candidate) > segmentWidth && line != "" {
 			lines = append(lines, line+",")
 			line = part
 		} else {
@@ -755,7 +754,16 @@ func doctorDetail(detail string) string {
 	if line != "" {
 		lines = append(lines, line)
 	}
-	return strings.Join(lines, "\n                 ")
+	return strings.Join(lines, "\n"+strings.Repeat(" ", continuationIndent))
+}
+
+// Rune count is a sufficient no-dependency column approximation for paths,
+// identifiers, and error text displayed by doctor.
+func doctorTruncate(value string, max int) string {
+	if utf8.RuneCountInString(value) <= max {
+		return value
+	}
+	return string([]rune(value)[:max-1]) + "…"
 }
 
 // routeOptions is route's argv, already parsed. parseErr rides along instead
