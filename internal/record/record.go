@@ -151,13 +151,20 @@ type minimalRecord struct {
 	Truncated bool   `json:"truncated"`
 }
 
+// StreamDir is the single source of truth for where the stream directory
+// lives, so "where the stream directory is" stops being a filepath.Join
+// repeated in writer.go and now also in serve.
+func StreamDir(stateDir string) string {
+	return filepath.Join(stateDir, "stream")
+}
+
 // StreamPath is the single source of truth for where a day's file lives.
 // Append, the retention sweep's cutoff computation, and doctor's "today's
 // file" lookup all compute the path through this function, never re-deriving
 // the format string elsewhere, so the three can never drift against each
 // other on timezone.
 func StreamPath(stateDir string, t time.Time) string {
-	return filepath.Join(stateDir, "stream", t.UTC().Format("2006-01-02")+".jsonl")
+	return filepath.Join(StreamDir(stateDir), t.UTC().Format("2006-01-02")+".jsonl")
 }
 
 // computeKey is hookyard's own correlation-key rule (§6): pane if non-empty,

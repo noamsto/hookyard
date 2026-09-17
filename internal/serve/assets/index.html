@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hookyard serve</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">hookyard <span class="dim">serve</span></div>
+  <div id="state-dir" class="state-dir dim"></div>
+  <div class="spacer"></div>
+  <label class="day-picker">
+    <span class="dim">day</span>
+    <select id="day-select"></select>
+  </label>
+  <div id="conn" class="conn" data-state="static">
+    <span class="conn-dot"></span><span class="conn-label">static</span>
+  </div>
+</header>
+
+<form id="filters" class="filterbar" autocomplete="off">
+  <div class="filter-group">
+    <label for="f-engine">engine</label>
+    <select id="f-engine" name="engine" multiple size="4"></select>
+  </div>
+  <div class="filter-group filter-group--wide">
+    <label for="f-session">session <kbd>/</kbd></label>
+    <input id="f-session" name="session" type="text" placeholder="substring of session id…">
+  </div>
+  <div class="filter-group">
+    <label for="f-event">event</label>
+    <select id="f-event" name="event" multiple size="4"></select>
+  </div>
+  <div class="filter-group">
+    <label for="f-handler">handler</label>
+    <select id="f-handler" name="handler" multiple size="4"></select>
+  </div>
+  <div class="filter-group">
+    <label for="f-verdict">verdict / outcome</label>
+    <select id="f-verdict" name="verdict" multiple size="4"></select>
+  </div>
+  <button type="button" id="clear-filters"><kbd>Esc</kbd> clear</button>
+</form>
+
+<main class="body">
+  <section class="panel feed-panel">
+    <div class="panel-header">
+      <h2>feed</h2>
+      <span id="feed-count" class="dim"></span>
+      <span id="feed-windowed" class="dim" hidden>windowed &mdash; more via load older</span>
+    </div>
+    <ol id="feed" class="feed"></ol>
+    <div class="feed-footer">
+      <button type="button" id="load-older">load older</button>
+    </div>
+  </section>
+
+  <aside class="side">
+    <section class="panel stats-panel">
+      <div class="panel-header">
+        <h2>counts</h2>
+        <span id="stats-day" class="dim"></span>
+      </div>
+      <p class="hint">unfiltered — describes the whole day, not the feed above</p>
+      <div id="stats-body"></div>
+    </section>
+
+    <section class="panel table-panel">
+      <div class="panel-header">
+        <h2>handler table</h2>
+      </div>
+      <div id="table-body"></div>
+    </section>
+  </aside>
+</main>
+
+<template id="row-template">
+  <li class="row">
+    <div class="row-main" tabindex="0" role="button" aria-expanded="false">
+      <span class="c-time"></span>
+      <span class="c-engine"></span>
+      <span class="c-key"></span>
+      <span class="c-event"></span>
+      <span class="c-tool"></span>
+      <span class="c-verdict"></span>
+      <span class="c-enforced"></span>
+      <span class="c-handlers"></span>
+    </div>
+    <div class="row-detail" hidden>
+      <dl>
+        <dt>session</dt><dd class="d-session"></dd>
+        <dt>cwd</dt><dd class="d-cwd"></dd>
+        <dt>reason</dt><dd class="d-reason"></dd>
+      </dl>
+      <div class="d-handlers"></div>
+    </div>
+  </li>
+</template>
+
+<template id="handler-chip-template">
+  <span class="chip">
+    <span class="chip-name"></span><span class="chip-ms"></span>
+  </span>
+</template>
+
+<template id="handler-detail-template">
+  <div class="handler-detail">
+    <div class="handler-detail-head">
+      <span class="hd-name"></span>
+      <span class="hd-outcome"></span>
+      <span class="hd-ms"></span>
+    </div>
+    <div class="hd-advice"></div>
+    <div class="hd-message"></div>
+  </div>
+</template>
+
+<template id="table-row-template">
+  <div class="table-row">
+    <span class="tr-fired"></span>
+    <span class="tr-id"></span>
+    <span class="tr-lane"></span>
+    <span class="tr-events"></span>
+  </div>
+</template>
+
+<template id="divider-template">
+  <li class="divider"><span></span></li>
+</template>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

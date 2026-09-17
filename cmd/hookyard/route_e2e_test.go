@@ -25,10 +25,15 @@ const e2eBudget = 10 * time.Second
 // proving the pipeline through the real executable rather than through
 // runRoute called in-process — route_test.go already covers that — so a
 // build failure here belongs to the test, not to a helper package.
+//
+// -tags netgo forces the pure-Go DNS resolver: internal/serve now imports
+// net/http, and without this tag a devshell with CGO_ENABLED=1 (the default
+// here) links the cgo resolver against libc, which is exactly the PT_INTERP
+// regression assertStaticBinary (build_e2e_test.go) exists to catch.
 func buildRouteBinary(t *testing.T) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "hookyard")
-	cmd := exec.Command("go", "build", "-o", bin, ".")
+	cmd := exec.Command("go", "build", "-tags", "netgo", "-o", bin, ".")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}

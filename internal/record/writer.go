@@ -50,7 +50,7 @@ func (w *Writer) now() time.Time {
 func (w *Writer) Append(e Event) error {
 	now := w.now()
 
-	streamDir := filepath.Join(w.StateDir, "stream")
+	streamDir := StreamDir(w.StateDir)
 	if err := EnsureStateDir(w.StateDir); err != nil {
 		return fmt.Errorf("record: %w", err)
 	}
