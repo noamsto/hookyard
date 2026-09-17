@@ -11,10 +11,10 @@ import (
 )
 
 // rewriteFingerprint bounds how many already-read trailing bytes the cursor
-// remembers to detect a same-inode rewrite (SPEC 4.2 case 5): a copytruncate
-// that shrinks a file and refills it past the stale offset within one poll
-// interval leaves nothing for a plain size check to catch, since the
-// rewritten file is never observed shorter than the cursor.
+// remembers to detect a same-inode rewrite: a copytruncate that shrinks a
+// file and refills it past the stale offset within one poll interval leaves
+// nothing for a plain size check to catch, since the rewritten file is never
+// observed shorter than the cursor.
 const rewriteFingerprint = 4096
 
 // Tailer follows the current day's stream file and reports every record, day
@@ -137,9 +137,8 @@ func (t *Tailer) tick(ctx context.Context, c *tailCursor, out chan<- TailEvent) 
 		// Same inode, and not shorter than the cursor either, but the bytes
 		// just before the cursor no longer match what was already read: a
 		// copytruncate rewrote the file in place and regrew it past the
-		// stale offset before this poll ever saw it shorter (SPEC 4.2 case
-		// 5). Trusting the offset here would silently skip or misread the
-		// rewritten prefix.
+		// stale offset before this poll ever saw it shorter. Trusting the
+		// offset here would silently skip or misread the rewritten prefix.
 		c.offset = 0
 		c.carry = nil
 		c.tail = nil
@@ -167,6 +166,21 @@ func (t *Tailer) tick(ctx context.Context, c *tailCursor, out chan<- TailEvent) 
 			return true
 		}
 		c.file, c.opened = file, opened
+		if c.offset > 0 {
+			// Resuming at a known offset (from Seed, or a prior restart) means
+			// this tailer has never itself read what's already on disk there.
+			// Seed the rewrite fingerprint from the file directly so a rewrite
+			// happening before this tailer's own next read is still caught,
+			// instead of only ever comparing against bytes it read itself.
+			n := int64(rewriteFingerprint)
+			if c.offset < n {
+				n = c.offset
+			}
+			buf := make([]byte, n)
+			if got, _ := file.ReadAt(buf, c.offset-n); got > 0 {
+				c.tail = buf[:got]
+			}
+		}
 	}
 	return t.pump(ctx, c, info.Size(), out)
 }
@@ -181,6 +195,9 @@ func tailIntact(c *tailCursor) bool {
 	}
 	start := c.offset - int64(len(c.tail))
 	got := make([]byte, len(c.tail))
+	// A read error here is treated the same as a content mismatch: either way
+	// the offset can no longer be trusted, and resetting is the safe default
+	// (the same one the truncation/replacement cases already take).
 	n, _ := c.file.ReadAt(got, start)
 	return n == len(c.tail) && bytes.Equal(got, c.tail)
 }

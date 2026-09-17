@@ -22,7 +22,7 @@ type Hub struct {
 	now      func() time.Time
 	poll     time.Duration // 0 -> pollInterval; only a test shortens it
 
-	day     string // the day Seed settled on
+	seedDay string // the day Seed settled on, frozen there — see Day() for the live day
 	seedEnd int64  // where Seed stopped, and therefore where the tailer starts
 
 	acc   *Accumulator
@@ -79,17 +79,18 @@ func (h *Hub) Seed() error {
 	if err != nil {
 		return err
 	}
-	h.day, h.seedEnd, h.acc = day, seedEnd, acc
+	h.seedDay, h.seedEnd, h.acc = day, seedEnd, acc
 	h.publish()
 	return nil
 }
 
 // Day is the Hub's current day, read from the published snapshot rather than
-// the h.day field directly. h.day is mutated only by Run's owning goroutine,
-// on rollover (SPEC 4.4a); reading it from any other goroutine, as this
-// method is (server.go's handlers call it concurrently with Run), would race
-// that write. The published snapshot already exists for exactly this kind of
-// concurrent, lock-free read, and is updated in lockstep with h.day.
+// a raw field. The day changes only on rollover, inside Run's owning
+// goroutine (SPEC 4.4a); reading it from any other goroutine, as this method
+// is (server.go's handlers call it concurrently with Run), would race that
+// write if it went through an unsynchronized field. The published snapshot
+// already exists for exactly this kind of concurrent, lock-free read, and is
+// updated in lockstep with every place the day changes.
 func (h *Hub) Day() string {
 	if snap := h.live.Load(); snap != nil {
 		return snap.Day
@@ -119,7 +120,7 @@ func (h *Hub) Run(ctx context.Context) error {
 		StateDir: h.stateDir,
 		Poll:     h.poll,
 		Now:      h.now,
-		Start:    map[string]int64{h.day: h.seedEnd},
+		Start:    map[string]int64{h.seedDay: h.seedEnd},
 	}).Run(tailCtx, events)
 
 	ticker := time.NewTicker(statsInterval)
@@ -213,7 +214,6 @@ func (h *Hub) handle(ev TailEvent) {
 		// The day frame goes out before any of the new day's call frames
 		// (SPEC 4.4a), so a page left open overnight re-points its stats panel
 		// rather than watching the counts collapse to near-zero unannounced.
-		h.day = ev.NewDay
 		h.acc = NewAccumulator(ev.NewDay)
 		h.publish()
 		h.broadcast(Frame{Event: "day", Data: dayPayload{Day: ev.NewDay}})

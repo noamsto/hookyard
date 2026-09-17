@@ -267,8 +267,8 @@ func TestHubRolloverSendsDayBeforeTheNewDaysCalls(t *testing.T) {
 // TestHubDayReadDoesNotRaceRollover exists to be run under `go test -race`.
 // It asserts nothing about Day()'s return value — its only job is to hold a
 // concurrent reader on Day() across the exact moment Run's own goroutine
-// mutates the day on rollover, so the race detector catches h.day being read
-// and written from different goroutines without synchronization.
+// mutates the day on rollover, so the race detector would catch a regression
+// back to reading an unsynchronized field from outside that goroutine.
 func TestHubDayReadDoesNotRaceRollover(t *testing.T) {
 	stateDir := t.TempDir()
 	day, next := "2026-09-10", "2026-09-11"

@@ -67,6 +67,22 @@ func tailAppend(t *testing.T, stateDir, day, content string) {
 	}
 }
 
+// tailOverwrite rewrites the day's file from offset 0 without truncating, so
+// its size only ever grows — a same-inode rewrite no size check can notice.
+func tailOverwrite(t *testing.T, stateDir, day, content string) {
+	t.Helper()
+	file, err := os.OpenFile(tailPath(stateDir, day), os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := file.WriteAt([]byte(content), 0); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
 func startTailer(t *testing.T, tl *Tailer) (<-chan TailEvent, context.CancelFunc) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -254,6 +270,49 @@ func TestTailRapidTruncateAndRegrowDetectsRewriteBeforeReReading(t *testing.T) {
 	}
 	if entry.Offset != int64(len(fresh)) {
 		t.Errorf("Offset = %d, want %d (re-read from 0)", entry.Offset, len(fresh))
+	}
+}
+
+func TestTailFingerprintSeededFromDiskAtStartup(t *testing.T) {
+	stateDir := t.TempDir()
+	day := "2026-09-10"
+	clock := newTailClock(t, "2026-09-10T12:00:00Z")
+	old1 := recLine(t, record.Record{SessionID: "old1"})
+	old2 := recLine(t, record.Record{SessionID: "old2"})
+	tailAppend(t, stateDir, day, old1+old2)
+
+	// Start the tailer already past both records, as Hub.Seed would leave it
+	// — it never reads old1/old2 itself, so its rewrite fingerprint must come
+	// from disk at open time, not from its own reads.
+	out, _ := startTailer(t, &Tailer{
+		StateDir: stateDir,
+		Poll:     time.Millisecond,
+		Now:      clock.now,
+		Start:    map[string]int64{day: int64(len(old1) + len(old2))},
+	})
+
+	// Ticks that open the file and emit nothing, the quiet period between
+	// `hookyard serve` starting and the first new call — the window in which
+	// the fingerprint has to come from disk, since no read will fill it.
+	time.Sleep(20 * time.Millisecond)
+
+	// Rewrite in place over the old bytes rather than truncating first, so the
+	// file is never observed shorter than the cursor even for an instant: a
+	// size check cannot catch this at any tick, only the fingerprint can.
+	padded := strings.Repeat("f", len(old1)+len(old2))
+	fresh := recLine(t, record.Record{SessionID: padded})
+	if len(fresh) < len(old1)+len(old2) {
+		t.Fatalf("test setup: fresh (%d bytes) must be >= the old offset (%d bytes)", len(fresh), len(old1)+len(old2))
+	}
+	tailOverwrite(t, stateDir, day, fresh)
+
+	ev := nextTail(t, out)
+	if ev.Restart == "" {
+		t.Fatalf("want a restart when a rewrite happens before the tailer's own first read, got %+v", ev)
+	}
+	entry := nextEntry(t, out)
+	if entry.Rec.SessionID != padded {
+		t.Fatalf("SessionID = %q, want the rewritten record", entry.Rec.SessionID)
 	}
 }
 

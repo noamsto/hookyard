@@ -277,17 +277,14 @@ func TestEventsBeforeParamPagesOlderRecords(t *testing.T) {
 		t.Fatalf("decode page2: %v", err)
 	}
 
-	var sawS6 bool
-	for _, rec := range page2.Records {
-		if rec.Rec.SessionID == "s9" || rec.Rec.SessionID == "s8" {
-			t.Fatalf("page2 repeats the newest page instead of paging older: %+v", page2.Records)
-		}
-		if rec.Rec.SessionID == "s6" {
-			sawS6 = true
-		}
+	want := []string{"s6", "s5", "s4"}
+	if len(page2.Records) != len(want) {
+		t.Fatalf("page2 = %+v, want exactly %v (s7 must not reappear as page2's newest entry)", page2.Records, want)
 	}
-	if !sawS6 {
-		t.Fatalf("page2 = %+v, want it to reach s6 (an older record than page1)", page2.Records)
+	for i, w := range want {
+		if got := page2.Records[i].Rec.SessionID; got != w {
+			t.Errorf("page2.Records[%d].SessionID = %q, want %q", i, got, w)
+		}
 	}
 }
 
