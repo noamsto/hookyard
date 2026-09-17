@@ -725,6 +725,8 @@ func doctorStatusStyle(status string) (string, string) {
 
 func doctorDetail(detail string) string {
 	const width = 88
+	const continuationIndent = 17
+	const segmentWidth = width - continuationIndent
 	if len(detail) <= width {
 		return detail
 	}
@@ -736,6 +738,9 @@ func doctorDetail(detail string) string {
 	line := ""
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
+		if len(part) >= segmentWidth {
+			part = part[:segmentWidth-1] + "…"
+		}
 		candidate := part
 		if line != "" {
 			candidate = line + ", " + part

@@ -17,7 +17,7 @@ Ledger opened before the independent review batch.
 
 | invariant/family | finding or thread IDs | observed head | fix commit | proof | disposition | rounds used |
 | --- | --- | --- | --- | --- | --- | --- |
-| doctor report rendering and JSON contract | pending independent review | pending commit | pending | `go build ./...`, `go vet ./...`, `go test ./... -race`, `golangci-lint run ./...`, `nix flake check` | open | 0 |
+| doctor TTY detail lines stay bounded even for a long comma-delimited segment | Go reviewer MEDIUM (round 1) | eb7f937 | pending | `go build ./...`, `go vet ./...`, `go test ./... -race`, `golangci-lint run ./...`, `nix flake check`; targeted re-review pending | fixed | 1 |
 
 recurrence_escalation: unused
 

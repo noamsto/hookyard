@@ -86,3 +86,15 @@ func TestRenderDoctorJSONSchemaAndNoANSI(t *testing.T) {
 		t.Fatalf("global group = %#v", report.Engines[1])
 	}
 }
+
+func TestDoctorDetailBoundsLongCommaSegment(t *testing.T) {
+	detail := doctorDetail(strings.Repeat("/very-long-path-segment", 8) + ", /short")
+	for _, line := range strings.Split(detail, "\n") {
+		if len(line) > 88 {
+			t.Fatalf("detail line length = %d, want at most 88: %q", len(line), line)
+		}
+	}
+	if !strings.Contains(detail, "…") || !strings.Contains(detail, "/short") {
+		t.Fatalf("detail = %q, want truncation and later segment", detail)
+	}
+}
