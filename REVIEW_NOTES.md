@@ -11,6 +11,19 @@ recurrence_escalation: unused
 
 ---
 
+# Review notes — hookyard #56 (doctor report rendering and JSON)
+
+Ledger opened before the independent review batch.
+
+| invariant/family | finding or thread IDs | observed head | fix commit | proof | disposition | rounds used |
+| --- | --- | --- | --- | --- | --- | --- |
+| doctor TTY detail lines stay bounded even for a long comma-delimited segment | Go reviewer MEDIUM (round 1); targeted reviewer HIGH (round 2); dispatcher late packing directive | 93ffda3 | 93ffda3 | full deterministic gate passed; first lines use 88 runes and continuations reserve indentation; targeted re-review accepted (round 4) | fixed | 4 |
+| rendered doctor TTY rows, including check details and fixes, must not exceed 88 columns and continuations start under their detail column | follow-up defect from PR #69; Go review approved; test-runner's long-label concern refuted by all production check labels (max 24 runes) | 14f97d4 | 14f97d4 | `TestRenderDoctorTTYLinesFitTerminalWidth`; full deterministic gate; independent Go review and targeted test review passed | fixed | 1 |
+
+recurrence_escalation: unused
+
+---
+
 # Review notes — hookyard #63 (bound Codex block duplication: structural strip anchor + doctor entry counts)
 
 Base `dfbf33c` (`origin/main`). Ledger opened at head `0413433` immediately before

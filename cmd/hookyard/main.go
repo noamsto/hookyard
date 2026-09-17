@@ -4,6 +4,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/noamsto/hookyard/internal/build"
 	"github.com/noamsto/hookyard/internal/doctor"
@@ -534,6 +536,7 @@ func runDoctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 	dir := fs.String("dir", "", "directory to report on (defaults to the working directory)")
 	stateDir := fs.String("state-dir", "", "state directory to report on (defaults to the one recovered from the engines' configs, falling back to record.DefaultStateDir)")
+	jsonOutput := fs.Bool("json", false, "print the report as JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -549,13 +552,10 @@ func runDoctor(args []string) error {
 		paths.StateDir = *stateDir
 	}
 
-	fmt.Printf("hookyard doctor — %s\n\n", target)
-	problems := 0
-	for _, f := range doctor.Run(paths, target) {
-		if f.Status == doctor.Fail {
-			problems++
-		}
-		fmt.Printf("%-12s %-20s %-8s %s\n", f.Engine, f.Check, f.Status, f.Detail)
+	findings := doctor.Run(paths, target)
+	problems, err := renderDoctor(os.Stdout, target, findings, stdoutIsTerminal(), *jsonOutput)
+	if err != nil {
+		return err
 	}
 	if problems == 1 {
 		return fmt.Errorf("1 problem found")
@@ -564,6 +564,217 @@ func runDoctor(args []string) error {
 		return fmt.Errorf("%d problems found", problems)
 	}
 	return nil
+}
+
+func stdoutIsTerminal() bool {
+	info, err := os.Stdout.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+type doctorGroup struct {
+	Engine   string        `json:"engine"`
+	Verdict  string        `json:"verdict"`
+	Problems int           `json:"problems"`
+	Checks   []doctorCheck `json:"checks"`
+}
+
+type doctorCheck struct {
+	Check  string `json:"check"`
+	Status string `json:"status"`
+	Detail string `json:"detail"`
+	Fix    string `json:"fix,omitempty"`
+}
+
+type doctorReport struct {
+	Engines []doctorGroup `json:"engines"`
+}
+
+func renderDoctor(out io.Writer, target string, findings []doctor.Finding, terminal, jsonOutput bool) (int, error) {
+	problems := 0
+	for _, finding := range findings {
+		if finding.Status == doctor.Fail {
+			problems++
+		}
+	}
+	if jsonOutput {
+		groups := doctorGroups(findings)
+		if err := json.NewEncoder(out).Encode(doctorReport{Engines: groups}); err != nil {
+			return problems, err
+		}
+		return problems, nil
+	}
+	if !terminal {
+		if _, err := fmt.Fprintf(out, "hookyard doctor — %s\n\n", target); err != nil {
+			return problems, err
+		}
+		for _, finding := range findings {
+			if _, err := fmt.Fprintf(out, "%-12s %-20s %-8s %s\n", finding.Engine, finding.Check, finding.Status, finding.Detail); err != nil {
+				return problems, err
+			}
+		}
+		return problems, nil
+	}
+
+	groups := doctorGroups(findings)
+	for _, group := range groups {
+		color, glyph := doctorVerdictStyle(group.Verdict)
+		if _, err := fmt.Fprintf(out, "%s%s %s — %s\x1b[0m\n", color, glyph, group.Engine, doctorGroupVerdict(group)); err != nil {
+			return problems, err
+		}
+		for _, check := range group.Checks {
+			checkColor, checkGlyph := doctorStatusStyle(check.Status)
+			checkPrefix := fmt.Sprintf("  %s %-20s ", checkGlyph, check.Check)
+			if _, err := fmt.Fprintf(out, "%s%s%s\x1b[0m\n", checkColor, checkPrefix, doctorDetail(check.Detail, utf8.RuneCountInString(checkPrefix))); err != nil {
+				return problems, err
+			}
+			if check.Status == "problem" && check.Fix != "" {
+				fixPrefix := "    fix: "
+				if _, err := fmt.Fprintf(out, "%s%s\n", fixPrefix, doctorDetail(check.Fix, utf8.RuneCountInString(fixPrefix))); err != nil {
+					return problems, err
+				}
+			}
+		}
+	}
+	var affected []string
+	for _, group := range groups {
+		if group.Problems > 0 {
+			affected = append(affected, group.Engine)
+		}
+	}
+	if len(affected) > 0 {
+		if _, err := fmt.Fprintf(out, "\nAffected: %s\n", strings.Join(affected, ", ")); err != nil {
+			return problems, err
+		}
+	}
+	return problems, nil
+}
+
+func doctorGroupVerdict(group doctorGroup) string {
+	if group.Problems > 0 {
+		if group.Problems == 1 {
+			return "1 problem"
+		}
+		return fmt.Sprintf("%d problems", group.Problems)
+	}
+	if group.Verdict == "unknown" {
+		return "unknown"
+	}
+	return "all ok"
+}
+
+func doctorGroups(findings []doctor.Finding) []doctorGroup {
+	groups := make([]doctorGroup, 0)
+	indices := make(map[string]int)
+	for _, finding := range findings {
+		engine := string(finding.Engine)
+		if engine == "" {
+			engine = "hookyard"
+		}
+		index, ok := indices[engine]
+		if !ok {
+			indices[engine] = len(groups)
+			groups = append(groups, doctorGroup{Engine: engine})
+			index = len(groups) - 1
+		}
+		status := doctorStatus(finding.Status)
+		check := doctorCheck{Check: finding.Check, Status: status, Detail: finding.Detail, Fix: finding.Fix}
+		groups[index].Checks = append(groups[index].Checks, check)
+		if status == "problem" {
+			groups[index].Problems++
+		}
+	}
+	for i := range groups {
+		verdict := "ok"
+		if groups[i].Problems > 0 {
+			verdict = "problem"
+		} else {
+			for _, check := range groups[i].Checks {
+				if check.Status == "unknown" {
+					verdict = "unknown"
+					break
+				}
+			}
+		}
+		groups[i].Verdict = verdict
+	}
+	return groups
+}
+
+func doctorStatus(status doctor.Status) string {
+	switch status {
+	case doctor.Pass:
+		return "ok"
+	case doctor.Fail:
+		return "problem"
+	default:
+		return "unknown"
+	}
+}
+
+func doctorVerdictStyle(verdict string) (string, string) {
+	switch verdict {
+	case "problem":
+		return "\x1b[31m", "✗"
+	case "unknown":
+		return "\x1b[33m", "?"
+	default:
+		return "\x1b[32m", "✓"
+	}
+}
+
+func doctorStatusStyle(status string) (string, string) {
+	return doctorVerdictStyle(status)
+}
+
+func doctorDetail(detail string, prefixWidth int) string {
+	const width = 88
+	detailWidth := width - prefixWidth
+	if utf8.RuneCountInString(detail) <= detailWidth {
+		return detail
+	}
+	parts := strings.Split(detail, ",")
+	if len(parts) == 1 {
+		return doctorTruncate(detail, detailWidth)
+	}
+	var lines []string
+	line := ""
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		capacity := detailWidth
+		if i < len(parts)-1 {
+			part = doctorTruncate(part, capacity-1)
+		} else {
+			part = doctorTruncate(part, capacity)
+		}
+		candidate := part
+		if line != "" {
+			candidate = line + ", " + part
+		}
+		if utf8.RuneCountInString(candidate) > capacity && line != "" {
+			lines = append(lines, doctorTruncate(line, capacity-1)+",")
+			if i < len(parts)-1 {
+				part = doctorTruncate(part, capacity-1)
+			} else {
+				part = doctorTruncate(part, capacity)
+			}
+			line = part
+		} else {
+			line = candidate
+		}
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n"+strings.Repeat(" ", prefixWidth))
+}
+
+// Rune count is a sufficient no-dependency column approximation for paths,
+// identifiers, and error text displayed by doctor.
+func doctorTruncate(value string, max int) string {
+	if utf8.RuneCountInString(value) <= max {
+		return value
+	}
+	return string([]rune(value)[:max-1]) + "…"
 }
 
 // routeOptions is route's argv, already parsed. parseErr rides along instead
