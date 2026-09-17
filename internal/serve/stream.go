@@ -191,15 +191,15 @@ func ScanDay(stateDir, day string, end int64, limit int, f Filter) (EventsRespon
 //
 // Known trade-off: this assumes the partial line is a record still being
 // written (record.Append does one atomic write(2) per record, capped at 64
-// KiB specifically so a concurrent reader racing an in-flight write is the
-// only practical way a partial line appears — see record.go's maxRecordBytes
-// doc). If a partial line is instead permanently abandoned (e.g. a write
-// error left a genuinely incomplete record on disk with no retry), the next
-// distinct record appended after it will be read glued to that dead prefix
-// with no separating newline, fail to decode as one unit, and be dropped
-// together with it. This is a narrower, rarer case than the one this fix
-// targets, and is not solvable from the byte stream alone without a
-// self-delimiting record format — a larger change than this fix's scope.
+// KiB so a short write is not a practical concern — see record.go's
+// maxRecordBytes doc — which leaves a concurrent reader racing an in-flight
+// write as the ordinary way a partial line appears). If a partial line is
+// instead permanently abandoned (e.g. a write error left a genuinely
+// incomplete record on disk with no retry), the next distinct record
+// appended after it is read glued to that dead prefix with no separating
+// newline, fails to decode as one unit, and is dropped along with it — rarer
+// than the in-flight case, and not distinguishable from the byte stream
+// alone without a self-delimiting record format.
 func ScanAll(stateDir, day string, visit func(Entry)) (int64, error) {
 	if !validDayPattern.MatchString(day) {
 		return 0, nil
