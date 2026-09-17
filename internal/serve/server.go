@@ -184,14 +184,17 @@ func (h *serveMux) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	endStr := q.Get("end")
-	var end int64
-	if endStr != "" {
-		end, _ = strconv.ParseInt(endStr, 10, 64)
+	// before is the "load older" cursor (SPEC 4.4): the scan window ends
+	// there instead of at the file size, which is what the UI and the
+	// documented contract both name it.
+	beforeStr := q.Get("before")
+	var before int64
+	if beforeStr != "" {
+		before, _ = strconv.ParseInt(beforeStr, 10, 64)
 	}
 
 	f := ParseFilter(q)
-	resp, err := ScanDay(h.stateDir, day, end, limit, f)
+	resp, err := ScanDay(h.stateDir, day, before, limit, f)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

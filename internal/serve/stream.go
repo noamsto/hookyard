@@ -154,8 +154,13 @@ func ScanDay(stateDir, day string, end int64, limit int, f Filter) (EventsRespon
 }
 
 // ScanAll streams the whole day file from offset 0, calling visit for every
-// decodable record in order, and returns the offset it stopped at (the file
-// size observed when the pass began). Used to seed the accumulator.
+// decodable record in order, and returns the offset just past the last
+// complete (newline-terminated) record. A trailing partial line — the file's
+// last bytes when a write is caught mid-record — is deliberately excluded
+// from that offset: including it would mean the tailer starts past the
+// in-progress record, and once the write completes the tailer would see only
+// the suffix, fail to decode it, and silently drop it (SPEC 4.2 case 2). Used
+// to seed the accumulator.
 func ScanAll(stateDir, day string, visit func(Entry)) (int64, error) {
 	if !validDayPattern.MatchString(day) {
 		return 0, nil
@@ -174,13 +179,20 @@ func ScanAll(stateDir, day string, visit func(Entry)) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	seedEnd := info.Size()
+	size := info.Size()
 
-	scanner := newScanner(io.LimitReader(file, seedEnd))
+	scanner := newScanner(io.LimitReader(file, size))
 	var offset int64
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		offset += int64(len(line)) + 1
+		lineEnd := offset + int64(len(line)) + 1
+		if lineEnd > size {
+			// The final token has no trailing newline in the file: a write
+			// still in progress. Stop before it — offset already sits just
+			// past the last complete record.
+			break
+		}
+		offset = lineEnd
 		var rec record.Record
 		if err := json.Unmarshal(line, &rec); err != nil {
 			continue
@@ -190,5 +202,5 @@ func ScanAll(stateDir, day string, visit func(Entry)) (int64, error) {
 	if err := scanner.Err(); err != nil {
 		return 0, err
 	}
-	return seedEnd, nil
+	return offset, nil
 }

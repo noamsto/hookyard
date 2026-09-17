@@ -84,9 +84,17 @@ func (h *Hub) Seed() error {
 	return nil
 }
 
-// Day is the day Seed settled on.
+// Day is the Hub's current day, read from the published snapshot rather than
+// the h.day field directly. h.day is mutated only by Run's owning goroutine,
+// on rollover (SPEC 4.4a); reading it from any other goroutine, as this
+// method is (server.go's handlers call it concurrently with Run), would race
+// that write. The published snapshot already exists for exactly this kind of
+// concurrent, lock-free read, and is updated in lockstep with h.day.
 func (h *Hub) Day() string {
-	return h.day
+	if snap := h.live.Load(); snap != nil {
+		return snap.Day
+	}
+	return ""
 }
 
 // Now is the Hub's own clock, so handlers that need "the current time" agree

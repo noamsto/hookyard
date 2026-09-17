@@ -10,6 +10,13 @@ import (
 	"github.com/noamsto/hookyard/internal/record"
 )
 
+// rewriteFingerprint bounds how many already-read trailing bytes the cursor
+// remembers to detect a same-inode rewrite (SPEC 4.2 case 5): a copytruncate
+// that shrinks a file and refills it past the stale offset within one poll
+// interval leaves nothing for a plain size check to catch, since the
+// rewritten file is never observed shorter than the cursor.
+const rewriteFingerprint = 4096
+
 // Tailer follows the current day's stream file and reports every record, day
 // rollover and restart it sees. It polls rather than watching (SPEC 4.2):
 // inotify is Linux-only and kqueue is not portable either, and neither one
@@ -44,6 +51,7 @@ type tailCursor struct {
 	file   *os.File    // nil until the day's file exists
 	opened os.FileInfo // stat of the descriptor, for os.SameFile against the path
 	carry  []byte
+	tail   []byte // last min(offset, rewriteFingerprint) bytes already read, to detect a same-inode rewrite underneath the cursor
 }
 
 func (c *tailCursor) closeFile() {
@@ -61,6 +69,7 @@ func (c *tailCursor) rewind() {
 	c.closeFile()
 	c.offset = 0
 	c.carry = nil
+	c.tail = nil
 }
 
 // Run polls until ctx is done, sending to out. It closes out on return.
@@ -124,9 +133,24 @@ func (t *Tailer) tick(ctx context.Context, c *tailCursor, out chan<- TailEvent) 
 			return false
 		}
 	}
+	if c.file != nil && info.Size() >= c.offset && !tailIntact(c) {
+		// Same inode, and not shorter than the cursor either, but the bytes
+		// just before the cursor no longer match what was already read: a
+		// copytruncate rewrote the file in place and regrew it past the
+		// stale offset before this poll ever saw it shorter (SPEC 4.2 case
+		// 5). Trusting the offset here would silently skip or misread the
+		// rewritten prefix.
+		c.offset = 0
+		c.carry = nil
+		c.tail = nil
+		if !sendTail(ctx, out, TailEvent{Restart: "stream file rewritten"}) {
+			return false
+		}
+	}
 	if info.Size() < c.offset {
 		c.offset = 0
 		c.carry = nil
+		c.tail = nil
 		if !sendTail(ctx, out, TailEvent{Restart: "stream file truncated"}) {
 			return false
 		}
@@ -147,6 +171,20 @@ func (t *Tailer) tick(ctx context.Context, c *tailCursor, out chan<- TailEvent) 
 	return t.pump(ctx, c, info.Size(), out)
 }
 
+// tailIntact reports whether the bytes just before c.offset still match what
+// the cursor already read there. It is vacuously true until at least one
+// byte has been read (c.tail starts empty), so a freshly opened or just-reset
+// cursor is never flagged.
+func tailIntact(c *tailCursor) bool {
+	if len(c.tail) == 0 {
+		return true
+	}
+	start := c.offset - int64(len(c.tail))
+	got := make([]byte, len(c.tail))
+	n, _ := c.file.ReadAt(got, start)
+	return n == len(c.tail) && bytes.Equal(got, c.tail)
+}
+
 // pump reads [offset, size) through the open descriptor and emits one event
 // per complete line, returning false when ctx ended mid-send.
 func (t *Tailer) pump(ctx context.Context, c *tailCursor, size int64, out chan<- TailEvent) bool {
@@ -162,6 +200,13 @@ func (t *Tailer) pump(ctx context.Context, c *tailCursor, size int64, out chan<-
 	}
 	c.offset += int64(n)
 	c.carry = append(c.carry, buf[:n]...)
+
+	c.tail = append(c.tail, buf[:n]...)
+	if len(c.tail) > rewriteFingerprint {
+		// Copy on trim so the retained slice doesn't keep a much larger buf
+		// array alive underneath it.
+		c.tail = append([]byte(nil), c.tail[len(c.tail)-rewriteFingerprint:]...)
+	}
 
 	base := c.offset - int64(len(c.carry)) // absolute offset of carry[0]
 	for {

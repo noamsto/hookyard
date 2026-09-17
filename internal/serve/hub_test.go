@@ -139,6 +139,36 @@ func waitCalls(t *testing.T, h *Hub, day string, want int64) {
 	}
 }
 
+func TestHubSeedDoesNotDropARecordCompletedAfterSeed(t *testing.T) {
+	stateDir := t.TempDir()
+	day := "2026-09-10"
+	clock := newTailClock(t, "2026-09-10T12:00:00Z")
+
+	whole := recLine(t, record.Record{Engine: "codex", SessionID: "whole"})
+	full := recLine(t, record.Record{Engine: "codex", SessionID: "torn"})
+	torn := full[:len(full)-2] // drop the closing "}\n": a write Seed catches mid-record
+	tailAppend(t, stateDir, day, whole+torn)
+
+	h := seededHub(t, stateDir, clock)
+	if got := snapshotCalls(t, h, day); got != 1 {
+		t.Fatalf("seed counted %d calls, want 1 (the torn line must not be counted yet)", got)
+	}
+	startHub(t, h)
+
+	sub := h.Subscribe(Filter{}, 32)
+	handshake(t, sub)
+
+	// Complete the torn line exactly where Seed left off. If Seed's returned
+	// offset included the torn prefix, the tailer starts past it and only
+	// ever sees this suffix, which fails to decode and is silently dropped.
+	tailAppend(t, stateDir, day, full[len(full)-2:])
+
+	entry := nextCall(t, sub)
+	if entry.Rec.SessionID != "torn" {
+		t.Fatalf("SessionID = %q, want %q (the record completed after seed)", entry.Rec.SessionID, "torn")
+	}
+}
+
 func TestHubSeedHandsOffToTheTailerWithoutRecounting(t *testing.T) {
 	stateDir := t.TempDir()
 	day := "2026-09-10"
@@ -231,6 +261,55 @@ func TestHubRolloverSendsDayBeforeTheNewDaysCalls(t *testing.T) {
 	}
 	if got := h.Day(); got != next {
 		t.Errorf("Day() = %q after the rollover, want %q (a caller that omits ?day= would keep getting stale data)", got, next)
+	}
+}
+
+// TestHubDayReadDoesNotRaceRollover exists to be run under `go test -race`.
+// It asserts nothing about Day()'s return value — its only job is to hold a
+// concurrent reader on Day() across the exact moment Run's own goroutine
+// mutates the day on rollover, so the race detector catches h.day being read
+// and written from different goroutines without synchronization.
+func TestHubDayReadDoesNotRaceRollover(t *testing.T) {
+	stateDir := t.TempDir()
+	day, next := "2026-09-10", "2026-09-11"
+	clock := newTailClock(t, "2026-09-10T23:59:59Z")
+	h := seededHub(t, stateDir, clock)
+	startHub(t, h)
+
+	// The tailer only announces a rollover once it has settled on a first day,
+	// so wait for the old day's record before moving the clock.
+	hubLine(t, stateDir, day, "s0")
+	waitCalls(t, h, day, 1)
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				h.Day()
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-done
+	}()
+
+	clock.set(t, "2026-09-11T00:00:01Z")
+
+	deadline := time.Now().Add(frameWait)
+	for {
+		if _, ok := h.Snapshot(next); ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("rollover never happened")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

@@ -239,6 +239,58 @@ func TestEventsHonorsLimitAndFilter(t *testing.T) {
 	}
 }
 
+func TestEventsBeforeParamPagesOlderRecords(t *testing.T) {
+	stateDir := t.TempDir()
+	day := "2026-09-10"
+
+	var lines []string
+	for i := range 10 {
+		lines = append(lines, recLine(t, record.Record{Engine: "codex", SessionID: fmt.Sprintf("s%d", i)}))
+	}
+	writeDayFile(t, stateDir, day, lines)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	base := runTestServer(t, ctx, serveOpts(t, stateDir))
+
+	url := fmt.Sprintf("%s/api/events?day=%s&limit=3", base, day)
+	resp := get(t, url)
+	defer func() { _ = resp.Body.Close() }()
+	var page1 EventsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&page1); err != nil {
+		t.Fatalf("decode page1: %v", err)
+	}
+	if len(page1.Records) != 3 {
+		t.Fatalf("page1 got %d records, want 3", len(page1.Records))
+	}
+	oldest := page1.Records[len(page1.Records)-1]
+	if oldest.Rec.SessionID != "s7" {
+		t.Fatalf("page1 oldest session = %q, want s7", oldest.Rec.SessionID)
+	}
+
+	url2 := fmt.Sprintf("%s/api/events?day=%s&limit=3&before=%d", base, day, oldest.Offset)
+	resp2 := get(t, url2)
+	defer func() { _ = resp2.Body.Close() }()
+	var page2 EventsResponse
+	if err := json.NewDecoder(resp2.Body).Decode(&page2); err != nil {
+		t.Fatalf("decode page2: %v", err)
+	}
+
+	var sawS6 bool
+	for _, rec := range page2.Records {
+		if rec.Rec.SessionID == "s9" || rec.Rec.SessionID == "s8" {
+			t.Fatalf("page2 repeats the newest page instead of paging older: %+v", page2.Records)
+		}
+		if rec.Rec.SessionID == "s6" {
+			sawS6 = true
+		}
+	}
+	if !sawS6 {
+		t.Fatalf("page2 = %+v, want it to reach s6 (an older record than page1)", page2.Records)
+	}
+}
+
 func TestDaysEndpoint(t *testing.T) {
 	stateDir := t.TempDir()
 	writeDayFile(t, stateDir, "2026-09-10", []string{recLine(t, record.Record{SessionID: "x"})})
