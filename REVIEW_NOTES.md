@@ -11,6 +11,18 @@ recurrence_escalation: unused
 
 ---
 
+# Review notes — hookyard #56 (doctor report rendering and JSON)
+
+Ledger opened before the independent review batch.
+
+| invariant/family | finding or thread IDs | observed head | fix commit | proof | disposition | rounds used |
+| --- | --- | --- | --- | --- | --- | --- |
+| doctor report rendering and JSON contract | pending independent review | pending commit | pending | `go build ./...`, `go vet ./...`, `go test ./... -race`, `golangci-lint run ./...`, `nix flake check` | open | 0 |
+
+recurrence_escalation: unused
+
+---
+
 # Review notes — hookyard #63 (bound Codex block duplication: structural strip anchor + doctor entry counts)
 
 Base `dfbf33c` (`origin/main`). Ledger opened at head `0413433` immediately before

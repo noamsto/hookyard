@@ -71,6 +71,9 @@ func TestCompetingWriterFailsOnForeignRowNamingAHandler(t *testing.T) {
 	if !strings.Contains(f.Detail, foreign) {
 		t.Errorf("detail = %q, want it to name the foreign command", f.Detail)
 	}
+	if f.Fix != "" {
+		t.Errorf("fix = %q, want empty Fix for competing writers", f.Fix)
+	}
 }
 
 func TestCompetingWriterPassesOnDisjointForeignRows(t *testing.T) {
