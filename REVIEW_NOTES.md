@@ -17,7 +17,7 @@ Ledger opened before the independent review batch.
 
 | invariant/family | finding or thread IDs | observed head | fix commit | proof | disposition | rounds used |
 | --- | --- | --- | --- | --- | --- | --- |
-| doctor TTY detail lines stay bounded even for a long comma-delimited segment | Go reviewer MEDIUM (round 1) | eb7f937 | pending | `go build ./...`, `go vet ./...`, `go test ./... -race`, `golangci-lint run ./...`, `nix flake check`; targeted re-review pending | fixed | 1 |
+| doctor TTY detail lines stay bounded even for a long comma-delimited segment | Go reviewer MEDIUM (round 1); targeted reviewer HIGH (round 2) | 0c9d826 | 0c9d826 | full deterministic gate passed; targeted re-review found the UTF-8 ellipsis still exceeds the continuation byte budget | open | 2 |
 
 recurrence_escalation: unused
 
