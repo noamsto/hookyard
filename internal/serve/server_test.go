@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -463,6 +464,58 @@ func readSSEEvent(r *bufio.Reader) (id string, data string, err error) {
 			data = line[6:]
 		}
 		// Comments (starting with :) and event: lines are ignored for these tests.
+	}
+}
+
+// readySignal is an io.Writer that closes ready on its first Write, so a test
+// can wait for Run's startup banner instead of polling with time.Sleep.
+type readySignal struct {
+	once  sync.Once
+	ready chan struct{}
+}
+
+func newReadySignal() *readySignal {
+	return &readySignal{ready: make(chan struct{})}
+}
+
+func (s *readySignal) Write(p []byte) (int, error) {
+	s.once.Do(func() { close(s.ready) })
+	return len(p), nil
+}
+
+// TestRunShutsDownCleanlyOnCancel exercises the production Run path (not
+// runTestServer's hand-rolled srv.Close()): Run must return nil once ctx is
+// cancelled, the same way a normal Ctrl-C/SIGTERM does. Closing the listener
+// directly instead of calling srv.Shutdown makes srv.Serve return a
+// *net.OpError ("use of closed network connection") rather than
+// http.ErrServerClosed, which Run then reports as a real error — turning
+// every clean shutdown into a nonzero exit with a scary message.
+func TestRunShutsDownCleanlyOnCancel(t *testing.T) {
+	stateDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sig := newReadySignal()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, Options{StateDir: stateDir, Port: 0, Out: sig, Now: time.Now})
+	}()
+
+	select {
+	case <-sig.ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not start")
+	}
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run returned %v after context cancellation, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after context cancellation")
 	}
 }
 

@@ -229,6 +229,9 @@ func TestHubRolloverSendsDayBeforeTheNewDaysCalls(t *testing.T) {
 	if _, ok := h.Snapshot(day); ok {
 		t.Errorf("the old day is still the live day after a rollover")
 	}
+	if got := h.Day(); got != next {
+		t.Errorf("Day() = %q after the rollover, want %q (a caller that omits ?day= would keep getting stale data)", got, next)
+	}
 }
 
 func TestHubRestartRebuildsFromTheFileThatIsActuallyThere(t *testing.T) {

@@ -22,6 +22,13 @@ func DayString(t time.Time) string {
 // dayFilePattern is what Days matches stream file names against.
 var dayFilePattern = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})\.jsonl$`)
 
+// validDayPattern is dayFilePattern's date shape without the file suffix,
+// checked against every day value a request supplies before it reaches
+// filepath.Join: an unvalidated day (e.g. "../../../../etc/passwd") would
+// otherwise let a scan read any .jsonl file on the host, not just one under
+// stateDir/stream.
+var validDayPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
 // Days lists the days with a stream file, newest first. A missing stream
 // directory is the normal state of a fresh machine, not an error.
 func Days(stateDir string) ([]string, error) {
@@ -72,6 +79,9 @@ func ScanDay(stateDir, day string, end int64, limit int, f Filter) (EventsRespon
 	limit = clampLimit(limit)
 	resp := EventsResponse{Day: day}
 
+	if !validDayPattern.MatchString(day) {
+		return resp, nil
+	}
 	path := filepath.Join(record.StreamDir(stateDir), day+".jsonl")
 	file, err := os.Open(path)
 	if os.IsNotExist(err) {
@@ -147,6 +157,9 @@ func ScanDay(stateDir, day string, end int64, limit int, f Filter) (EventsRespon
 // decodable record in order, and returns the offset it stopped at (the file
 // size observed when the pass began). Used to seed the accumulator.
 func ScanAll(stateDir, day string, visit func(Entry)) (int64, error) {
+	if !validDayPattern.MatchString(day) {
+		return 0, nil
+	}
 	path := filepath.Join(record.StreamDir(stateDir), day+".jsonl")
 	file, err := os.Open(path)
 	if os.IsNotExist(err) {

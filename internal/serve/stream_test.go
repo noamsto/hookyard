@@ -93,6 +93,34 @@ func TestScanDayMissingFile(t *testing.T) {
 	}
 }
 
+// TestScanDayRejectsPathTraversal pins the day-value guard: an out-of-shape
+// day must never reach filepath.Join, or a request could read any .jsonl
+// file on the host, not just one under stateDir/stream.
+func TestScanDayRejectsPathTraversal(t *testing.T) {
+	stateDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.jsonl")
+	if err := os.WriteFile(outside, []byte(recLine(t, record.Record{SessionID: "leaked"})), 0o600); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+
+	rel, err := filepath.Rel(record.StreamDir(stateDir), outside[:len(outside)-len(".jsonl")])
+	if err != nil {
+		t.Fatalf("Rel: %v", err)
+	}
+
+	resp, err := ScanDay(stateDir, rel, 0, 10, Filter{})
+	if err != nil {
+		t.Fatalf("ScanDay: %v", err)
+	}
+	if len(resp.Records) != 0 {
+		t.Fatalf("got %d records from a path-traversal day value, want 0 (file outside stateDir was read)", len(resp.Records))
+	}
+
+	if n, err := ScanAll(stateDir, rel, func(Entry) {}); err != nil || n != 0 {
+		t.Fatalf("ScanAll(%q) = %d, %v, want 0, nil", rel, n, err)
+	}
+}
+
 func TestDaysMissingStreamDir(t *testing.T) {
 	stateDir := t.TempDir()
 	days, err := Days(stateDir)

@@ -89,6 +89,12 @@ func (h *Hub) Day() string {
 	return h.day
 }
 
+// Now is the Hub's own clock, so handlers that need "the current time" agree
+// with the tailer and accumulator instead of calling time.Now() separately.
+func (h *Hub) Now() time.Time {
+	return h.now()
+}
+
 // Run owns the tailer and the subscriber set until ctx is done. It refuses to
 // start before Seed rather than silently tailing from offset 0 and counting
 // the whole day a second time — the ordering is enforced, not just documented.
@@ -199,6 +205,7 @@ func (h *Hub) handle(ev TailEvent) {
 		// The day frame goes out before any of the new day's call frames
 		// (SPEC 4.4a), so a page left open overnight re-points its stats panel
 		// rather than watching the counts collapse to near-zero unannounced.
+		h.day = ev.NewDay
 		h.acc = NewAccumulator(ev.NewDay)
 		h.publish()
 		h.broadcast(Frame{Event: "day", Data: dayPayload{Day: ev.NewDay}})

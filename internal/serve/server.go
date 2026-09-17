@@ -74,11 +74,6 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("serve: seed: %w", err)
 	}
 
-	go func() {
-		<-ctx.Done()
-		_ = ln.Close()
-	}()
-
 	srv := &http.Server{
 		Handler: middleware(&serveMux{
 			stateDir: absDir,
@@ -87,6 +82,11 @@ func Run(ctx context.Context, opts Options) error {
 		}),
 		BaseContext: func(_ net.Listener) context.Context { return ctx },
 	}
+
+	go func() {
+		<-ctx.Done()
+		_ = srv.Shutdown(context.Background())
+	}()
 
 	hubErr := make(chan error, 1)
 	go func() { hubErr <- hub.Run(ctx) }()
@@ -165,7 +165,7 @@ func (h *serveMux) handleDays(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	today := DayString(time.Now())
+	today := DayString(h.hub.Now())
 	writeJSON(w, DaysResponse{Days: days, Today: today})
 }
 
