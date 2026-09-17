@@ -17,7 +17,7 @@ Ledger opened before the independent review batch.
 
 | invariant/family | finding or thread IDs | observed head | fix commit | proof | disposition | rounds used |
 | --- | --- | --- | --- | --- | --- | --- |
-| doctor TTY detail lines stay bounded even for a long comma-delimited segment | Go reviewer MEDIUM (round 1); targeted reviewer HIGH (round 2); dispatcher late packing directive | pending | pending | full deterministic gate passed; first lines now use 88 runes and continuations reserve indentation; targeted re-review pending | open | 4 |
+| doctor TTY detail lines stay bounded even for a long comma-delimited segment | Go reviewer MEDIUM (round 1); targeted reviewer HIGH (round 2); dispatcher late packing directive | 93ffda3 | 93ffda3 | full deterministic gate passed; first lines use 88 runes and continuations reserve indentation; targeted re-review accepted (round 4) | fixed | 4 |
 
 recurrence_escalation: unused
 
