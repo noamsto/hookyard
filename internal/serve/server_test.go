@@ -483,13 +483,10 @@ func (s *readySignal) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// TestRunShutsDownCleanlyOnCancel exercises the production Run path (not
-// runTestServer's hand-rolled srv.Close()): Run must return nil once ctx is
-// cancelled, the same way a normal Ctrl-C/SIGTERM does. Closing the listener
-// directly instead of calling srv.Shutdown makes srv.Serve return a
-// *net.OpError ("use of closed network connection") rather than
-// http.ErrServerClosed, which Run then reports as a real error — turning
-// every clean shutdown into a nonzero exit with a scary message.
+// TestRunShutsDownCleanlyOnCancel exercises the production Run path directly,
+// unlike runTestServer's hand-rolled srv.Close(): a normal Ctrl-C/SIGTERM
+// must make Run return nil, not surface a listener-close error as a fatal
+// exit.
 func TestRunShutsDownCleanlyOnCancel(t *testing.T) {
 	stateDir := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
