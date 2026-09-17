@@ -60,6 +60,28 @@ func TestScanDayNewestFirstAndLimit(t *testing.T) {
 	}
 }
 
+func TestScanAllExcludesTrailingPartialLine(t *testing.T) {
+	stateDir := t.TempDir()
+	day := "2026-09-10"
+
+	whole := recLine(t, record.Record{Engine: "codex", SessionID: "whole"})
+	full := recLine(t, record.Record{Engine: "codex", SessionID: "torn"})
+	torn := full[:len(full)-2] // drop the closing "}\n": a write caught mid-record
+	writeDayFile(t, stateDir, day, []string{whole, torn})
+
+	var got []Entry
+	offset, err := ScanAll(stateDir, day, func(e Entry) { got = append(got, e) })
+	if err != nil {
+		t.Fatalf("ScanAll: %v", err)
+	}
+	if len(got) != 1 || got[0].Rec.SessionID != "whole" {
+		t.Fatalf("visited %+v, want exactly the complete record", got)
+	}
+	if want := int64(len(whole)); offset != want {
+		t.Fatalf("offset = %d, want %d (just past the complete record, excluding the torn suffix)", offset, want)
+	}
+}
+
 func TestScanDayMalformedLineSkipped(t *testing.T) {
 	stateDir := t.TempDir()
 	day := "2026-09-10"

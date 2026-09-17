@@ -97,6 +97,11 @@ func ScanDay(stateDir, day string, end int64, limit int, f Filter) (EventsRespon
 		return EventsResponse{}, err
 	}
 	size := info.Size()
+	// A genuine client "before" cursor names an offset in (0, size]: end<=0
+	// means no cursor (first load), and end>size means a stale/bogus cursor,
+	// both of which already mean "scan to the current end" below. Only the
+	// genuine case needs the boundary-record exclusion after the scan.
+	pagingOlder := end > 0 && end <= size
 	if end <= 0 || end > size {
 		end = size
 	}
@@ -117,9 +122,17 @@ func ScanDay(stateDir, day string, end int64, limit int, f Filter) (EventsRespon
 		offset += int64(len(scanner.Bytes())) + 1
 	}
 
-	// A ring buffer of the last `limit` matches keeps memory O(limit), never
-	// O(filesize) (SPEC 4.4).
-	ring := make([]Entry, limit)
+	// A ring buffer of the last `limit` (or `limit+1` when paging older —
+	// see below) matches keeps memory O(limit), never O(filesize) (SPEC 4.4).
+	ringSize := limit
+	if pagingOlder {
+		// The boundary record's own bytes are always the newest entry inside
+		// the scan window when a client cursor selects it, so the ring needs
+		// one spare slot to still return `limit` results after that entry is
+		// excluded below.
+		ringSize = limit + 1
+	}
+	ring := make([]Entry, ringSize)
 	count := 0
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -131,21 +144,35 @@ func ScanDay(stateDir, day string, end int64, limit int, f Filter) (EventsRespon
 		if !f.Match(rec) {
 			continue
 		}
-		ring[count%limit] = Entry{Rec: rec, Day: day, Offset: offset}
+		ring[count%ringSize] = Entry{Rec: rec, Day: day, Offset: offset}
 		count++
 	}
 	if err := scanner.Err(); err != nil {
 		return EventsResponse{}, err
 	}
 
-	n := min(count, limit)
+	n := min(count, ringSize)
 	records := make([]Entry, n)
 	for i := range n {
-		// Newest first: the ring's most recently written slot is (count-1)%limit.
-		records[i] = ring[(count-1-i+limit)%limit]
+		// Newest first: the ring's most recently written slot is (count-1)%ringSize.
+		records[i] = ring[(count-1-i+ringSize)%ringSize]
+	}
+	if pagingOlder && len(records) > 0 && records[0].Offset == end {
+		// That record's own bytes end exactly at `end`, so the scan window
+		// [start, end) necessarily re-included it — it was already shown as
+		// the previous page's oldest entry.
+		records = records[1:]
+	}
+	if len(records) > limit {
+		// The spare ring slot exists to survive the strip above; if that
+		// strip didn't happen (e.g. the boundary record was filtered out, or
+		// `before` wasn't aligned to a record boundary), trim back to `limit`
+		// so the endpoint's contract stays exactly "at most limit records"
+		// regardless of which path produced them.
+		records = records[:limit]
 	}
 	resp.Records = records
-	if n > 0 {
+	if len(records) > 0 {
 		resp.NextOffset = records[0].Offset
 	} else {
 		resp.NextOffset = offset
@@ -154,8 +181,25 @@ func ScanDay(stateDir, day string, end int64, limit int, f Filter) (EventsRespon
 }
 
 // ScanAll streams the whole day file from offset 0, calling visit for every
-// decodable record in order, and returns the offset it stopped at (the file
-// size observed when the pass began). Used to seed the accumulator.
+// decodable record in order, and returns the offset just past the last
+// complete (newline-terminated) record. A trailing partial line — the file's
+// last bytes when a write is caught mid-record — is deliberately excluded
+// from that offset: including it would mean the tailer starts past the
+// in-progress record, and once the write completes the tailer would see only
+// the suffix, fail to decode it, and silently drop it. Used to seed the
+// accumulator.
+//
+// Known trade-off: this assumes the partial line is a record still being
+// written (record.Append does one atomic write(2) per record, capped at 64
+// KiB so a short write is not a practical concern — see record.go's
+// maxRecordBytes doc — which leaves a concurrent reader racing an in-flight
+// write as the ordinary way a partial line appears). If a partial line is
+// instead permanently abandoned (e.g. a write error left a genuinely
+// incomplete record on disk with no retry), the next distinct record
+// appended after it is read glued to that dead prefix with no separating
+// newline, fails to decode as one unit, and is dropped along with it — rarer
+// than the in-flight case, and not distinguishable from the byte stream
+// alone without a self-delimiting record format.
 func ScanAll(stateDir, day string, visit func(Entry)) (int64, error) {
 	if !validDayPattern.MatchString(day) {
 		return 0, nil
@@ -174,13 +218,20 @@ func ScanAll(stateDir, day string, visit func(Entry)) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	seedEnd := info.Size()
+	size := info.Size()
 
-	scanner := newScanner(io.LimitReader(file, seedEnd))
+	scanner := newScanner(io.LimitReader(file, size))
 	var offset int64
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		offset += int64(len(line)) + 1
+		lineEnd := offset + int64(len(line)) + 1
+		if lineEnd > size {
+			// The final token has no trailing newline in the file: a write
+			// still in progress. Stop before it — offset already sits just
+			// past the last complete record.
+			break
+		}
+		offset = lineEnd
 		var rec record.Record
 		if err := json.Unmarshal(line, &rec); err != nil {
 			continue
@@ -190,5 +241,5 @@ func ScanAll(stateDir, day string, visit func(Entry)) (int64, error) {
 	if err := scanner.Err(); err != nil {
 		return 0, err
 	}
-	return seedEnd, nil
+	return offset, nil
 }
