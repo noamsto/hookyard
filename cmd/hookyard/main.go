@@ -623,11 +623,13 @@ func renderDoctor(out io.Writer, target string, findings []doctor.Finding, termi
 		}
 		for _, check := range group.Checks {
 			checkColor, checkGlyph := doctorStatusStyle(check.Status)
-			if _, err := fmt.Fprintf(out, "  %s%s %-20s %s\x1b[0m\n", checkColor, checkGlyph, check.Check, doctorDetail(check.Detail)); err != nil {
+			checkPrefix := fmt.Sprintf("  %s %-20s ", checkGlyph, check.Check)
+			if _, err := fmt.Fprintf(out, "%s%s%s\x1b[0m\n", checkColor, checkPrefix, doctorDetail(check.Detail, utf8.RuneCountInString(checkPrefix))); err != nil {
 				return problems, err
 			}
 			if check.Status == "problem" && check.Fix != "" {
-				if _, err := fmt.Fprintf(out, "    fix: %s\n", doctorDetail(check.Fix)); err != nil {
+				fixPrefix := "    fix: "
+				if _, err := fmt.Fprintf(out, "%s%s\n", fixPrefix, doctorDetail(check.Fix, utf8.RuneCountInString(fixPrefix))); err != nil {
 					return problems, err
 				}
 			}
@@ -724,26 +726,21 @@ func doctorStatusStyle(status string) (string, string) {
 	return doctorVerdictStyle(status)
 }
 
-func doctorDetail(detail string) string {
+func doctorDetail(detail string, prefixWidth int) string {
 	const width = 88
-	const continuationIndent = 17
-	const segmentWidth = width - continuationIndent
-	if utf8.RuneCountInString(detail) <= width {
+	detailWidth := width - prefixWidth
+	if utf8.RuneCountInString(detail) <= detailWidth {
 		return detail
 	}
 	parts := strings.Split(detail, ",")
 	if len(parts) == 1 {
-		return doctorTruncate(detail, width)
+		return doctorTruncate(detail, detailWidth)
 	}
 	var lines []string
 	line := ""
-	first := true
 	for i, part := range parts {
 		part = strings.TrimSpace(part)
-		capacity := segmentWidth
-		if first {
-			capacity = width
-		}
+		capacity := detailWidth
 		if i < len(parts)-1 {
 			part = doctorTruncate(part, capacity-1)
 		} else {
@@ -755,8 +752,6 @@ func doctorDetail(detail string) string {
 		}
 		if utf8.RuneCountInString(candidate) > capacity && line != "" {
 			lines = append(lines, doctorTruncate(line, capacity-1)+",")
-			first = false
-			capacity = segmentWidth
 			if i < len(parts)-1 {
 				part = doctorTruncate(part, capacity-1)
 			} else {
@@ -770,7 +765,7 @@ func doctorDetail(detail string) string {
 	if line != "" {
 		lines = append(lines, line)
 	}
-	return strings.Join(lines, "\n"+strings.Repeat(" ", continuationIndent))
+	return strings.Join(lines, "\n"+strings.Repeat(" ", prefixWidth))
 }
 
 // Rune count is a sufficient no-dependency column approximation for paths,

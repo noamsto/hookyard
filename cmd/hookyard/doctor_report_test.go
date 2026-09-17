@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -89,7 +91,7 @@ func TestRenderDoctorJSONSchemaAndNoANSI(t *testing.T) {
 }
 
 func TestDoctorDetailBoundsLongCommaSegment(t *testing.T) {
-	detail := doctorDetail(strings.Repeat("/very-long-path-segment", 8) + ", /短い")
+	detail := doctorDetail(strings.Repeat("/very-long-path-segment", 8)+", /短い", 0)
 	for _, line := range strings.Split(detail, "\n") {
 		if utf8.RuneCountInString(line) > 88 {
 			t.Fatalf("detail line length = %d, want at most 88: %q", len(line), line)
@@ -99,7 +101,7 @@ func TestDoctorDetailBoundsLongCommaSegment(t *testing.T) {
 		t.Fatalf("detail = %q, want truncation and later segment", detail)
 	}
 
-	packed := doctorDetail(strings.Repeat("a", 40) + ", " + strings.Repeat("b", 40) + ", " + strings.Repeat("c", 40))
+	packed := doctorDetail(strings.Repeat("a", 40)+", "+strings.Repeat("b", 40)+", "+strings.Repeat("c", 40), 0)
 	packedLines := strings.Split(packed, "\n")
 	if utf8.RuneCountInString(packedLines[0]) <= 71 {
 		t.Fatalf("first packed line used %d runes, want it to use first-line space", utf8.RuneCountInString(packedLines[0]))
@@ -115,5 +117,56 @@ func TestDoctorDetailBoundsLongCommaSegment(t *testing.T) {
 	}
 	if got := doctorTruncate(strings.Repeat("界", 89), 88); utf8.RuneCountInString(got) != 88 || !strings.HasSuffix(got, "…") {
 		t.Fatalf("unicode truncation = %q, want 88 runes ending in ellipsis", got)
+	}
+}
+
+func TestRenderDoctorTTYLinesFitTerminalWidth(t *testing.T) {
+	detail := strings.Repeat("/home/noam/.local/share/pi/extensions/launcher-wrapper/bin/pi, ", 4) + "/home/noam/.local/share/pi/extensions/launcher-wrapper/bin/pi"
+	fix := strings.Repeat("/home/noam/.local/share/pi/extensions/launcher-wrapper/bin/hookyard, ", 4) + "/home/noam/.local/share/pi/extensions/launcher-wrapper/bin/hookyard"
+	check := "launcher wrapper path"
+	findings := []doctor.Finding{{Engine: vocab.Pi, Check: check, Status: doctor.Fail, Detail: detail, Fix: fix}}
+	var out bytes.Buffer
+	if _, err := renderDoctor(&out, "ignored", findings, true, false); err != nil {
+		t.Fatal(err)
+	}
+	ansi := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	lines := strings.Split(strings.TrimSuffix(ansi.ReplaceAllString(out.String(), ""), "\n"), "\n")
+	for _, line := range lines {
+		if got := utf8.RuneCountInString(line); got > 88 {
+			t.Fatalf("rendered line length = %d, want at most 88: %q", got, line)
+		}
+	}
+	checkPrefix := fmt.Sprintf("  %s %-20s ", "✗", check)
+	fixPrefix := fmt.Sprintf("    fix: %s", "")
+	assertDoctorContinuationIndent(t, lines, checkPrefix, fixPrefix)
+	assertDoctorContinuationIndent(t, lines, fixPrefix, "Affected:")
+}
+
+func assertDoctorContinuationIndent(t *testing.T, lines []string, prefix, nextPrefix string) {
+	t.Helper()
+	start := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, prefix) {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("row with prefix %q not found in %q", prefix, lines)
+	}
+	wantIndent := utf8.RuneCountInString(prefix)
+	continuations := 0
+	for _, line := range lines[start+1:] {
+		if line == "" || strings.HasPrefix(line, nextPrefix) {
+			break
+		}
+		gotIndent := utf8.RuneCountInString(line) - utf8.RuneCountInString(strings.TrimLeft(line, " "))
+		if gotIndent != wantIndent {
+			t.Fatalf("continuation indent = %d, want %d: %q", gotIndent, wantIndent, line)
+		}
+		continuations++
+	}
+	if continuations == 0 {
+		t.Fatalf("row with prefix %q did not wrap", prefix)
 	}
 }
