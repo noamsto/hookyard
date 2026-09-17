@@ -737,15 +737,31 @@ func doctorDetail(detail string) string {
 	}
 	var lines []string
 	line := ""
-	for _, part := range parts {
+	first := true
+	for i, part := range parts {
 		part = strings.TrimSpace(part)
-		part = doctorTruncate(part, segmentWidth)
+		capacity := segmentWidth
+		if first {
+			capacity = width
+		}
+		if i < len(parts)-1 {
+			part = doctorTruncate(part, capacity-1)
+		} else {
+			part = doctorTruncate(part, capacity)
+		}
 		candidate := part
 		if line != "" {
 			candidate = line + ", " + part
 		}
-		if utf8.RuneCountInString(candidate) > segmentWidth && line != "" {
-			lines = append(lines, line+",")
+		if utf8.RuneCountInString(candidate) > capacity && line != "" {
+			lines = append(lines, doctorTruncate(line, capacity-1)+",")
+			first = false
+			capacity = segmentWidth
+			if i < len(parts)-1 {
+				part = doctorTruncate(part, capacity-1)
+			} else {
+				part = doctorTruncate(part, capacity)
+			}
 			line = part
 		} else {
 			line = candidate

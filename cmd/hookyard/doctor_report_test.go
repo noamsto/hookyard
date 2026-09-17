@@ -99,6 +99,17 @@ func TestDoctorDetailBoundsLongCommaSegment(t *testing.T) {
 		t.Fatalf("detail = %q, want truncation and later segment", detail)
 	}
 
+	packed := doctorDetail(strings.Repeat("a", 40) + ", " + strings.Repeat("b", 40) + ", " + strings.Repeat("c", 40))
+	packedLines := strings.Split(packed, "\n")
+	if utf8.RuneCountInString(packedLines[0]) <= 71 {
+		t.Fatalf("first packed line used %d runes, want it to use first-line space", utf8.RuneCountInString(packedLines[0]))
+	}
+	for _, line := range packedLines {
+		if utf8.RuneCountInString(line) > 88 {
+			t.Fatalf("packed detail line length = %d, want at most 88: %q", utf8.RuneCountInString(line), line)
+		}
+	}
+
 	if got := doctorTruncate("é"+strings.Repeat("x", 88), 88); utf8.RuneCountInString(got) != 88 || !strings.HasSuffix(got, "…") {
 		t.Fatalf("exact-boundary truncation = %q, want 88 runes ending in ellipsis", got)
 	}
