@@ -169,16 +169,21 @@ func (t *Tailer) tick(ctx context.Context, c *tailCursor, out chan<- TailEvent) 
 		if c.offset > 0 {
 			// Resuming at a known offset (from Seed, or a prior restart) means
 			// this tailer has never itself read what's already on disk there.
-			// Seed the rewrite fingerprint from the file directly so a rewrite
-			// happening before this tailer's own next read is still caught,
-			// instead of only ever comparing against bytes it read itself.
-			n := int64(rewriteFingerprint)
-			if c.offset < n {
-				n = c.offset
-			}
+			// Seed the rewrite fingerprint from the file directly, right after
+			// opening it, so a rewrite happening after this point but before
+			// this tailer's own next read is still caught, instead of only ever
+			// comparing against bytes it read itself. A rewrite landing between
+			// Seed's own scan and this open is a narrower, still-open gap: this
+			// read happens after the open, so it would already reflect the
+			// rewritten content and compare as intact on the next tick.
+			n := min(int64(rewriteFingerprint), c.offset)
 			buf := make([]byte, n)
-			if got, _ := file.ReadAt(buf, c.offset-n); got > 0 {
-				c.tail = buf[:got]
+			// A short read leaves c.tail nil (vacuously intact) rather than a
+			// wrong byte range: ReadAt only returns a nil error once buf is
+			// fully populated, matching tailIntact's assumption that len(c.tail)
+			// alone is enough to reconstruct the compared range.
+			if _, err := file.ReadAt(buf, c.offset-n); err == nil {
+				c.tail = buf
 			}
 		}
 	}
