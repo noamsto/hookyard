@@ -131,6 +131,33 @@ func TestBuildPlanRefusesARelativeRouterPath(t *testing.T) {
 	}
 }
 
+// The Pi bridge takes its argv from the emitted command split on " ", so a
+// router path with whitespace in it reaches execFile truncated: the spawn
+// fails, the bridge fails open, and every Pi hook is disarmed without a single
+// error anywhere.
+func TestBuildPlanRefusesARouterPathContainingWhitespace(t *testing.T) {
+	handlers := []manifest.Handler{
+		{ID: "a", Events: []string{vocab.PreTool}, Engines: []string{"pi"}},
+	}
+	_, err := BuildPlan(handlers, "/home/my user/bin/hookyard", stateDir)
+	if err == nil || !strings.Contains(err.Error(), "whitespace") {
+		t.Fatalf("got %v, want an error about whitespace", err)
+	}
+}
+
+// command formats --state-dir as the trailing argv element of the same
+// string the router path occupies the front of, so a state dir with
+// whitespace mangles that element instead of stopping the spawn outright.
+func TestBuildPlanRefusesAStateDirContainingWhitespace(t *testing.T) {
+	handlers := []manifest.Handler{
+		{ID: "a", Events: []string{vocab.PreTool}, Engines: []string{"pi"}},
+	}
+	_, err := BuildPlan(handlers, routerPath, "/nix/my state/hookyard")
+	if err == nil || !strings.Contains(err.Error(), "whitespace") {
+		t.Fatalf("got %v, want an error about whitespace", err)
+	}
+}
+
 func TestBuildPlanRoutesEngineScopedEventsToTheirOwnEngine(t *testing.T) {
 	handlers := []manifest.Handler{
 		{ID: "a", Events: []string{"cursor:beforeShellExecution"}, Engines: []string{"cursor", "codex"}, Match: []string{"Bash"}},

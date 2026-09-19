@@ -67,6 +67,9 @@ func BuildPlan(handlers []manifest.Handler, routerPath, stateDir string) (Plan, 
 	if err := checkRouterPath(routerPath); err != nil {
 		return nil, err
 	}
+	if err := checkStateDir(stateDir); err != nil {
+		return nil, err
+	}
 
 	return buildPlan(handlers, func(engine vocab.Engine, event string) string {
 		return command(routerPath, engine, event, stateDir)
@@ -106,6 +109,33 @@ func checkRouterPath(routerPath string) error {
 	if !filepath.IsAbs(routerPath) {
 		return fmt.Errorf("router path %q must be an absolute path, because it is resolved at "+
 			"hook-fire time against the agent's working directory, not the installer's", routerPath)
+	}
+	// Load-bearing for Pi in particular: piBridgeEntries rebuilds argv by
+	// splitting the emitted command on " ", so whitespace here hands execFile a
+	// truncated binary path — the spawn fails, the bridge fails open, and every
+	// Pi hook goes silently dead with no record to notice it by. Refused here
+	// rather than only in cmd/hookyard so a BuildPlan caller that never passes
+	// through the CLI cannot produce such a plan. It covers the router path
+	// alone; checkStateDir below covers the state dir's half of the same
+	// argv-split hazard.
+	if i := strings.IndexAny(routerPath, " \t\n\r"); i >= 0 {
+		return fmt.Errorf("router path %q contains whitespace (%q), which the Pi bridge's argv "+
+			"split would cut the path in half at", routerPath, routerPath[i])
+	}
+	return nil
+}
+
+// checkStateDir refuses a state dir an emitted command must not embed.
+//
+// command formats "--state-dir %s" as the last token of the same string
+// checkRouterPath's whitespace rule protects the front of: the router path
+// missing its front half fails to spawn at all, but a mangled state dir still
+// spawns the router — it just hands the router a truncated --state-dir value,
+// a quieter failure with no error anywhere to notice it by.
+func checkStateDir(stateDir string) error {
+	if i := strings.IndexAny(stateDir, " \t\n\r"); i >= 0 {
+		return fmt.Errorf("state dir %q contains whitespace (%q), which the Pi bridge's argv "+
+			"split would cut the --state-dir value in half at", stateDir, stateDir[i])
 	}
 	return nil
 }

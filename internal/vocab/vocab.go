@@ -7,6 +7,7 @@ package vocab
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -167,12 +168,7 @@ func buildPiCatalog() []string {
 
 // IsPiEvent reports whether native is one of PiCatalog's members.
 func IsPiEvent(native string) bool {
-	for _, n := range PiCatalog {
-		if n == native {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(PiCatalog, native)
 }
 
 // NormalizedTools is Claude Code's own tool vocabulary, which §7 normalizes

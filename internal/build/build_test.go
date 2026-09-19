@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -390,6 +391,38 @@ func TestPiBuildMergesPackageJSONAndIsIdempotent(t *testing.T) {
 	}
 	if !bytes.Equal(first, second) {
 		t.Errorf("rebuild is not idempotent\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+// TestPiBuildMergePackageJSONKeepsKeyOrder pins the failure mode a
+// map[string]json.RawMessage merge would reintroduce: alphabetically
+// re-sorting a hand-maintained package.json's top-level and pi.* keys turns a
+// two-line hook change into a whole-file diff for the plugin author.
+func TestPiBuildMergePackageJSONKeepsKeyOrder(t *testing.T) {
+	existing := []byte(`{"scripts":{},"name":"mine","pi":{"settings":{"x":1},"extensions":["./other.ts"]},"version":"1.0.0"}`)
+	got, err := mergePackageJSON("package.json", existing, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	positions := func(s string, keys ...string) []int {
+		out := make([]int, len(keys))
+		for i, key := range keys {
+			out[i] = strings.Index(s, `"`+key+`"`)
+			if out[i] < 0 {
+				t.Fatalf("key %q missing from output: %s", key, s)
+			}
+		}
+		return out
+	}
+
+	top := positions(string(got), "scripts", "name", "pi", "version")
+	if !slices.IsSorted(top) {
+		t.Errorf("top-level key order not preserved: %s", got)
+	}
+	nested := positions(string(got), "settings", "extensions")
+	if !slices.IsSorted(nested) {
+		t.Errorf("pi.* key order not preserved: %s", got)
 	}
 }
 

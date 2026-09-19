@@ -565,8 +565,12 @@ func TestPiBridgeDeliversASessionStartAdvisoryOnceThroughBeforeAgentStart(t *tes
 	// pi still stores it and sends it to the model.
 	for key, want := range map[string]string{
 		"customType": `"hookyard"`,
-		"content":    strconv.Quote(advice),
-		"display":    "false",
+		// Attributed in the text, exactly as the tool_result path attributes
+		// it: customType is metadata pi may never put in front of the model,
+		// and an unattributed block is the shape the probe model read as an
+		// injection attempt.
+		"content": strconv.Quote("[hookyard advisory] " + advice),
+		"display": "false",
 	} {
 		if got := string(injected.Message[key]); got != want {
 			t.Errorf("message.%s = %s, want %s", key, got, want)
@@ -653,7 +657,9 @@ func TestPiBridgeEmitsTheSessionFileEvenWhenThereIsNone(t *testing.T) {
 // pi takes --api-key on its own command line, so argv is the one payload field
 // that can carry a live credential — and the payload travels to a router that
 // records what it is given. Both spellings have to go, and the bare flag's
-// value with it.
+// value with it. Single-dash spellings too: pi has no short alias for --api-key
+// today, but the word match exists to fail closed on a flag a later version
+// adds, and that promise is only kept if the dash count does not decide it.
 func TestPiBridgeStripsSecretBearingFlagsFromArgv(t *testing.T) {
 	run := newPiBridgeRun(t)
 	router, capturePath := run.capturingRouter(t)
@@ -661,7 +667,12 @@ func TestPiBridgeStripsSecretBearingFlagsFromArgv(t *testing.T) {
 
 	const secret = "sk-probe-must-not-travel"
 	assertPiAllows(t, run.fire(t, "tool_call", piToolCall("bash", nil),
-		"/probe/sessions/probe.jsonl", "--api-key", secret, "--api-key="+secret, "--model", "probe-model"))
+		"/probe/sessions/probe.jsonl",
+		"--api-key", secret, "--api-key="+secret,
+		"-apikey", secret, "-apikey="+secret,
+		// pi's real argv is full of single-dash flags that carry nothing
+		// secret, and a guard that matched on the dash alone would eat them.
+		"-p", "probe-prompt", "-e", "--model", "probe-model"))
 
 	payload := piCapturedPayload(t, capturePath)
 	var argv []string
@@ -669,12 +680,14 @@ func TestPiBridgeStripsSecretBearingFlagsFromArgv(t *testing.T) {
 		t.Fatalf("argv is not an array of strings: %v", err)
 	}
 	for _, arg := range argv {
-		if strings.Contains(arg, secret) || strings.Contains(arg, "api-key") {
+		if strings.Contains(arg, secret) || strings.Contains(arg, "api-key") || strings.Contains(arg, "apikey") {
 			t.Fatalf("argv = %q still carries the secret-bearing flag", argv)
 		}
 	}
-	if !slices.Contains(argv, "--model") || !slices.Contains(argv, "probe-model") {
-		t.Errorf("argv = %q dropped a flag that carries no secret", argv)
+	for _, kept := range []string{"-p", "probe-prompt", "-e", "--model", "probe-model"} {
+		if !slices.Contains(argv, kept) {
+			t.Errorf("argv = %q dropped %q, which carries no secret", argv, kept)
+		}
 	}
 }
 

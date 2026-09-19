@@ -234,7 +234,7 @@ func pi(opts Options) error {
 	if err := manifest.CheckPluginExecs(out, handlers); err != nil {
 		return err
 	}
-	if err := checkCommandExecs(out, commands); err != nil {
+	if err := manifest.CheckCommandExecs(out, commands); err != nil {
 		return err
 	}
 
@@ -309,32 +309,6 @@ func pi(opts Options) error {
 	return atomicfile.Write(packageJSONPath, packageJSON, 0o644)
 }
 
-// checkCommandExecs applies the same containment and runnable rules
-// manifest.CheckPluginExecs applies to a handler's exec (manifest.go:677) to a
-// manifest command's exec: pi spawns it directly with no router in front, so a
-// bad path would otherwise surface only as a command that silently does
-// nothing.
-func checkCommandExecs(root string, commands []manifest.Command) error {
-	for _, c := range commands {
-		target, err := manifest.ResolvePluginExec(root, c.Exec)
-		if err == nil {
-			var info os.FileInfo
-			info, err = os.Stat(target)
-			switch {
-			case err != nil:
-			case info.IsDir():
-				err = errors.New("is a directory")
-			case info.Mode().Perm()&0o111 == 0:
-				err = fmt.Errorf("not executable (mode %s)", info.Mode().Perm())
-			}
-		}
-		if err != nil {
-			return fmt.Errorf("command %q: exec %q: %w", c.Name, c.Exec, err)
-		}
-	}
-	return nil
-}
-
 // piExtensionEntry is the value build-pi adds to package.json's pi.extensions
 // (decomposition "Pi build package on disk"): the bridge's path relative to
 // the package root, exactly as pi.extensions resolves entries.
@@ -362,42 +336,40 @@ func mergePackageJSON(path string, existing []byte, name string) ([]byte, error)
 		return append(out, '\n'), nil
 	}
 
-	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(existing, &doc); err != nil {
+	// render.Object, not map[string]json.RawMessage: package.json is
+	// hand-edited like Claude's settings.json, and a map re-sorts every
+	// top-level and pi.* key on marshal, turning a two-line hook change into
+	// a whole-file diff for the plugin author (orderedjson.go's own reason
+	// for existing).
+	root, err := render.ParseObject(existing)
+	if err != nil {
 		return nil, fmt.Errorf("%s is not valid JSON, refusing to overwrite it: %w", path, err)
 	}
-	var pi map[string]json.RawMessage
-	if raw, ok := doc["pi"]; ok {
-		if err := json.Unmarshal(raw, &pi); err != nil {
-			return nil, fmt.Errorf(`%s has a "pi" key hookyard cannot read, refusing to overwrite it: %w`, path, err)
-		}
-	} else {
-		pi = map[string]json.RawMessage{}
+	rawPi, _ := root.Get("pi")
+	pi, err := render.ParseObject(rawPi)
+	if err != nil {
+		return nil, fmt.Errorf(`%s has a "pi" key hookyard cannot read, refusing to overwrite it: %w`, path, err)
 	}
 	var extensions []string
-	if raw, ok := pi["extensions"]; ok {
-		if err := json.Unmarshal(raw, &extensions); err != nil {
+	if rawExtensions, ok := pi.Get("extensions"); ok {
+		if err := json.Unmarshal(rawExtensions, &extensions); err != nil {
 			return nil, fmt.Errorf(`%s has a "pi.extensions" key hookyard cannot read, refusing to overwrite it: %w`, path, err)
 		}
 	}
 	if !slices.Contains(extensions, piExtensionEntry) {
 		extensions = append(extensions, piExtensionEntry)
 	}
-	rawExtensions, err := json.Marshal(extensions)
+	if err := pi.Set("extensions", extensions); err != nil {
+		return nil, err
+	}
+	nestedPi, err := pi.MarshalCompact()
 	if err != nil {
 		return nil, err
 	}
-	pi["extensions"] = rawExtensions
-	rawPi, err := json.Marshal(pi)
-	if err != nil {
+	if err := root.Set("pi", json.RawMessage(nestedPi)); err != nil {
 		return nil, err
 	}
-	doc["pi"] = rawPi
-	out, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	return append(out, '\n'), nil
+	return root.MarshalIndent()
 }
 
 // checkGeneratedDirs refuses to reach a generated file through a directory

@@ -17,6 +17,32 @@ type object struct {
 	values map[string]json.RawMessage
 }
 
+// Object is object's exported face. internal/build merges hookyard's entry into
+// a plugin author's package.json, which is hand-edited and carries the same
+// whole-file-diff cost this type exists to avoid — and an unexported type is
+// unreachable from there. The methods are the same ones the writers in this
+// package use, renamed; nothing in here is a second implementation.
+type Object struct{ *object }
+
+// ParseObject reads raw as an object, remembering its key order. Empty input is
+// an empty object, which is how a merge into a file that does not exist yet
+// takes the same path as one into a file that does.
+func ParseObject(raw []byte) (Object, error) {
+	o, err := parseObject(raw)
+	return Object{o}, err
+}
+
+func (o Object) Get(key string) (json.RawMessage, bool) { return o.get(key) }
+
+func (o Object) Set(key string, value any) error { return o.set(key, value) }
+
+func (o Object) MarshalIndent() ([]byte, error) { return o.marshalIndent() }
+
+// MarshalCompact renders o for storing inside another Object under one key: Set
+// would otherwise marshal it as {}, and these bytes round-trip verbatim through
+// json.RawMessage.
+func (o Object) MarshalCompact() ([]byte, error) { return o.marshalCompact() }
+
 func parseObject(raw []byte) (*object, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return &object{values: map[string]json.RawMessage{}}, nil
