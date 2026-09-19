@@ -221,10 +221,15 @@ func PiPluginBridge(handlers []manifest.Handler, commands []manifest.Command) ([
 }
 
 // piBridgeEntries splits each rendered command back into argv. command() joins
-// its tokens with single spaces and checkShellSafe keeps whitespace out of
-// every one of them, so this is that join's exact inverse — and doing it here
-// rather than in the bridge is what leaves the bridge with no path parsing at
-// all, since build-mode entries never pass through either of those.
+// its tokens with single spaces, and checkRouterPath and checkStateDir (both
+// in this package) keep whitespace out of the two tokens that could otherwise
+// be split wrong, so this is that join's exact inverse for a BuildPlan-produced
+// entry. checkShellSafe is a separate, cmd/hookyard CLI-layer guard that
+// additionally screens shell metacharacters before a value ever reaches this
+// package — it still exists, just not as the guard this invariant leans on.
+// Doing the split here rather than in the bridge is what leaves the bridge
+// with no path parsing at all, since build-mode entries never pass through
+// either guard.
 func piBridgeEntries(entries []Entry) []piBridgeEntry {
 	out := make([]piBridgeEntry, 0, len(entries))
 	for _, e := range entries {

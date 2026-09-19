@@ -484,6 +484,21 @@ func TestPiBuildErrors(t *testing.T) {
 		}
 	})
 
+	for name, content := range map[string][]byte{
+		"empty existing package.json":           {},
+		"whitespace-only existing package.json": []byte("  \n\t "),
+	} {
+		t.Run(name, func(t *testing.T) {
+			root, manifestPath, binaryPath := setupPiPlugin(t)
+			writeFile(t, filepath.Join(root, "package.json"), content, 0o644)
+			err := Build(vocab.Pi, Options{Manifests: []string{manifestPath}, Out: root, Name: "example", Binary: binaryPath})
+			requireErrorAndNothingWritten(t, root, err)
+			if !strings.Contains(err.Error(), "empty") {
+				t.Errorf("got %v, want an error about the empty file", err)
+			}
+		})
+	}
+
 	t.Run("commands refused for claude-code", func(t *testing.T) {
 		root := t.TempDir()
 		writeFile(t, filepath.Join(root, "handlers", "guard.sh"), []byte("#!/bin/sh\n"), 0o755)

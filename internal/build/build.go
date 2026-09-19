@@ -336,6 +336,19 @@ func mergePackageJSON(path string, existing []byte, name string) ([]byte, error)
 		return append(out, '\n'), nil
 	}
 
+	// A touched or truncated package.json arrives here as a non-nil empty
+	// slice, not fs.ErrNotExist, so it never takes the existing==nil branch
+	// above. render.ParseObject treats empty input as an empty object — the
+	// right leniency for a merge that starts with no file at all — but here
+	// the file does exist, so that leniency would silently swallow the
+	// --name guard above and write a nameless package.json. Refused before
+	// ParseObject sees it, since "empty file" and "no file" want different
+	// remedies.
+	if len(strings.TrimSpace(string(existing))) == 0 {
+		return nil, fmt.Errorf("%s exists but is empty, refusing to overwrite it: remove the file so "+
+			"hookyard can create it, or give it real JSON content", path)
+	}
+
 	// render.Object, not map[string]json.RawMessage: package.json is
 	// hand-edited like Claude's settings.json, and a map re-sorts every
 	// top-level and pi.* key on marshal, turning a two-line hook change into

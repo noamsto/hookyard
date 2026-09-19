@@ -158,6 +158,17 @@ func TestBuildPlanRefusesAStateDirContainingWhitespace(t *testing.T) {
 	}
 }
 
+// ClaudeCatalogPlan's Command is the same unquoted shell command string
+// BuildPlan's is, so it is exposed to the identical argv-split hazard a
+// whitespace state dir creates — checkStateDir must guard this caller too,
+// not just BuildPlan's.
+func TestClaudeCatalogPlanRefusesAStateDirContainingWhitespace(t *testing.T) {
+	_, err := ClaudeCatalogPlan(routerPath, "/nix/my state/hookyard")
+	if err == nil || !strings.Contains(err.Error(), "whitespace") {
+		t.Fatalf("got %v, want an error about whitespace", err)
+	}
+}
+
 func TestBuildPlanRoutesEngineScopedEventsToTheirOwnEngine(t *testing.T) {
 	handlers := []manifest.Handler{
 		{ID: "a", Events: []string{"cursor:beforeShellExecution"}, Engines: []string{"cursor", "codex"}, Match: []string{"Bash"}},
