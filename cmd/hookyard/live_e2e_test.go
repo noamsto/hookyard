@@ -867,7 +867,7 @@ func liveReadPiCaptures(t *testing.T, dir string) map[string]map[string]json.Raw
 // entry for — session_start, tool_call, tool_result and session_shutdown —
 // not tool_call alone, so a bridge that registers one of the other three and
 // never actually fires it fails here instead of going quiet on someone's
-// machine (SPEC R9.2).
+// machine.
 func TestLivePiPayloadMatchesTheCommittedFixtureShape(t *testing.T) {
 	piBin := liveRequirePi(t)
 	hookyardBin, root, agentDir, projectDir, stateDir := livePiSetup(t)

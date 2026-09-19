@@ -468,7 +468,7 @@ func TestPiDoubleFireUnknownWhenPackageTableUnreadable(t *testing.T) {
 // A third-party extension sitting beside pi's own must not be treated as a
 // hookyard build package just because it is a file under some extensions/
 // directory: its grandparent has no hookyard/table.json, so it does not
-// qualify (R8.2) and contributes nothing rather than an error.
+// qualify and contributes nothing rather than an error.
 func TestPiDoubleFireIgnoresANonHookyardExtensionsEntry(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
@@ -536,7 +536,7 @@ func TestPiBridgeDriftPassesWhenBridgeMatchesTheTable(t *testing.T) {
 }
 
 // A handler in the table with no corresponding bridge entry is exactly
-// "registered but can never fire" (SPEC R9.1).
+// "registered but can never fire".
 func TestPiBridgeDriftFailsWhenATableHandlerHasNoBridgeEntry(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
@@ -575,7 +575,7 @@ func TestPiBridgeDriftFailsWhenATableHandlerHasNoBridgeEntry(t *testing.T) {
 
 // A duplicate (event, matcher) pair in the installed bridge is the shape the
 // session_start + pi:session_start aliasing hazard produces, and this check
-// is the only place that surfaces it (SPEC R9.1, PLAN risks).
+// is the only place that surfaces it.
 func TestPiBridgeDriftFailsOnADuplicateEntry(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")

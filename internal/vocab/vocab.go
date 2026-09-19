@@ -144,9 +144,9 @@ func IsClaudeCodeEvent(native string) bool {
 
 // PiCatalog is the fixed set of pi native events hookyard routes: the six
 // canonical natives, in CanonicalEvents order, plus session_shutdown, which
-// pi fires with no canonical counterpart (R7). before_agent_start is
+// pi fires with no canonical counterpart. before_agent_start is
 // deliberately absent — the bridge registers it itself, outside any manifest
-// event, solely to flush a queued session_start advisory (R3.1/R3.3). A
+// event, solely to flush a queued session_start advisory. A
 // manifest naming pi:before_agent_start would ask hookyard to register a
 // second handler for that one event, one of which would answer a protocol
 // the router does not speak.

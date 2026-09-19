@@ -85,10 +85,8 @@ func ClaudeCatalogPlan(routerPath, stateDir string) ([]Entry, error) {
 	if err := checkRouterPath(routerPath); err != nil {
 		return nil, err
 	}
-	// Same argv-split hazard BuildPlan guards against: this plan's Command is
-	// an unquoted shell command string too, and checkRouterPath's own reason
-	// for living here — "a BuildPlan caller that never passes through the
-	// CLI cannot produce such a plan" — applies to this caller verbatim.
+	// This plan's Command is an unquoted shell command string too, so
+	// whitespace in the state dir would split it the same way.
 	if err := checkStateDir(stateDir); err != nil {
 		return nil, err
 	}

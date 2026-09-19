@@ -287,7 +287,7 @@ func TestLoadAcceptsEveryClaudeCodeCatalogNative(t *testing.T) {
 	}
 }
 
-// R7.1/R3.3: pi:session_shutdown is PiCatalog's whole reason for existing
+// pi:session_shutdown is PiCatalog's whole reason for existing
 // beyond the six canonical natives, and pi:before_agent_start is refused by
 // the same catalog rule — before_agent_start is deliberately absent from
 // PiCatalog (vocab.go) rather than carrying a bespoke rejection message here.
@@ -494,7 +494,7 @@ func TestMergeRejectsDuplicateIDAcrossManifests(t *testing.T) {
 	}
 }
 
-// Mode gate (R6.5): commands are build-mode-only. Load, LoadBuildTime and
+// Mode gate: commands are build-mode-only. Load, LoadBuildTime and
 // ReadTable all read yard-mode manifests and must refuse a non-empty commands
 // rather than accept a surface yard mode has nothing to register it into.
 func TestYardReadersRejectNonEmptyCommands(t *testing.T) {
@@ -578,7 +578,7 @@ func TestLoadPluginRejectsClaudeCodeEventOutsideCatalog(t *testing.T) {
 	}
 }
 
-// LoadPlugin is the one reader that accepts commands (R6.5): name shape,
+// LoadPlugin is the one reader that accepts commands: name shape,
 // non-empty description, and exec under the same ExecPluginRelative rule a
 // handler's exec follows.
 func TestLoadPluginCommands(t *testing.T) {

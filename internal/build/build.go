@@ -71,8 +71,8 @@ func claudeCode(opts Options) error {
 		}
 		manifests = append(manifests, m)
 	}
-	// Commands render only through PiPluginBridge into pi.registerCommand
-	// (R6.5); accepting them here would silently drop them from this engine's
+	// Commands render only through PiPluginBridge into pi.registerCommand;
+	// accepting them here would silently drop them from this engine's
 	// build rather than telling the author they picked the wrong engine.
 	for _, m := range manifests {
 		if len(m.Commands) > 0 {
@@ -314,7 +314,7 @@ func pi(opts Options) error {
 // the package root, exactly as pi.extensions resolves entries.
 const piExtensionEntry = "./extensions/hookyard.ts"
 
-// mergePackageJSON returns package.json's bytes (R6.1). Absent input creates
+// mergePackageJSON returns package.json's bytes. Absent input creates
 // {"name": name, "pi": {"extensions": [piExtensionEntry]}}, the plugin.json
 // rule's name-required-only-when-absent counterpart. Present input keeps
 // every other top-level and pi.* key and appends the entry to pi.extensions

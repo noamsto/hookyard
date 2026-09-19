@@ -479,7 +479,7 @@ func TestPiBridgeDeliversNothingOnEveryUnreadableAdvisory(t *testing.T) {
 	}
 }
 
-// R4.1 and R4.4: the advisory is appended to the tool's own output and names
+// The advisory is appended to the tool's own output and names
 // where it came from. Pi takes the returned content as the whole block list, so
 // a bridge that returned its own block alone would delete the tool result the
 // model is waiting on — and the probe model, shown an unattributed appended
@@ -520,7 +520,7 @@ func TestPiBridgeAppendsAnAttributedAdvisoryAndKeepsTheOriginalContent(t *testin
 	}
 }
 
-// R4.2: tool_result's content is pi's shape rather than hookyard's, and a
+// tool_result's content is pi's shape rather than hookyard's, and a
 // content that is not an array is one this bridge does not understand. It
 // declines instead of returning a block list of its own, which pi would take as
 // the whole patch — dropping the tool output to make room for the advice.
@@ -581,7 +581,7 @@ func TestPiBridgeDeliversASessionStartAdvisoryOnceThroughBeforeAgentStart(t *tes
 	}
 }
 
-// R3.4: a prompt that follows no queued advisory injects nothing — the same
+// A prompt that follows no queued advisory injects nothing — the same
 // fail-open every other path here owes, reached by the commonest route of all
 // (a router that abstained, or a session_start that never ran).
 func TestPiBridgeInjectsNothingWhenNoAdvisoryIsQueued(t *testing.T) {
@@ -595,7 +595,7 @@ func TestPiBridgeInjectsNothingWhenNoAdvisoryIsQueued(t *testing.T) {
 	}
 }
 
-// R3.1: before_agent_start exists only as session_start's delivery vehicle, so
+// before_agent_start exists only as session_start's delivery vehicle, so
 // an install with no session_start entry registers none. Registering it either
 // way would put a handler in front of every prompt of every session that
 // answers a protocol no entry routes.

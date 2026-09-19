@@ -44,7 +44,7 @@ type Handler struct {
 // FireAndForget reports whether the router starts h and never waits for it.
 func (h Handler) FireAndForget() bool { return h.Lane == LaneFireAndForget }
 
-// Command is a pi-only, build-mode-only command surface (R6.5): build
+// Command is a pi-only, build-mode-only command surface: build
 // --engine pi renders each entry into pi.registerCommand, so a handler's
 // exec can also be invoked as a slash command rather than only fired from a
 // hook. Yard mode and every other engine have no equivalent — Load,
@@ -81,7 +81,7 @@ const PluginTablePath = "hookyard/table.json"
 
 var idPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_./-]*$`)
 
-// commandNamePattern constrains a manifest command's name (R6.5). The name is
+// commandNamePattern constrains a manifest command's name. The name is
 // passed to pi.registerCommand verbatim and becomes the literal string a user
 // types after "/", so unlike idPattern it excludes "/" and "." — either would
 // read as a nested command path pi's command palette does not support.
@@ -295,9 +295,9 @@ func validatePluginRelativeExec(where, exec string) error {
 
 // validateCatalog refuses an engine-scoped event whose native half isn't one
 // of that engine's routed catalog: "claude-code:X" against the eight events
-// vocab.ClaudeCodeCatalog documents evidence for (R-A/R-C), and "pi:X"
-// against vocab.PiCatalog (R7.1). This is how R3.3's pi:before_agent_start
-// rejection lands — before_agent_start is absent from PiCatalog, so it fails
+// vocab.ClaudeCodeCatalog documents evidence for, and "pi:X" against
+// vocab.PiCatalog. This is how the pi:before_agent_start rejection lands —
+// before_agent_start is absent from PiCatalog, so it fails
 // the same catalog rule every other out-of-catalog event does, rather than a
 // bespoke check with its own message. Claude Code and pi are the only
 // engines with a catalog here: Codex and Cursor have none, so
@@ -337,7 +337,7 @@ func validateCatalog(where string, h Handler) error {
 
 // validateCommand checks one manifest command: name shape, a non-empty
 // description, and exec under the ExecPluginRelative rule — commands are
-// build-mode-only regardless of the manifest's own exec form (R6.5).
+// build-mode-only regardless of the manifest's own exec form.
 func validateCommand(where string, c Command) error {
 	if !commandNamePattern.MatchString(c.Name) {
 		return fmt.Errorf("%s: name must match %s", where, commandNamePattern)

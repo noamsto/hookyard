@@ -141,7 +141,7 @@ func TestRunBuildHappyPathPi(t *testing.T) {
 }
 
 // The unsupported-engine error must name the engines build does support,
-// rather than repeating the days when Claude Code was the only one (R6.3).
+// rather than repeating the days when Claude Code was the only one.
 func TestRunBuildUnsupportedEngineNamesSupportedEngines(t *testing.T) {
 	root, manifestPath := setupBuildPlugin(t)
 

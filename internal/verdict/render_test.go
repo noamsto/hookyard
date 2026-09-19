@@ -220,7 +220,7 @@ func TestRenderOnDecisionCapableEvents(t *testing.T) {
 			delivered: true,
 		},
 		{
-			// Pi's tool_call reply has no advisory key (R2.4), and an allow
+			// Pi's tool_call reply has no advisory key, and an allow
 			// prints nothing at all, so advice riding one has nowhere to go.
 			name: "pi allow drops the advice riding it",
 			in:   Input{Engine: vocab.Pi, CanonicalEvent: vocab.PreTool, NativeEvent: "tool_call", Verdict: Allow, Reason: "r", Advice: "a"},

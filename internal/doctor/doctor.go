@@ -698,16 +698,16 @@ func piBuildPackageRoot(entry string) string {
 	return filepath.Dir(filepath.Dir(entry))
 }
 
-// piDoubleFire is R8: pi tolerates `hookyard install` (yard mode) and
-// `pi install <built package>` naming the same handler id, running it twice
-// per event with no warning of its own — the shape a consumer reaches when a
-// migration to a build-mode package leaves the yard registration in place
-// instead of retiring it in the same commit. It walks settings.json's
-// extensions[] for a build-mode package root (piBuildPackageRoot) and
-// compares that package's baked table against the yard table this install's
-// stateDir names. piLauncherFindings detects a different hazard — an
-// injection hookyard cannot strip — and is not replaced by this check
-// (R8.5).
+// piDoubleFire detects a double registration: pi tolerates `hookyard install`
+// (yard mode) and `pi install <built package>` naming the same handler id,
+// running it twice per event with no warning of its own — the shape a
+// consumer reaches when a migration to a build-mode package leaves the yard
+// registration in place instead of retiring it in the same commit. It walks
+// settings.json's extensions[] for a build-mode package root
+// (piBuildPackageRoot) and compares that package's baked table against the
+// yard table this install's stateDir names. piLauncherFindings detects a
+// different hazard — an injection hookyard cannot strip — and is not
+// replaced by this check.
 func piDoubleFire(stateDir, settingsPath string) Finding {
 	f := Finding{Engine: vocab.Pi, Check: "double-registered handlers", Detail: settingsPath}
 
@@ -759,7 +759,7 @@ func piDoubleFire(stateDir, settingsPath string) Finding {
 		handlers, err := manifest.ReadPluginTable(tablePath)
 		if err != nil {
 			if os.IsNotExist(err) {
-				continue // root does not qualify as a build package; not an error (R8.2)
+				continue // root does not qualify as a build package; not an error
 			}
 			unreadable = append(unreadable, fmt.Sprintf("%s (%v)", tablePath, err))
 			continue
@@ -797,8 +797,8 @@ func piDoubleFire(stateDir, settingsPath string) Finding {
 	return f
 }
 
-// piBridgeDrift is R9.1: the installed bridge is a rendering of the handler
-// table taken at install time, and nothing re-renders it when the table
+// piBridgeDrift catches a stale bridge: the installed bridge is a rendering
+// of the handler table taken at install time, and nothing re-renders it when the table
 // changes underneath it, so a handler can be added or retired in the table
 // while the bridge keeps firing (or stops firing) the stale set — a
 // registered-but-can-never-fire gap that looks, from inside the record,
@@ -1113,15 +1113,15 @@ func registration(engine vocab.Engine, path string) Finding {
 var routerPathPattern = regexp.MustCompile(`/[^\s"']*` + regexp.QuoteMeta(render.Marker))
 
 // stateDirPattern recovers --state-dir from the same command line, in the
-// same character class and for the same reason. It no longer covers Pi: R6.2
-// renders Pi's invocation as DATA.entries[].args, a JSON array rather than a
+// same character class and for the same reason. It no longer covers Pi:
+// Pi's invocation renders as DATA.entries[].args, a JSON array rather than a
 // shell command line, so a whitespace-delimited match finds nothing there —
 // recoverPiBridgeData reads that source instead.
 var stateDirPattern = regexp.MustCompile(`--state-dir\s+([^\s"']+)`)
 
 // piBridgeDataAnchor is the line writePiBridge produces by exactly one
-// strings.Replace of one json.Marshal output (pi.go:169-173, R9.1's second
-// sentence): the spliced value has no embedded raw newline — json.Marshal
+// strings.Replace of one json.Marshal output (pi.go:169-173): the spliced
+// value has no embedded raw newline — json.Marshal
 // escapes control characters rather than emitting them literally — so
 // everything between this anchor and the next newline, less its trailing
 // semicolon, is one complete JSON object. That is what makes recovering it a
@@ -1302,7 +1302,7 @@ func recoverStateDir(p Paths, claude claudeSources) []string {
 	// its --state-dir travel inside the bridge as DATA.entries[].args, a JSON
 	// array rather than a shell command line, so stateDirPattern would
 	// recover nothing there and reproduce the exact silent-fallback bug this
-	// function exists to close (R6.2/R9.1). Each entry carries its own args,
+	// function exists to close. Each entry carries its own args,
 	// so every one is scanned rather than just the first.
 	if raw, err := os.ReadFile(render.PiBridgePath(filepath.Join(p.PiAgentDir, "settings.json"))); err == nil {
 		if data, ok := recoverPiBridgeData(raw); ok {
