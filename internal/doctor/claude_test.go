@@ -360,6 +360,7 @@ func TestOtherEnginesFindingsAreUnchanged(t *testing.T) {
 		{vocab.Pi, "launcher wrapper", Unknown, "no pi on PATH to check for an injected launcher"},
 		{vocab.Pi, "double-registered handlers", Unknown, "no --state-dir recoverable to read the handler table from"},
 		{vocab.Pi, "bridge matches handler table", Unknown, "no --state-dir recoverable to read the handler table from"},
+		{vocab.Pi, "bridge invocation is executable", Pass, "every entry in " + piBridge + " names an executable bin"},
 	}
 
 	var got []Finding

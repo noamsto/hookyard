@@ -619,3 +619,99 @@ func TestPiBridgeDriftUnknownWhenDataCannotBeParsed(t *testing.T) {
 		t.Fatalf("status = %v, want Unknown; detail=%q", f.Status, f.Detail)
 	}
 }
+
+// The hazard this pins is the one a machine installed before render's
+// checkRouterPath is already in: piBridgeEntries split the emitted command on
+// " ", so a whitespace-bearing router path reached the bridge as a bin of
+// "<root>/my" with the rest of the path sitting in args[0]. The fixture is
+// built by the real writer from such a command rather than hand-typed, so it
+// is byte-for-byte what that install produced.
+func TestPiBridgeExecFailsOnAWhitespaceSplitInvocation(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "my dir", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	router := filepath.Join(binDir, "hookyard")
+	if err := os.WriteFile(router, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	piDir := filepath.Join(root, "pi")
+	piConfig(t, piDir, routedCommand(router, vocab.Pi, filepath.Join(root, "state")))
+
+	findings := piFindings(Paths{PiAgentDir: piDir}, "")
+
+	f := findByCheck(t, findings, "bridge invocation is executable")
+	if f.Status != Fail {
+		t.Fatalf("status = %v, want Fail; detail=%q", f.Status, f.Detail)
+	}
+	if !strings.Contains(f.Detail, filepath.Join(root, "my")+" ") {
+		t.Errorf("detail = %q, want the truncated bin execFile receives named", f.Detail)
+	}
+	if !strings.Contains(f.Detail, "hookyard install") || !strings.Contains(f.Detail, "whitespace") {
+		t.Errorf("detail = %q, want the repair and its cause named", f.Detail)
+	}
+
+	// Why this check has to exist at all: routerPathPattern needs a slash
+	// before the marker, and the split leaves "dir/bin/hookyard" with none, so
+	// the grep matches nothing and the router-path finding shrugs.
+	if rp := findByCheck(t, findings, "router path"); rp.Status != Unknown {
+		t.Errorf("router path status = %v, want Unknown (the gap this check closes); detail=%q", rp.Status, rp.Detail)
+	}
+}
+
+func TestPiBridgeExecPassesWhenTheRouterIsExecutable(t *testing.T) {
+	root := t.TempDir()
+	router := writeRouterBinary(t, root, true)
+	_, bridge := piConfig(t, filepath.Join(root, "pi"), routedCommand(router, vocab.Pi, filepath.Join(root, "state")))
+
+	f := piBridgeExec(bridge)
+	if f.Status != Pass {
+		t.Fatalf("status = %v, want Pass; detail=%q", f.Status, f.Detail)
+	}
+}
+
+// A bridge doctor cannot read or cannot parse is Unknown, not Fail — the same
+// absence-vs-unreadability split danglingExtensions draws.
+func TestPiBridgeExecUnknownWhenTheBridgeCannotBeRead(t *testing.T) {
+	dir := t.TempDir()
+	if f := piBridgeExec(filepath.Join(dir, "bin", "hookyard-bridge.ts")); f.Status != Unknown {
+		t.Errorf("missing bridge status = %v, want Unknown; detail=%q", f.Status, f.Detail)
+	}
+
+	bridge := filepath.Join(dir, "pi", "bin", "hookyard-bridge.ts")
+	if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bridge, []byte("const DATA = {not valid json};\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if f := piBridgeExec(bridge); f.Status != Unknown {
+		t.Errorf("unparsable DATA status = %v, want Unknown; detail=%q", f.Status, f.Detail)
+	}
+}
+
+// A built package's bin is render.PluginLauncher, relative to a package root
+// the bridge resolves at load. Statting it from doctor's working directory
+// would report a missing router that is perfectly present.
+func TestPiBridgeExecIgnoresABuildModePackagesRelativeBin(t *testing.T) {
+	source, err := render.PiPluginBridge([]manifest.Handler{piHandler("guard/one", "post_tool", "bin/guard.sh")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := filepath.Join(t.TempDir(), "extensions", "hookyard.ts")
+	if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bridge, source, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	f := piBridgeExec(bridge)
+	if f.Status != Pass {
+		t.Fatalf("status = %v, want Pass; detail=%q", f.Status, f.Detail)
+	}
+	if !strings.Contains(f.Detail, "relative") {
+		t.Errorf("detail = %q, want it to say why nothing was stat'd", f.Detail)
+	}
+}

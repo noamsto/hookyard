@@ -675,6 +675,7 @@ func piFindings(p Paths, stateDir string) []Finding {
 		piLauncherFindings(),
 		piDoubleFire(stateDir, settings),
 		piBridgeDrift(stateDir, bridge),
+		piBridgeExec(bridge),
 	}
 }
 
@@ -907,6 +908,83 @@ func piBridgeDrift(stateDir, bridgePath string) Finding {
 	return f
 }
 
+// piBridgeExec asks the one question routerPath cannot answer about a bridge:
+// whether the binary execFile will actually be handed is there to run. The two
+// differ because routerPath greps for text matching an absolute path ending in
+// render.Marker, while the bridge execs DATA.entries[].bin verbatim. An install
+// predating render's checkRouterPath split that argv on " " mid-path, and the
+// fragments it left behind defeat the grep two different ways: a bin of
+// "/home/my" with the remainder in args[0] leaves the marker preceded by too few
+// slashes to match at all (Unknown, so silent), and a space further left leaves
+// a fragment like "/sub/bin/hookyard" that does match — reporting a path the
+// bridge never names as missing. Statting the parsed bin instead is
+// position-independent, and catches the other ways a bridge goes stale: a
+// router removed, a store path collected.
+//
+// This matters more than the same failure on another engine because pi's
+// bridge fails open when the spawn fails: every pi hook stops enforcing, and
+// no record is written to notice it by, since the router never ran.
+func piBridgeExec(bridgePath string) Finding {
+	f := Finding{Engine: vocab.Pi, Check: "bridge invocation is executable", Detail: bridgePath}
+
+	raw, err := os.ReadFile(bridgePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// danglingExtensions/registration() above already report a
+			// missing bridge as Fail; a second Fail here for the same cause
+			// would be duplicate noise.
+			f.Status = Unknown
+			f.Detail = "no " + bridgePath + " to check"
+			return f
+		}
+		f.Status = Unknown
+		f.Detail = fmt.Sprintf("cannot read %s: %v", bridgePath, err)
+		return f
+	}
+	data, ok := recoverPiBridgeData(raw)
+	if !ok {
+		f.Status = Unknown
+		f.Detail = "cannot recover DATA from " + bridgePath
+		return f
+	}
+
+	// checked counts only the entries this check can actually answer for, so
+	// a built package's bridge does not Pass by saying it verified nothing.
+	var checked int
+	var broken []string
+	for _, e := range data.Entries {
+		// A built package's bin is package-root-relative and the bridge
+		// resolves it against import.meta.url at load, so there is no root
+		// here to stat it against — reporting it missing would be a wrong
+		// answer, not a cautious one.
+		if !filepath.IsAbs(e.Bin) {
+			continue
+		}
+		checked++
+		if reason := notExecutable(e.Bin); reason != "" {
+			broken = append(broken, fmt.Sprintf("%s (%s)", e.Bin, reason))
+		}
+	}
+
+	if len(broken) > 0 {
+		f.Status = Fail
+		f.Detail = bridgePath + " names a bin pi cannot exec, and the failed spawn fails open — " +
+			"every pi hook stops enforcing with no record to notice it by: " +
+			strings.Join(distinctStrings(broken), ", ") +
+			"; re-run hookyard install — a router path or state dir containing whitespace " +
+			"splits the invocation mid-path and leaves exactly this"
+		return f
+	}
+	if checked == 0 {
+		f.Status = Pass
+		f.Detail = "every entry in " + bridgePath + " names a package-root-relative bin, which resolves at load rather than from here"
+		return f
+	}
+	f.Status = Pass
+	f.Detail = "every entry in " + bridgePath + " names an executable bin"
+	return f
+}
+
 // danglingExtensions is Pi's own gap: pi tolerates an extensions[] entry
 // whose file is missing by silently skipping it, starting, running and
 // exiting 0 with no warning of its own. doctor is the only thing that can
@@ -1134,6 +1212,7 @@ const piBridgeDataAnchor = "const DATA = "
 type piBridgeEntryShape struct {
 	Event   string   `json:"event"`
 	Matcher string   `json:"matcher"`
+	Bin     string   `json:"bin"`
 	Args    []string `json:"args"`
 }
 
