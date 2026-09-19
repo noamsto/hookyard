@@ -123,10 +123,12 @@ function advisory(stdout) {
 // An appended block reaches the model as the tool's own bytes. Shown one with
 // nothing naming its source, the probe model called it "exactly the shape of an
 // injection attempt" and disregarded it — and advice nobody acts on is the same
-// loss as advice never delivered. So both deliveries say whose they are: the
-// tool_result block in its text, the injected message in the customType pi
-// stores beside it. Fixed strings, never spliced — a per-install label would be
-// a second value reaching this source by concatenation (§8).
+// loss as advice never delivered. So both deliveries say whose they are in
+// their own text; the injected message also carries the customType pi stores
+// beside it, which is metadata rather than a second attribution — whether pi
+// puts it in front of the model is unverified, so nothing rests on it. Fixed
+// strings, never spliced — a per-install label would be a second value reaching
+// this source by concatenation (§8).
 const ATTRIBUTION = "[hookyard advisory] ";
 const ADVISORY_CUSTOM_TYPE = "hookyard";
 
@@ -135,6 +137,11 @@ const ADVISORY_CUSTOM_TYPE = "hookyard";
 // buildPlan collapses every handler for one (engine, event) into a single entry,
 // so a session_start yields one registration, one router call and one reply —
 // whose advice the router has already folded together.
+//
+// A module-level slot is enough because pi binds one extension instance per
+// session: /new, /resume and /fork emit session_shutdown for the old instance
+// and reload the extensions for the new session, so no two sessions ever share
+// this one.
 let queuedAdvisory;
 
 // Pi documents a tool_result handler as chaining middleware whose omitted fields
@@ -173,9 +180,9 @@ const extras = {
 // pi takes `--api-key <value>` on its own command line, so the invoking argv can
 // carry a live credential — and `argv` travels to the router and into whatever a
 // handler writes down. Matching on the flag *name* containing one of these
-// words, rather than on an exact flag list, is what makes that fail closed: a
-// secret-bearing flag pi adds in a later version is dropped by a bridge written
-// before it existed.
+// words — in any dash spelling — rather than on an exact flag list, is what
+// makes that fail closed: a secret-bearing flag pi adds in a later version is
+// dropped by a bridge written before it existed.
 const SECRET_FLAG_WORDS = ["key", "token", "secret", "password"];
 
 function sanitizeArgv(argv) {
@@ -183,8 +190,12 @@ function sanitizeArgv(argv) {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const eq = arg.indexOf("=");
-    const name = eq === -1 ? arg : arg.slice(0, eq);
-    if (!name.startsWith("--") || !SECRET_FLAG_WORDS.some((word) => name.toLowerCase().includes(word))) {
+    // Leading dashes are stripped rather than required to be exactly two, so a
+    // short or single-dash alias fails closed the same way its long form does.
+    // A positional is not a flag and is never matched on, and a bare "-"
+    // strips to nothing, which matches no word.
+    const name = arg.startsWith("-") ? (eq === -1 ? arg : arg.slice(0, eq)).replace(/^-+/, "") : "";
+    if (name === "" || !SECRET_FLAG_WORDS.some((word) => name.toLowerCase().includes(word))) {
       kept.push(arg);
       continue;
     }
@@ -258,7 +269,7 @@ export default function (pi) {
       const advice = queuedAdvisory;
       queuedAdvisory = undefined;
       if (advice === undefined) return undefined;
-      return { message: { customType: ADVISORY_CUSTOM_TYPE, content: advice, display: false } };
+      return { message: { customType: ADVISORY_CUSTOM_TYPE, content: ATTRIBUTION + advice, display: false } };
     });
   }
 

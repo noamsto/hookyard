@@ -25,11 +25,39 @@ payload=$(cat)
 # hook protocol, so the payload on stdin already is the fixture — appending it
 # into a shared log would only mean taking it apart again, once per event.
 if [[ -d $out ]]; then
-  name=$(jq -r --arg event "$event" '.hook_event_name // $event' <<<"$payload")
+  # set -uo pipefail (no -e): a jq parse failure exits non-zero and prints
+  # nothing to stdout, so an unchecked call would silently write a
+  # mislabelled $engine-.json fixture instead of failing loudly.
+  if ! name=$(jq -r --arg event "$event" '.hook_event_name // $event' <<<"$payload"); then
+    echo "capture-hook: jq failed to parse payload for $engine/$event" >&2
+    exit 1
+  fi
+  # $name is a fixed protocol enum per engine (hookyard's own validated event
+  # name for pi), not realistically attacker-controlled -- this is a one-line
+  # path-safety guard, not a fix for a real vulnerability. Quoting already
+  # stops word-splitting/globbing; this stops a "/" or ".." from escaping $out.
+  case $name in
+    */*|*..*)
+      echo "capture-hook: unsafe hook_event_name from payload: $name" >&2
+      exit 1
+      ;;
+  esac
   # First firing per event wins. A denied call is answered by the model trying
   # something else, so last-write-wins would leave the tool_call fixture holding
   # whatever it retried with rather than the call the probe prompt asked for.
-  [[ -e $out/$engine-$name.json ]] || printf '%s\n' "$payload" >"$out/$engine-$name.json"
+  # The create must be atomic, not check-then-act: pi fires sibling tool calls
+  # concurrently, so two firings for the same engine+event can both pass an
+  # `-e` test before either writes, and the later `>` would silently invert
+  # that guarantee. `set -C` (noclobber) maps to open(..., O_EXCL), so only
+  # the first writer's file survives; it's scoped to a subshell so noclobber
+  # doesn't leak into the rest of the script.
+  if ! (set -C; printf '%s\n' "$payload" >"$out/$engine-$name.json") 2>/dev/null; then
+    # Losing the O_EXCL race is expected and not an error. A write that fails
+    # for any other reason (permissions, disk full, ...) leaves no file behind
+    # -- that case must still be reported, not swallowed with the race.
+    [[ -e $out/$engine-$name.json ]] ||
+      { echo "capture-hook: failed to write $out/$engine-$name.json" >&2; exit 1; }
+  fi
 else
   jq -c -n \
     --arg engine "$engine" \

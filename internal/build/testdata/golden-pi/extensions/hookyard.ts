@@ -248,8 +248,13 @@ export default function (pi) {
   // rather than once per session, which is why the slot is cleared on the first
   // flush — the advice belongs to the prompt that followed the session_start,
   // not to every later one.
+  //
+  // async here, matching every sibling handler and pi's own documented
+  // examples: the sync form was never verified live (a probe attempt hit a
+  // provider 402 and pi retried until it timed out, inconclusive either way),
+  // so this is the file's lone inconsistency and async costs nothing to close.
   if (DATA.entries.some((entry) => entry.event === "session_start")) {
-    pi.on("before_agent_start", () => {
+    pi.on("before_agent_start", async () => {
       const advice = queuedAdvisory;
       queuedAdvisory = undefined;
       if (advice === undefined) return undefined;

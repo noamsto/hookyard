@@ -299,9 +299,11 @@ func validatePluginRelativeExec(where, exec string) error {
 // against vocab.PiCatalog (R7.1). This is how R3.3's pi:before_agent_start
 // rejection lands — before_agent_start is absent from PiCatalog, so it fails
 // the same catalog rule every other out-of-catalog event does, rather than a
-// bespoke check with its own message. Any other engine has no catalog
-// restriction beyond its six canonical natives, already enforced by
-// validateCoverage.
+// bespoke check with its own message. Claude Code and pi are the only
+// engines with a catalog here: Codex and Cursor have none, so
+// vocab.NativeEvent resolves codex:X or cursor:X for any eventPattern-shaped
+// X against that engine's own scope, and validateCoverage's nil return for
+// it is not coverage of a catalog that does not exist.
 //
 // It runs from validateAll, not validateStatic, so ReadTable — which calls
 // validateStatic alone — stays exempt: a table an older hookyard wrote before
@@ -684,6 +686,22 @@ func CheckPluginExecs(root string, handlers []Handler) error {
 		}
 		if err != nil {
 			return fmt.Errorf("handler %q: exec %q: %w", h.ID, h.Exec, err)
+		}
+	}
+	return nil
+}
+
+// CheckCommandExecs is CheckPluginExecs' sibling for a manifest command's
+// exec: same containment and runnable rules, so the two surfaces cannot
+// drift apart the way a private reimplementation would let them.
+func CheckCommandExecs(root string, commands []Command) error {
+	for _, c := range commands {
+		target, err := ResolvePluginExec(root, c.Exec)
+		if err == nil {
+			err = execIsRunnable(target)
+		}
+		if err != nil {
+			return fmt.Errorf("command %q: exec %q: %w", c.Name, c.Exec, err)
 		}
 	}
 	return nil

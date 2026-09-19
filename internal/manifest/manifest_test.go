@@ -801,6 +801,37 @@ func TestCheckPluginExecs(t *testing.T) {
 	}
 }
 
+func TestCheckCommandExecs(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "guard.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, root, "plain.sh", "#!/bin/sh\n")
+	if err := os.Mkdir(filepath.Join(root, "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := writeFile(t, t.TempDir(), "evil.sh", "#!/bin/sh\n")
+	if err := os.Symlink(outside, filepath.Join(root, "escape.sh")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := CheckCommandExecs(root, []Command{{Name: "ok", Exec: "guard.sh"}}); err != nil {
+		t.Fatalf("executable file: %v", err)
+	}
+	cases := map[string]string{
+		"gone.sh":   "gone.sh",
+		"plain.sh":  "not executable",
+		"dir":       "is a directory",
+		"escape.sh": "outside the plugin root",
+	}
+	for exec, want := range cases {
+		err := CheckCommandExecs(root, []Command{{Name: "ok", Exec: "guard.sh"}, {Name: "bad", Exec: exec}})
+		if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), `command "bad"`) {
+			t.Errorf("%s: got %v, want an error naming command \"bad\" containing %q", exec, err, want)
+		}
+	}
+}
+
 // writeBuildTimeManifest writes a manifest naming exec verbatim, unlike
 // writeManifest, which always points EXEC at a real executable it just
 // created. LoadBuildTime's whole point is behaving differently depending on
