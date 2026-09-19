@@ -658,10 +658,16 @@ func TestInstallAllowEmptyStripsHookyardRowsFromEveryConfig(t *testing.T) {
 	// names the bridge, and the router command lives inside the bridge — so
 	// both are read here.
 	bridge := render.PiBridgePath(pi)
-	for _, want := range []string{"--registered-for codex", "--registered-for cursor", "--registered-for pi"} {
+	for _, want := range []string{"--registered-for codex", "--registered-for cursor"} {
 		if got := readFile(t, codex) + readFile(t, cursor) + readFile(t, pi) + readFile(t, bridge); !strings.Contains(got, want) {
 			t.Fatalf("setup: first install did not register %q, got:\n%s", want, got)
 		}
+	}
+	// Pi's router invocation is spliced into the bridge as a JSON bin/args pair
+	// rather than a shell string (internal/render/pi.go), so its registration
+	// is checked against that argv shape instead of the other engines' form.
+	if bridgeGot := readFile(t, bridge); !strings.Contains(bridgeGot, `"--registered-for","pi"`) {
+		t.Fatalf("setup: first install did not register pi, got:\n%s", bridgeGot)
 	}
 
 	if err := install(append([]string{"--allow-empty"}, targetFlags...)); err != nil {

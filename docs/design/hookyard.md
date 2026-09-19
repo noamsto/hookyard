@@ -1922,7 +1922,7 @@ rather than harder.
 | tool args | `tool_input` (`command`, `description`) | `tool_input` (`command`) | `tool_input` (`command`, `cwd`, `timeout`) | `tool_input` (`command`) |
 | call id | `tool_use_id` | `tool_use_id: "exec-…"` | `tool_use_id` | `tool_use_id` |
 | event name field | `hook_event_name: "PreToolUse"` | `hook_event_name: "PreToolUse"` | `hook_event_name: "preToolUse"` | `hook_event_name: "tool_call"` |
-| also present | `permission_mode`, `effort`, `transcript_path` | `permission_mode`, `model`, `transcript_path: null` | `model`, `cursor_version`, `user_email`, `workspace_roots` | `pi_version` — **not Pi's own field**; hookyard's bridge injects it (below) |
+| also present | `permission_mode`, `effort`, `transcript_path` | `permission_mode`, `model`, `transcript_path: null` | `model`, `cursor_version`, `user_email`, `workspace_roots` | `pi_version`, `session_file`, `argv` — **none are Pi's own fields**; hookyard's bridge injects all three (below). `session_file` is `ctx.sessionManager.getSessionFile()` (`""` under `--no-session`); `argv` is `process.argv.slice(2)`, with secret-bearing flags (`--api-key`) dropped |
 
 Pi's `session_id` is `ctx.sessionManager.getSessionId()`, read directly off
 the live `ctx` object rather than off a fixture alone, and it stayed

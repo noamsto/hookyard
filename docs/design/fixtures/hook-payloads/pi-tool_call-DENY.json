@@ -1,11 +1,25 @@
 {
+  "argv": [
+    "-e",
+    "/nix/store/isc969mqn5gh9agc33h52wixcqx0svdk-hook-bridge.ts",
+    "--skill",
+    "/home/noams/.claude/skills",
+    "--skill",
+    "/nix/store/11pnadlaypf4b1rshn0b7fi84nsmphi3-xdg-claude/context-efficient-tools/skills",
+    "--prompt-template",
+    "/home/noams/.claude/commands",
+    "-p",
+    "--approve",
+    "Run the shell command: touch SIDE-EFFECT.txt — run exactly that one command, nothing before or after it"
+  ],
   "cwd": "<PROBE>/work",
   "hook_event_name": "tool_call",
   "pi_version": "0.85.1",
-  "session_id": "01a090c3-a055-77c5-9f6e-c53f636de7c1",
+  "session_file": "<PROBE>/pi-agent/sessions/-<PROBE>-work--/2026-09-17T14-52-43-082Z_01a0afdb-0ac9-70cb-a861-03e48807f087.jsonl",
+  "session_id": "01a0afdb-0ac9-70cb-a861-03e48807f087",
   "tool_input": {
     "command": "touch SIDE-EFFECT.txt"
   },
   "tool_name": "bash",
-  "tool_use_id": "C6FEUYjmmJ0qVPAJfxkxGBHUnDnqRQtZ"
+  "tool_use_id": "call_eec4103c04184488b9878ef0"
 }

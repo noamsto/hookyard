@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/noamsto/hookyard/internal/manifest"
 	"github.com/noamsto/hookyard/internal/render"
 	"github.com/noamsto/hookyard/internal/vocab"
 )
@@ -63,7 +64,7 @@ func TestPiFindingsRegistersOffSettingsAndRouterOffBridge(t *testing.T) {
 	piConfig(t, piDir, routedCommand(router, vocab.Pi, filepath.Join(root, "state")))
 
 	p := Paths{PiAgentDir: piDir}
-	findings := piFindings(p)
+	findings := piFindings(p, "")
 
 	reg := findByCheck(t, findings, "hookyard registered")
 	if reg.Status != Pass {
@@ -81,7 +82,7 @@ func TestPiFindingsRegistersOffSettingsAndRouterOffBridge(t *testing.T) {
 
 func TestPiFindingsNoRegistrationWhenSettingsMissing(t *testing.T) {
 	p := Paths{PiAgentDir: filepath.Join(t.TempDir(), "pi")}
-	findings := piFindings(p)
+	findings := piFindings(p, "")
 
 	reg := findByCheck(t, findings, "hookyard registered")
 	if reg.Status != Fail {
@@ -94,7 +95,7 @@ func TestPiFindingsNoRegistrationWhenSettingsMissing(t *testing.T) {
 // extensions at all, so the check always passes and says why.
 func TestPiTrustFindingReportsGlobalExtensionsAsUngated(t *testing.T) {
 	p := Paths{PiAgentDir: filepath.Join(t.TempDir(), "pi")}
-	trust := findByCheck(t, piFindings(p), "workspace trust")
+	trust := findByCheck(t, piFindings(p, ""), "workspace trust")
 	if trust.Status != Pass {
 		t.Fatalf("trust status = %v, want Pass; detail=%q", trust.Status, trust.Detail)
 	}
@@ -184,6 +185,15 @@ func TestPiDanglingExtensionReportsAnUnreadableEntryAsUnknown(t *testing.T) {
 // directory, not silently fall back to record.DefaultStateDir() and read a
 // directory nothing writes to.
 func TestRunRecoversPiOnlyStateDir(t *testing.T) {
+	// Pin the fallback DefaultStateDir() reaches for on a recovery failure to
+	// an empty directory. Left ambient, this test passes on any developer
+	// machine with a live hookyard install for the wrong reason: the fallback
+	// resolves to ~/.local/state/hookyard, which already has today's real
+	// event stream, so a completely broken recovery still reports Pass by
+	// accident — exactly the silent false negative recoverStateDir's own
+	// comment warns about.
+	t.Setenv("HOOKYARD_STATE_DIR", t.TempDir())
+
 	root := t.TempDir()
 	router := writeRouterBinary(t, root, true)
 	stateDir := filepath.Join(root, "pi-state")
@@ -305,5 +315,307 @@ func TestPiLauncherFindingsSkipsACompiledBinary(t *testing.T) {
 	}
 	if !strings.Contains(f.Detail, "binary") {
 		t.Errorf("detail = %q, want it to say this is a binary", f.Detail)
+	}
+}
+
+// pluginHandler is aeyeScript's build-mode counterpart: a fully valid handler
+// with a plugin-root-relative exec, so WritePluginTable -> ReadPluginTable
+// round-trips without validateStatic refusing it.
+func pluginHandler(id, exec string) manifest.Handler {
+	return manifest.Handler{
+		ID:      id,
+		Exec:    exec,
+		Events:  []string{"post_tool"},
+		Engines: []string{"pi"},
+	}
+}
+
+// piBuildPackageFixture writes a build-mode pi package under root, in the
+// shape build-pi produces (decomposition: "Pi build package on disk"): the
+// extension file at <root>/extensions/hookyard.ts and the baked table at
+// <root>/hookyard/table.json. It returns the extension path, the value a
+// settings.json extensions[] entry would name.
+func piBuildPackageFixture(t *testing.T, root string, handlers []manifest.Handler) string {
+	t.Helper()
+	extensionsDir := filepath.Join(root, "extensions")
+	if err := os.MkdirAll(extensionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	extension := filepath.Join(extensionsDir, "hookyard.ts")
+	if err := os.WriteFile(extension, []byte("export default {};\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tableDir := filepath.Join(root, "hookyard")
+	if err := os.MkdirAll(tableDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := manifest.WritePluginTable(filepath.Join(tableDir, "table.json"), handlers); err != nil {
+		t.Fatal(err)
+	}
+	return extension
+}
+
+func writePiSettingsExtensions(t *testing.T, path string, extensions []string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(map[string]any{"extensions": extensions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPiDoubleFirePassesWhenNoBuildPackageExists(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	writeTable(t, stateDir, []manifest.Handler{aeyeScript("guard/one", "/nix/store/x/guard.sh")})
+
+	settings := filepath.Join(dir, "pi", "settings.json")
+	writePiSettingsExtensions(t, settings, nil)
+
+	f := piDoubleFire(stateDir, settings)
+	if f.Status != Pass {
+		t.Fatalf("status = %v, want Pass; detail=%q", f.Status, f.Detail)
+	}
+	if !strings.Contains(f.Detail, "no build-mode pi package found") {
+		t.Errorf("detail = %q, want it to say no package was found", f.Detail)
+	}
+}
+
+func TestPiDoubleFirePassesOnDisjointHandlerIDs(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	writeTable(t, stateDir, []manifest.Handler{aeyeScript("guard/one", "/nix/store/x/guard.sh")})
+
+	pkgRoot := filepath.Join(dir, "pkg")
+	extension := piBuildPackageFixture(t, pkgRoot, []manifest.Handler{pluginHandler("guard/two", "bin/guard.sh")})
+
+	settings := filepath.Join(dir, "pi", "settings.json")
+	writePiSettingsExtensions(t, settings, []string{extension})
+
+	f := piDoubleFire(stateDir, settings)
+	if f.Status != Pass {
+		t.Fatalf("status = %v, want Pass; detail=%q", f.Status, f.Detail)
+	}
+	if !strings.Contains(f.Detail, "no handler id is registered in both") {
+		t.Errorf("detail = %q, want it to say nothing collided", f.Detail)
+	}
+}
+
+func TestPiDoubleFireFailsOnASharedHandlerID(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	writeTable(t, stateDir, []manifest.Handler{aeyeScript("guard/one", "/nix/store/x/guard.sh")})
+
+	pkgRoot := filepath.Join(dir, "pkg")
+	extension := piBuildPackageFixture(t, pkgRoot, []manifest.Handler{pluginHandler("guard/one", "bin/guard.sh")})
+
+	settings := filepath.Join(dir, "pi", "settings.json")
+	writePiSettingsExtensions(t, settings, []string{extension})
+
+	f := piDoubleFire(stateDir, settings)
+	if f.Status != Fail {
+		t.Fatalf("status = %v, want Fail; detail=%q", f.Status, f.Detail)
+	}
+	if !strings.Contains(f.Detail, "guard/one") {
+		t.Errorf("detail = %q, want the colliding id named", f.Detail)
+	}
+	yardPath := filepath.Join(stateDir, "table.json")
+	pkgTablePath := filepath.Join(pkgRoot, "hookyard", "table.json")
+	if !strings.Contains(f.Detail, yardPath) {
+		t.Errorf("detail = %q, want the yard table path named", f.Detail)
+	}
+	if !strings.Contains(f.Detail, pkgTablePath) {
+		t.Errorf("detail = %q, want the build package's table path named", f.Detail)
+	}
+}
+
+func TestPiDoubleFireUnknownWhenPackageTableUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	writeTable(t, stateDir, []manifest.Handler{aeyeScript("guard/one", "/nix/store/x/guard.sh")})
+
+	pkgRoot := filepath.Join(dir, "pkg")
+	extensionsDir := filepath.Join(pkgRoot, "extensions")
+	if err := os.MkdirAll(extensionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	extension := filepath.Join(extensionsDir, "hookyard.ts")
+	if err := os.WriteFile(extension, []byte("export default {};\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tableDir := filepath.Join(pkgRoot, "hookyard")
+	if err := os.MkdirAll(tableDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tableDir, "table.json"), []byte("not valid json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	settings := filepath.Join(dir, "pi", "settings.json")
+	writePiSettingsExtensions(t, settings, []string{extension})
+
+	f := piDoubleFire(stateDir, settings)
+	if f.Status != Unknown {
+		t.Fatalf("status = %v, want Unknown; detail=%q", f.Status, f.Detail)
+	}
+}
+
+// A third-party extension sitting beside pi's own must not be treated as a
+// hookyard build package just because it is a file under some extensions/
+// directory: its grandparent has no hookyard/table.json, so it does not
+// qualify (R8.2) and contributes nothing rather than an error.
+func TestPiDoubleFireIgnoresANonHookyardExtensionsEntry(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	writeTable(t, stateDir, []manifest.Handler{aeyeScript("guard/one", "/nix/store/x/guard.sh")})
+
+	otherDir := filepath.Join(dir, "other-extension", "extensions")
+	if err := os.MkdirAll(otherDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(otherDir, "unrelated.ts")
+	if err := os.WriteFile(other, []byte("export default {};\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	settings := filepath.Join(dir, "pi", "settings.json")
+	writePiSettingsExtensions(t, settings, []string{other})
+
+	f := piDoubleFire(stateDir, settings)
+	if f.Status != Pass {
+		t.Fatalf("status = %v, want Pass; detail=%q", f.Status, f.Detail)
+	}
+}
+
+// piHandler is aeyeScript's pi-scoped counterpart: ReadTable enforces
+// ExecAbsolute, unlike pluginHandler's plugin-root-relative exec, so the
+// drift check's yard-mode fixtures need their own absolute-exec handler.
+func piHandler(id, event, exec string) manifest.Handler {
+	return manifest.Handler{
+		ID:      id,
+		Exec:    exec,
+		Events:  []string{event},
+		Engines: []string{"pi"},
+	}
+}
+
+// piBridgeFixture renders settings.json plus a bridge naming exactly entries,
+// via the real writer, so a multi-entry fixture is never a hand-typed guess
+// at how WritePi encodes bin/args.
+func piBridgeFixture(t *testing.T, dir string, entries []render.Entry) (settingsPath, bridgePath string) {
+	t.Helper()
+	settingsPath = filepath.Join(dir, "settings.json")
+	if err := render.WritePi(settingsPath, entries, "1.2.3"); err != nil {
+		t.Fatal(err)
+	}
+	return settingsPath, render.PiBridgePath(settingsPath)
+}
+
+func TestPiBridgeDriftPassesWhenBridgeMatchesTheTable(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	handlers := []manifest.Handler{piHandler("guard/one", "post_tool", "/nix/store/x/guard.sh")}
+	writeTable(t, stateDir, handlers)
+
+	router := writeRouterBinary(t, dir, true)
+	plan, err := render.BuildPlan(handlers, router, stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, bridge := piBridgeFixture(t, filepath.Join(dir, "pi"), plan[vocab.Pi])
+
+	f := piBridgeDrift(stateDir, bridge)
+	if f.Status != Pass {
+		t.Fatalf("status = %v, want Pass; detail=%q", f.Status, f.Detail)
+	}
+}
+
+// A handler in the table with no corresponding bridge entry is exactly
+// "registered but can never fire" (SPEC R9.1).
+func TestPiBridgeDriftFailsWhenATableHandlerHasNoBridgeEntry(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	handlers := []manifest.Handler{
+		piHandler("guard/pre", "pre_tool", "/nix/store/x/pre.sh"),
+		piHandler("guard/post", "post_tool", "/nix/store/x/post.sh"),
+	}
+	writeTable(t, stateDir, handlers)
+
+	router := writeRouterBinary(t, dir, true)
+	plan, err := render.BuildPlan(handlers, router, stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Install only the pre_tool ("tool_call") entry: post_tool
+	// ("tool_result") stays in the table with no matching bridge entry.
+	var preOnly []render.Entry
+	for _, e := range plan[vocab.Pi] {
+		if e.Event == "tool_call" {
+			preOnly = append(preOnly, e)
+		}
+	}
+	if len(preOnly) != 1 {
+		t.Fatalf("test setup: want exactly one tool_call entry in the plan, got %d", len(preOnly))
+	}
+	_, bridge := piBridgeFixture(t, filepath.Join(dir, "pi"), preOnly)
+
+	f := piBridgeDrift(stateDir, bridge)
+	if f.Status != Fail {
+		t.Fatalf("status = %v, want Fail; detail=%q", f.Status, f.Detail)
+	}
+	if !strings.Contains(f.Detail, "tool_result") {
+		t.Errorf("detail = %q, want the orphaned handler's native event named", f.Detail)
+	}
+}
+
+// A duplicate (event, matcher) pair in the installed bridge is the shape the
+// session_start + pi:session_start aliasing hazard produces, and this check
+// is the only place that surfaces it (SPEC R9.1, PLAN risks).
+func TestPiBridgeDriftFailsOnADuplicateEntry(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	handlers := []manifest.Handler{piHandler("guard/one", "post_tool", "/nix/store/x/guard.sh")}
+	writeTable(t, stateDir, handlers)
+
+	router := writeRouterBinary(t, dir, true)
+	plan, err := render.BuildPlan(handlers, router, stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doubled := append(plan[vocab.Pi], plan[vocab.Pi]...)
+	_, bridge := piBridgeFixture(t, filepath.Join(dir, "pi"), doubled)
+
+	f := piBridgeDrift(stateDir, bridge)
+	if f.Status != Fail {
+		t.Fatalf("status = %v, want Fail; detail=%q", f.Status, f.Detail)
+	}
+	if !strings.Contains(f.Detail, "registered 2 times") {
+		t.Errorf("detail = %q, want the duplicate count named", f.Detail)
+	}
+}
+
+// A DATA that will not parse is Unknown, not Fail — the same
+// absence-vs-unreadability split danglingExtensions draws.
+func TestPiBridgeDriftUnknownWhenDataCannotBeParsed(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	writeTable(t, stateDir, []manifest.Handler{piHandler("guard/one", "post_tool", "/nix/store/x/guard.sh")})
+
+	bridge := filepath.Join(dir, "pi", "bin", "hookyard-bridge.ts")
+	if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bridge, []byte("const DATA = {not valid json};\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	f := piBridgeDrift(stateDir, bridge)
+	if f.Status != Unknown {
+		t.Fatalf("status = %v, want Unknown; detail=%q", f.Status, f.Detail)
 	}
 }

@@ -44,8 +44,21 @@ type Handler struct {
 // FireAndForget reports whether the router starts h and never waits for it.
 func (h Handler) FireAndForget() bool { return h.Lane == LaneFireAndForget }
 
+// Command is a pi-only, build-mode-only command surface (R6.5): build
+// --engine pi renders each entry into pi.registerCommand, so a handler's
+// exec can also be invoked as a slash command rather than only fired from a
+// hook. Yard mode and every other engine have no equivalent — Load,
+// LoadBuildTime and ReadTable reject a non-empty Commands outright rather
+// than accepting a shape they could never serve.
+type Command struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Exec        string `json:"exec"`
+}
+
 type Manifest struct {
 	Handlers []Handler `json:"handlers"`
+	Commands []Command `json:"commands,omitempty"`
 
 	// Source is the path this manifest was read from, used to name both sides
 	// of a collision.
@@ -67,6 +80,12 @@ const (
 const PluginTablePath = "hookyard/table.json"
 
 var idPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_./-]*$`)
+
+// commandNamePattern constrains a manifest command's name (R6.5). The name is
+// passed to pi.registerCommand verbatim and becomes the literal string a user
+// types after "/", so unlike idPattern it excludes "/" and "." — either would
+// read as a nested command path pi's command palette does not support.
+var commandNamePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
 
 // eventPattern constrains the native half of an engine-scoped event name.
 // Those names reach a TOML array-of-table header verbatim, where an encoder
@@ -123,13 +142,16 @@ func (m *Manifest) validateAll(form ExecForm, extra func(where string, h Handler
 	if len(m.Handlers) == 0 {
 		return fmt.Errorf("%s: no handlers declared", m.Source)
 	}
+	if err := validateCommandsMode(m.Source, m.Commands, form); err != nil {
+		return err
+	}
 	seen := map[string]bool{}
 	for _, h := range m.Handlers {
 		where := fmt.Sprintf("%s: handler %q", m.Source, h.ID)
 		if err := validateStatic(where, h, form); err != nil {
 			return err
 		}
-		if err := validateClaudeCatalog(where, h); err != nil {
+		if err := validateCatalog(where, h); err != nil {
 			return err
 		}
 		if extra != nil {
@@ -141,6 +163,29 @@ func (m *Manifest) validateAll(form ExecForm, extra func(where string, h Handler
 			return fmt.Errorf("%s: handler id %q declared twice in one manifest", m.Source, h.ID)
 		}
 		seen[h.ID] = true
+	}
+	seenCommand := map[string]bool{}
+	for _, c := range m.Commands {
+		where := fmt.Sprintf("%s: command %q", m.Source, c.Name)
+		if err := validateCommand(where, c); err != nil {
+			return err
+		}
+		if seenCommand[c.Name] {
+			return fmt.Errorf("%s: command name %q declared twice in one manifest", m.Source, c.Name)
+		}
+		seenCommand[c.Name] = true
+	}
+	return nil
+}
+
+// validateCommandsMode refuses a non-empty Commands outside build mode
+// (ExecPluginRelative). Yard mode's handlers run standalone with nothing
+// resembling pi's command registry to register into, so a manifest naming a
+// command there could never be served.
+func validateCommandsMode(source string, commands []Command, form ExecForm) error {
+	if form == ExecAbsolute && len(commands) > 0 {
+		return fmt.Errorf("%s: yard mode has no command surface; commands are accepted only in "+
+			"build mode (hookyard build)", source)
 	}
 	return nil
 }
@@ -177,14 +222,8 @@ func validateStatic(where string, h Handler, form ExecForm) error {
 				where, h.Exec)
 		}
 	case ExecPluginRelative:
-		// The router joins it onto the plugin root rather than the agent's cwd,
-		// so relative is safe here; ResolvePluginExec still enforces containment
-		// after symlinks, which a lexical check cannot see.
-		if !filepath.IsLocal(h.Exec) {
-			return fmt.Errorf("%s: exec %q must be relative to the plugin root with no .. segments, "+
-				"because an absolute path names the author's machine rather than the end user's; "+
-				"an absolute exec is yard mode's form (hookyard install)",
-				where, h.Exec)
+		if err := validatePluginRelativeExec(where, h.Exec); err != nil {
+			return err
 		}
 	}
 	if h.Lane != LaneVerdict && h.Lane != LaneFireAndForget {
@@ -236,31 +275,75 @@ func validateStatic(where string, h Handler, form ExecForm) error {
 	return validateLane(where, h, engines)
 }
 
-// validateClaudeCatalog refuses a "claude-code:X" event whose native half
-// isn't one of the eight events vocab.ClaudeCodeCatalog documents evidence
-// for (R-A/R-C). It applies whatever the handler's engines say, because the
-// event name itself claims claude-code regardless.
+// validatePluginRelativeExec is the ExecPluginRelative form's shared rule:
+// the router joins the exec onto the plugin root rather than the agent's
+// cwd, so relative is safe here; ResolvePluginExec still enforces
+// containment after symlinks, which a lexical check cannot see. Besides
+// validateStatic's handler case, commands take this branch unconditionally
+// (validateCommand) — a command is build-mode-only regardless of the
+// manifest's own exec form, so there is no ExecAbsolute case for it to switch
+// on.
+func validatePluginRelativeExec(where, exec string) error {
+	if !filepath.IsLocal(exec) {
+		return fmt.Errorf("%s: exec %q must be relative to the plugin root with no .. segments, "+
+			"because an absolute path names the author's machine rather than the end user's; "+
+			"an absolute exec is yard mode's form (hookyard install)",
+			where, exec)
+	}
+	return nil
+}
+
+// validateCatalog refuses an engine-scoped event whose native half isn't one
+// of that engine's routed catalog: "claude-code:X" against the eight events
+// vocab.ClaudeCodeCatalog documents evidence for (R-A/R-C), and "pi:X"
+// against vocab.PiCatalog (R7.1). This is how R3.3's pi:before_agent_start
+// rejection lands — before_agent_start is absent from PiCatalog, so it fails
+// the same catalog rule every other out-of-catalog event does, rather than a
+// bespoke check with its own message. Any other engine has no catalog
+// restriction beyond its six canonical natives, already enforced by
+// validateCoverage.
 //
 // It runs from validateAll, not validateStatic, so ReadTable — which calls
 // validateStatic alone — stays exempt: a table an older hookyard wrote before
 // some catalog row existed would otherwise turn every event for every engine
 // into a router error until the next successful install rewrites it (#59).
-func validateClaudeCatalog(where string, h Handler) error {
+func validateCatalog(where string, h Handler) error {
 	for _, event := range h.Events {
 		engine, native, scoped := vocab.SplitEngineScoped(event)
-		if !scoped || engine != vocab.ClaudeCode {
+		if !scoped {
 			continue
 		}
-		if !vocab.IsClaudeCodeEvent(native) {
-			natives := make([]string, len(vocab.ClaudeCodeCatalog))
-			for i, e := range vocab.ClaudeCodeCatalog {
-				natives[i] = e.Native
+		switch engine {
+		case vocab.ClaudeCode:
+			if !vocab.IsClaudeCodeEvent(native) {
+				natives := make([]string, len(vocab.ClaudeCodeCatalog))
+				for i, e := range vocab.ClaudeCodeCatalog {
+					natives[i] = e.Native
+				}
+				return fmt.Errorf("%s: event %q is not a Claude Code event hookyard routes (want one of %s)",
+					where, event, strings.Join(natives, ", "))
 			}
-			return fmt.Errorf("%s: event %q is not a Claude Code event hookyard routes (want one of %s)",
-				where, event, strings.Join(natives, ", "))
+		case vocab.Pi:
+			if !vocab.IsPiEvent(native) {
+				return fmt.Errorf("%s: event %q is not a Pi event hookyard routes (want one of %s)",
+					where, event, strings.Join(vocab.PiCatalog, ", "))
+			}
 		}
 	}
 	return nil
+}
+
+// validateCommand checks one manifest command: name shape, a non-empty
+// description, and exec under the ExecPluginRelative rule — commands are
+// build-mode-only regardless of the manifest's own exec form (R6.5).
+func validateCommand(where string, c Command) error {
+	if !commandNamePattern.MatchString(c.Name) {
+		return fmt.Errorf("%s: name must match %s", where, commandNamePattern)
+	}
+	if c.Description == "" {
+		return fmt.Errorf("%s: no description", where)
+	}
+	return validatePluginRelativeExec(where, c.Exec)
 }
 
 func parseEngines(where string, names []string) ([]vocab.Engine, error) {
@@ -478,6 +561,20 @@ func Merge(manifests []*Manifest) ([]Handler, error) {
 		}
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
+
+	// Commands share handlers' cross-manifest uniqueness rule even though
+	// they are not part of the returned table: a duplicate name is one
+	// repo's command silently shadowing another's, the same collision a
+	// duplicate handler id catches above.
+	commandOwner := map[string]string{}
+	for _, m := range manifests {
+		for _, c := range m.Commands {
+			if prev, clash := commandOwner[c.Name]; clash {
+				return nil, fmt.Errorf("command name %q declared by both %s and %s", c.Name, prev, m.Source)
+			}
+			commandOwner[c.Name] = m.Source
+		}
+	}
 	return all, nil
 }
 
@@ -526,6 +623,9 @@ func readTable(path string, form ExecForm) ([]Handler, error) {
 	var t Manifest
 	if err := json.Unmarshal(raw, &t); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if err := validateCommandsMode(path, t.Commands, form); err != nil {
+		return nil, err
 	}
 	t.normalizeLanes()
 	seen := map[string]bool{}

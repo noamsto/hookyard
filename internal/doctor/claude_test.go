@@ -358,12 +358,14 @@ func TestOtherEnginesFindingsAreUnchanged(t *testing.T) {
 		{vocab.Pi, "hookyard registered", Pass, "present in " + piSettings},
 		{vocab.Pi, "router path", Pass, executable},
 		{vocab.Pi, "launcher wrapper", Unknown, "no pi on PATH to check for an injected launcher"},
+		{vocab.Pi, "double-registered handlers", Unknown, "no --state-dir recoverable to read the handler table from"},
+		{vocab.Pi, "bridge matches handler table", Unknown, "no --state-dir recoverable to read the handler table from"},
 	}
 
 	var got []Finding
 	got = append(got, codexFindings(p, dir)...)
 	got = append(got, cursorFindings(p, dir, stateDir)...)
-	got = append(got, piFindings(p)...)
+	got = append(got, piFindings(p, "")...)
 
 	if len(got) != len(want) {
 		t.Fatalf("got %d findings, want %d: %+v", len(got), len(want), got)

@@ -1,7 +1,21 @@
 {
+  "argv": [
+    "-e",
+    "/nix/store/isc969mqn5gh9agc33h52wixcqx0svdk-hook-bridge.ts",
+    "--skill",
+    "/home/noams/.claude/skills",
+    "--skill",
+    "/nix/store/11pnadlaypf4b1rshn0b7fi84nsmphi3-xdg-claude/context-efficient-tools/skills",
+    "--prompt-template",
+    "/home/noams/.claude/commands",
+    "-p",
+    "--approve",
+    "Run the shell command: echo hookyard-probe"
+  ],
   "cwd": "<PROBE>/work",
   "hook_event_name": "turn_end",
   "pi_version": "0.85.1",
-  "session_id": "01a090c3-49a5-74cf-a396-9a9823c3143b",
+  "session_file": "<PROBE>/pi-agent/sessions/-<PROBE>-work--/2026-09-17T14-52-06-261Z_01a0afda-7af5-70a0-964f-48dfb3e70ff1.jsonl",
+  "session_id": "01a0afda-7af5-70a0-964f-48dfb3e70ff1",
   "turn_index": 0
 }

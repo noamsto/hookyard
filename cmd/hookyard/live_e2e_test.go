@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -677,6 +678,34 @@ func livePiWriteManifest(t *testing.T, dir, handlerPath string) string {
 	return path
 }
 
+// livePiWriteMultiEventManifest is livePiWriteManifest's sibling for the
+// fixture-shape test: one handler registered for every event that test
+// captures — session_start, pre_tool, post_tool and pi:session_shutdown —
+// rather than pre_tool alone, since a manifest that never asks pi to fire the
+// other three would leave their fixtures unverifiable no matter what the
+// capture router does. No Match: an unset matcher renders empty for every
+// event (render.buildPlan's everyTool case), and a non-empty one would
+// silently drop session_start/session_shutdown, whose events carry no
+// toolName for the bridge's matcher check to compare against.
+func livePiWriteMultiEventManifest(t *testing.T, dir, handlerPath string) string {
+	t.Helper()
+	m := manifest.Manifest{Handlers: []manifest.Handler{{
+		ID:      "e2e-pi-fixture-shape",
+		Exec:    handlerPath,
+		Events:  []string{"session_start", "pre_tool", "post_tool", "pi:session_shutdown"},
+		Engines: []string{"pi"},
+	}}}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	path := filepath.Join(dir, "hookyard-pi.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	return path
+}
+
 // livePiInstall runs `hookyard install` with routerPath as the one path each
 // test varies, and every other destination pointed at scratch files under
 // root so no real engine config is ever touched.
@@ -771,38 +800,82 @@ func TestLivePiFailsOpenWhenTheRouterBinaryIsAbsent(t *testing.T) {
 
 // liveWritePiCaptureRouter writes a router that is not hookyard at all: it
 // only records the exact bytes the bridge piped to its stdin, so this test
-// can compare what the bridge actually sends against the committed fixture
+// can compare what the bridge actually sends against the committed fixtures
 // without going through hookyard's own decode/render round trip, which would
-// hide a drift between the two. Its path still has to satisfy
-// render.BuildPlan's Marker check, the same requirement any real router path
-// meets.
-func liveWritePiCaptureRouter(t *testing.T, root, capturePath string) string {
+// hide a drift between the two. It captures into captureDir, one file per
+// invocation named after the invoking shell's own PID, because the bridge
+// calls this same script once per registered event — a single `cat >` target
+// would leave only the last firing's bytes behind, and the script has no
+// argv-parsing of its own to name the event that fired it. Its path still has
+// to satisfy render.BuildPlan's Marker check, the same requirement any real
+// router path meets.
+func liveWritePiCaptureRouter(t *testing.T, root, captureDir string) string {
 	t.Helper()
 	path := filepath.Join(root, "capture-router", "bin", "hookyard")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
 	}
-	script := "#!/bin/sh\ncat > " + capturePath + "\n"
+	if err := os.MkdirAll(captureDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", captureDir, err)
+	}
+	script := "#!/bin/sh\ncat > " + captureDir + "/$$.json\n"
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatalf("write capture router: %v", err)
 	}
 	return path
 }
 
+// liveReadPiCaptures reads every payload liveWritePiCaptureRouter's router
+// wrote into dir and keys each by its own hook_event_name — the bridge's
+// native pi event name — since that is the only thing identifying which
+// firing produced it; the capture filename carries nothing but a PID.
+func liveReadPiCaptures(t *testing.T, dir string) map[string]map[string]json.RawMessage {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read capture dir %s: %v", dir, err)
+	}
+	captures := map[string]map[string]json.RawMessage{}
+	for _, entry := range entries {
+		capturePath := filepath.Join(dir, entry.Name())
+		raw, err := os.ReadFile(capturePath)
+		if err != nil {
+			t.Fatalf("read %s: %v", capturePath, err)
+		}
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			t.Fatalf("captured payload %s is not valid JSON: %v\n%s", capturePath, err, raw)
+		}
+		var name string
+		if err := json.Unmarshal(payload["hook_event_name"], &name); err != nil {
+			t.Fatalf("captured payload %s carries no hook_event_name: %v\n%s", capturePath, err, raw)
+		}
+		if _, dup := captures[name]; dup {
+			t.Fatalf("more than one captured payload names hook_event_name %q; expected one firing per event", name)
+		}
+		captures[name] = payload
+	}
+	return captures
+}
+
 // TestLivePiPayloadMatchesTheCommittedFixtureShape is the automated binding
-// between the generated bridge (internal/render/pi_bridge.ts's tool_call
-// entry in the `extras` table) and the committed fixtures: without it the
-// generator can drift from docs/design/fixtures/hook-payloads/pi-tool_call.json
-// with go build, go vet, go test and the nix syntax gate all green, since none
-// of those runs the bridge against a real pi process.
+// between the generated bridge (internal/render/pi_bridge.ts's `extras`
+// table) and the committed fixtures: without it the generator can drift from
+// docs/design/fixtures/hook-payloads/pi-*.json with go build, go vet, go test
+// and the nix syntax gate all green, since none of those runs the bridge
+// against a real pi process. It covers every event that table carries an
+// entry for — session_start, tool_call, tool_result and session_shutdown —
+// not tool_call alone, so a bridge that registers one of the other three and
+// never actually fires it fails here instead of going quiet on someone's
+// machine (SPEC R9.2).
 func TestLivePiPayloadMatchesTheCommittedFixtureShape(t *testing.T) {
 	piBin := liveRequirePi(t)
 	hookyardBin, root, agentDir, projectDir, stateDir := livePiSetup(t)
 
 	handlerPath := liveWriteDenyHandler(t, root, filepath.Join(root, "handler-fired"), "unused-not-invoked")
-	manifestPath := livePiWriteManifest(t, root, handlerPath)
-	capturePath := filepath.Join(root, "captured-payload.json")
-	captureRouter := liveWritePiCaptureRouter(t, root, capturePath)
+	manifestPath := livePiWriteMultiEventManifest(t, root, handlerPath)
+	captureDir := filepath.Join(root, "captured-payloads")
+	captureRouter := liveWritePiCaptureRouter(t, root, captureDir)
 	livePiInstall(t, hookyardBin, root, agentDir, stateDir, manifestPath, captureRouter)
 
 	ctx, cancel := context.WithTimeout(context.Background(), livePiBudget)
@@ -815,16 +888,24 @@ func TestLivePiPayloadMatchesTheCommittedFixtureShape(t *testing.T) {
 		t.Fatalf("pi run: %v\n--- pi output ---\n%s", err, output)
 	}
 
-	captured, err := os.ReadFile(capturePath)
-	if err != nil {
-		t.Fatalf("the capture router was never invoked: %v\n--- pi output ---\n%s", err, output)
-	}
-	var got map[string]json.RawMessage
-	if err := json.Unmarshal(captured, &got); err != nil {
-		t.Fatalf("captured payload is not valid JSON: %v\n%s", err, captured)
+	captures := liveReadPiCaptures(t, captureDir)
+	liveAssertPayloadMatchesFixture(t, captures, "session_start", "pi-session_start.json")
+	liveAssertPayloadMatchesFixture(t, captures, "tool_call", "pi-tool_call.json")
+	liveAssertPayloadMatchesFixture(t, captures, "tool_result", "pi-tool_result.json")
+	liveAssertPayloadMatchesFixture(t, captures, "session_shutdown", "pi-session_shutdown.json")
+}
+
+// liveAssertPayloadMatchesFixture isolates nativeEvent's captured payload
+// from captures and compares its key set against fixtureName, the committed
+// fixture naming that event.
+func liveAssertPayloadMatchesFixture(t *testing.T, captures map[string]map[string]json.RawMessage, nativeEvent, fixtureName string) {
+	t.Helper()
+	got, ok := captures[nativeEvent]
+	if !ok {
+		t.Fatalf("the bridge never fired %s: no captured payload names it in hook_event_name", nativeEvent)
 	}
 
-	fixturePath := filepath.Join("..", "..", "docs", "design", "fixtures", "hook-payloads", "pi-tool_call.json")
+	fixturePath := filepath.Join("..", "..", "docs", "design", "fixtures", "hook-payloads", fixtureName)
 	fixtureRaw, err := os.ReadFile(fixturePath)
 	if err != nil {
 		t.Fatalf("read %s: %v", fixturePath, err)
@@ -835,7 +916,7 @@ func TestLivePiPayloadMatchesTheCommittedFixtureShape(t *testing.T) {
 	}
 
 	if diff := liveKeySetDiff(got, want); diff != "" {
-		t.Fatalf("bridge payload key set does not match %s: %s\ncaptured: %s", fixturePath, diff, captured)
+		t.Fatalf("%s payload key set does not match %s: %s", nativeEvent, fixturePath, diff)
 	}
 }
 
@@ -859,4 +940,99 @@ func liveKeySetDiff(got, want map[string]json.RawMessage) string {
 	sort.Strings(missing)
 	sort.Strings(extra)
 	return fmt.Sprintf("missing %v, extra %v", missing, extra)
+}
+
+// livePiBuildPluginPackage runs `hookyard build --engine pi` into its own
+// scratch plugin root, then replaces the bundled binary launcher.sh execs
+// with a stand-in that records its argv to argvCapturePath — the same
+// substitution liveWritePiCaptureRouter makes for yard mode's router, applied
+// here to build mode's bundled binary instead of a --router-path. launcher.sh
+// itself is left exactly as build wrote it, so a passing test still proves
+// build's own OS/arch dispatch resolves to a real, executable file.
+func livePiBuildPluginPackage(t *testing.T, hookyardBin, root string) (pluginRoot, argvCapturePath string) {
+	t.Helper()
+	pluginRoot = filepath.Join(root, "pi-package")
+	if err := os.MkdirAll(pluginRoot, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", pluginRoot, err)
+	}
+	writeBuildFile(t, filepath.Join(pluginRoot, "handlers", "guard.sh"), "#!/bin/sh\n", 0o755)
+	manifestPath := filepath.Join(root, "pi-plugin-manifest.json")
+	writeBuildFile(t, manifestPath, `{"handlers":[`+
+		`{"id":"e2e-pi-plugin","exec":"handlers/guard.sh","events":["pre_tool"],"engines":["pi"],"match":["Bash"]}]}`, 0o644)
+
+	build := exec.Command(hookyardBin, "build",
+		"--engine", "pi",
+		"--manifest", manifestPath,
+		"--out", pluginRoot,
+		"--name", "hookyard-e2e",
+	)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("hookyard build --engine pi: %v\n%s", err, out)
+	}
+
+	// The bundled binary this overwrites is the one file build's own launcher.sh
+	// execs once it has picked the host's OS/arch, so replacing it is what turns
+	// "the package routes" into something this test can observe without
+	// spawning hookyard's real route command.
+	argvCapturePath = filepath.Join(root, "plugin-router-argv.txt")
+	binaryPath := filepath.Join(pluginRoot, "bin", fmt.Sprintf("hookyard-%s-%s", runtime.GOOS, runtime.GOARCH))
+	script := "#!/bin/sh\necho \"$@\" > " + argvCapturePath + "\ncat > /dev/null\n"
+	if err := os.WriteFile(binaryPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("overwrite bundled binary %s: %v", binaryPath, err)
+	}
+	return pluginRoot, argvCapturePath
+}
+
+// livePiRegisterExtension adds extensionPath to the scratch agent dir's
+// settings.json extensions[] — the mechanism a built package's own
+// extensions/hookyard.ts loads through, the same array yard mode's bridge is
+// registered in, just pointed at a package instead of hookyard install
+// writing it.
+func livePiRegisterExtension(t *testing.T, agentDir, extensionPath string) {
+	t.Helper()
+	settingsPath := filepath.Join(agentDir, "settings.json")
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", settingsPath, err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatalf("%s is not valid JSON: %v", settingsPath, err)
+	}
+	settings["extensions"] = []string{extensionPath}
+	livePiWriteJSON(t, settingsPath, settings)
+}
+
+// TestLivePiBuiltPackageInvokesTheRouterWithPluginRoot is build mode's
+// automated proof that a package `hookyard build --engine pi` produces is not
+// merely well-formed on disk but actually loads in a real pi process and
+// routes through it (SPEC AC4): registered in extensions[] rather than
+// installed through yard mode's settings.json + bridge pair, and its bundled
+// binary invoked with --plugin-root, the one argument only a package's own
+// bridge appends (pi_bridge.ts's `base` branch).
+func TestLivePiBuiltPackageInvokesTheRouterWithPluginRoot(t *testing.T) {
+	piBin := liveRequirePi(t)
+	hookyardBin, root, agentDir, projectDir, _ := livePiSetup(t)
+
+	pluginRoot, argvCapturePath := livePiBuildPluginPackage(t, hookyardBin, root)
+	livePiRegisterExtension(t, agentDir, filepath.Join(pluginRoot, "extensions", "hookyard.ts"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), livePiBudget)
+	defer cancel()
+	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", livePiProbePrompt)
+	probe.Dir = projectDir
+	probe.Env = livePiEnv(agentDir)
+	output, err := probe.CombinedOutput()
+	if err != nil {
+		t.Fatalf("pi run: %v\n--- pi output ---\n%s", err, output)
+	}
+
+	argv, err := os.ReadFile(argvCapturePath)
+	if err != nil {
+		t.Fatalf("the built package's router was never invoked: %v\n--- pi output ---\n%s", err, output)
+	}
+	if !strings.Contains(string(argv), "--plugin-root") {
+		t.Fatalf("router argv carries no --plugin-root, so the built package's bridge did not resolve its own "+
+			"root: %q\n--- pi output ---\n%s", argv, output)
+	}
 }

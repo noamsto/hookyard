@@ -39,8 +39,10 @@ func Build(engine vocab.Engine, opts Options) error {
 	switch engine {
 	case vocab.ClaudeCode:
 		return claudeCode(opts)
+	case vocab.Pi:
+		return pi(opts)
 	default:
-		return fmt.Errorf("hookyard build does not support %s yet; only %s is implemented", engine, vocab.ClaudeCode)
+		return fmt.Errorf("hookyard build does not support %s yet; only %s and %s are implemented", engine, vocab.ClaudeCode, vocab.Pi)
 	}
 }
 
@@ -68,6 +70,14 @@ func claudeCode(opts Options) error {
 			return err
 		}
 		manifests = append(manifests, m)
+	}
+	// Commands render only through PiPluginBridge into pi.registerCommand
+	// (R6.5); accepting them here would silently drop them from this engine's
+	// build rather than telling the author they picked the wrong engine.
+	for _, m := range manifests {
+		if len(m.Commands) > 0 {
+			return fmt.Errorf("%s: commands are supported only for %s, not %s", m.Source, vocab.Pi, vocab.ClaudeCode)
+		}
 	}
 	merged, err := manifest.Merge(manifests)
 	if err != nil {
@@ -165,6 +175,229 @@ func claudeCode(opts Options) error {
 		return err
 	}
 	return atomicfile.Write(binaryPath, binary, 0o755)
+}
+
+// pi writes the Pi build package (decomposition "Pi build package on disk"):
+// package.json, extensions/hookyard.ts, the launcher and bundled binary under
+// bin/, and the baked handler table. Unlike claudeCode's hooks.json, pi's
+// package.json is merged even when it already exists, because pi.extensions
+// is one entry among a plugin author's own package.json keys rather than a
+// file hookyard owns outright the way .claude-plugin/plugin.json is.
+func pi(opts Options) error {
+	// Checked up front, before any manifest or handler work, because the
+	// error naming --out should be the first thing an author sees for a
+	// typo'd path rather than surfacing as a confusing exec-resolution
+	// failure further down.
+	info, err := os.Stat(opts.Out)
+	if err != nil {
+		return fmt.Errorf("--out %s: %w", opts.Out, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("--out %s: not a directory", opts.Out)
+	}
+	out, err := filepath.Abs(opts.Out)
+	if err != nil {
+		return err
+	}
+
+	var manifests []*manifest.Manifest
+	for _, path := range opts.Manifests {
+		m, err := manifest.LoadPlugin(path)
+		if err != nil {
+			return err
+		}
+		manifests = append(manifests, m)
+	}
+	merged, err := manifest.Merge(manifests)
+	if err != nil {
+		return err
+	}
+
+	var handlers []manifest.Handler
+	for _, h := range merged {
+		if slices.Contains(h.Engines, string(vocab.Pi)) {
+			handlers = append(handlers, h)
+		}
+	}
+	if len(handlers) == 0 {
+		return fmt.Errorf("no handler in the manifests claims pi")
+	}
+
+	// Merge does not return commands: they are not part of the handler table
+	// it dedupes, only cross-manifest name uniqueness, which it already
+	// checked above.
+	var commands []manifest.Command
+	for _, m := range manifests {
+		commands = append(commands, m.Commands...)
+	}
+
+	if err := manifest.CheckPluginExecs(out, handlers); err != nil {
+		return err
+	}
+	if err := checkCommandExecs(out, commands); err != nil {
+		return err
+	}
+
+	bridge, err := render.PiPluginBridge(handlers, commands)
+	if err != nil {
+		return err
+	}
+
+	packageJSONPath := filepath.Join(out, "package.json")
+	extensionPath := filepath.Join(out, "extensions", "hookyard.ts")
+	tablePath := filepath.Join(out, manifest.PluginTablePath)
+	launcherPath := filepath.Join(out, render.PluginLauncher)
+	binaryPath := filepath.Join(out, "bin", fmt.Sprintf("hookyard-%s-%s", runtime.GOOS, runtime.GOARCH))
+
+	// package.json's directory is --out itself, which checkGeneratedDirs does
+	// not guard: --out is the caller's own path, not a directory hookyard
+	// creates, and a symlinked --out is ordinary (a symlinked checkout, a
+	// symlinked plugin dir). extensions/, bin/ and hookyard/ are the
+	// directories build-pi creates, so those are the ones a link could
+	// redirect.
+	if err := checkGeneratedDirs(out, extensionPath, launcherPath, binaryPath, tablePath); err != nil {
+		return err
+	}
+	if err := render.CheckDestinations(
+		render.Destination{Flag: "--out", Path: packageJSONPath},
+		render.Destination{Flag: "--out", Path: extensionPath},
+		render.Destination{Flag: "--out", Path: launcherPath},
+		render.Destination{Flag: "--out", Path: binaryPath},
+		render.Destination{Flag: "--out", Path: tablePath},
+	); err != nil {
+		return err
+	}
+
+	// Everything below is read/validation, completed before the first write
+	// so a failure here never leaves a partial build on disk.
+	existing, err := os.ReadFile(packageJSONPath)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		existing = nil
+		if opts.Name == "" {
+			return fmt.Errorf("--name is required when %s does not exist", packageJSONPath)
+		}
+	}
+	packageJSON, err := mergePackageJSON(packageJSONPath, existing, opts.Name)
+	if err != nil {
+		return err
+	}
+
+	binary, err := os.ReadFile(opts.Binary)
+	if err != nil {
+		return err
+	}
+
+	if err := manifest.WritePluginTable(tablePath, handlers); err != nil {
+		return err
+	}
+	// The extension is written before package.json names it, the same order
+	// WritePi keeps between the yard bridge and the settings.json entry
+	// naming it (pi.go:93-97): so a crash mid-build never leaves pi.extensions
+	// pointing at a file that does not exist yet.
+	if err := atomicfile.Write(extensionPath, bridge, 0o644); err != nil {
+		return err
+	}
+	if err := atomicfile.Write(launcherPath, launcher, 0o755); err != nil {
+		return err
+	}
+	if err := atomicfile.Write(binaryPath, binary, 0o755); err != nil {
+		return err
+	}
+	return atomicfile.Write(packageJSONPath, packageJSON, 0o644)
+}
+
+// checkCommandExecs applies the same containment and runnable rules
+// manifest.CheckPluginExecs applies to a handler's exec (manifest.go:677) to a
+// manifest command's exec: pi spawns it directly with no router in front, so a
+// bad path would otherwise surface only as a command that silently does
+// nothing.
+func checkCommandExecs(root string, commands []manifest.Command) error {
+	for _, c := range commands {
+		target, err := manifest.ResolvePluginExec(root, c.Exec)
+		if err == nil {
+			var info os.FileInfo
+			info, err = os.Stat(target)
+			switch {
+			case err != nil:
+			case info.IsDir():
+				err = errors.New("is a directory")
+			case info.Mode().Perm()&0o111 == 0:
+				err = fmt.Errorf("not executable (mode %s)", info.Mode().Perm())
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("command %q: exec %q: %w", c.Name, c.Exec, err)
+		}
+	}
+	return nil
+}
+
+// piExtensionEntry is the value build-pi adds to package.json's pi.extensions
+// (decomposition "Pi build package on disk"): the bridge's path relative to
+// the package root, exactly as pi.extensions resolves entries.
+const piExtensionEntry = "./extensions/hookyard.ts"
+
+// mergePackageJSON returns package.json's bytes (R6.1). Absent input creates
+// {"name": name, "pi": {"extensions": [piExtensionEntry]}}, the plugin.json
+// rule's name-required-only-when-absent counterpart. Present input keeps
+// every other top-level and pi.* key and appends the entry to pi.extensions
+// only if it is not already there, so a rebuild is idempotent and a plugin
+// author's own package.json content survives the build.
+func mergePackageJSON(path string, existing []byte, name string) ([]byte, error) {
+	if existing == nil {
+		doc := struct {
+			Name string `json:"name"`
+			Pi   struct {
+				Extensions []string `json:"extensions"`
+			} `json:"pi"`
+		}{Name: name}
+		doc.Pi.Extensions = []string{piExtensionEntry}
+		out, err := json.MarshalIndent(doc, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		return append(out, '\n'), nil
+	}
+
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(existing, &doc); err != nil {
+		return nil, fmt.Errorf("%s is not valid JSON, refusing to overwrite it: %w", path, err)
+	}
+	var pi map[string]json.RawMessage
+	if raw, ok := doc["pi"]; ok {
+		if err := json.Unmarshal(raw, &pi); err != nil {
+			return nil, fmt.Errorf(`%s has a "pi" key hookyard cannot read, refusing to overwrite it: %w`, path, err)
+		}
+	} else {
+		pi = map[string]json.RawMessage{}
+	}
+	var extensions []string
+	if raw, ok := pi["extensions"]; ok {
+		if err := json.Unmarshal(raw, &extensions); err != nil {
+			return nil, fmt.Errorf(`%s has a "pi.extensions" key hookyard cannot read, refusing to overwrite it: %w`, path, err)
+		}
+	}
+	if !slices.Contains(extensions, piExtensionEntry) {
+		extensions = append(extensions, piExtensionEntry)
+	}
+	rawExtensions, err := json.Marshal(extensions)
+	if err != nil {
+		return nil, err
+	}
+	pi["extensions"] = rawExtensions
+	rawPi, err := json.Marshal(pi)
+	if err != nil {
+		return nil, err
+	}
+	doc["pi"] = rawPi
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(out, '\n'), nil
 }
 
 // checkGeneratedDirs refuses to reach a generated file through a directory

@@ -152,7 +152,7 @@ func Run(p Paths, dir string) []Finding {
 	findings = append(findings, codexFindings(p, dir)...)
 	findings = append(findings, cursorFindings(p, dir, stateDir)...)
 	findings = append(findings, generationFindings(p, stateDir)...)
-	findings = append(findings, piFindings(p)...)
+	findings = append(findings, piFindings(p, stateDir)...)
 	findings = append(findings, streamFindings(stateDir, disagreement, time.Now())...)
 	return findings
 }
@@ -648,7 +648,7 @@ func cursorProjectSlug(dir string) string {
 // gate (~/.pi/agent/trust.json + defaultProjectTrust) covers only
 // project-local .pi/ resources, and hookyard registers a global extension,
 // which that gate does not touch at all. Reporting that is the finding.
-func piFindings(p Paths) []Finding {
+func piFindings(p Paths, stateDir string) []Finding {
 	settings := filepath.Join(p.PiAgentDir, "settings.json")
 	bridge := render.PiBridgePath(settings)
 	trustFile := filepath.Join(p.PiAgentDir, "trust.json")
@@ -673,7 +673,238 @@ func piFindings(p Paths) []Finding {
 		// router that does not exist (routerpath_test.go documents the trap).
 		routerPath(vocab.Pi, bridge),
 		piLauncherFindings(),
+		piDoubleFire(stateDir, settings),
+		piBridgeDrift(stateDir, bridge),
 	}
+}
+
+// piBuildPackageRoot resolves a settings.json extensions[] entry to the
+// build-mode package root piDoubleFire compares against the yard table, per
+// the layout build-pi writes ("Pi build package on disk" in the
+// decomposition): pi loads a directory entry by package rules, so the entry
+// is the root itself; a hookyard-built package's extension instead sits two
+// levels under its root, at <root>/extensions/hookyard.ts, so a file entry's
+// grandparent is the root. An entry doctor cannot stat — missing or
+// otherwise — yields "": danglingExtensions already reports a missing one,
+// and geometry cannot be derived for a path that is not there.
+func piBuildPackageRoot(entry string) string {
+	info, err := os.Stat(entry)
+	if err != nil {
+		return ""
+	}
+	if info.IsDir() {
+		return entry
+	}
+	return filepath.Dir(filepath.Dir(entry))
+}
+
+// piDoubleFire is R8: pi tolerates `hookyard install` (yard mode) and
+// `pi install <built package>` naming the same handler id, running it twice
+// per event with no warning of its own — the shape a consumer reaches when a
+// migration to a build-mode package leaves the yard registration in place
+// instead of retiring it in the same commit. It walks settings.json's
+// extensions[] for a build-mode package root (piBuildPackageRoot) and
+// compares that package's baked table against the yard table this install's
+// stateDir names. piLauncherFindings detects a different hazard — an
+// injection hookyard cannot strip — and is not replaced by this check
+// (R8.5).
+func piDoubleFire(stateDir, settingsPath string) Finding {
+	f := Finding{Engine: vocab.Pi, Check: "double-registered handlers", Detail: settingsPath}
+
+	if stateDir == "" {
+		f.Status = Unknown
+		f.Detail = "no --state-dir recoverable to read the handler table from"
+		return f
+	}
+	yardHandlers, err := tableHandlers(stateDir)
+	if err != nil {
+		f.Status = Unknown
+		f.Detail = fmt.Sprintf("cannot read the handler table at %s: %v", filepath.Join(stateDir, "table.json"), err)
+		return f
+	}
+	yardPath := filepath.Join(stateDir, "table.json")
+	yardIDs := make(map[string]bool, len(yardHandlers))
+	for _, h := range yardHandlers {
+		yardIDs[h.ID] = true
+	}
+
+	var settings struct {
+		Extensions []string `json:"extensions"`
+	}
+	if err := readJSON(settingsPath, &settings); err != nil {
+		if os.IsNotExist(err) {
+			// registration() above already reports a missing settings.json as
+			// Fail; a second Fail here for the same cause would be duplicate
+			// noise.
+			f.Status = Unknown
+			f.Detail = "no " + settingsPath + " to check"
+			return f
+		}
+		f.Status = Unknown
+		f.Detail = fmt.Sprintf("cannot read %s: %v", settingsPath, err)
+		return f
+	}
+
+	// found distinguishes "no build-mode package alongside settings.json"
+	// from "one or more exist and none collide" — both Pass, but only the
+	// latter means a package was actually read and compared.
+	var found bool
+	var collisions, unreadable []string
+	for _, e := range settings.Extensions {
+		root := piBuildPackageRoot(e)
+		if root == "" {
+			continue
+		}
+		tablePath := filepath.Join(root, manifest.PluginTablePath)
+		handlers, err := manifest.ReadPluginTable(tablePath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue // root does not qualify as a build package; not an error (R8.2)
+			}
+			unreadable = append(unreadable, fmt.Sprintf("%s (%v)", tablePath, err))
+			continue
+		}
+		found = true
+		for _, h := range handlers {
+			if yardIDs[h.ID] {
+				collisions = append(collisions, fmt.Sprintf("%s is registered in both %s and %s", h.ID, yardPath, tablePath))
+			}
+		}
+	}
+
+	// Fail outranks Unknown, mirroring danglingExtensions' own precedence: a
+	// confirmed double-fire is the more actionable answer, and reporting
+	// Unknown instead just because some other package's table also happened
+	// to be unreadable would bury a real collision behind a shrug.
+	if len(collisions) > 0 {
+		sort.Strings(collisions)
+		f.Status = Fail
+		f.Detail = strings.Join(collisions, " | ")
+		return f
+	}
+	if len(unreadable) > 0 {
+		f.Status = Unknown
+		f.Detail = "cannot tell whether every build-mode package is disjoint from the yard table: " + strings.Join(unreadable, ", ")
+		return f
+	}
+	if !found {
+		f.Status = Pass
+		f.Detail = "no build-mode pi package found alongside " + settingsPath
+		return f
+	}
+	f.Status = Pass
+	f.Detail = "no handler id is registered in both the yard table and a build-mode pi package"
+	return f
+}
+
+// piBridgeDrift is R9.1: the installed bridge is a rendering of the handler
+// table taken at install time, and nothing re-renders it when the table
+// changes underneath it, so a handler can be added or retired in the table
+// while the bridge keeps firing (or stops firing) the stale set — a
+// registered-but-can-never-fire gap that looks, from inside the record,
+// exactly like a guard that was never invoked (§8's opening claim). Comparing
+// on (Event, Matcher) only, rather than the full entry, is deliberate: an
+// entry's Bin/Args encode this install's own router path and state dir,
+// which would make the comparison fail on every machine whose state dir
+// isn't the one BuildPlan happens to be re-rendered with here.
+//
+// A duplicate (Event, Matcher) pair in the installed bridge is reported the
+// same way as an orphaned one: it is exactly the session_start +
+// pi:session_start aliasing hazard (two manifest event names resolving to one
+// native pi.on registration) becoming visible as drift, and doctor has no
+// other place that would ever say so.
+func piBridgeDrift(stateDir, bridgePath string) Finding {
+	f := Finding{Engine: vocab.Pi, Check: "bridge matches handler table", Detail: bridgePath}
+
+	raw, err := os.ReadFile(bridgePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// danglingExtensions/registration() above already report a
+			// missing bridge as Fail; a second Fail here for the same cause
+			// would be duplicate noise.
+			f.Status = Unknown
+			f.Detail = "no " + bridgePath + " to check"
+			return f
+		}
+		f.Status = Unknown
+		f.Detail = fmt.Sprintf("cannot read %s: %v", bridgePath, err)
+		return f
+	}
+	data, ok := recoverPiBridgeData(raw)
+	if !ok {
+		f.Status = Unknown
+		f.Detail = "cannot recover DATA from " + bridgePath
+		return f
+	}
+
+	if stateDir == "" {
+		f.Status = Unknown
+		f.Detail = "no --state-dir recoverable to read the handler table from"
+		return f
+	}
+	tablePath := filepath.Join(stateDir, "table.json")
+	handlers, err := tableHandlers(stateDir)
+	if err != nil {
+		f.Status = Unknown
+		f.Detail = fmt.Sprintf("cannot read the handler table at %s: %v", tablePath, err)
+		return f
+	}
+
+	routerPaths := routerPathPattern.FindAllString(string(raw), -1)
+	if len(routerPaths) == 0 {
+		f.Status = Unknown
+		f.Detail = "no router path recoverable from " + bridgePath
+		return f
+	}
+	plan, err := render.BuildPlan(handlers, routerPaths[0], stateDir)
+	if err != nil {
+		f.Status = Unknown
+		f.Detail = fmt.Sprintf("cannot render %s's pi plan: %v", tablePath, err)
+		return f
+	}
+
+	type key struct{ event, matcher string }
+	want := make(map[key]bool, len(plan[vocab.Pi]))
+	for _, e := range plan[vocab.Pi] {
+		want[key{e.Event, e.Matcher}] = true
+	}
+	got := make(map[key]int, len(data.Entries))
+	for _, e := range data.Entries {
+		got[key{e.Event, e.Matcher}]++
+	}
+
+	var missing, drifted []string
+	for k := range want {
+		if got[k] == 0 {
+			missing = append(missing, k.event+"/"+k.matcher)
+		}
+	}
+	for k, n := range got {
+		switch {
+		case !want[k]:
+			drifted = append(drifted, k.event+"/"+k.matcher)
+		case n > 1:
+			drifted = append(drifted, fmt.Sprintf("%s/%s (registered %d times)", k.event, k.matcher, n))
+		}
+	}
+
+	if len(missing) == 0 && len(drifted) == 0 {
+		f.Status = Pass
+		f.Detail = bridgePath + "'s entries match what " + tablePath + " renders for pi"
+		return f
+	}
+	sort.Strings(missing)
+	sort.Strings(drifted)
+	f.Status = Fail
+	var parts []string
+	if len(missing) > 0 {
+		parts = append(parts, tablePath+" registers a handler with no matching entry in "+bridgePath+": "+strings.Join(missing, ", "))
+	}
+	if len(drifted) > 0 {
+		parts = append(parts, bridgePath+" has an entry "+tablePath+" would not render this way: "+strings.Join(drifted, ", "))
+	}
+	f.Detail = strings.Join(parts, "; ")
+	return f
 }
 
 // danglingExtensions is Pi's own gap: pi tolerates an extensions[] entry
@@ -882,8 +1113,55 @@ func registration(engine vocab.Engine, path string) Finding {
 var routerPathPattern = regexp.MustCompile(`/[^\s"']*` + regexp.QuoteMeta(render.Marker))
 
 // stateDirPattern recovers --state-dir from the same command line, in the
-// same character class and for the same reason.
+// same character class and for the same reason. It no longer covers Pi: R6.2
+// renders Pi's invocation as DATA.entries[].args, a JSON array rather than a
+// shell command line, so a whitespace-delimited match finds nothing there —
+// recoverPiBridgeData reads that source instead.
 var stateDirPattern = regexp.MustCompile(`--state-dir\s+([^\s"']+)`)
+
+// piBridgeDataAnchor is the line writePiBridge produces by exactly one
+// strings.Replace of one json.Marshal output (pi.go:169-173, R9.1's second
+// sentence): the spliced value has no embedded raw newline — json.Marshal
+// escapes control characters rather than emitting them literally — so
+// everything between this anchor and the next newline, less its trailing
+// semicolon, is one complete JSON object. That is what makes recovering it a
+// slice-and-Unmarshal rather than a brace-counting parser.
+const piBridgeDataAnchor = "const DATA = "
+
+// piBridgeEntryShape is doctor's own copy of piBridgeEntry's wire shape
+// (internal/render/pi.go): that type is unexported, and this package only
+// ever reads a bridge another package wrote, never constructs one.
+type piBridgeEntryShape struct {
+	Event   string   `json:"event"`
+	Matcher string   `json:"matcher"`
+	Args    []string `json:"args"`
+}
+
+type piBridgeShape struct {
+	Entries []piBridgeEntryShape `json:"entries"`
+}
+
+// recoverPiBridgeData locates and parses the bridge's spliced DATA object.
+// The second return is false both when the anchor is absent and when what
+// follows it does not parse — a bridge whose DATA cannot be recovered is
+// Unknown, not Fail, the same absence-vs-unreadability split danglingExtensions
+// already draws for a missing extensions[] target.
+func recoverPiBridgeData(raw []byte) (piBridgeShape, bool) {
+	idx := bytes.Index(raw, []byte(piBridgeDataAnchor))
+	if idx == -1 {
+		return piBridgeShape{}, false
+	}
+	line := raw[idx+len(piBridgeDataAnchor):]
+	if end := bytes.IndexByte(line, '\n'); end != -1 {
+		line = line[:end]
+	}
+	line = bytes.TrimSuffix(bytes.TrimSpace(line), []byte(";"))
+	var data piBridgeShape
+	if err := json.Unmarshal(line, &data); err != nil {
+		return piBridgeShape{}, false
+	}
+	return data, true
+}
 
 // routerPath reports whether the absolute path this
 // engine's emitted command names is actually there to exec. §9's closing
@@ -1012,18 +1290,30 @@ func recoverStateDir(p Paths, claude claudeSources) []string {
 	for _, path := range []string{
 		filepath.Join(p.CodexHome, "config.toml"),
 		filepath.Join(p.CursorHome, "hooks.json"),
-		// Pi's settings.json only names the bridge file; the router command,
-		// and the --state-dir stateDirPattern is after, is data spliced into
-		// the bridge itself (render.WritePi). Scanning settings.json here
-		// would recover nothing and reproduce the exact silent-fallback bug
-		// this function exists to close.
-		render.PiBridgePath(filepath.Join(p.PiAgentDir, "settings.json")),
 	} {
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
 		scan(raw)
+	}
+
+	// Pi's settings.json only names the bridge file; the router command and
+	// its --state-dir travel inside the bridge as DATA.entries[].args, a JSON
+	// array rather than a shell command line, so stateDirPattern would
+	// recover nothing there and reproduce the exact silent-fallback bug this
+	// function exists to close (R6.2/R9.1). Each entry carries its own args,
+	// so every one is scanned rather than just the first.
+	if raw, err := os.ReadFile(render.PiBridgePath(filepath.Join(p.PiAgentDir, "settings.json"))); err == nil {
+		if data, ok := recoverPiBridgeData(raw); ok {
+			for _, e := range data.Entries {
+				for i, a := range e.Args {
+					if a == "--state-dir" && i+1 < len(e.Args) {
+						found = append(found, e.Args[i+1])
+					}
+				}
+			}
+		}
 	}
 	return distinctStrings(found)
 }

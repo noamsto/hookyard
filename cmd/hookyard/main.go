@@ -31,7 +31,7 @@ const usage = `hookyard — register agent hooks once, route them to every codin
 
   hookyard install   render every manifest into every engine's native config
   hookyard emit      print Claude Code's overlay to stdout for Nix to place
-  hookyard build     generate a native plugin that bundles hookyard (Claude Code only, for now)
+  hookyard build     generate a native plugin that bundles hookyard (Claude Code and pi)
   hookyard validate  check manifests without writing anything
   hookyard doctor    report whether each engine will actually run the hooks
   hookyard route     dispatch one hook event to every handler that matches it
@@ -437,7 +437,7 @@ func renderClaudeOverlay(routerPath, stateDir, base string) ([]byte, error) {
 func runBuild(args []string) error {
 	fs := flag.NewFlagSet("build", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	engineFlag := fs.String("engine", "", "engine to build a plugin for; only claude-code is supported")
+	engineFlag := fs.String("engine", "", "engine to build a plugin for; claude-code and pi are supported")
 	var paths manifestPaths
 	fs.Var(&paths, "manifest", "path to a handler manifest (repeatable)")
 	out := fs.String("out", "", "plugin root to write into (must already exist)")

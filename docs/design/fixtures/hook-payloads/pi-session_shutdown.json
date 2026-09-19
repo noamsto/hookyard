@@ -13,22 +13,9 @@
     "Run the shell command: echo hookyard-probe"
   ],
   "cwd": "<PROBE>/work",
-  "hook_event_name": "tool_result",
+  "hook_event_name": "session_shutdown",
   "pi_version": "0.85.1",
+  "reason": "quit",
   "session_file": "<PROBE>/pi-agent/sessions/-<PROBE>-work--/2026-09-17T14-52-06-261Z_01a0afda-7af5-70a0-964f-48dfb3e70ff1.jsonl",
-  "session_id": "01a0afda-7af5-70a0-964f-48dfb3e70ff1",
-  "tool_input": {
-    "command": "echo hookyard-probe"
-  },
-  "tool_name": "bash",
-  "tool_response": {
-    "content": [
-      {
-        "text": "hookyard-probe\n",
-        "type": "text"
-      }
-    ],
-    "is_error": false
-  },
-  "tool_use_id": "call_7a53704decb04cdbb17dc9d6"
+  "session_id": "01a0afda-7af5-70a0-964f-48dfb3e70ff1"
 }

@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/noamsto/hookyard/internal/atomicfile"
+	"github.com/noamsto/hookyard/internal/manifest"
+	"github.com/noamsto/hookyard/internal/vocab"
 )
 
 // piBridgeTemplate is the extension hookyard installs for Pi, byte-identical on
@@ -30,22 +32,40 @@ const piBridgeSplice = "__HOOKYARD_DATA__"
 // handler's promise — so the bridge has to hold the clock.
 type piBridgeData struct {
 	TimeoutMS int `json:"timeout_ms"`
-	// PiVersion is resolved at install time. Pi exposes no version accessor to
-	// an extension, and this key is envelope.Detect's only Pi discriminator, so
-	// a runtime lookup would yield undefined, JSON.stringify would drop the key
-	// and every Pi hook would become a no-op no Go test can see.
-	PiVersion string          `json:"pi_version"`
-	Entries   []piBridgeEntry `json:"entries"`
+	// PiVersion is envelope.Detect's only Pi discriminator, and Pi exposes no
+	// version accessor to an extension. Yard mode resolves it at install time;
+	// a built package has no install to ask, so it ships this empty and the
+	// bridge falls back to reading Pi's own package.json, then to "unknown".
+	PiVersion string `json:"pi_version"`
+	// Root is the package root as a path relative to the bridge file, which the
+	// bridge resolves against import.meta.url at load. nil in yard mode. It is
+	// how a built package carries no install path at all in its bytes.
+	Root    *string         `json:"root"`
+	Entries []piBridgeEntry `json:"entries"`
+	// Commands is always an array: the bridge iterates it, and a nil slice
+	// would marshal to null and throw there.
+	Commands []piBridgeCommand `json:"commands"`
 }
 
-// piBridgeEntry mirrors Entry, except that Command stays a single string rather
-// than a pre-split argv array: doctor recovers the state directory from the
-// bridge's raw bytes with a flag-then-whitespace regex an array would break.
-// The bridge splits it back on single spaces, which checkShellSafe makes exact.
+// piBridgeEntry mirrors Entry, except that the invocation arrives pre-split
+// into the argv execFile takes. Nothing downstream of here parses a path: the
+// bridge splits nothing, so a built package may live under a path containing
+// spaces even though yard mode's own paths may not.
 type piBridgeEntry struct {
-	Event   string `json:"event"`
-	Matcher string `json:"matcher"`
-	Command string `json:"command"`
+	Event   string   `json:"event"`
+	Matcher string   `json:"matcher"`
+	Bin     string   `json:"bin"`
+	Args    []string `json:"args"`
+}
+
+// piBridgeCommand is one pi.registerCommand registration. Args is empty because
+// a command's only argument is the string Pi hands the handler when a user
+// invokes it, which exists only at invocation time.
+type piBridgeCommand struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Bin         string   `json:"bin"`
+	Args        []string `json:"args"`
 }
 
 // PiBridgePath is where WritePi puts the bridge: bin/hookyard-bridge.ts beside
@@ -154,23 +174,81 @@ func WritePi(settingsPath string, entries []Entry, piVersion string) error {
 }
 
 func writePiBridge(path string, entries []Entry, piVersion string) error {
-	data := piBridgeData{
+	source, err := piBridgeSource(piBridgeData{
 		TimeoutMS: EmittedTimeoutSeconds * 1000,
 		PiVersion: piVersion,
-		Entries:   make([]piBridgeEntry, 0, len(entries)),
-	}
-	for _, e := range entries {
-		data.Entries = append(data.Entries, piBridgeEntry(e))
-	}
-	encoded, err := json.Marshal(data)
+		Entries:   piBridgeEntries(entries),
+		Commands:  []piBridgeCommand{},
+	})
 	if err != nil {
 		return err
 	}
-	// One Replace, count 1, of a token the template carries exactly once, with
-	// json.Marshal output. This is the only way any install-specific value
-	// enters a file pi executes: nothing is ever concatenated into that source.
-	source := strings.Replace(piBridgeTemplate, piBridgeSplice, string(encoded), 1)
-	return atomicfile.Write(path, []byte(source), fileMode(path))
+	return atomicfile.Write(path, source, fileMode(path))
+}
+
+// PiPluginBridge renders the extension a built Pi package ships. It is the
+// sibling of PluginPlan rather than a row in pluginRootVar because Pi needs no
+// plugin-root variable to interpolate: its invocation travels as argv, and the
+// bridge resolves its own root and appends --plugin-root itself, so a package's
+// bytes name no install.
+func PiPluginBridge(handlers []manifest.Handler, commands []manifest.Command) ([]byte, error) {
+	plan, err := buildPlan(handlers, func(engine vocab.Engine, event string) string {
+		return fmt.Sprintf("%s route --registered-for %s --event %s", PluginLauncher, engine, event)
+	})
+	if err != nil {
+		return nil, err
+	}
+	// The bridge is written to <root>/extensions/hookyard.ts, so the root is one
+	// level up from the directory import.meta.url resolves to.
+	root := ".."
+	rendered := make([]piBridgeCommand, 0, len(commands))
+	for _, c := range commands {
+		// Exec is already plugin-root-relative, so the bridge resolves it
+		// against the same base it resolves an entry's Bin against.
+		rendered = append(rendered, piBridgeCommand{
+			Name:        c.Name,
+			Description: c.Description,
+			Bin:         c.Exec,
+			Args:        []string{},
+		})
+	}
+	return piBridgeSource(piBridgeData{
+		TimeoutMS: EmittedTimeoutSeconds * 1000,
+		Root:      &root,
+		Entries:   piBridgeEntries(plan[vocab.Pi]),
+		Commands:  rendered,
+	})
+}
+
+// piBridgeEntries splits each rendered command back into argv. command() joins
+// its tokens with single spaces and checkShellSafe keeps whitespace out of
+// every one of them, so this is that join's exact inverse — and doing it here
+// rather than in the bridge is what leaves the bridge with no path parsing at
+// all, since build-mode entries never pass through either of those.
+func piBridgeEntries(entries []Entry) []piBridgeEntry {
+	out := make([]piBridgeEntry, 0, len(entries))
+	for _, e := range entries {
+		argv := strings.Split(e.Command, " ")
+		out = append(out, piBridgeEntry{
+			Event:   e.Event,
+			Matcher: e.Matcher,
+			Bin:     argv[0],
+			Args:    argv[1:],
+		})
+	}
+	return out
+}
+
+// piBridgeSource fills the template's one splice point. One Replace, count 1,
+// of a token the template carries exactly once, with json.Marshal output. This
+// is the only way any install-specific value enters a file pi executes:
+// nothing is ever concatenated into that source.
+func piBridgeSource(data piBridgeData) ([]byte, error) {
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(strings.Replace(piBridgeTemplate, piBridgeSplice, string(encoded), 1)), nil
 }
 
 // fileMode is the perm policy both Pi artifacts share with the other writers:

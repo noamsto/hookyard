@@ -247,11 +247,11 @@ var discriminatorless = map[string]bool{
 
 // The drift pin: every fixture's hook_event_name must resolve through
 // InboundEvent, as a known engine-only protocol-split spelling
-// (beforeShellExecution), or, for Claude Code only, as an engine-scoped
-// catalog event (SessionEnd). A spelling in none of those means the fixture
-// and vocab's tables have drifted apart, and must fail loudly rather than
-// being patched by inventing a fake canonical mapping (§7, §8's double-fire
-// rule) for beforeShellExecution.
+// (beforeShellExecution), or, for Claude Code or Pi, as that engine's own
+// engine-scoped catalog event (SessionEnd; session_shutdown). A spelling in
+// none of those means the fixture and vocab's tables have drifted apart, and
+// must fail loudly rather than being patched by inventing a fake canonical
+// mapping (§7, §8's double-fire rule) for beforeShellExecution.
 func TestEveryFixtureEventIsKnownToVocab(t *testing.T) {
 	entries, err := os.ReadDir(fixtureDir)
 	if err != nil {
@@ -271,10 +271,11 @@ func TestEveryFixtureEventIsKnownToVocab(t *testing.T) {
 			}
 			_, resolvesCanonically := vocab.InboundEvent(env.Engine, env.NativeEvent)
 			isKnownSplit := vocab.Protocol(env.NativeEvent) != ""
-			isClaudeCatalog := env.Engine == vocab.ClaudeCode && vocab.IsClaudeCodeEvent(env.NativeEvent)
-			if !resolvesCanonically && !isKnownSplit && !isClaudeCatalog {
+			isEngineCatalog := (env.Engine == vocab.ClaudeCode && vocab.IsClaudeCodeEvent(env.NativeEvent)) ||
+				(env.Engine == vocab.Pi && vocab.IsPiEvent(env.NativeEvent))
+			if !resolvesCanonically && !isKnownSplit && !isEngineCatalog {
 				t.Errorf("native_event %q for %s resolves to neither a canonical event, a known "+
-					"protocol-split spelling, nor a Claude Code catalog event", env.NativeEvent, env.Engine)
+					"protocol-split spelling, nor an engine catalog event", env.NativeEvent, env.Engine)
 			}
 		})
 	}
