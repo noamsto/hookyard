@@ -95,8 +95,9 @@ func setupBuildPluginWithCommand(t *testing.T, commandExecMode os.FileMode) (roo
 	return root, manifestPath
 }
 
-// The finding this pins: validatePlugin used to check only handler execs, so
-// a commands[].exec that would fail at build time passed validate silently.
+// validatePlugin checks handler execs and command execs alike; a
+// commands[].exec that would fail at build time must fail validate too,
+// rather than passing it silently.
 func TestValidatePluginRootRejectsAMissingCommandExec(t *testing.T) {
 	root, manifestPath := setupBuildPluginWithCommand(t, 0o755)
 	if err := os.Remove(filepath.Join(root, "handlers", "greet.sh")); err != nil {
