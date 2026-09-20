@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -90,20 +91,27 @@ func TestPiBridgeTemplateHasExactlyOneSplicePoint(t *testing.T) {
 // other. Renaming either half alone turns this red instead of turning every Pi
 // hook into a silent no-op.
 func TestPiBridgeDataMatchesWhatTheTemplateReads(t *testing.T) {
+	root := ".."
 	raw, err := json.Marshal(piBridgeData{
 		TimeoutMS: EmittedTimeoutSeconds * 1000,
 		PiVersion: "0.85.1",
-		Entries:   []piBridgeEntry{{Event: "tool_call", Matcher: "bash", Command: "hookyard route"}},
+		Root:      &root,
+		Entries:   []piBridgeEntry{{Event: "tool_call", Matcher: "bash", Bin: "hookyard", Args: []string{"route"}}},
+		Commands:  []piBridgeCommand{},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{`"timeout_ms"`, `"pi_version"`, `"entries"`, `"event"`, `"matcher"`, `"command"`} {
+	for _, key := range []string{`"timeout_ms"`, `"pi_version"`, `"root"`, `"entries"`, `"event"`, `"matcher"`, `"bin"`, `"args"`, `"commands"`} {
 		if !strings.Contains(string(raw), key) {
 			t.Errorf("the data constant marshals without %s", key)
 		}
 	}
-	for _, access := range []string{"DATA.timeout_ms", "DATA.pi_version", "DATA.entries", "entry.event", "entry.matcher", "entry.command"} {
+	for _, access := range []string{
+		"DATA.timeout_ms", "DATA.pi_version", "DATA.root", "DATA.entries",
+		"entry.event", "entry.matcher", "entry.bin", "entry.args",
+		"DATA.commands", "command.name", "command.description", "command.bin", "command.args",
+	} {
 		if !strings.Contains(piBridgeTemplate, access) {
 			t.Errorf("bridge template never reads %s", access)
 		}
@@ -354,8 +362,9 @@ func TestWritePiSplicesAHostileValueAsDataNotCode(t *testing.T) {
 	var data struct {
 		PiVersion string `json:"pi_version"`
 		Entries   []struct {
-			Matcher string `json:"matcher"`
-			Command string `json:"command"`
+			Matcher string   `json:"matcher"`
+			Bin     string   `json:"bin"`
+			Args    []string `json:"args"`
 		} `json:"entries"`
 	}
 	if err := json.Unmarshal([]byte(spliced(t, source)), &data); err != nil {
@@ -364,10 +373,95 @@ func TestWritePiSplicesAHostileValueAsDataNotCode(t *testing.T) {
 	if len(data.Entries) != 1 {
 		t.Fatalf("want one entry in the constant, got %d", len(data.Entries))
 	}
-	for name, got := range map[string]string{"pi_version": data.PiVersion, "matcher": data.Entries[0].Matcher, "command": data.Entries[0].Command} {
+	// The command arrives split into bin plus argv, so rejoining on the single
+	// space command() joins with is what recovers the value verbatim.
+	argv := strings.Join(append([]string{data.Entries[0].Bin}, data.Entries[0].Args...), " ")
+	for name, got := range map[string]string{"pi_version": data.PiVersion, "matcher": data.Entries[0].Matcher, "argv": argv} {
 		if got != hostile {
 			t.Errorf("%s = %q, want the value verbatim %q", name, got, hostile)
 		}
+	}
+}
+
+// A nil Go slice marshals to null, and the bridge iterates both of these keys:
+// the generated command handler spreads args, and the command loop walks
+// commands. Yard mode registers no commands and most entries carry no extra
+// argv, so null is exactly what an unguarded rendering would emit.
+func TestWritePiRendersEmptyArraysRatherThanNull(t *testing.T) {
+	path := piSettings(t, "{}")
+	if err := WritePi(path, []Entry{{Event: "tool_call", Command: "/x/bin/hookyard"}}, "0.85.1"); err != nil {
+		t.Fatal(err)
+	}
+
+	data := spliced(t, readFile(t, PiBridgePath(path)))
+	for _, want := range []string{`"args":[]`, `"commands":[]`, `"root":null`} {
+		if !strings.Contains(data, want) {
+			t.Errorf("the data constant lacks %s\n--- got ---\n%s", want, data)
+		}
+	}
+}
+
+// A built package's bytes must name no install: the root is relative to the
+// bridge file and --plugin-root is appended by the bridge from what that
+// resolves to, so a rendered --plugin-root here would bake one machine's layout
+// into a package every machine unpacks.
+func TestPiPluginBridgeRendersARelativeRootAndNoInstallPath(t *testing.T) {
+	rendered, err := PiPluginBridge(
+		[]manifest.Handler{{ID: "a", Events: []string{vocab.PreTool}, Engines: []string{"pi"}}},
+		[]manifest.Command{{Name: "aeye", Description: "Open the aeye carousel", Exec: "scripts/aeye-toggle"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var data struct {
+		PiVersion string  `json:"pi_version"`
+		Root      *string `json:"root"`
+		Entries   []struct {
+			Event string   `json:"event"`
+			Bin   string   `json:"bin"`
+			Args  []string `json:"args"`
+		} `json:"entries"`
+		Commands []piBridgeCommand `json:"commands"`
+	}
+	if err := json.Unmarshal([]byte(spliced(t, string(rendered))), &data); err != nil {
+		t.Fatalf("the spliced constant is not JSON: %v", err)
+	}
+
+	if data.Root == nil || *data.Root != ".." {
+		t.Errorf("root = %v, want \"..\": the bridge ships at <root>/extensions/hookyard.ts", data.Root)
+	}
+	// Empty, not the builder's own pi: the bridge resolves the running pi's
+	// version at load, and a baked one would describe the machine that built.
+	if data.PiVersion != "" {
+		t.Errorf("pi_version = %q, want it empty in build mode", data.PiVersion)
+	}
+	if len(data.Entries) != 1 {
+		t.Fatalf("want one entry, got %d", len(data.Entries))
+	}
+	entry := data.Entries[0]
+	if entry.Bin != PluginLauncher {
+		t.Errorf("bin = %q, want the bundled launcher %q", entry.Bin, PluginLauncher)
+	}
+	want := []string{"route", "--registered-for", "pi", "--event", vocab.PreTool}
+	if !slices.Equal(entry.Args, want) {
+		t.Errorf("args = %q, want %q", entry.Args, want)
+	}
+	for _, flag := range []string{"--plugin-root", "--state-dir"} {
+		if slices.Contains(entry.Args, flag) {
+			t.Errorf("args carry %s, which names an install a package cannot know", flag)
+		}
+	}
+
+	if len(data.Commands) != 1 {
+		t.Fatalf("want one command, got %d", len(data.Commands))
+	}
+	cmd := data.Commands[0]
+	if cmd.Name != "aeye" || cmd.Description != "Open the aeye carousel" || cmd.Bin != "scripts/aeye-toggle" {
+		t.Errorf("command = %+v, want the manifest's name, description and exec", cmd)
+	}
+	if cmd.Args == nil || len(cmd.Args) != 0 {
+		t.Errorf("command args = %v, want an empty array", cmd.Args)
 	}
 }
 
@@ -393,6 +487,7 @@ func spliced(t *testing.T, source string) string {
 func TestWritePiRendersPiSpellingOfTheMatcher(t *testing.T) {
 	plan, err := BuildPlan([]manifest.Handler{
 		{ID: "a", Events: []string{vocab.PreTool}, Engines: []string{"pi"}, Match: []string{"Bash"}},
+		{ID: "b", Events: []string{"pi:session_shutdown"}, Engines: []string{"pi"}},
 	}, "/nix/store/x/bin/hookyard", "/var/state")
 	if err != nil {
 		t.Fatal(err)
@@ -402,8 +497,18 @@ func TestWritePiRendersPiSpellingOfTheMatcher(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := readFile(t, PiBridgePath(path)); !strings.Contains(got, `"matcher":"bash"`) {
+	got := readFile(t, PiBridgePath(path))
+	if !strings.Contains(got, `"matcher":"bash"`) {
 		t.Errorf(`the bridge does not carry "matcher":"bash"; a capitalised matcher matches no Pi tool name`+"\n--- got ---\n%s", got)
+	}
+	// session_shutdown has no canonical counterpart, so buildPlan's scoped arm
+	// is the only thing that can put it in DATA.entries — and it registers
+	// under its native name while the router is asked for the manifest's.
+	if !strings.Contains(got, `"event":"session_shutdown"`) {
+		t.Errorf("the bridge registers no session_shutdown handler\n--- got ---\n%s", got)
+	}
+	if !strings.Contains(got, `"--event","pi:session_shutdown"`) {
+		t.Errorf("the bridge does not route session_shutdown by its manifest name\n--- got ---\n%s", got)
 	}
 }
 

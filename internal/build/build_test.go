@@ -2,6 +2,7 @@ package build
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -253,6 +255,361 @@ func TestBuildErrors(t *testing.T) {
 		root, manifestPath, binaryPath := setupPlugin(t)
 		writeFile(t, filepath.Join(root, "hooks", "hooks.json"), []byte("not json"), 0o644)
 		err := Build(vocab.ClaudeCode, Options{Manifests: []string{manifestPath}, Out: root, Name: "example", Binary: binaryPath})
+		requireErrorAndNothingWritten(t, root, err)
+	})
+}
+
+const piManifestBody = `{"handlers":[
+  {"id":"guard","exec":"handlers/guard.sh","events":["pre_tool"],"engines":["pi"],"match":["Bash"]},
+  {"id":"log","exec":"handlers/log.sh","events":["post_tool"],"engines":["pi"],"lane":"fire_and_forget"}
+],
+"commands":[
+  {"name":"aeye","description":"Open the aeye image carousel for this session","exec":"scripts/aeye-toggle"}
+]}`
+
+// setupPiPlugin is setupPlugin's pi counterpart: the two handler scripts plus
+// the one command exec the manifest names, all plugin-root-relative.
+func setupPiPlugin(t *testing.T) (root, manifestPath, binaryPath string) {
+	t.Helper()
+	root = t.TempDir()
+	writeFile(t, filepath.Join(root, "handlers", "guard.sh"), []byte("#!/bin/sh\n"), 0o755)
+	writeFile(t, filepath.Join(root, "handlers", "log.sh"), []byte("#!/bin/sh\n"), 0o755)
+	writeFile(t, filepath.Join(root, "scripts", "aeye-toggle"), []byte("#!/bin/sh\n"), 0o755)
+
+	manifestPath = filepath.Join(t.TempDir(), "hookyard.json")
+	writeFile(t, manifestPath, []byte(piManifestBody), 0o644)
+
+	binaryPath = filepath.Join(t.TempDir(), "fake-hookyard")
+	writeFile(t, binaryPath, []byte("fake-binary"), 0o755)
+	return root, manifestPath, binaryPath
+}
+
+func TestPiBuildGolden(t *testing.T) {
+	root, manifestPath, binaryPath := setupPiPlugin(t)
+
+	if err := Build(vocab.Pi, Options{
+		Manifests: []string{manifestPath},
+		Out:       root,
+		Name:      "example",
+		Binary:    binaryPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	generated := map[string]string{
+		"package.json":           filepath.Join(root, "package.json"),
+		"extensions/hookyard.ts": filepath.Join(root, "extensions", "hookyard.ts"),
+		"hookyard/table.json":    filepath.Join(root, "hookyard", "table.json"),
+		"bin/hookyard":           filepath.Join(root, "bin", "hookyard"),
+	}
+	for rel, path := range generated {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("%s: %v", rel, err)
+		}
+		golden := filepath.Join("testdata", "golden-pi", filepath.FromSlash(rel))
+		if *update {
+			writeFile(t, golden, got, 0o644)
+			continue
+		}
+		want, err := os.ReadFile(golden)
+		if err != nil {
+			t.Fatalf("%s: reading golden: %v", rel, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("%s mismatch\ngot:\n%s\nwant:\n%s", rel, got, want)
+		}
+	}
+
+	modes := map[string]os.FileMode{
+		filepath.Join(root, "package.json"):                                                     0o644,
+		filepath.Join(root, "extensions", "hookyard.ts"):                                        0o644,
+		filepath.Join(root, "hookyard", "table.json"):                                           0o644,
+		filepath.Join(root, "bin", "hookyard"):                                                  0o755,
+		filepath.Join(root, "bin", fmt.Sprintf("hookyard-%s-%s", runtime.GOOS, runtime.GOARCH)): 0o755,
+	}
+	for path, want := range modes {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s mode = %o, want %o", path, got, want)
+		}
+	}
+
+	binPath := filepath.Join(root, "bin", fmt.Sprintf("hookyard-%s-%s", runtime.GOOS, runtime.GOARCH))
+	gotBinary, err := os.ReadFile(binPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotBinary) != "fake-binary" {
+		t.Errorf("bundled binary = %q, want %q", gotBinary, "fake-binary")
+	}
+}
+
+// TestPiBuildGolden's fixture passes exactly one manifest contributing
+// exactly one command, so `commands = append(commands, m.Commands...)` and a
+// plain last-manifest-wins overwrite render byte-identical output there. This
+// test uses two manifests, each contributing its own command, so a
+// regression that drops every manifest's commands but the last would leave
+// the rendered bridge missing one.
+func TestPiBuildAggregatesCommandsFromEveryManifest(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "handlers", "guard1.sh"), []byte("#!/bin/sh\n"), 0o755)
+	writeFile(t, filepath.Join(root, "handlers", "guard2.sh"), []byte("#!/bin/sh\n"), 0o755)
+	writeFile(t, filepath.Join(root, "scripts", "one.sh"), []byte("#!/bin/sh\n"), 0o755)
+	writeFile(t, filepath.Join(root, "scripts", "two.sh"), []byte("#!/bin/sh\n"), 0o755)
+
+	manifestOnePath := filepath.Join(t.TempDir(), "one.json")
+	writeFile(t, manifestOnePath, []byte(`{"handlers":[`+
+		`{"id":"guard-one","exec":"handlers/guard1.sh","events":["pre_tool"],"engines":["pi"],"match":["Bash"]}],`+
+		`"commands":[{"name":"cmd-one","description":"first command","exec":"scripts/one.sh"}]}`), 0o644)
+
+	manifestTwoPath := filepath.Join(t.TempDir(), "two.json")
+	writeFile(t, manifestTwoPath, []byte(`{"handlers":[`+
+		`{"id":"guard-two","exec":"handlers/guard2.sh","events":["pre_tool"],"engines":["pi"],"match":["Bash"]}],`+
+		`"commands":[{"name":"cmd-two","description":"second command","exec":"scripts/two.sh"}]}`), 0o644)
+
+	binaryPath := filepath.Join(t.TempDir(), "fake-hookyard")
+	writeFile(t, binaryPath, []byte("fake-binary"), 0o755)
+
+	if err := Build(vocab.Pi, Options{
+		Manifests: []string{manifestOnePath, manifestTwoPath},
+		Out:       root,
+		Name:      "example",
+		Binary:    binaryPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rendered, err := os.ReadFile(filepath.Join(root, "extensions", "hookyard.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"name":"cmd-one"`, `"name":"cmd-two"`} {
+		if !strings.Contains(string(rendered), want) {
+			t.Errorf("extensions/hookyard.ts does not contain %s: only one manifest's commands survived aggregation\n%s", want, rendered)
+		}
+	}
+}
+
+func TestPiBuildMergesPackageJSONAndIsIdempotent(t *testing.T) {
+	root, manifestPath, binaryPath := setupPiPlugin(t)
+	packageJSONPath := filepath.Join(root, "package.json")
+	existing := []byte(`{"name":"mine","version":"1.0.0","pi":{"extensions":["./other.ts"],"settings":{"x":1}}}`)
+	writeFile(t, packageJSONPath, existing, 0o644)
+
+	opts := Options{Manifests: []string{manifestPath}, Out: root, Binary: binaryPath}
+	if err := Build(vocab.Pi, opts); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(packageJSONPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(first, &doc); err != nil {
+		t.Fatalf("package.json is not valid JSON: %v\n%s", err, first)
+	}
+	if doc["name"] != "mine" || doc["version"] != "1.0.0" {
+		t.Errorf("existing top-level keys were not kept: %s", first)
+	}
+	pi, _ := doc["pi"].(map[string]any)
+	if pi == nil {
+		t.Fatalf(`"pi" key missing or not an object: %s`, first)
+	}
+	if _, ok := pi["settings"]; !ok {
+		t.Errorf(`existing "pi.settings" key was not kept: %s`, first)
+	}
+	extensions, _ := pi["extensions"].([]any)
+	want := []any{"./other.ts", "./extensions/hookyard.ts"}
+	if len(extensions) != len(want) || extensions[0] != want[0] || extensions[1] != want[1] {
+		t.Errorf("pi.extensions = %v, want %v", extensions, want)
+	}
+
+	if err := Build(vocab.Pi, opts); err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.ReadFile(packageJSONPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Errorf("rebuild is not idempotent\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+// TestPiBuildMergePackageJSONKeepsKeyOrder pins the failure mode a
+// map[string]json.RawMessage merge would reintroduce: alphabetically
+// re-sorting a hand-maintained package.json's top-level and pi.* keys turns a
+// two-line hook change into a whole-file diff for the plugin author.
+func TestPiBuildMergePackageJSONKeepsKeyOrder(t *testing.T) {
+	existing := []byte(`{"scripts":{},"name":"mine","pi":{"settings":{"x":1},"extensions":["./other.ts"]},"version":"1.0.0"}`)
+	got, err := mergePackageJSON("package.json", existing, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	positions := func(s string, keys ...string) []int {
+		out := make([]int, len(keys))
+		for i, key := range keys {
+			out[i] = strings.Index(s, `"`+key+`"`)
+			if out[i] < 0 {
+				t.Fatalf("key %q missing from output: %s", key, s)
+			}
+		}
+		return out
+	}
+
+	top := positions(string(got), "scripts", "name", "pi", "version")
+	if !slices.IsSorted(top) {
+		t.Errorf("top-level key order not preserved: %s", got)
+	}
+	nested := positions(string(got), "settings", "extensions")
+	if !slices.IsSorted(nested) {
+		t.Errorf("pi.* key order not preserved: %s", got)
+	}
+}
+
+func TestPiBuildErrors(t *testing.T) {
+	t.Run("missing handler file", func(t *testing.T) {
+		root, manifestPath, binaryPath := setupPiPlugin(t)
+		if err := os.Remove(filepath.Join(root, "handlers", "guard.sh")); err != nil {
+			t.Fatal(err)
+		}
+		err := Build(vocab.Pi, Options{Manifests: []string{manifestPath}, Out: root, Name: "example", Binary: binaryPath})
+		requireErrorAndNothingWritten(t, root, err)
+	})
+
+	t.Run("missing command exec", func(t *testing.T) {
+		root, manifestPath, binaryPath := setupPiPlugin(t)
+		if err := os.Remove(filepath.Join(root, "scripts", "aeye-toggle")); err != nil {
+			t.Fatal(err)
+		}
+		err := Build(vocab.Pi, Options{Manifests: []string{manifestPath}, Out: root, Name: "example", Binary: binaryPath})
+		requireErrorAndNothingWritten(t, root, err)
+		if !strings.Contains(err.Error(), `command "aeye"`) {
+			t.Errorf("got %v, want an error naming the command", err)
+		}
+	})
+
+	t.Run("absolute exec in manifest", func(t *testing.T) {
+		root := t.TempDir()
+		writeFile(t, filepath.Join(root, "handlers", "guard.sh"), []byte("#!/bin/sh\n"), 0o755)
+		manifestPath := filepath.Join(t.TempDir(), "hookyard.json")
+		body := fmt.Sprintf(`{"handlers":[{"id":"guard","exec":%q,"events":["pre_tool"],"engines":["pi"],"match":["Bash"]}]}`,
+			filepath.Join(root, "handlers", "guard.sh"))
+		writeFile(t, manifestPath, []byte(body), 0o644)
+		binaryPath := filepath.Join(t.TempDir(), "fake-hookyard")
+		writeFile(t, binaryPath, []byte("fake-binary"), 0o755)
+
+		err := Build(vocab.Pi, Options{Manifests: []string{manifestPath}, Out: root, Name: "example", Binary: binaryPath})
+		requireErrorAndNothingWritten(t, root, err)
+		if !strings.Contains(err.Error(), "must be relative to the plugin root") {
+			t.Errorf("got %v, want an error about the plugin-root-relative exec form", err)
+		}
+	})
+
+	t.Run("package.json absent and name empty", func(t *testing.T) {
+		root, manifestPath, binaryPath := setupPiPlugin(t)
+		err := Build(vocab.Pi, Options{Manifests: []string{manifestPath}, Out: root, Binary: binaryPath})
+		requireErrorAndNothingWritten(t, root, err)
+		if !strings.Contains(err.Error(), "--name is required") {
+			t.Errorf("got %v, want an error about --name", err)
+		}
+	})
+
+	t.Run("malformed existing package.json", func(t *testing.T) {
+		root, manifestPath, binaryPath := setupPiPlugin(t)
+		writeFile(t, filepath.Join(root, "package.json"), []byte("not json"), 0o644)
+		err := Build(vocab.Pi, Options{Manifests: []string{manifestPath}, Out: root, Name: "example", Binary: binaryPath})
+		requireErrorAndNothingWritten(t, root, err)
+		if !strings.Contains(err.Error(), "not valid JSON") {
+			t.Errorf("got %v, want an error about invalid JSON", err)
+		}
+	})
+
+	for name, content := range map[string][]byte{
+		"empty existing package.json":           {},
+		"whitespace-only existing package.json": []byte("  \n\t "),
+	} {
+		t.Run(name, func(t *testing.T) {
+			root, manifestPath, binaryPath := setupPiPlugin(t)
+			writeFile(t, filepath.Join(root, "package.json"), content, 0o644)
+			err := Build(vocab.Pi, Options{Manifests: []string{manifestPath}, Out: root, Name: "example", Binary: binaryPath})
+			requireErrorAndNothingWritten(t, root, err)
+			if !strings.Contains(err.Error(), "empty") {
+				t.Errorf("got %v, want an error about the empty file", err)
+			}
+		})
+	}
+
+	t.Run("commands refused for claude-code", func(t *testing.T) {
+		root := t.TempDir()
+		writeFile(t, filepath.Join(root, "handlers", "guard.sh"), []byte("#!/bin/sh\n"), 0o755)
+		writeFile(t, filepath.Join(root, "scripts", "aeye-toggle"), []byte("#!/bin/sh\n"), 0o755)
+		manifestPath := filepath.Join(t.TempDir(), "hookyard.json")
+		body := `{"handlers":[{"id":"guard","exec":"handlers/guard.sh","events":["pre_tool"],"engines":["claude-code"],"match":["Bash"]}],
+"commands":[{"name":"aeye","description":"Open the aeye image carousel","exec":"scripts/aeye-toggle"}]}`
+		writeFile(t, manifestPath, []byte(body), 0o644)
+		binaryPath := filepath.Join(t.TempDir(), "fake-hookyard")
+		writeFile(t, binaryPath, []byte("fake-binary"), 0o755)
+
+		err := Build(vocab.ClaudeCode, Options{Manifests: []string{manifestPath}, Out: root, Name: "example", Binary: binaryPath})
+		requireErrorAndNothingWritten(t, root, err)
+		if !strings.Contains(err.Error(), "commands are supported only for pi") {
+			t.Errorf("got %v, want an error naming pi as the only engine commands are supported for", err)
+		}
+	})
+
+	t.Run("no handler claims pi", func(t *testing.T) {
+		root := t.TempDir()
+		writeFile(t, filepath.Join(root, "handlers", "guard.sh"), []byte("#!/bin/sh\n"), 0o755)
+		manifestPath := filepath.Join(t.TempDir(), "hookyard.json")
+		body := `{"handlers":[{"id":"guard","exec":"handlers/guard.sh","events":["pre_tool"],"engines":["claude-code"],"match":["Bash"]}]}`
+		writeFile(t, manifestPath, []byte(body), 0o644)
+		binaryPath := filepath.Join(t.TempDir(), "fake-hookyard")
+		writeFile(t, binaryPath, []byte("fake-binary"), 0o755)
+
+		err := Build(vocab.Pi, Options{Manifests: []string{manifestPath}, Out: root, Name: "example", Binary: binaryPath})
+		requireErrorAndNothingWritten(t, root, err)
+		if !strings.Contains(err.Error(), "no handler in the manifests claims pi") {
+			t.Errorf("got %v, want an error about no handler claiming pi", err)
+		}
+	})
+
+	for _, dir := range []string{"bin", "hookyard", "extensions"} {
+		t.Run(dir+" is a symlink", func(t *testing.T) {
+			root, manifestPath, binaryPath := setupPiPlugin(t)
+			outside := t.TempDir()
+			if err := os.Symlink(outside, filepath.Join(root, dir)); err != nil {
+				t.Fatal(err)
+			}
+			err := Build(vocab.Pi, Options{Manifests: []string{manifestPath}, Out: root, Name: "example", Binary: binaryPath})
+			requireErrorAndNothingWritten(t, root, err)
+			if !strings.Contains(err.Error(), outside) || !strings.Contains(err.Error(), "--out") {
+				t.Errorf("got %v, want an error naming --out and the link target %s", err, outside)
+			}
+			entries, readErr := os.ReadDir(outside)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if len(entries) != 0 {
+				t.Errorf("build wrote %d entries through the %s link into %s", len(entries), dir, outside)
+			}
+		})
+	}
+
+	t.Run("package.json is a symlink", func(t *testing.T) {
+		root, manifestPath, binaryPath := setupPiPlugin(t)
+		packageJSONPath := filepath.Join(root, "package.json")
+		target := filepath.Join(t.TempDir(), "elsewhere.json")
+		writeFile(t, target, []byte(`{}`), 0o644)
+		if err := os.Symlink(target, packageJSONPath); err != nil {
+			t.Fatal(err)
+		}
+		err := Build(vocab.Pi, Options{Manifests: []string{manifestPath}, Out: root, Name: "example", Binary: binaryPath})
 		requireErrorAndNothingWritten(t, root, err)
 	})
 }

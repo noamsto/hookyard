@@ -56,7 +56,11 @@ same placeholder everywhere it recurs, preserving correlation) — Pi's own
 ids are base62, not hex, so left as captured they trip this repo's `typos`
 pre-commit hook on essentially every line. The session `id` (a uuid) is
 left untouched; it's hex and already covered by `_typos.toml`'s existing
-ignore pattern.
+ignore pattern. This repo is public, so each transcript's session-start
+`cwd` — the capturing machine's real home directory — is also redacted to
+`/home/<REDACTED-USER>/...`, matching `hook-payloads/README.md`'s policy;
+the rest of the path (the worktree this probe actually ran in) is left
+intact, since it's what the scenario is about.
 
 An early unrestricted-tools run (no `--tools bash`) is *not* reproduced
 here: without a tool allowlist, a blocked `bash` call sent the small local

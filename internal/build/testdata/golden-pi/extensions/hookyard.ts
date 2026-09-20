@@ -25,7 +25,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const DATA = __HOOKYARD_DATA__;
+const DATA = {"timeout_ms":5000,"pi_version":"","root":"..","entries":[{"event":"tool_call","matcher":"bash","bin":"bin/hookyard","args":["route","--registered-for","pi","--event","pre_tool"]},{"event":"tool_result","matcher":"","bin":"bin/hookyard","args":["route","--registered-for","pi","--event","post_tool"]}],"commands":[{"name":"aeye","description":"Open the aeye image carousel for this session","bin":"scripts/aeye-toggle","args":[]}]};
 
 // A built package must name no install in its bytes, so it ships its root as a
 // path relative to this file and resolves it here; the yard bridge's own paths

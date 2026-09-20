@@ -220,8 +220,22 @@ func TestRenderOnDecisionCapableEvents(t *testing.T) {
 			delivered: true,
 		},
 		{
-			// No advisory-only response Pi honours has been confirmed, so
-			// standalone advice is dropped rather than claimed as delivered.
+			// Pi's tool_call reply has no advisory key, and an allow
+			// prints nothing at all, so advice riding one has nowhere to go.
+			name: "pi allow drops the advice riding it",
+			in:   Input{Engine: vocab.Pi, CanonicalEvent: vocab.PreTool, NativeEvent: "tool_call", Verdict: Allow, Reason: "r", Advice: "a"},
+		},
+		{
+			name:      "pi ask joins the degraded reason and advice",
+			in:        Input{Engine: vocab.Pi, CanonicalEvent: vocab.PreTool, NativeEvent: "tool_call", Verdict: Ask, Reason: "r", Advice: "a"},
+			stdout:    `{"block":true,"reason":"r — hookyard verdict was ask; Pi has no ask channel, so the call was denied\n\na"}`,
+			enforced:  true,
+			delivered: true,
+		},
+		{
+			// On tool_call the only slot is the block reason, so standalone
+			// advice is dropped rather than claimed as delivered — unlike
+			// session_start and post_tool, see TestRenderPiAdvisoryOnlyEvents.
 			name:     "pi standalone advice is not delivered",
 			in:       Input{Engine: vocab.Pi, CanonicalEvent: vocab.PreTool, NativeEvent: "tool_call", Verdict: Abstain, Advice: "a"},
 			enforced: true,
@@ -244,8 +258,15 @@ func TestRenderOffADecisionSlotPrintsNothing(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s has no native post_tool event", engine)
 		}
+		// Pi has a post_tool advisory slot too, so the case that prints nothing
+		// is its no-advice one; the advice case is in
+		// TestRenderPiAdvisoryOnlyEvents.
+		advice := "a"
+		if engine == vocab.Pi {
+			advice = ""
+		}
 		for _, v := range lattice {
-			in := Input{Engine: engine, CanonicalEvent: vocab.PostTool, NativeEvent: native, Verdict: v, Reason: "r", Advice: "a"}
+			in := Input{Engine: engine, CanonicalEvent: vocab.PostTool, NativeEvent: native, Verdict: v, Reason: "r", Advice: advice}
 			// Enforced is true only for abstain: any other verdict was computed
 			// and cannot be acted on, which is what the record must show.
 			checkRendered(t, fmt.Sprintf("%s post_tool %s", engine, v), Render(in), "", v == Abstain, false)
@@ -319,6 +340,32 @@ func TestRenderAdvisoryOnlyEvents(t *testing.T) {
 	}
 }
 
+// TestRenderPiAdvisoryOnlyEvents walks the whole (verdict × advice) matrix on
+// Pi's two advisory-only events. The reply must stay a bare advisory whatever
+// the verdict was: no block key — which is what piResponse.Block's omitempty
+// buys — and no reason, since neither event has anywhere to act on one.
+func TestRenderPiAdvisoryOnlyEvents(t *testing.T) {
+	for _, event := range []string{vocab.SessionStart, vocab.PostTool} {
+		native, ok := vocab.NativeEvent(vocab.Pi, event)
+		if !ok {
+			t.Fatalf("pi has no native %s event", event)
+		}
+		for _, v := range lattice {
+			for _, advice := range []string{"", "a"} {
+				in := Input{Engine: vocab.Pi, CanonicalEvent: event, NativeEvent: native, Verdict: v, Reason: "r", Advice: advice}
+				want := ""
+				if advice != "" {
+					want = `{"advisory":"a"}`
+				}
+				// Enforced tracks abstain alone: delivering an advisory is not
+				// acting on a verdict, and there is no decision slot here.
+				name := fmt.Sprintf("pi %s %s advice=%q", event, v, advice)
+				checkRendered(t, name, Render(in), want, v == Abstain, advice != "")
+			}
+		}
+	}
+}
+
 func TestRenderDoesNotRenderPermissionRequest(t *testing.T) {
 	// A confirmed decision channel hookyard deliberately leaves unrendered
 	// (§4): a computed deny arrives here unenforced, and says so.
@@ -341,7 +388,8 @@ func TestCapabilityTable(t *testing.T) {
 			}
 			// Codex has no advisory slot on any event.
 			wantAdvisory := want && engine != vocab.Codex
-			if engine == vocab.ClaudeCode {
+			// Claude Code and Pi both reach the model off the permission path.
+			if engine == vocab.ClaudeCode || engine == vocab.Pi {
 				wantAdvisory = event == vocab.PreTool || event == vocab.SessionStart || event == vocab.PostTool
 			}
 			if got := HasAdvisorySlot(engine, event, native); got != wantAdvisory {

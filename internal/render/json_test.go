@@ -574,7 +574,7 @@ func TestWritePiLeavesOtherExtensionsAndKeysAlone(t *testing.T) {
 	if !strings.Contains(got, PiBridgePath(path)) {
 		t.Errorf("the bridge is not registered\n--- got ---\n%s", got)
 	}
-	if !strings.Contains(readFile(t, PiBridgePath(path)), "--registered-for pi") {
+	if !strings.Contains(readFile(t, PiBridgePath(path)), `"--registered-for","pi"`) {
 		t.Error("the bridge carries no hookyard entry")
 	}
 }

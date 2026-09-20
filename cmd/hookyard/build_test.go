@@ -115,3 +115,39 @@ func TestRunBuildHappyPath(t *testing.T) {
 		}
 	}
 }
+
+func TestRunBuildHappyPathPi(t *testing.T) {
+	root := t.TempDir()
+	writeBuildFile(t, filepath.Join(root, "handlers", "guard.sh"), "#!/bin/sh\n", 0o755)
+	manifestPath := filepath.Join(t.TempDir(), "hookyard.json")
+	writeBuildFile(t, manifestPath, `{"handlers":[`+
+		`{"id":"guard","exec":"handlers/guard.sh","events":["pre_tool"],"engines":["pi"],"match":["Bash"]}]}`, 0o644)
+
+	err := runBuild([]string{
+		"--engine", "pi",
+		"--manifest", manifestPath,
+		"--out", root,
+		"--name", "example",
+	})
+
+	if err != nil {
+		t.Fatalf("runBuild: %v", err)
+	}
+	for _, rel := range []string{"package.json", filepath.Join("extensions", "hookyard.ts"), filepath.Join("hookyard", "table.json")} {
+		if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
+			t.Errorf("want %s to exist: %v", rel, err)
+		}
+	}
+}
+
+// The unsupported-engine error must name the engines build does support,
+// rather than repeating the days when Claude Code was the only one.
+func TestRunBuildUnsupportedEngineNamesSupportedEngines(t *testing.T) {
+	root, manifestPath := setupBuildPlugin(t)
+
+	err := runBuild([]string{"--engine", "codex", "--manifest", manifestPath, "--out", root, "--name", "example"})
+
+	if err == nil || !strings.Contains(err.Error(), "claude-code") || !strings.Contains(err.Error(), "pi") {
+		t.Fatalf("got %v, want an error naming claude-code and pi as supported", err)
+	}
+}

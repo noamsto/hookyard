@@ -15,7 +15,7 @@
   "tool_name": "Shell",
   "tool_output": "{\"output\":\"hookyard-probe\\n\",\"exitCode\":0}",
   "tool_use_id": "4f3727d1-c7eb-40ae-bdd0-2d856d15fcb7",
-  "transcript_path": "/home/noams/.cursor/projects/tmp-claude-1000-home-noams-Data-git-worktrees-noamsto-hookyard-feat-1-design-spec-hookyard-as-a-standalone-cro-33cb05fe-2fe0-4094-841d-3c21fcc2dc5c-scratchpad-capture-cursor-probe/agent-transcripts/b0d29f55-8780-4365-bbdd-10f82fc213ec/b0d29f55-8780-4365-bbdd-10f82fc213ec.jsonl",
+  "transcript_path": "/home/<REDACTED-USER>/.cursor/projects/tmp-claude-1000-home-<REDACTED-USER>-Data-git-worktrees-noamsto-hookyard-feat-1-design-spec-hookyard-as-a-standalone-cro-33cb05fe-2fe0-4094-841d-3c21fcc2dc5c-scratchpad-capture-cursor-probe/agent-transcripts/b0d29f55-8780-4365-bbdd-10f82fc213ec/b0d29f55-8780-4365-bbdd-10f82fc213ec.jsonl",
   "user_email": "<REDACTED-EMAIL>",
   "workspace_roots": [
     "<PROBE>/capture/cursor-probe"

@@ -48,16 +48,20 @@ func HasDecisionSlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bo
 // no handler can get advice to Codex by any means this package offers.
 // Cursor's is the user_message field of the decision object itself, so its
 // advisory set is exactly its decision set — and advice only rides there
-// alongside a rendered permission, which Render is what enforces. Pi's is its
-// single reason field, riding the same way: the block reason was observed
-// reaching the model as the tool outcome, but only alongside a block, so Pi's
-// advisory set is its decision set too.
+// alongside a rendered permission, which Render is what enforces. Pi's set is
+// wider than its decision set: on pre_tool advice still rides the block reason
+// and nothing else, but the bridge also delivers a standalone advisory on
+// session_start (as an injected message before the agent starts) and on
+// post_tool (appended to the tool result), neither of which can carry a
+// decision.
 func HasAdvisorySlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bool {
 	switch engine {
 	case vocab.ClaudeCode:
 		return canonicalEvent == vocab.PreTool || canonicalEvent == vocab.SessionStart || canonicalEvent == vocab.PostTool
-	case vocab.Cursor, vocab.Pi:
+	case vocab.Cursor:
 		return HasDecisionSlot(engine, canonicalEvent, nativeEvent)
+	case vocab.Pi:
+		return canonicalEvent == vocab.PreTool || canonicalEvent == vocab.SessionStart || canonicalEvent == vocab.PostTool
 	}
 	return false
 }

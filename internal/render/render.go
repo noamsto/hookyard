@@ -36,7 +36,9 @@ const PluginLauncher = "bin/hookyard"
 
 // pluginRootVar names the environment variable each engine exports with the
 // plugin's own root, so a built plugin's command never hardcodes an install
-// path. Only claude-code is populated; other engines are build mode's seam.
+// path. Pi will never have a row: its invocation travels as argv rather than as
+// a shell string, and its bridge resolves its own root from import.meta.url
+// (PiPluginBridge). The remaining engines are build mode's seam.
 var pluginRootVar = map[vocab.Engine]string{vocab.ClaudeCode: "CLAUDE_PLUGIN_ROOT"}
 
 // Entry is one hook registration in one engine's config.
@@ -65,6 +67,9 @@ func BuildPlan(handlers []manifest.Handler, routerPath, stateDir string) (Plan, 
 	if err := checkRouterPath(routerPath); err != nil {
 		return nil, err
 	}
+	if err := checkStateDir(stateDir); err != nil {
+		return nil, err
+	}
 
 	return buildPlan(handlers, func(engine vocab.Engine, event string) string {
 		return command(routerPath, engine, event, stateDir)
@@ -78,6 +83,11 @@ func BuildPlan(handlers []manifest.Handler, routerPath, stateDir string) (Plan, 
 // each one actually reaches (R-B).
 func ClaudeCatalogPlan(routerPath, stateDir string) ([]Entry, error) {
 	if err := checkRouterPath(routerPath); err != nil {
+		return nil, err
+	}
+	// This plan's Command is an unquoted shell command string too, so
+	// whitespace in the state dir would split it the same way.
+	if err := checkStateDir(stateDir); err != nil {
 		return nil, err
 	}
 	entries := make([]Entry, 0, len(vocab.ClaudeCodeCatalog))
@@ -105,6 +115,33 @@ func checkRouterPath(routerPath string) error {
 		return fmt.Errorf("router path %q must be an absolute path, because it is resolved at "+
 			"hook-fire time against the agent's working directory, not the installer's", routerPath)
 	}
+	// Load-bearing for Pi in particular: piBridgeEntries rebuilds argv by
+	// splitting the emitted command on " ", so whitespace here hands execFile a
+	// truncated binary path — the spawn fails, the bridge fails open, and every
+	// Pi hook goes silently dead with no record to notice it by. Refused here
+	// rather than only in cmd/hookyard so a BuildPlan caller that never passes
+	// through the CLI cannot produce such a plan. It covers the router path
+	// alone; checkStateDir below covers the state dir's half of the same
+	// argv-split hazard.
+	if i := strings.IndexAny(routerPath, " \t\n\r"); i >= 0 {
+		return fmt.Errorf("router path %q contains whitespace (%q), which the Pi bridge's argv "+
+			"split would cut the path in half at", routerPath, routerPath[i])
+	}
+	return nil
+}
+
+// checkStateDir refuses a state dir an emitted command must not embed.
+//
+// command formats "--state-dir %s" as the last token of the same string
+// checkRouterPath's whitespace rule protects the front of: the router path
+// missing its front half fails to spawn at all, but a mangled state dir still
+// spawns the router — it just hands the router a truncated --state-dir value,
+// a quieter failure with no error anywhere to notice it by.
+func checkStateDir(stateDir string) error {
+	if i := strings.IndexAny(stateDir, " \t\n\r"); i >= 0 {
+		return fmt.Errorf("state dir %q contains whitespace (%q), which the Pi bridge's argv "+
+			"split would cut the --state-dir value in half at", stateDir, stateDir[i])
+	}
 	return nil
 }
 
@@ -115,7 +152,8 @@ func checkRouterPath(routerPath string) error {
 func PluginPlan(handlers []manifest.Handler, engine vocab.Engine) ([]Entry, error) {
 	v, ok := pluginRootVar[engine]
 	if !ok {
-		return nil, fmt.Errorf("hookyard build does not support %s yet", engine)
+		return nil, fmt.Errorf("hookyard build renders no plugin-root command string for %s: "+
+			"pi builds through PiPluginBridge, and no other engine is implemented yet", engine)
 	}
 	plan, err := buildPlan(handlers, func(e vocab.Engine, event string) string {
 		return fmt.Sprintf(`"${%[1]s}/%[2]s" route --registered-for %[3]s --event %[4]s --plugin-root "${%[1]s}"`,

@@ -362,12 +362,15 @@ func TestOtherEnginesFindingsAreUnchanged(t *testing.T) {
 		{Engine: vocab.Pi, Check: "hookyard registered", Status: Pass, Detail: "present in " + piSettings},
 		{Engine: vocab.Pi, Check: "router path", Status: Pass, Detail: executable},
 		{Engine: vocab.Pi, Check: "launcher wrapper", Status: Unknown, Detail: "no pi on PATH to check for an injected launcher"},
+		{Engine: vocab.Pi, Check: "double-registered handlers", Status: Unknown, Detail: "no --state-dir recoverable to read the handler table from"},
+		{Engine: vocab.Pi, Check: "bridge matches handler table", Status: Unknown, Detail: "no --state-dir recoverable to read the handler table from"},
+		{Engine: vocab.Pi, Check: "bridge invocation is executable", Status: Pass, Detail: "every entry in " + piBridge + " names an executable bin"},
 	}
 
 	var got []Finding
 	got = append(got, codexFindings(p, dir)...)
 	got = append(got, cursorFindings(p, dir, stateDir)...)
-	got = append(got, piFindings(p)...)
+	got = append(got, piFindings(p, "")...)
 
 	if len(got) != len(want) {
 		t.Fatalf("got %d findings, want %d: %+v", len(got), len(want), got)

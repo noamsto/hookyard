@@ -49,3 +49,54 @@ func TestIsClaudeCodeEvent(t *testing.T) {
 		}
 	}
 }
+
+func TestPiCatalogCanonicalRowsMatchNativeEventsInOrder(t *testing.T) {
+	if len(PiCatalog) < len(CanonicalEvents) {
+		t.Fatalf("catalog has %d rows, want at least %d canonical rows", len(PiCatalog), len(CanonicalEvents))
+	}
+	for i, canonical := range CanonicalEvents {
+		native := PiCatalog[i]
+		want := nativeEvents[Pi][canonical]
+		if native != want {
+			t.Errorf("row %d: native = %q, want nativeEvents[Pi][%q] = %q", i, native, canonical, want)
+		}
+	}
+}
+
+// The scoped rows (beyond the six canonical) must be genuinely additional —
+// reachable only as "pi:<native>" — not a restatement of a canonical native
+// under another name.
+func TestPiCatalogScopedRowsAreEngineScoped(t *testing.T) {
+	canonicalNatives := map[string]bool{}
+	for _, canonical := range CanonicalEvents {
+		canonicalNatives[nativeEvents[Pi][canonical]] = true
+	}
+	for _, native := range PiCatalog[len(CanonicalEvents):] {
+		if canonicalNatives[native] {
+			t.Errorf("native %q duplicates a canonical row instead of being genuinely scoped", native)
+		}
+	}
+}
+
+func TestPiCatalogHasNoDuplicateNatives(t *testing.T) {
+	seen := map[string]bool{}
+	for _, native := range PiCatalog {
+		if seen[native] {
+			t.Errorf("native %q appears more than once in the catalog", native)
+		}
+		seen[native] = true
+	}
+}
+
+func TestIsPiEvent(t *testing.T) {
+	for _, native := range PiCatalog {
+		if !IsPiEvent(native) {
+			t.Errorf("IsPiEvent(%q) = false, want true", native)
+		}
+	}
+	for _, native := range []string{"before_agent_start", "session_compact"} {
+		if IsPiEvent(native) {
+			t.Errorf("IsPiEvent(%q) = true, want false", native)
+		}
+	}
+}

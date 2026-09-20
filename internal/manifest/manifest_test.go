@@ -287,6 +287,25 @@ func TestLoadAcceptsEveryClaudeCodeCatalogNative(t *testing.T) {
 	}
 }
 
+// pi:session_shutdown is PiCatalog's whole reason for existing
+// beyond the six canonical natives, and pi:before_agent_start is refused by
+// the same catalog rule — before_agent_start is deliberately absent from
+// PiCatalog (vocab.go) rather than carrying a bespoke rejection message here.
+func TestLoadAcceptsPiSessionShutdownAndRejectsBeforeAgentStart(t *testing.T) {
+	path := writeManifest(t, `{"handlers":[
+	  {"id":"a","exec":"EXEC","events":["pi:session_shutdown"],"engines":["pi"]}]}`)
+	if _, err := Load(path); err != nil {
+		t.Fatal(err)
+	}
+
+	path = writeManifest(t, `{"handlers":[
+	  {"id":"a","exec":"EXEC","events":["pi:before_agent_start"],"engines":["pi"]}]}`)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "not a Pi event hookyard routes") {
+		t.Fatalf("got %v, want an error naming the Pi catalog", err)
+	}
+}
+
 func TestWriteTableThenReadTableRoundTrips(t *testing.T) {
 	dir := t.TempDir()
 	exec := filepath.Join(dir, "guard.sh")
@@ -475,6 +494,39 @@ func TestMergeRejectsDuplicateIDAcrossManifests(t *testing.T) {
 	}
 }
 
+// Mode gate: commands are build-mode-only. Load, LoadBuildTime and
+// ReadTable all read yard-mode manifests and must refuse a non-empty commands
+// rather than accept a surface yard mode has nothing to register it into.
+func TestYardReadersRejectNonEmptyCommands(t *testing.T) {
+	const commandsKey = `,"commands":[{"name":"aeye","description":"Open the viewer","exec":"scripts/aeye"}]`
+
+	t.Run("Load", func(t *testing.T) {
+		path := writeManifest(t, `{"handlers":[{"id":"a","exec":"EXEC","events":["pre_tool"],"engines":["cursor"]}]`+commandsKey+`}`)
+		_, err := Load(path)
+		if err == nil || !strings.Contains(err.Error(), "yard mode has no command surface") {
+			t.Fatalf("got %v, want an error about yard mode's command surface", err)
+		}
+	})
+
+	t.Run("LoadBuildTime", func(t *testing.T) {
+		path := writeFile(t, t.TempDir(), "hookyard.json",
+			`{"handlers":[{"id":"a","exec":"/nonexistent","events":["pre_tool"],"engines":["cursor"]}]`+commandsKey+`}`)
+		_, err := LoadBuildTime(path)
+		if err == nil || !strings.Contains(err.Error(), "yard mode has no command surface") {
+			t.Fatalf("got %v, want an error about yard mode's command surface", err)
+		}
+	})
+
+	t.Run("ReadTable", func(t *testing.T) {
+		path := writeFile(t, t.TempDir(), "table.json",
+			`{"handlers":[{"id":"a","exec":"/opt/hookyard/guard.sh","events":["pre_tool"],"engines":["cursor"]}]`+commandsKey+`}`)
+		_, err := ReadTable(path)
+		if err == nil || !strings.Contains(err.Error(), "yard mode has no command surface") {
+			t.Fatalf("got %v, want an error about yard mode's command surface", err)
+		}
+	})
+}
+
 func writeFile(t *testing.T, dir, name, body string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
@@ -523,6 +575,98 @@ func TestLoadPluginRejectsClaudeCodeEventOutsideCatalog(t *testing.T) {
 	_, err := LoadPlugin(path)
 	if err == nil || !strings.Contains(err.Error(), "not a Claude Code event hookyard routes") {
 		t.Fatalf("got %v, want an error about the Claude Code catalog", err)
+	}
+}
+
+// LoadPlugin is the one reader that accepts commands: name shape,
+// non-empty description, and exec under the same ExecPluginRelative rule a
+// handler's exec follows.
+func TestLoadPluginCommands(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string // one commands[] entry
+		want    string // empty means accepted
+	}{
+		{name: "valid", command: `{"name":"aeye","description":"Open the viewer","exec":"scripts/aeye"}`},
+		{name: "empty name", command: `{"name":"","description":"d","exec":"scripts/aeye"}`,
+			want: "name must match"},
+		{name: "name with a slash reads as a nested command path", command: `{"name":"aeye/images","description":"d","exec":"scripts/aeye"}`,
+			want: "name must match"},
+		{name: "empty description", command: `{"name":"aeye","description":"","exec":"scripts/aeye"}`,
+			want: "no description"},
+		{name: "absolute exec", command: `{"name":"aeye","description":"d","exec":"/opt/aeye"}`,
+			want: "must be relative to the plugin root"},
+		{name: "exec escaping the plugin root", command: `{"name":"aeye","description":"d","exec":"../aeye"}`,
+			want: "must be relative to the plugin root"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeFile(t, t.TempDir(), "hookyard.json",
+				`{"handlers":[{"id":"a","exec":"handlers/guard.sh","events":["pre_tool"],"engines":["claude-code"]}],`+
+					`"commands":[`+tc.command+`]}`)
+			m, err := LoadPlugin(path)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(m.Commands) != 1 || m.Commands[0].Name != "aeye" || m.Commands[0].Exec != "scripts/aeye" {
+					t.Errorf("got %+v, want one command named aeye with exec scripts/aeye", m.Commands)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want an error containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadPluginRejectsDuplicateCommandNameInOneManifest(t *testing.T) {
+	path := writeFile(t, t.TempDir(), "hookyard.json",
+		`{"handlers":[{"id":"a","exec":"handlers/guard.sh","events":["pre_tool"],"engines":["claude-code"]}],
+		  "commands":[
+		    {"name":"aeye","description":"d","exec":"scripts/aeye"},
+		    {"name":"aeye","description":"d2","exec":"scripts/aeye2"}]}`)
+	_, err := LoadPlugin(path)
+	if err == nil || !strings.Contains(err.Error(), "declared twice") {
+		t.Fatalf("got %v, want an error about a duplicate command name", err)
+	}
+}
+
+// A valid commands[] round-trips through LoadPlugin and Merge, and Merge
+// rejects a duplicate command name across manifests the way it already
+// rejects a duplicate handler id.
+func TestMergeCommands(t *testing.T) {
+	first, err := LoadPlugin(writeFile(t, t.TempDir(), "hookyard.json",
+		`{"handlers":[{"id":"a","exec":"handlers/guard.sh","events":["pre_tool"],"engines":["claude-code"]}],
+		  "commands":[{"name":"aeye","description":"d","exec":"scripts/aeye"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := LoadPlugin(writeFile(t, t.TempDir(), "hookyard.json",
+		`{"handlers":[{"id":"b","exec":"handlers/guard.sh","events":["pre_tool"],"engines":["claude-code"]}],
+		  "commands":[{"name":"images","description":"d","exec":"scripts/images"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Merge([]*Manifest{first, second}); err != nil {
+		t.Fatalf("want distinct command names to merge cleanly, got %v", err)
+	}
+
+	third, err := LoadPlugin(writeFile(t, t.TempDir(), "hookyard.json",
+		`{"handlers":[{"id":"c","exec":"handlers/guard.sh","events":["pre_tool"],"engines":["claude-code"]}],
+		  "commands":[{"name":"aeye","description":"d","exec":"scripts/aeye"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Merge([]*Manifest{first, third})
+	if err == nil {
+		t.Fatal("want an error for a duplicate command name across manifests, got nil")
+	}
+	for _, want := range []string{first.Source, third.Source} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should name both manifests, missing %q: %v", want, err)
+		}
 	}
 }
 
@@ -653,6 +797,37 @@ func TestCheckPluginExecs(t *testing.T) {
 		err := CheckPluginExecs(root, []Handler{{ID: "ok", Exec: "guard.sh"}, {ID: "bad", Exec: exec}})
 		if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), `handler "bad"`) {
 			t.Errorf("%s: got %v, want an error naming handler \"bad\" containing %q", exec, err, want)
+		}
+	}
+}
+
+func TestCheckCommandExecs(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "guard.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, root, "plain.sh", "#!/bin/sh\n")
+	if err := os.Mkdir(filepath.Join(root, "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := writeFile(t, t.TempDir(), "evil.sh", "#!/bin/sh\n")
+	if err := os.Symlink(outside, filepath.Join(root, "escape.sh")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := CheckCommandExecs(root, []Command{{Name: "ok", Exec: "guard.sh"}}); err != nil {
+		t.Fatalf("executable file: %v", err)
+	}
+	cases := map[string]string{
+		"gone.sh":   "gone.sh",
+		"plain.sh":  "not executable",
+		"dir":       "is a directory",
+		"escape.sh": "outside the plugin root",
+	}
+	for exec, want := range cases {
+		err := CheckCommandExecs(root, []Command{{Name: "ok", Exec: "guard.sh"}, {Name: "bad", Exec: exec}})
+		if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), `command "bad"`) {
+			t.Errorf("%s: got %v, want an error naming command \"bad\" containing %q", exec, err, want)
 		}
 	}
 }

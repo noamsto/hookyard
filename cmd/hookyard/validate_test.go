@@ -81,6 +81,52 @@ func TestValidatePlainRejectsWhatBuildTimeWouldSkipOrCatch(t *testing.T) {
 	}
 }
 
+// setupBuildPluginWithCommand is setupBuildPlugin plus one pi command whose
+// exec is a second, separately-created executable — reused by the two tests
+// below to prove --plugin-root checks commands[].exec, not only handlers.
+func setupBuildPluginWithCommand(t *testing.T, commandExecMode os.FileMode) (root, manifestPath string) {
+	t.Helper()
+	root, _ = setupBuildPlugin(t)
+	writeBuildFile(t, filepath.Join(root, "handlers", "greet.sh"), "#!/bin/sh\n", commandExecMode)
+	manifestPath = filepath.Join(t.TempDir(), "hookyard.json")
+	writeBuildFile(t, manifestPath, `{"handlers":[`+
+		`{"id":"guard","exec":"handlers/guard.sh","events":["pre_tool"],"engines":["claude-code"],"match":["Bash"]}],`+
+		`"commands":[{"name":"greet","description":"says hi","exec":"handlers/greet.sh"}]}`, 0o644)
+	return root, manifestPath
+}
+
+// validatePlugin checks handler execs and command execs alike; a
+// commands[].exec that would fail at build time must fail validate too,
+// rather than passing it silently.
+func TestValidatePluginRootRejectsAMissingCommandExec(t *testing.T) {
+	root, manifestPath := setupBuildPluginWithCommand(t, 0o755)
+	if err := os.Remove(filepath.Join(root, "handlers", "greet.sh")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := validate([]string{"--manifest", manifestPath, "--plugin-root", root})
+
+	if err == nil {
+		t.Fatal("want an error for the missing command exec, got nil")
+	}
+	if !strings.Contains(err.Error(), "greet") {
+		t.Errorf("error should name the command, got: %v", err)
+	}
+}
+
+func TestValidatePluginRootRejectsANonExecutableCommandExec(t *testing.T) {
+	root, manifestPath := setupBuildPluginWithCommand(t, 0o644) // no +x
+
+	err := validate([]string{"--manifest", manifestPath, "--plugin-root", root})
+
+	if err == nil {
+		t.Fatal("want an error for the non-executable command exec, got nil")
+	}
+	if !strings.Contains(err.Error(), "greet") {
+		t.Errorf("error should name the command, got: %v", err)
+	}
+}
+
 func TestValidateBuildTimeAndPluginRootAreMutuallyExclusive(t *testing.T) {
 	manifestPath := filepath.Join(t.TempDir(), "unused.json") // never read; the flag conflict is caught first
 	pluginRoot := t.TempDir()

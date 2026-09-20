@@ -7,6 +7,7 @@ package vocab
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -139,6 +140,35 @@ func IsClaudeCodeEvent(native string) bool {
 		}
 	}
 	return false
+}
+
+// PiCatalog is the fixed set of pi native events hookyard routes: the six
+// canonical natives, in CanonicalEvents order, plus session_shutdown, which
+// pi fires with no canonical counterpart. before_agent_start is
+// deliberately absent — the bridge registers it itself, outside any manifest
+// event, solely to flush a queued session_start advisory. A
+// manifest naming pi:before_agent_start would ask hookyard to register a
+// second handler for that one event, one of which would answer a protocol
+// the router does not speak.
+//
+// Unlike ClaudeCodeCatalog, PiCatalog is a []string of native names rather
+// than a []ClaudeCodeEvent pair: every consumer here (IsPiEvent, the
+// envelope arm, manifest validation) asks about the native name only, and
+// ClaudeCodeEvent.Routed exists to drive render.ClaudeCatalogPlan, which has
+// no pi counterpart — a second field nothing reads would just be dead weight.
+var PiCatalog = buildPiCatalog()
+
+func buildPiCatalog() []string {
+	catalog := make([]string, 0, len(CanonicalEvents)+1)
+	for _, canonical := range CanonicalEvents {
+		catalog = append(catalog, nativeEvents[Pi][canonical])
+	}
+	return append(catalog, "session_shutdown")
+}
+
+// IsPiEvent reports whether native is one of PiCatalog's members.
+func IsPiEvent(native string) bool {
+	return slices.Contains(PiCatalog, native)
 }
 
 // NormalizedTools is Claude Code's own tool vocabulary, which §7 normalizes

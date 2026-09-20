@@ -55,12 +55,16 @@ type cursorResponse struct {
 	UserMessage string `json:"user_message,omitempty"`
 }
 
-// piResponse is the bridge's wire shape: binary and reason-only, with no
-// decision field at all — the bridge blocks by returning this, and returns
-// nothing (allow) otherwise (§7).
+// piResponse is the bridge's wire shape on both of Pi's reply paths: a block
+// with its reason, which the bridge answers by refusing the call (returning
+// nothing is allow), or a standalone advisory it delivers as a message. Block
+// carries omitempty because the two paths are disjoint on the wire — an
+// advisory reply spelling "block":false would read as a decision no handler
+// made — and renderPiDeny, the only producer of a block, always sets it true.
 type piResponse struct {
-	Block  bool   `json:"block"`
-	Reason string `json:"reason,omitempty"`
+	Block    bool   `json:"block,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	Advisory string `json:"advisory,omitempty"`
 }
 
 // Render turns a consolidated decision into the bytes one engine expects on
@@ -82,11 +86,16 @@ func Render(in Input) Rendered {
 		}
 		return Rendered{Enforced: in.Verdict == Abstain}
 	}
-	// Only Claude Code can reach this branch: Cursor/Pi's advisory set is
-	// defined as identical to their decision set (already false here), and
-	// Codex has no advisory slot at all.
-	if HasAdvisorySlot(in.Engine, in.CanonicalEvent, in.NativeEvent) && in.Engine == vocab.ClaudeCode {
-		return renderClaudeCodeAdvisoryOnly(in)
+	// Only Claude Code and Pi can reach this branch: Cursor's advisory set is
+	// defined as identical to its decision set (already false here), and Codex
+	// has no advisory slot at all.
+	if HasAdvisorySlot(in.Engine, in.CanonicalEvent, in.NativeEvent) {
+		switch in.Engine {
+		case vocab.ClaudeCode:
+			return renderClaudeCodeAdvisoryOnly(in)
+		case vocab.Pi:
+			return renderPiAdvisoryOnly(in)
+		}
 	}
 	return Rendered{Enforced: in.Verdict == Abstain}
 }
@@ -210,9 +219,11 @@ func piAskDegradedReason(handlerReason string) string {
 }
 
 // renderPiDeny joins reason and advice into Pi's one reason field, the same
-// way renderCursor joins them into user_message: the block reason is the only
-// slot observed reaching the model, and standalone advice has no path of its
-// own (§7), so advice only reaches the model riding along a block.
+// way renderCursor joins them into user_message. Advice does not get its own
+// key here even though renderPiAdvisoryOnly has one: Pi's tool_call return
+// shape is {block, reason, terminate} with no advisory channel, so an advisory
+// key on this path would be a field the bridge cannot deliver. The asymmetry
+// with session_start and post_tool is the return shapes', not hookyard's.
 func renderPiDeny(reason, advice string) Rendered {
 	var message []string
 	if reason != "" {
@@ -223,6 +234,19 @@ func renderPiDeny(reason, advice string) Rendered {
 	}
 	out := piResponse{Block: true, Reason: strings.Join(message, "\n\n")}
 	return Rendered{Stdout: marshal(out), Enforced: true, AdviceDelivered: advice != ""}
+}
+
+// renderPiAdvisoryOnly renders Pi's standalone advisory on the events where the
+// bridge has a channel to the model — an injected message after session_start,
+// an appended block on tool_result — but no decision channel. Reason is dropped
+// for the same reason renderClaudeCodeAdvisoryOnly drops it: there is nowhere
+// to put it, so a non-Abstain verdict here is recorded unenforced.
+func renderPiAdvisoryOnly(in Input) Rendered {
+	if in.Advice == "" {
+		return Rendered{Enforced: in.Verdict == Abstain}
+	}
+	out := piResponse{Advisory: in.Advice}
+	return Rendered{Stdout: marshal(out), Enforced: in.Verdict == Abstain, AdviceDelivered: true}
 }
 
 // marshal cannot fail here: every field of every response struct is a string.
