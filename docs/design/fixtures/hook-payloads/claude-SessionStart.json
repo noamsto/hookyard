@@ -3,5 +3,5 @@
   "hook_event_name": "SessionStart",
   "session_id": "2e836ac9-0906-468f-b575-1a3ce651e3dc",
   "source": "startup",
-  "transcript_path": "<PROBE>/capture/claude-home/projects/-tmp-claude-1000--home-noams-Data-git--worktrees-git-hookyard-feat-58-make-the-claude-code-overlay-manifest-in-89de17ab-6577-42a8-8703-4901b7086c88-scratchpad-capture/2e836ac9-0906-468f-b575-1a3ce651e3dc.jsonl"
+  "transcript_path": "<PROBE>/capture/claude-home/projects/-tmp-claude-1000--home-<REDACTED-USER>-Data-git--worktrees-git-hookyard-feat-58-make-the-claude-code-overlay-manifest-in-89de17ab-6577-42a8-8703-4901b7086c88-scratchpad-capture/2e836ac9-0906-468f-b575-1a3ce651e3dc.jsonl"
 }

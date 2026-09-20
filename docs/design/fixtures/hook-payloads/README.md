@@ -145,7 +145,9 @@ inferred rather than captured.
 
 ## What was changed in these files
 
-Only two things, both mechanical:
+This repo is public, and these fixtures are published — so beyond the probe
+scaffolding, anything that identifies the machine or account that captured
+them is redacted too. Three things, all mechanical:
 
 - `user_email` (Cursor only) is replaced with `<REDACTED-EMAIL>`.
 - The throwaway probe directory prefix is replaced with `<PROBE>`. Pi's
@@ -153,6 +155,19 @@ Only two things, both mechanical:
   the session directory's name, where pi flattens the project path by
   replacing every `/` with `-` — and both spellings are the same
   substitution.
+- The capturing account's home directory is replaced with
+  `/home/<REDACTED-USER>`, keeping the path shape a real home path has
+  rather than collapsing it to a bare token — these fixtures are the payload
+  spec the bridge is checked against, so a redaction that changes a field's
+  shape would break the thing it's pinning. This shows up in three places:
+  Pi's `argv` (`--skill`/`--prompt-template` point at the real
+  `~/.claude/skills` and `~/.claude/commands`, which are not scratched by
+  the probe setup), the `pi-multi-extension-consolidation` sample
+  transcripts' `cwd`, and — flattened, `/` replaced with `-` the same way
+  `session_file` is — inside a `transcript_path` project-directory segment
+  that both Claude Code and Cursor derive from the real cwd rather than the
+  scratched probe root, so the earlier `<PROBE>` substitution alone didn't
+  catch it.
 
 Session, turn and tool-call identifiers are left as captured. They identify
 sessions that no longer exist and are the shape of the fields, which is the

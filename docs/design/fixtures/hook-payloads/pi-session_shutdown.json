@@ -3,11 +3,11 @@
     "-e",
     "/nix/store/isc969mqn5gh9agc33h52wixcqx0svdk-hook-bridge.ts",
     "--skill",
-    "/home/noams/.claude/skills",
+    "/home/<REDACTED-USER>/.claude/skills",
     "--skill",
     "/nix/store/11pnadlaypf4b1rshn0b7fi84nsmphi3-xdg-claude/context-efficient-tools/skills",
     "--prompt-template",
-    "/home/noams/.claude/commands",
+    "/home/<REDACTED-USER>/.claude/commands",
     "-p",
     "--approve",
     "Run the shell command: echo hookyard-probe"
