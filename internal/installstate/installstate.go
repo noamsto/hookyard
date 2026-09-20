@@ -22,8 +22,9 @@ import (
 
 // Schema is the identity contract's version. Diff short-circuits on a
 // mismatch: a witness and receipt written by two schema versions have nothing
-// meaningful to compare field-by-field.
-const Schema = 1
+// meaningful to compare field-by-field. Bumped to 2 when PiSettings changed
+// type from string to []string, not just value.
+const Schema = 2
 
 // Identity is the set of paths and inputs a home-manager generation and an
 // install run must agree on. Field names are a cross-language contract with
@@ -34,7 +35,7 @@ type Identity struct {
 	StateDir    string   `json:"stateDir"`
 	CodexConfig string   `json:"codexConfig"`
 	CursorHooks string   `json:"cursorHooks"`
-	PiSettings  string   `json:"piSettings"`
+	PiSettings  []string `json:"piSettings"`
 	Hookyard    string   `json:"hookyard"`
 }
 
@@ -129,7 +130,7 @@ func Diff(w Witness, r Receipt) []string {
 	if w.CursorHooks != r.CursorHooks {
 		diffs = append(diffs, "cursor hooks")
 	}
-	if w.PiSettings != r.PiSettings {
+	if !slices.Equal(w.PiSettings, r.PiSettings) {
 		diffs = append(diffs, "pi settings")
 	}
 	if w.Hookyard != r.Hookyard {

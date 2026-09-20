@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -660,9 +661,21 @@ func cursorProjectSlug(dir string) string {
 // project-local .pi/ resources, and hookyard registers a global extension,
 // which that gate does not touch at all. Reporting that is the finding.
 func piFindings(p Paths, stateDir string) []Finding {
-	settings := filepath.Join(p.PiAgentDir, "settings.json")
+	managed := managedPiSettingsPaths(p)
+
+	var findings []Finding
+	for _, settings := range managed {
+		findings = append(findings, piFindingsForSettings(settings, stateDir)...)
+	}
+	// The launcher check resolves the single `pi` binary on PATH, which no
+	// settings directory can vary, so it runs once rather than per directory.
+	findings = append(findings, piLauncherFindings())
+	return append(findings, piUnmanagedDir(p.PiAgentDir, managed))
+}
+
+func piFindingsForSettings(settings, stateDir string) []Finding {
 	bridge := render.PiBridgePath(settings)
-	trustFile := filepath.Join(p.PiAgentDir, "trust.json")
+	trustFile := filepath.Join(filepath.Dir(settings), "trust.json")
 
 	trust := Finding{
 		Engine: vocab.Pi,
@@ -683,10 +696,47 @@ func piFindings(p Paths, stateDir string) []Finding {
 		// match the bridge path itself truncated at "hookyard" — reporting a
 		// router that does not exist (routerpath_test.go documents the trap).
 		routerPath(vocab.Pi, bridge),
-		piLauncherFindings(),
 		piDoubleFire(stateDir, settings),
 		piBridgeDrift(stateDir, bridge),
 		piBridgeExec(bridge),
+	}
+}
+
+// managedPiSettingsPaths lists the settings.json files hookyard installs into.
+// The generation witness is the only place that set is written down, so a
+// machine without one — no Nix, or a witness from an older schema whose
+// piSettings was a bare string — falls back to the single ambient directory
+// doctor has always checked.
+func managedPiSettingsPaths(p Paths) []string {
+	w, err := installstate.ReadWitness(p.GenerationWitness)
+	if err != nil || len(w.PiSettings) == 0 {
+		return []string{filepath.Join(p.PiAgentDir, "settings.json")}
+	}
+	return w.PiSettings
+}
+
+// piUnmanagedDir catches the gap the per-directory checks above cannot see: a
+// pi started from a settings directory hookyard was never told about passes
+// every check by being absent from all of them.
+func piUnmanagedDir(piAgentDir string, managed []string) Finding {
+	ambient := filepath.Join(piAgentDir, "settings.json")
+	if slices.Contains(managed, ambient) {
+		return Finding{
+			Engine: vocab.Pi,
+			Check:  "settings dir coverage",
+			Status: Pass,
+			Detail: fmt.Sprintf("%s is one of hookyard's %d configured pi settings dir(s)", piAgentDir, len(managed)),
+		}
+	}
+	return Finding{
+		Engine: vocab.Pi,
+		Check:  "settings dir coverage",
+		Status: Fail,
+		Detail: fmt.Sprintf(
+			"%s is not among hookyard's configured pi settings dirs (%s); pi run here has no hookyard registration and none of the checks above cover it",
+			piAgentDir, strings.Join(managed, ", "),
+		),
+		Fix: "Add this directory's settings.json to programs.hookyard.piSettings, or point $PI_CODING_AGENT_DIR back at a managed dir.",
 	}
 }
 
@@ -1409,13 +1459,19 @@ func recoverStateDir(p Paths, claude claudeSources) []string {
 	// recover nothing there and reproduce the exact silent-fallback bug this
 	// function exists to close. Each entry carries its own args,
 	// so every one is scanned rather than just the first.
-	if raw, err := os.ReadFile(render.PiBridgePath(filepath.Join(p.PiAgentDir, "settings.json"))); err == nil {
-		if data, ok := recoverPiBridgeData(raw); ok {
-			for _, e := range data.Entries {
-				for i, a := range e.Args {
-					if a == "--state-dir" && i+1 < len(e.Args) {
-						found = append(found, e.Args[i+1])
-					}
+	for _, settings := range managedPiSettingsPaths(p) {
+		raw, err := os.ReadFile(render.PiBridgePath(settings))
+		if err != nil {
+			continue
+		}
+		data, ok := recoverPiBridgeData(raw)
+		if !ok {
+			continue
+		}
+		for _, e := range data.Entries {
+			for i, a := range e.Args {
+				if a == "--state-dir" && i+1 < len(e.Args) {
+					found = append(found, e.Args[i+1])
 				}
 			}
 		}

@@ -361,10 +361,11 @@ func TestOtherEnginesFindingsAreUnchanged(t *testing.T) {
 		{Engine: vocab.Pi, Check: "extensions targets exist", Status: Pass, Detail: "every extensions[] entry in " + piSettings + " resolves to a file"},
 		{Engine: vocab.Pi, Check: "hookyard registered", Status: Pass, Detail: "present in " + piSettings},
 		{Engine: vocab.Pi, Check: "router path", Status: Pass, Detail: executable},
-		{Engine: vocab.Pi, Check: "launcher wrapper", Status: Unknown, Detail: "no pi on PATH to check for an injected launcher"},
 		{Engine: vocab.Pi, Check: "double-registered handlers", Status: Unknown, Detail: "no --state-dir recoverable to read the handler table from"},
 		{Engine: vocab.Pi, Check: "bridge matches handler table", Status: Unknown, Detail: "no --state-dir recoverable to read the handler table from"},
 		{Engine: vocab.Pi, Check: "bridge invocation is executable", Status: Pass, Detail: "every entry in " + piBridge + " names an executable bin"},
+		{Engine: vocab.Pi, Check: "launcher wrapper", Status: Unknown, Detail: "no pi on PATH to check for an injected launcher"},
+		{Engine: vocab.Pi, Check: "settings dir coverage", Status: Pass, Detail: piAgentDir + " is one of hookyard's 1 configured pi settings dir(s)"},
 	}
 
 	var got []Finding

@@ -90,10 +90,22 @@ func (m *manifestPaths) Set(v string) error {
 	return nil
 }
 
+// piSettingsPaths collects a repeatable --pi-settings flag. A machine can run
+// more than one pi installation, each with its own settings.json and its own
+// bin/ beside it, and the bridge has to land in every one of them.
+type piSettingsPaths []string
+
+func (p *piSettingsPaths) String() string { return strings.Join(*p, ",") }
+
+func (p *piSettingsPaths) Set(v string) error {
+	*p = append(*p, v)
+	return nil
+}
+
 type targets struct {
 	codex  string
 	cursor string
-	pi     string
+	pi     []string
 }
 
 func defaultTargets() (targets, error) {
@@ -114,7 +126,7 @@ func defaultTargets() (targets, error) {
 	return targets{
 		codex:  filepath.Join(codexHome, "config.toml"),
 		cursor: filepath.Join(home, ".cursor", "hooks.json"),
-		pi:     filepath.Join(piAgentDir, "settings.json"),
+		pi:     []string{filepath.Join(piAgentDir, "settings.json")},
 	}, nil
 }
 
@@ -134,11 +146,17 @@ func install(args []string) error {
 	stateDir := fs.String("state-dir", defaultStateDir, "directory the router reads its table from and writes records to")
 	codex := fs.String("codex-config", defaults.codex, "Codex config.toml to write")
 	cursor := fs.String("cursor-hooks", defaults.cursor, "Cursor hooks.json to write")
-	pi := fs.String("pi-settings", defaults.pi, "Pi settings.json to write; the bridge lands in bin/ beside it")
+	var pi piSettingsPaths
+	fs.Var(&pi, "pi-settings", "path to a Pi settings.json to write (repeatable); the bridge lands in bin/ beside each")
 	dryRun := fs.Bool("dry-run", false, "print what would be written and exit")
 	allowEmpty := fs.Bool("allow-empty", false, "render an empty table and strip every hookyard entry when no --manifest is given")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	// The default can't be pre-seeded into the flag: Set appends, so a caller
+	// passing --pi-settings would install into their dir *and* the default one.
+	if len(pi) == 0 {
+		pi = defaults.pi
 	}
 	// A bare `hookyard install` with no --manifest is almost always a typo, so
 	// it stays an error. The home-manager module needs the opposite: an empty
@@ -151,12 +169,12 @@ func install(args []string) error {
 	if len(paths) == 0 && !*allowEmpty {
 		return fmt.Errorf("no --manifest given")
 	}
-	return runInstall(os.Stdout, paths, *routerPath, *stateDir, *codex, *cursor, *pi, *dryRun)
+	return runInstall(os.Stdout, paths, *routerPath, *stateDir, *codex, *cursor, pi, *dryRun)
 }
 
 // runInstall is install's pipeline, split out so tests can drive it with
 // explicit paths instead of os.Args.
-func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex, cursor, pi string, dryRun bool) error {
+func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex, cursor string, pi []string, dryRun bool) error {
 	router := routerPath
 	if router == "" {
 		router = filepath.Join(stateDir, "bin", "hookyard")
@@ -238,19 +256,26 @@ func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex,
 	// everything above this point is read-only, so this is the last moment an
 	// install is still all-or-nothing. A per-writer refusal would land after
 	// the table and the earlier engines were already written.
-	if err := render.CheckDestinations(
-		render.Destination{Flag: "--codex-config", Path: codex},
-		render.Destination{Flag: "--cursor-hooks", Path: cursor},
-		render.Destination{Flag: "--pi-settings", Path: pi},
+	destinations := []render.Destination{
+		{Flag: "--codex-config", Path: codex},
+		{Flag: "--cursor-hooks", Path: cursor},
+	}
+	for _, p := range pi {
 		// The bridge's location follows --pi-settings, so that is still the
 		// flag to name when the refusal is about the bridge.
-		render.Destination{Flag: "--pi-settings", Path: render.PiBridgePath(pi)},
-	); err != nil {
+		destinations = append(destinations,
+			render.Destination{Flag: "--pi-settings", Path: p},
+			render.Destination{Flag: "--pi-settings", Path: render.PiBridgePath(p)},
+		)
+	}
+	if err := render.CheckDestinations(destinations...); err != nil {
 		return err
 	}
 	// Separate from the check above, which cannot see a link one segment up.
-	if err := render.CheckPiBridgeDir("--pi-settings", render.PiBridgePath(pi)); err != nil {
-		return err
+	for _, p := range pi {
+		if err := render.CheckPiBridgeDir("--pi-settings", render.PiBridgePath(p)); err != nil {
+			return err
+		}
 	}
 	// The table must exist before any engine config can point at it: an
 	// entry pointing at a --state-dir whose table isn't there yet is a
@@ -272,9 +297,13 @@ func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex,
 		return err
 	}
 	// More consequential than the config-only writer above it: this one also
-	// lands executable code.
-	if err := render.WritePi(pi, plan[vocab.Pi], piVersion()); err != nil {
-		return err
+	// lands executable code. The version is resolved once: it describes the pi
+	// on PATH, not the dir being written, and each call shells out.
+	version := piVersion()
+	for _, p := range pi {
+		if err := render.WritePi(p, plan[vocab.Pi], version); err != nil {
+			return err
+		}
 	}
 	if err := render.WriteCodex(codex, plan[vocab.Codex]); err != nil {
 		return err
@@ -1109,7 +1138,7 @@ func loadAllWith(paths []string, load func(string) (*manifest.Manifest, error)) 
 	return manifest.Merge(manifests)
 }
 
-func printPlan(out io.Writer, plan render.Plan, piSettings string) {
+func printPlan(out io.Writer, plan render.Plan, piSettings []string) {
 	for _, engine := range vocab.Engines {
 		_, _ = fmt.Fprintf(out, "%s\n", engine)
 		if engine == vocab.ClaudeCode {
@@ -1128,8 +1157,10 @@ func printPlan(out io.Writer, plan render.Plan, piSettings string) {
 		}
 	}
 	// Pi is the one engine whose install writes a second file, and it is the
-	// executable half.
-	_, _ = fmt.Fprintf(out, "pi writes two files\n  %s\n  %s\n", piSettings, render.PiBridgePath(piSettings))
+	// executable half — once per pi dir.
+	for _, p := range piSettings {
+		_, _ = fmt.Fprintf(out, "pi writes two files\n  %s\n  %s\n", p, render.PiBridgePath(p))
+	}
 }
 
 // runServe resolves the state directory, makes it absolute, and starts the

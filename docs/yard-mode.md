@@ -131,7 +131,9 @@ these rather than replace it, because replacing it would silently detach
 whatever manages the link with no warning at the next switch. The same escape
 hatch exists for these three engines as `codexConfig`, `cursorHooks`, and
 `piSettings`, each pointed at a file hookyard can own instead of the default
-path.
+path. `piSettings` differs from the other two in being list-valued rather than
+single-valued: it names one or more settings.json files, and hookyard installs
+one bridge per entry.
 
 Claude Code has no such option, and needs none: `programs.hookyard.claudeHooks`
 is the package holding hookyard's own emitted block — the fixed event catalog,

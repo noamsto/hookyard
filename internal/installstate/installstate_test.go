@@ -17,7 +17,7 @@ func sampleIdentity() Identity {
 		StateDir:    "/home/u/.local/state/hookyard",
 		CodexConfig: "/home/u/.codex/config.toml",
 		CursorHooks: "/home/u/.cursor/hooks.json",
-		PiSettings:  "/home/u/.pi/settings.json",
+		PiSettings:  []string{"/home/u/.pi/settings.json"},
 		Hookyard:    "/nix/store/abc/bin/hookyard",
 	}
 }
@@ -130,7 +130,7 @@ func TestDiffPerField(t *testing.T) {
 		{"stateDir", func(id *Identity) { id.StateDir = "/other/state" }, "state dir"},
 		{"codexConfig", func(id *Identity) { id.CodexConfig = "/other/codex.toml" }, "codex config"},
 		{"cursorHooks", func(id *Identity) { id.CursorHooks = "/other/hooks.json" }, "cursor hooks"},
-		{"piSettings", func(id *Identity) { id.PiSettings = "/other/pi.json" }, "pi settings"},
+		{"piSettings", func(id *Identity) { id.PiSettings = []string{"/other/pi.json"} }, "pi settings"},
 		{"hookyard", func(id *Identity) { id.Hookyard = "/other/hookyard" }, "hookyard binary"},
 	}
 	for _, tc := range cases {

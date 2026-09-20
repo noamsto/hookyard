@@ -2379,7 +2379,7 @@ emitted entries carry. The four targets, and what already lives in each:
 | Cursor | `~/.cursor/hooks.json` | `jq` merge: validate, marker-scoped strip, append, atomic rename | four declared, three live |
 | Codex | `~/.codex/config.toml` | marker-guarded `sed`/heredoc append | lazytmux only, two blocks |
 | Claude Code | Nix `--settings` overlay | `hookyard emit` prints one route row per event in a fixed, manifest-independent catalog on stdout (below); Nix places it, hookyard writes nothing | hand edits to `~/.claude/settings.json` (a separate file the overlay's union does not touch), plugin `--plugin-dir` trees, and houston's installer as a *potential* writer of that separate file (it has never run here) |
-| Pi | `<config dir>/bin/hookyard-bridge.ts` (generated, hookyard's own template) **and** the `extensions` array in `~/.pi/agent/settings.json` | write the bridge file whole (it is not merged with anything); JSON merge of the `extensions` entry under the same marker-scoped-strip discipline as the other three | the Nix wrapper's `-e`/`PI_AGENT_HOOKS` injection (below); pi itself, into the same `settings.json` |
+| Pi | `<config dir>/bin/hookyard-bridge.ts` (generated, hookyard's own template) **and** the `extensions` array in each configured pi `settings.json` (a list of paths, one entry by default: `~/.pi/agent/settings.json`) | write the bridge file whole (it is not merged with anything); JSON merge of the `extensions` entry, once per configured path, under the same marker-scoped-strip discipline as the other three | the Nix wrapper's `-e`/`PI_AGENT_HOOKS` injection (below); pi itself, into whichever of those `settings.json` files is active |
 
 **Cursor.** Independent `jq` mergers already write `~/.cursor/hooks.json`,
 and this pass counts **four declared, three currently live** (§1): aeye's
@@ -2785,17 +2785,21 @@ router's argument contract, is invisible from Pi's own behavior. That is a
 writer one: the writer's job is to land both artifacts consistently as far
 as it controls, not to make Pi notice when they drift apart.
 
-**Coexistence is real, on both artifacts.** `~/.pi/agent/settings.json` has
-other writers: pi itself writes `theme`, `defaultModel`, `defaultProvider`
-and `lastChangelogVersion` — via `/settings`, Ctrl+S in `/model`, and
-changelog tracking — and `pi install`/`pi remove` also write `extensions`.
-The marker-scoped strip that already has to coexist with hand edits and the
+**Coexistence is real, on both artifacts, and on every configured path.**
+`~/.pi/agent/settings.json` — the default entry in what is now a list of
+such paths — has other writers: pi itself writes `theme`, `defaultModel`,
+`defaultProvider` and `lastChangelogVersion` — via `/settings`, Ctrl+S in
+`/model`, and changelog tracking — and `pi install`/`pi remove` also write
+`extensions`. The same holds for any other path in the list; hookyard's
+writer coexists with pi's own writes independently at each one. The
+marker-scoped strip that already has to coexist with hand edits and the
 Nix overlay on Claude Code's `settings.json` has the same duty here: strip
 only the one `extensions` array entry whose path is hookyard's own, leave
-every other key and every other `extensions` entry untouched. The bridge
-file itself has no coexistence problem the other artifacts don't — it is
-hookyard's alone, never hand-edited, so a whole-file write is safe precisely
-because nothing else claims that path.
+every other key and every other `extensions` entry untouched — per
+configured `settings.json`, not once globally. The bridge file itself has
+no coexistence problem the other artifacts don't — it is hookyard's alone,
+never hand-edited, so a whole-file write is safe precisely because nothing
+else claims that path.
 
 **One coexistence hazard has no writer-side fix, because there is no config
 file to strip it from.** The Nix wrapper described above already runs four

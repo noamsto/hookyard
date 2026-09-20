@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/noamsto/hookyard/internal/installstate"
 	"github.com/noamsto/hookyard/internal/manifest"
 	"github.com/noamsto/hookyard/internal/render"
 	"github.com/noamsto/hookyard/internal/vocab"
@@ -269,6 +270,21 @@ func findByCheck(t *testing.T, findings []Finding, check string) Finding {
 	}
 	t.Fatalf("no %q finding among %d findings", check, len(findings))
 	return Finding{}
+}
+
+// findAllByCheck is findByCheck's multi-dir counterpart: piFindings now
+// reports one row per Check per managed settings dir, and findByCheck's
+// first-match-wins behavior would let a multi-dir assertion pass vacuously
+// while a second dir goes completely unchecked.
+func findAllByCheck(t *testing.T, findings []Finding, check string) []Finding {
+	t.Helper()
+	var out []Finding
+	for _, f := range findings {
+		if f.Check == check {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // writeLauncherScript writes a text file at <dir>/pi with the given body and
@@ -771,5 +787,169 @@ func TestPiBridgeExecIgnoresABuildModePackagesRelativeBin(t *testing.T) {
 	}
 	if !strings.Contains(f.Detail, "relative") {
 		t.Errorf("detail = %q, want it to say why nothing was stat'd", f.Detail)
+	}
+}
+
+// piMultiDirWitness writes a witness naming exactly the given settings paths
+// as hookyard's managed pi settings dirs, so managedPiSettingsPaths resolves
+// to more than the single ambient PiAgentDir a bare Paths would fall back to.
+func piMultiDirWitness(t *testing.T, path string, settings ...string) {
+	t.Helper()
+	writeWitness(t, path, installstate.Witness{
+		Schema:   installstate.Schema,
+		Identity: installstate.Identity{PiSettings: settings},
+	})
+}
+
+// A settings dir hookyard doesn't yet know about (no witness, or a witness
+// naming a different dir) passes every per-dir check by being absent from
+// all of them; the multi-dir loop this test exercises is what makes a second
+// managed dir show up in piFindings' output at all.
+func TestPiFindingsCoverEveryManagedDir(t *testing.T) {
+	root := t.TempDir()
+	router := writeRouterBinary(t, root, true)
+	stateDir := filepath.Join(root, "state")
+
+	dir1 := filepath.Join(root, "pi1")
+	dir2 := filepath.Join(root, "pi2")
+	settings1, _ := piConfig(t, dir1, routedCommand(router, vocab.Pi, stateDir))
+	settings2, bridge2 := piConfig(t, dir2, routedCommand(router, vocab.Pi, stateDir))
+
+	witness := filepath.Join(root, "generation.json")
+	piMultiDirWitness(t, witness, settings1, settings2)
+
+	p := Paths{PiAgentDir: dir1, GenerationWitness: witness}
+	findings := piFindings(p, "")
+
+	regs := findAllByCheck(t, findings, "hookyard registered")
+	if len(regs) != 2 {
+		t.Fatalf("got %d \"hookyard registered\" findings, want 2 (one per managed dir): %+v", len(regs), regs)
+	}
+	for _, r := range regs {
+		if r.Status != Pass {
+			t.Errorf("registration %+v status = %v, want Pass", r, r.Status)
+		}
+	}
+
+	// Corrupt only dir2's bridge: dir1's per-dir findings must stay exactly
+	// as they were, proving the loop doesn't leak state across dirs.
+	if err := os.Remove(bridge2); err != nil {
+		t.Fatal(err)
+	}
+	findings = piFindings(p, "")
+
+	exts := findAllByCheck(t, findings, "extensions targets exist")
+	if len(exts) != 2 {
+		t.Fatalf("got %d \"extensions targets exist\" findings, want 2: %+v", len(exts), exts)
+	}
+	var sawDir1Pass, sawDir2Fail bool
+	for _, e := range exts {
+		switch {
+		case strings.Contains(e.Detail, settings1):
+			if e.Status != Pass {
+				t.Errorf("dir1 extensions status = %v, want Pass; detail=%q", e.Status, e.Detail)
+			}
+			sawDir1Pass = true
+		case strings.Contains(e.Detail, bridge2):
+			if e.Status != Fail {
+				t.Errorf("dir2 extensions status = %v, want Fail (its bridge was removed); detail=%q", e.Status, e.Detail)
+			}
+			sawDir2Fail = true
+		default:
+			t.Errorf("finding %+v names neither settings dir", e)
+		}
+	}
+	if !sawDir1Pass || !sawDir2Fail {
+		t.Fatalf("did not observe both dirs' expected status: dir1 Pass=%v, dir2 Fail=%v", sawDir1Pass, sawDir2Fail)
+	}
+}
+
+// A build-mode collision in one managed dir must not spill into another
+// managed dir's own double-fire check: each dir compares only its own
+// settings.json extensions[] against the shared yard table.
+func TestPiDoubleFireIsPerDirNotShared(t *testing.T) {
+	root := t.TempDir()
+	router := writeRouterBinary(t, root, true)
+	stateDir := filepath.Join(root, "state")
+	writeTable(t, stateDir, []manifest.Handler{aeyeScript("guard/one", "/nix/store/x/guard.sh")})
+
+	// dir1 has a build-mode package colliding with the yard table.
+	dir1 := filepath.Join(root, "pi1")
+	pkgRoot := filepath.Join(root, "pkg")
+	extension := piBuildPackageFixture(t, pkgRoot, []manifest.Handler{pluginHandler("guard/one", "bin/guard.sh")})
+	settings1 := filepath.Join(dir1, "settings.json")
+	writePiSettingsExtensions(t, settings1, []string{extension})
+
+	// dir2 has no build-mode package at all.
+	dir2 := filepath.Join(root, "pi2")
+	settings2, _ := piConfig(t, dir2, routedCommand(router, vocab.Pi, stateDir))
+
+	witness := filepath.Join(root, "generation.json")
+	piMultiDirWitness(t, witness, settings1, settings2)
+
+	p := Paths{PiAgentDir: dir1, GenerationWitness: witness}
+	findings := piFindings(p, stateDir)
+
+	fires := findAllByCheck(t, findings, "double-registered handlers")
+	if len(fires) != 2 {
+		t.Fatalf("got %d \"double-registered handlers\" findings, want 2: %+v", len(fires), fires)
+	}
+	var sawDir1Fail, sawDir2Pass bool
+	for _, f := range fires {
+		switch {
+		case strings.Contains(f.Detail, "guard/one"):
+			if f.Status != Fail {
+				t.Errorf("dir1 double-fire status = %v, want Fail; detail=%q", f.Status, f.Detail)
+			}
+			sawDir1Fail = true
+		case strings.Contains(f.Detail, settings2):
+			if f.Status != Pass {
+				t.Errorf("dir2 double-fire status = %v, want Pass (no build-mode package there); detail=%q", f.Status, f.Detail)
+			}
+			sawDir2Pass = true
+		default:
+			t.Errorf("finding %+v matched neither dir's expected shape", f)
+		}
+	}
+	if !sawDir1Fail || !sawDir2Pass {
+		t.Fatalf("did not observe both dirs' expected status: dir1 Fail=%v, dir2 Pass=%v", sawDir1Fail, sawDir2Pass)
+	}
+}
+
+func TestPiUnmanagedDir(t *testing.T) {
+	piAgentDir := filepath.Join(t.TempDir(), "pi")
+	ambient := filepath.Join(piAgentDir, "settings.json")
+
+	pass := piUnmanagedDir(piAgentDir, []string{ambient, "/other/settings.json"})
+	if pass.Status != Pass {
+		t.Fatalf("status = %v, want Pass; detail=%q", pass.Status, pass.Detail)
+	}
+
+	fail := piUnmanagedDir(piAgentDir, []string{"/other/settings.json"})
+	if fail.Status != Fail {
+		t.Fatalf("status = %v, want Fail; detail=%q", fail.Status, fail.Detail)
+	}
+	if fail.Fix == "" {
+		t.Errorf("fix = %q, want a non-empty Fix for an unmanaged dir", fail.Fix)
+	}
+}
+
+// On a plain non-Nix machine there is no witness at all, so
+// managedPiSettingsPaths must fall back to the single ambient dir doctor has
+// always checked, and piUnmanagedDir must never turn that fallback into a
+// false "unmanaged dir" problem.
+func TestPiUnmanagedDirFallsBackWithoutAWitness(t *testing.T) {
+	piAgentDir := filepath.Join(t.TempDir(), "pi")
+	p := Paths{PiAgentDir: piAgentDir}
+
+	managed := managedPiSettingsPaths(p)
+	want := []string{filepath.Join(piAgentDir, "settings.json")}
+	if len(managed) != len(want) || managed[0] != want[0] {
+		t.Fatalf("managedPiSettingsPaths = %v, want %v", managed, want)
+	}
+
+	f := piUnmanagedDir(piAgentDir, managed)
+	if f.Status != Pass {
+		t.Fatalf("status = %v, want Pass; detail=%q", f.Status, f.Detail)
 	}
 }

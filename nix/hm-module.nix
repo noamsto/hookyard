@@ -99,7 +99,7 @@
       "--state-dir ${lib.escapeShellArg cfg.stateDir}"
       "--codex-config ${lib.escapeShellArg cfg.codexConfig}"
       "--cursor-hooks ${lib.escapeShellArg cfg.cursorHooks}"
-      "--pi-settings ${lib.escapeShellArg cfg.piSettings}"
+      (lib.concatMapStringsSep " " (p: "--pi-settings ${lib.escapeShellArg p}") cfg.piSettings)
     ]
   );
 
@@ -195,9 +195,15 @@ in {
     };
 
     piSettings = lib.mkOption {
-      type = lib.types.str;
-      default = "${config.home.homeDirectory}/.pi/agent/settings.json";
-      description = "Pi settings.json to render hookyard's registration into; the bridge lands in bin/ beside it.";
+      type = lib.types.listOf lib.types.str;
+      default = ["${config.home.homeDirectory}/.pi/agent/settings.json"];
+      description = ''
+        Pi settings.json files to render hookyard's registration into; a
+        bridge lands in bin/ beside each one. List-valued: one bridge is
+        installed per entry. hookyard has no notion of what each entry is
+        for — deciding what belongs in the list, and why, is left entirely
+        to the consumer.
+      '';
     };
 
     # Claude never gets a `claudeSettings`-shaped destination string:
@@ -304,6 +310,18 @@ in {
           assertion = lib.hasPrefix "/" cfg.stateDir;
           message = "programs.hookyard.stateDir must be an absolute path, got ${cfg.stateDir}";
         }
+        {
+          # An empty list renders zero --pi-settings flags, which `hookyard
+          # install` cannot tell apart from the flag never being passed at
+          # all — it falls back to the single default dir instead of
+          # installing nowhere, and the witness (recording the empty list
+          # verbatim) then permanently disagrees with the receipt (recording
+          # the fallback), so doctor's generation check fails forever with a
+          # "re-run home-manager switch" fix that can never resolve it.
+          # Refusing here, at eval time, is cheaper than that footgun.
+          assertion = cfg.piSettings != [];
+          message = "programs.hookyard.piSettings must name at least one settings.json; hookyard has no way to represent installing into none.";
+        }
       ];
 
       programs.hookyard.installCommand = installCommand;
@@ -343,7 +361,7 @@ in {
       # This whole block is `mkIf cfg.enable`, so turning hookyard off leaves
       # no witness and `doctor` reports Unknown rather than a false Fail.
       xdg.configFile."hookyard/generation.json".text = builtins.toJSON {
-        schema = 1;
+        schema = 2;
         manifests = validatedManifestPaths;
         # `inherit` keeps the attribute names, which is what matters here:
         # every one of them is a JSON key installstate.Identity decodes.
