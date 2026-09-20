@@ -478,6 +478,12 @@ func TestPiDoubleFireFailsOnASharedHandlerID(t *testing.T) {
 	if !strings.Contains(f.Detail, pkgTablePath) {
 		t.Errorf("detail = %q, want the build package's table path named", f.Detail)
 	}
+	// Retiring one of the two registrations is a human decision — yard-mode
+	// vs. build-mode, and there is no hookyard uninstall to name — so unlike
+	// most Fail findings this one has no single safe command to suggest.
+	if f.Fix != "" {
+		t.Errorf("fix = %q, want empty Fix for a same-ID collision", f.Fix)
+	}
 }
 
 func TestPiDoubleFireUnknownWhenPackageTableUnreadable(t *testing.T) {
@@ -617,6 +623,9 @@ func TestPiBridgeDriftFailsWhenATableHandlerHasNoBridgeEntry(t *testing.T) {
 	if !strings.Contains(f.Detail, "tool_result") {
 		t.Errorf("detail = %q, want the orphaned handler's native event named", f.Detail)
 	}
+	if want := "Run hookyard install to regenerate the Pi bridge."; f.Fix != want {
+		t.Errorf("fix = %q, want %q", f.Fix, want)
+	}
 }
 
 // A duplicate (event, matcher) pair in the installed bridge is the shape the
@@ -696,6 +705,9 @@ func TestPiBridgeExecFailsOnAWhitespaceSplitInvocation(t *testing.T) {
 	}
 	if !strings.Contains(f.Detail, "hookyard install") || !strings.Contains(f.Detail, "whitespace") {
 		t.Errorf("detail = %q, want the repair and its cause named", f.Detail)
+	}
+	if want := "Run hookyard install."; f.Fix != want {
+		t.Errorf("fix = %q, want %q", f.Fix, want)
 	}
 
 	// Why this check has to exist at all: routerPathPattern needs a slash
