@@ -59,7 +59,7 @@ func baseIdentity(stateDir string) installstate.Identity {
 		StateDir:    stateDir,
 		CodexConfig: "/codex/config.toml",
 		CursorHooks: "/cursor/hooks.json",
-		PiSettings:  "/pi/settings.json",
+		PiSettings:  []string{"/pi/settings.json"},
 		Hookyard:    "/nix/store/aaa-hookyard/bin/hookyard",
 	}
 }

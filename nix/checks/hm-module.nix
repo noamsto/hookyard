@@ -71,7 +71,7 @@
               # second artifact beside the settings file — the bridge, at
               # <dir>/bin/hookyard-bridge.ts — so the scratch target needs a
               # writable directory under it, not just a writable file.
-              piSettings = "/build/hookyard-check-${name}/pi/settings.json";
+              piSettings = ["/build/hookyard-check-${name}/pi/settings.json"];
             }
             // extraHookyard;
         }

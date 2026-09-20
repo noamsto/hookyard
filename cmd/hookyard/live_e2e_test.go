@@ -708,17 +708,25 @@ func livePiWriteMultiEventManifest(t *testing.T, dir, handlerPath string) string
 
 // livePiInstall runs `hookyard install` with routerPath as the one path each
 // test varies, and every other destination pointed at scratch files under
-// root so no real engine config is ever touched.
-func livePiInstall(t *testing.T, hookyardBin, root, agentDir, stateDir, manifestPath, routerPath string) {
+// root so no real engine config is ever touched. agentDirs registers the
+// bridge into every listed pi settings.json in a single install call, which
+// is how a dispatched pi worker's non-default PI_CODING_AGENT_DIR gets
+// covered alongside the default one.
+func livePiInstall(t *testing.T, hookyardBin, root string, agentDirs []string, stateDir, manifestPath, routerPath string) {
 	t.Helper()
-	install := exec.Command(hookyardBin, "install",
+	args := []string{"install",
 		"--manifest", manifestPath,
 		"--router-path", routerPath,
 		"--state-dir", stateDir,
-		"--pi-settings", filepath.Join(agentDir, "settings.json"),
+	}
+	for _, dir := range agentDirs {
+		args = append(args, "--pi-settings", filepath.Join(dir, "settings.json"))
+	}
+	args = append(args,
 		"--codex-config", filepath.Join(root, "unused-codex", "config.toml"),
 		"--cursor-hooks", filepath.Join(root, "unused-cursor", "hooks.json"),
 	)
+	install := exec.Command(hookyardBin, args...)
 	if out, err := install.CombinedOutput(); err != nil {
 		t.Fatalf("hookyard install: %v\n%s", err, out)
 	}
@@ -736,7 +744,7 @@ func TestLivePiRefusesTheDeniedToolCall(t *testing.T) {
 	reasonToken := fmt.Sprintf("hookyard-e2e-pi-deny-%d", time.Now().UnixNano())
 	handlerPath := liveWriteDenyHandler(t, root, filepath.Join(root, "handler-fired"), reasonToken)
 	manifestPath := livePiWriteManifest(t, root, handlerPath)
-	livePiInstall(t, hookyardBin, root, agentDir, stateDir, manifestPath, hookyardBin)
+	livePiInstall(t, hookyardBin, root, []string{agentDir}, stateDir, manifestPath, hookyardBin)
 
 	sideEffect := filepath.Join(projectDir, "SIDE-EFFECT.txt")
 
@@ -764,6 +772,51 @@ func TestLivePiRefusesTheDeniedToolCall(t *testing.T) {
 	t.Logf("pi refused the probe call; full output:\n%s", output)
 }
 
+// TestLivePiRefusesTheDeniedToolCallInASecondSettingsDir proves §5's
+// deny-enforcement guarantee holds for a SECOND, non-default pi settings dir
+// registered in the same install — the scenario a dispatched pi worker
+// process hits when $PI_CODING_AGENT_DIR points somewhere other than the
+// first configured dir. It is TestLivePiRefusesTheDeniedToolCall with a
+// second agent dir installed alongside the first, and the probe run against
+// that second dir instead.
+func TestLivePiRefusesTheDeniedToolCallInASecondSettingsDir(t *testing.T) {
+	piBin := liveRequirePi(t)
+	hookyardBin, root, agentDir, projectDir, stateDir := livePiSetup(t)
+
+	agentDir2 := filepath.Join(root, "pi-agent-2")
+	liveSeedPiAgentDir(t, agentDir2)
+
+	reasonToken := fmt.Sprintf("hookyard-e2e-pi-deny-2nd-dir-%d", time.Now().UnixNano())
+	handlerPath := liveWriteDenyHandler(t, root, filepath.Join(root, "handler-fired"), reasonToken)
+	manifestPath := livePiWriteManifest(t, root, handlerPath)
+	livePiInstall(t, hookyardBin, root, []string{agentDir, agentDir2}, stateDir, manifestPath, hookyardBin)
+
+	sideEffect := filepath.Join(projectDir, "SIDE-EFFECT.txt")
+
+	ctx, cancel := context.WithTimeout(context.Background(), livePiBudget)
+	defer cancel()
+	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", livePiProbePrompt)
+	probe.Dir = projectDir
+	probe.Env = livePiEnv(agentDir2)
+	output, runErr := probe.CombinedOutput()
+
+	if _, statErr := os.Stat(sideEffect); statErr == nil {
+		t.Fatalf("the denied tool call ran anyway: %s exists\n--- pi output ---\n%s", sideEffect, output)
+	}
+
+	rec, ok := liveFindBashDenyRecord(t, stateDir)
+	if !ok {
+		t.Fatalf("hookyard's own record has no Bash pre_tool entry for the probe call "+
+			"(pi run error: %v)\n--- pi output ---\n%s", runErr, output)
+	}
+	if rec.Verdict != record.OutcomeDeny || !rec.Enforced {
+		t.Fatalf("hookyard did not render an enforced deny for the probe call (verdict=%q enforced=%v)\n"+
+			"--- pi output ---\n%s", rec.Verdict, rec.Enforced, output)
+	}
+
+	t.Logf("pi refused the probe call against the second settings dir; full output:\n%s", output)
+}
+
 // TestLivePiFailsOpenWhenTheRouterBinaryIsAbsent proves §5's fail-open
 // guarantee against a real pi process rather than a unit test's mocked
 // execFile: a router path that does not exist must not block the tool call.
@@ -778,7 +831,7 @@ func TestLivePiFailsOpenWhenTheRouterBinaryIsAbsent(t *testing.T) {
 	// Contains render.Marker, so BuildPlan accepts it as a router path, but
 	// nothing is ever written there — the absent-router case §5 governs.
 	missingRouter := filepath.Join(root, "does-not-exist", "bin", "hookyard")
-	livePiInstall(t, hookyardBin, root, agentDir, stateDir, manifestPath, missingRouter)
+	livePiInstall(t, hookyardBin, root, []string{agentDir}, stateDir, manifestPath, missingRouter)
 
 	sideEffect := filepath.Join(projectDir, "SIDE-EFFECT.txt")
 
@@ -876,7 +929,7 @@ func TestLivePiPayloadMatchesTheCommittedFixtureShape(t *testing.T) {
 	manifestPath := livePiWriteMultiEventManifest(t, root, handlerPath)
 	captureDir := filepath.Join(root, "captured-payloads")
 	captureRouter := liveWritePiCaptureRouter(t, root, captureDir)
-	livePiInstall(t, hookyardBin, root, agentDir, stateDir, manifestPath, captureRouter)
+	livePiInstall(t, hookyardBin, root, []string{agentDir}, stateDir, manifestPath, captureRouter)
 
 	ctx, cancel := context.WithTimeout(context.Background(), livePiBudget)
 	defer cancel()

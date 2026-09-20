@@ -68,7 +68,7 @@ func TestRunInstallLeavesTheTableBehindWhenAnEngineWriterFails(t *testing.T) {
 	if err := os.Mkdir(cursor, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
 	err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath, stateDir, codex, cursor, pi, false)
 	if err == nil {
@@ -94,7 +94,7 @@ func TestRunInstallTightensAPreexistingStateDir(t *testing.T) {
 	}
 	codex := filepath.Join(dir, "config.toml")
 	cursor := filepath.Join(dir, "hooks.json")
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
 	if err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath, stateDir, codex, cursor, pi, false); err != nil {
 		t.Fatal(err)
@@ -115,7 +115,7 @@ func TestRunInstallCreatesRouterSymlinkAtStateDir(t *testing.T) {
 	stateDir := filepath.Join(dir, "state")
 	codex := filepath.Join(dir, "config.toml")
 	cursor := filepath.Join(dir, "hooks.json")
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
 	if err := runInstall(io.Discard, manifestPaths{manifestPath}, "", stateDir, codex, cursor, pi, false); err != nil {
 		t.Fatal(err)
@@ -156,7 +156,7 @@ func TestRunInstallRepointsAnExistingRouterSymlinkAtomically(t *testing.T) {
 	stateDir := filepath.Join(dir, "state")
 	codex := filepath.Join(dir, "config.toml")
 	cursor := filepath.Join(dir, "hooks.json")
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
 	link := filepath.Join(stateDir, "bin", "hookyard")
 	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
@@ -191,7 +191,7 @@ func TestRunInstallRouterSymlinkIsIdempotent(t *testing.T) {
 	stateDir := filepath.Join(dir, "state")
 	codex := filepath.Join(dir, "config.toml")
 	cursor := filepath.Join(dir, "hooks.json")
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
 	if err := runInstall(io.Discard, manifestPaths{manifestPath}, "", stateDir, codex, cursor, pi, false); err != nil {
 		t.Fatal(err)
@@ -223,7 +223,7 @@ func TestRunInstallExplicitRouterPathManagesNoLink(t *testing.T) {
 	stateDir := filepath.Join(dir, "state")
 	codex := filepath.Join(dir, "config.toml")
 	cursor := filepath.Join(dir, "hooks.json")
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
 	if err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath, stateDir, codex, cursor, pi, false); err != nil {
 		t.Fatal(err)
@@ -245,7 +245,7 @@ func TestRunInstallExplicitRouterPathEqualToComputedLinkManagesIt(t *testing.T) 
 	stateDir := filepath.Join(dir, "state")
 	codex := filepath.Join(dir, "config.toml")
 	cursor := filepath.Join(dir, "hooks.json")
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 	link := filepath.Join(stateDir, "bin", "hookyard")
 
 	if err := runInstall(io.Discard, manifestPaths{manifestPath}, link, stateDir, codex, cursor, pi, false); err != nil {
@@ -287,7 +287,7 @@ func TestRunInstallRejectsShellUnsafePaths(t *testing.T) {
 
 			err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath+bad, stateDir,
 				filepath.Join(dir, "config.toml"), filepath.Join(dir, "hooks.json"),
-				filepath.Join(dir, "pi-settings.json"), false)
+				[]string{filepath.Join(dir, "pi-settings.json")}, false)
 			if err == nil {
 				t.Fatal("want an error, got nil")
 			}
@@ -306,7 +306,7 @@ func TestRunInstallRejectsShellUnsafePaths(t *testing.T) {
 
 			err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath, stateDir,
 				filepath.Join(dir, "config.toml"), filepath.Join(dir, "hooks.json"),
-				filepath.Join(dir, "pi-settings.json"), false)
+				[]string{filepath.Join(dir, "pi-settings.json")}, false)
 			if err == nil {
 				t.Fatal("want an error, got nil")
 			}
@@ -328,7 +328,7 @@ func TestRunInstallDryRunWritesNothing(t *testing.T) {
 	stateDir := filepath.Join(dir, "state")
 	codex := filepath.Join(dir, "config.toml")
 	cursor := filepath.Join(dir, "hooks.json")
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
 	if err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath, stateDir, codex, cursor, pi, true); err != nil {
 		t.Fatal(err)
@@ -342,7 +342,7 @@ func TestRunInstallDryRunWritesNothing(t *testing.T) {
 	}
 	// Pi's bridge is the one artifact a dry run could leave behind that is not
 	// a config file, so it is named rather than covered by the state-dir check.
-	if _, err := os.Stat(render.PiBridgePath(pi)); !os.IsNotExist(err) {
+	if _, err := os.Stat(render.PiBridgePath(pi[0])); !os.IsNotExist(err) {
 		t.Errorf("want no Pi bridge written by --dry-run, got stat err: %v", err)
 	}
 }
@@ -356,7 +356,7 @@ func TestRunInstallDryRunListsAllEightClaudeCodeNativesRegardlessOfHandlers(t *t
 	stateDir := filepath.Join(dir, "state")
 	codex := filepath.Join(dir, "config.toml")
 	cursor := filepath.Join(dir, "hooks.json")
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
 	var buf bytes.Buffer
 	if err := runInstall(&buf, manifestPaths{manifestPath}, testRouterPath, stateDir, codex, cursor, pi, true); err != nil {
@@ -383,7 +383,7 @@ func TestRunInstallReportsCatalogCountAndZeroClaudeCodeHandlers(t *testing.T) {
 	stateDir := filepath.Join(dir, "state")
 	codex := filepath.Join(dir, "config.toml")
 	cursor := filepath.Join(dir, "hooks.json")
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
 	var buf bytes.Buffer
 	if err := runInstall(&buf, manifestPaths{manifestPath}, testRouterPath, stateDir, codex, cursor, pi, false); err != nil {
@@ -408,7 +408,7 @@ func TestRunInstallReportsNonzeroClaudeCodeHandlerCount(t *testing.T) {
 	stateDir := filepath.Join(dir, "state")
 	codex := filepath.Join(dir, "config.toml")
 	cursor := filepath.Join(dir, "hooks.json")
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
 	var buf bytes.Buffer
 	if err := runInstall(&buf, manifestPaths{manifestPath}, testRouterPath, stateDir, codex, cursor, pi, false); err != nil {
@@ -446,7 +446,7 @@ func TestRunInstallRefusesASymlinkedDestinationBeforeWritingAnything(t *testing.
 	stateDir := filepath.Join(dir, "state")
 	codex := symlinkedDestination(t, dir, "config.toml")
 	cursor := filepath.Join(dir, "hooks.json")
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
 	err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath, stateDir, codex, cursor, pi, false)
 	if err == nil {
@@ -456,7 +456,7 @@ func TestRunInstallRefusesASymlinkedDestinationBeforeWritingAnything(t *testing.
 		t.Errorf("error does not name the symlinked path: %v", err)
 	}
 
-	for _, path := range []string{cursor, pi, render.PiBridgePath(pi), filepath.Join(stateDir, "table.json")} {
+	for _, path := range []string{cursor, pi[0], render.PiBridgePath(pi[0]), filepath.Join(stateDir, "table.json")} {
 		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
 			t.Errorf("want %s left unwritten by the refused install, got stat err: %v", path, statErr)
 		}
@@ -487,9 +487,9 @@ func TestRunInstallRefusesASymlinkedPiBridgeBeforeWritingAnything(t *testing.T) 
 	stateDir := filepath.Join(dir, "state")
 	codex := filepath.Join(dir, "config.toml")
 	cursor := filepath.Join(dir, "hooks.json")
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
-	bridge := render.PiBridgePath(pi)
+	bridge := render.PiBridgePath(pi[0])
 	if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -509,7 +509,7 @@ func TestRunInstallRefusesASymlinkedPiBridgeBeforeWritingAnything(t *testing.T) 
 		t.Errorf("error does not name the symlinked bridge: %v", err)
 	}
 
-	for _, path := range []string{codex, cursor, pi, filepath.Join(stateDir, "table.json")} {
+	for _, path := range []string{codex, cursor, pi[0], filepath.Join(stateDir, "table.json")} {
 		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
 			t.Errorf("want %s left unwritten by the refused install, got stat err: %v", path, statErr)
 		}
@@ -543,9 +543,9 @@ func TestRunInstallRefusesASymlinkedPiBinDirectoryBeforeWritingAnything(t *testi
 	stateDir := filepath.Join(dir, "state")
 	codex := filepath.Join(dir, "config.toml")
 	cursor := filepath.Join(dir, "hooks.json")
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
-	bridge := render.PiBridgePath(pi)
+	bridge := render.PiBridgePath(pi[0])
 	elsewhere := filepath.Join(dir, "owned-by-something-else")
 	if err := os.Mkdir(elsewhere, 0o700); err != nil {
 		t.Fatal(err)
@@ -564,7 +564,7 @@ func TestRunInstallRefusesASymlinkedPiBinDirectoryBeforeWritingAnything(t *testi
 
 	// The last two paths are the table, and the one the link would have
 	// redirected the bridge to.
-	for _, path := range []string{codex, cursor, pi, filepath.Join(stateDir, "table.json"), filepath.Join(elsewhere, filepath.Base(bridge))} {
+	for _, path := range []string{codex, cursor, pi[0], filepath.Join(stateDir, "table.json"), filepath.Join(elsewhere, filepath.Base(bridge))} {
 		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
 			t.Errorf("want %s left unwritten by the refused install, got stat err: %v", path, statErr)
 		}
@@ -587,7 +587,7 @@ func TestRunInstallDryRunSucceedsAgainstASymlinkedDestination(t *testing.T) {
 	codex := symlinkedDestination(t, dir, "config.toml")
 
 	if err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath, stateDir, codex,
-		filepath.Join(dir, "hooks.json"), filepath.Join(dir, "pi-settings.json"), true); err != nil {
+		filepath.Join(dir, "hooks.json"), []string{filepath.Join(dir, "pi-settings.json")}, true); err != nil {
 		t.Fatalf("want --dry-run to survive a symlinked destination, got %v", err)
 	}
 	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
@@ -631,7 +631,7 @@ func TestInstallAllowEmptyStripsHookyardRowsFromEveryConfig(t *testing.T) {
 	stateDir := filepath.Join(dir, "state")
 	codex := filepath.Join(dir, "config.toml")
 	cursor := filepath.Join(dir, "hooks.json")
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
 	if err := os.WriteFile(codex, []byte("[mcp_servers.context7]\ncommand = \"context7-mcp\"\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -639,7 +639,7 @@ func TestInstallAllowEmptyStripsHookyardRowsFromEveryConfig(t *testing.T) {
 	if err := os.WriteFile(cursor, []byte(`{"version":1,"hooks":{"preToolUse":[{"command":"/usr/bin/foreign-cursor-hook"}]}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(pi, []byte(`{"extensions":["/usr/lib/foreign-pi-extension.ts"]}`), 0o644); err != nil {
+	if err := os.WriteFile(pi[0], []byte(`{"extensions":["/usr/lib/foreign-pi-extension.ts"]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -648,7 +648,7 @@ func TestInstallAllowEmptyStripsHookyardRowsFromEveryConfig(t *testing.T) {
 		"--state-dir", stateDir,
 		"--codex-config", codex,
 		"--cursor-hooks", cursor,
-		"--pi-settings", pi,
+		"--pi-settings", pi[0],
 	}
 
 	if err := install(append([]string{"--manifest", manifestPath}, targetFlags...)); err != nil {
@@ -657,9 +657,9 @@ func TestInstallAllowEmptyStripsHookyardRowsFromEveryConfig(t *testing.T) {
 	// Pi's registration is split across two files — the entry in settings.json
 	// names the bridge, and the router command lives inside the bridge — so
 	// both are read here.
-	bridge := render.PiBridgePath(pi)
+	bridge := render.PiBridgePath(pi[0])
 	for _, want := range []string{"--registered-for codex", "--registered-for cursor"} {
-		if got := readFile(t, codex) + readFile(t, cursor) + readFile(t, pi) + readFile(t, bridge); !strings.Contains(got, want) {
+		if got := readFile(t, codex) + readFile(t, cursor) + readFile(t, pi[0]) + readFile(t, bridge); !strings.Contains(got, want) {
 			t.Fatalf("setup: first install did not register %q, got:\n%s", want, got)
 		}
 	}
@@ -676,7 +676,7 @@ func TestInstallAllowEmptyStripsHookyardRowsFromEveryConfig(t *testing.T) {
 
 	codexGot := readFile(t, codex)
 	cursorGot := readFile(t, cursor)
-	piGot := readFile(t, pi)
+	piGot := readFile(t, pi[0])
 
 	for _, got := range []string{codexGot, cursorGot, piGot} {
 		if strings.Contains(got, "hookyard") {
@@ -735,7 +735,7 @@ func TestRunInstallWithoutPiOnPATHStillEmitsADetectablePiVersion(t *testing.T) {
 
 	dir := t.TempDir()
 	manifestPath := writeAllEnginesManifest(t, dir)
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 	if err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath, filepath.Join(dir, "state"),
 		filepath.Join(dir, "config.toml"), filepath.Join(dir, "hooks.json"),
 		pi, false); err != nil {
@@ -745,7 +745,7 @@ func TestRunInstallWithoutPiOnPATHStillEmitsADetectablePiVersion(t *testing.T) {
 	var data struct {
 		PiVersion json.RawMessage `json:"pi_version"`
 	}
-	if err := json.Unmarshal([]byte(bridgeConstant(t, readFile(t, render.PiBridgePath(pi)))), &data); err != nil {
+	if err := json.Unmarshal([]byte(bridgeConstant(t, readFile(t, render.PiBridgePath(pi[0])))), &data); err != nil {
 		t.Fatalf("the bridge's data constant is not JSON: %v", err)
 	}
 	if got := string(data.PiVersion); got != `"unknown"` {
@@ -787,7 +787,7 @@ func TestInstallReceiptCompleteOnSuccess(t *testing.T) {
 	stateDir := filepath.Join(dir, "state")
 	codex := filepath.Join(dir, "config.toml")
 	cursor := filepath.Join(dir, "hooks.json")
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
 	if err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath, stateDir, codex, cursor, pi, false); err != nil {
 		t.Fatal(err)
@@ -815,7 +815,7 @@ func TestInstallReceiptCompleteOnSuccess(t *testing.T) {
 	if receipt.CursorHooks != cursor {
 		t.Errorf("CursorHooks = %q, want %q", receipt.CursorHooks, cursor)
 	}
-	if receipt.PiSettings != pi {
+	if !slices.Equal(receipt.PiSettings, pi) {
 		t.Errorf("PiSettings = %q, want %q", receipt.PiSettings, pi)
 	}
 }
@@ -838,7 +838,7 @@ func TestInstallReceiptIncompleteOnExecStat(t *testing.T) {
 	stateDir := filepath.Join(dir, "state")
 	codex := filepath.Join(dir, "config.toml")
 	cursor := filepath.Join(dir, "hooks.json")
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
 	err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath, stateDir, codex, cursor, pi, false)
 	if err == nil {
@@ -870,7 +870,7 @@ func TestInstallReceiptIncompleteAfterTableWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	cursor := filepath.Join(dir, "hooks.json")
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
 	err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath, stateDir, codex, cursor, pi, false)
 	if err == nil {
@@ -898,7 +898,7 @@ func TestInstallDryRunWritesNoReceipt(t *testing.T) {
 	stateDir := filepath.Join(dir, "state")
 
 	if err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath, stateDir,
-		filepath.Join(dir, "config.toml"), filepath.Join(dir, "hooks.json"), filepath.Join(dir, "pi-settings.json"), true); err != nil {
+		filepath.Join(dir, "config.toml"), filepath.Join(dir, "hooks.json"), []string{filepath.Join(dir, "pi-settings.json")}, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -916,7 +916,7 @@ func TestInstallIdempotentRerun(t *testing.T) {
 	stateDir := filepath.Join(dir, "state")
 	codex := filepath.Join(dir, "config.toml")
 	cursor := filepath.Join(dir, "hooks.json")
-	pi := filepath.Join(dir, "pi-settings.json")
+	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
 	for i := 0; i < 2; i++ {
 		if err := runInstall(io.Discard, manifestPaths{manifestPath}, testRouterPath, stateDir, codex, cursor, pi, false); err != nil {
