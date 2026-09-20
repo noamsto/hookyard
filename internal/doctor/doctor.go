@@ -57,6 +57,7 @@ type Finding struct {
 	Check  string
 	Status Status
 	Detail string
+	Fix    string
 }
 
 // Paths locates each engine's configuration. Tests set it; the CLI derives it
@@ -284,6 +285,7 @@ func claudeFindings(p Paths, dir string, c claudeSources) []Finding {
 	if err := readJSON(state, &claudeState); os.IsNotExist(err) {
 		trust.Status = Fail
 		trust.Detail = fmt.Sprintf("no trust record at %s, so hooks are skipped entirely", state)
+		trust.Fix = "Open the target workspace in Claude Code and accept its trust prompt."
 	} else if err != nil {
 		trust.Detail = fmt.Sprintf("cannot read %s: %v", state, err)
 	} else if claudeState.Projects[dir].HasTrustDialogAccepted {
@@ -292,6 +294,7 @@ func claudeFindings(p Paths, dir string, c claudeSources) []Finding {
 	} else {
 		trust.Status = Fail
 		trust.Detail = fmt.Sprintf("%s is not trusted in %s, so hooks are skipped entirely", dir, state)
+		trust.Fix = "Open the target workspace in Claude Code and accept its trust prompt."
 	}
 
 	return []Finding{trust, claudeHooksEnabled(c), claudeRegistration(c), claudeRouterPath(c)}
@@ -319,6 +322,7 @@ func claudeHooksEnabled(c claudeSources) Finding {
 		if settings.DisableAllHooks {
 			f.Status = Fail
 			f.Detail = "disableAllHooks is set in " + s.name
+			f.Fix = "Remove disableAllHooks from " + s.name + "."
 			return f
 		}
 		checked = append(checked, s.name)
@@ -351,6 +355,7 @@ func claudeRegistration(c claudeSources) Finding {
 		f.Status = Fail
 		f.Detail = "stale hookyard entry in " + c.settingsPath +
 			"; remove it — hookyard no longer writes that file, and an entry in both it and the --settings overlay runs every handler twice"
+		f.Fix = "Remove the stale hookyard entry from " + c.settingsPath + "."
 		return f
 	}
 
@@ -371,6 +376,7 @@ func claudeRegistration(c claudeSources) Finding {
 		f.Status = Fail
 		f.Detail = "no hookyard entry in the --settings overlay the claude launcher passes (" + strings.Join(names, ", ") +
 			"); wire programs.hookyard.claudeOverlay.merged into it and rebuild"
+		f.Fix = "Wire programs.hookyard.claudeOverlay.merged into " + strings.Join(names, ", ") + " and rebuild."
 		return f
 	}
 
@@ -430,6 +436,7 @@ func codexFindings(p Paths, dir string) []Finding {
 		} else {
 			trust.Status = Fail
 			trust.Detail = fmt.Sprintf("%s is not trusted in %s, so hooks are not loaded", dir, config)
+			trust.Fix = "Open the target workspace in Codex and mark it trusted."
 		}
 		// Codex reviews each hook entry separately from trusting the directory,
 		// and an untrusted entry is simply not run.
@@ -439,6 +446,7 @@ func codexFindings(p Paths, dir string) []Finding {
 		} else {
 			hookTrust.Status = Fail
 			hookTrust.Detail = "no reviewed hook entries in " + config + "; run codex and accept /hooks"
+			hookTrust.Fix = "Run codex and accept /hooks."
 		}
 	}
 
@@ -465,6 +473,7 @@ func codexRegistration(path string) Finding {
 	if total == 0 {
 		f.Status = Fail
 		f.Detail = "no hookyard entry in " + path + "; run hookyard install"
+		f.Fix = "Run hookyard install."
 		return f
 	}
 	perEvent := map[string]int{}
@@ -482,6 +491,7 @@ func codexRegistration(path string) Finding {
 		if n > 1 {
 			f.Status = Fail
 			f.Detail = fmt.Sprintf("%d hookyard entries in %s; run hookyard install", total, path)
+			f.Fix = "Run hookyard install."
 			return f
 		}
 	}
@@ -505,6 +515,7 @@ func cursorFindings(p Paths, dir, stateDir string) []Finding {
 	} else {
 		trust.Status = Fail
 		trust.Detail = fmt.Sprintf("no trust marker at %s, so hooks are skipped entirely", marker)
+		trust.Fix = "Open the target workspace in Cursor and accept its workspace-trust prompt."
 	}
 
 	return []Finding{trust, registration(vocab.Cursor, hooks), routerPath(vocab.Cursor, hooks), competingWriter(stateDir, hooks)}
@@ -905,6 +916,7 @@ func piBridgeDrift(stateDir, bridgePath string) Finding {
 		parts = append(parts, bridgePath+" has an entry "+tablePath+" would not render this way: "+strings.Join(drifted, ", "))
 	}
 	f.Detail = strings.Join(parts, "; ")
+	f.Fix = "Run hookyard install to regenerate the Pi bridge."
 	return f
 }
 
@@ -973,6 +985,7 @@ func piBridgeExec(bridgePath string) Finding {
 			strings.Join(distinctStrings(broken), ", ") +
 			"; re-run hookyard install — a router path or state dir containing whitespace " +
 			"splits the invocation mid-path and leaves exactly this"
+		f.Fix = "Run hookyard install."
 		return f
 	}
 	if checked == 0 {
@@ -1027,6 +1040,17 @@ func danglingExtensions(settingsPath string) Finding {
 	if len(missing) > 0 {
 		f.Status = Fail
 		f.Detail = "extensions[] names a file pi cannot find, and pi loads silently without it: " + strings.Join(missing, ", ")
+		bridge := render.PiBridgePath(settingsPath)
+		owned := true
+		for _, path := range missing {
+			if path != bridge {
+				owned = false
+				break
+			}
+		}
+		if owned {
+			f.Fix = "Run hookyard install to regenerate the Pi bridge and extensions entry."
+		}
 		return f
 	}
 	if len(unreadable) > 0 {
@@ -1175,6 +1199,7 @@ func registration(engine vocab.Engine, path string) Finding {
 	}
 	f.Status = Fail
 	f.Detail = "no hookyard entry in " + path + "; run hookyard install"
+	f.Fix = "Run hookyard install."
 	return f
 }
 
@@ -1291,6 +1316,7 @@ func routerPathIn(engine vocab.Engine, source string, raw []byte) Finding {
 	if bad {
 		f.Status = Fail
 		f.Detail = strings.Join(listed, "; ")
+		f.Fix = "Run hookyard install or home-manager switch to regenerate the emitted router path."
 		return f
 	}
 	f.Status = Pass
@@ -1427,6 +1453,7 @@ func streamFindings(stateDir string, disagreement []string, now time.Time) []Fin
 	if len(disagreement) > 0 {
 		f.Status = Fail
 		f.Detail = "engines disagree on --state-dir: " + strings.Join(disagreement, ", ")
+		f.Fix = "Run hookyard install so every engine registration names one state directory."
 		return []Finding{f}
 	}
 
@@ -1529,23 +1556,27 @@ func generationFindings(p Paths, stateDir string) []Finding {
 	if errors.Is(err, fs.ErrNotExist) {
 		f.Status = Fail
 		f.Detail = fmt.Sprintf("hookyard install has never completed for %s; re-run home-manager switch", receiptDir)
+		f.Fix = "Re-run home-manager switch."
 		return []Finding{f}
 	}
 	if err != nil {
 		f.Status = Fail
 		f.Detail = fmt.Sprintf("%s: %v; re-run home-manager switch", installstate.ReceiptPath(receiptDir), err)
+		f.Fix = "Re-run home-manager switch."
 		return []Finding{f}
 	}
 
 	if !r.Complete {
 		f.Status = Fail
 		f.Detail = "the last hookyard install did not finish, so the current generation and the installed state disagree; re-run home-manager switch"
+		f.Fix = "Re-run home-manager switch."
 		return []Finding{f}
 	}
 
 	if diffs := installstate.Diff(w, r); len(diffs) > 0 {
 		f.Status = Fail
 		f.Detail = fmt.Sprintf("the current generation and the installed state disagree: %s; re-run home-manager switch", strings.Join(diffs, ", "))
+		f.Fix = "Re-run home-manager switch."
 		return []Finding{f}
 	}
 

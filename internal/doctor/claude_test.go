@@ -184,6 +184,10 @@ func TestClaudeHooksEnabledReadsEverySource(t *testing.T) {
 	if !strings.Contains(f.Detail, overlay) {
 		t.Errorf("detail = %q, want it to name the source that sets the flag", f.Detail)
 	}
+	wantFix := "Remove disableAllHooks from " + overlay + "."
+	if f.Fix != wantFix {
+		t.Errorf("fix = %q, want %q", f.Fix, wantFix)
+	}
 	if strings.Contains(f.Detail, settings) {
 		t.Errorf("detail = %q, names the file that does not set it", f.Detail)
 	}
@@ -344,23 +348,23 @@ func TestOtherEnginesFindingsAreUnchanged(t *testing.T) {
 	p := Paths{CodexHome: codexHome, CursorHome: cursorHome, PiAgentDir: piAgentDir}
 
 	want := []Finding{
-		{vocab.Codex, "workspace trust", Pass, "trusted in " + codexConfig},
-		{vocab.Codex, "hook trust", Pass, "1 reviewed hook entries in " + codexConfig},
-		{vocab.Codex, "hookyard registered", Pass, "1 hookyard entry in " + codexConfig},
-		{vocab.Codex, "router path", Pass, executable},
-		{vocab.Cursor, "workspace trust", Pass, "trusted, per " + cursorMarker},
-		{vocab.Cursor, "hookyard registered", Fail, "no hookyard entry in " + cursorHooks + "; run hookyard install"},
-		{vocab.Cursor, "router path", Unknown, "no hookyard entry in " + cursorHooks + " to check"},
-		{vocab.Cursor, "competing writer", Pass, "no handlers in the table, so no foreign entry can double-register one"},
-		{vocab.Pi, "workspace trust", Pass, piBridge + " is a global extension; Pi's project trust gate (" +
+		{Engine: vocab.Codex, Check: "workspace trust", Status: Pass, Detail: "trusted in " + codexConfig},
+		{Engine: vocab.Codex, Check: "hook trust", Status: Pass, Detail: "1 reviewed hook entries in " + codexConfig},
+		{Engine: vocab.Codex, Check: "hookyard registered", Status: Pass, Detail: "1 hookyard entry in " + codexConfig},
+		{Engine: vocab.Codex, Check: "router path", Status: Pass, Detail: executable},
+		{Engine: vocab.Cursor, Check: "workspace trust", Status: Pass, Detail: "trusted, per " + cursorMarker},
+		{Engine: vocab.Cursor, Check: "hookyard registered", Status: Fail, Detail: "no hookyard entry in " + cursorHooks + "; run hookyard install", Fix: "Run hookyard install."},
+		{Engine: vocab.Cursor, Check: "router path", Status: Unknown, Detail: "no hookyard entry in " + cursorHooks + " to check"},
+		{Engine: vocab.Cursor, Check: "competing writer", Status: Pass, Detail: "no handlers in the table, so no foreign entry can double-register one"},
+		{Engine: vocab.Pi, Check: "workspace trust", Status: Pass, Detail: piBridge + " is a global extension; Pi's project trust gate (" +
 			filepath.Join(piAgentDir, "trust.json") + ") does not gate global extensions, so it runs regardless of trust state"},
-		{vocab.Pi, "extensions targets exist", Pass, "every extensions[] entry in " + piSettings + " resolves to a file"},
-		{vocab.Pi, "hookyard registered", Pass, "present in " + piSettings},
-		{vocab.Pi, "router path", Pass, executable},
-		{vocab.Pi, "launcher wrapper", Unknown, "no pi on PATH to check for an injected launcher"},
-		{vocab.Pi, "double-registered handlers", Unknown, "no --state-dir recoverable to read the handler table from"},
-		{vocab.Pi, "bridge matches handler table", Unknown, "no --state-dir recoverable to read the handler table from"},
-		{vocab.Pi, "bridge invocation is executable", Pass, "every entry in " + piBridge + " names an executable bin"},
+		{Engine: vocab.Pi, Check: "extensions targets exist", Status: Pass, Detail: "every extensions[] entry in " + piSettings + " resolves to a file"},
+		{Engine: vocab.Pi, Check: "hookyard registered", Status: Pass, Detail: "present in " + piSettings},
+		{Engine: vocab.Pi, Check: "router path", Status: Pass, Detail: executable},
+		{Engine: vocab.Pi, Check: "launcher wrapper", Status: Unknown, Detail: "no pi on PATH to check for an injected launcher"},
+		{Engine: vocab.Pi, Check: "double-registered handlers", Status: Unknown, Detail: "no --state-dir recoverable to read the handler table from"},
+		{Engine: vocab.Pi, Check: "bridge matches handler table", Status: Unknown, Detail: "no --state-dir recoverable to read the handler table from"},
+		{Engine: vocab.Pi, Check: "bridge invocation is executable", Status: Pass, Detail: "every entry in " + piBridge + " names an executable bin"},
 	}
 
 	var got []Finding

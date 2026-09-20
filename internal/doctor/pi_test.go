@@ -123,6 +123,52 @@ func TestPiDanglingExtensionIsAFinding(t *testing.T) {
 	if !strings.Contains(f.Detail, missing) {
 		t.Errorf("detail = %q, want the missing file named", f.Detail)
 	}
+	wantFix := "Run hookyard install to regenerate the Pi bridge and extensions entry."
+	if f.Fix != wantFix {
+		t.Errorf("fix = %q, want %q", f.Fix, wantFix)
+	}
+}
+
+func TestPiDanglingForeignExtensionHasNoFix(t *testing.T) {
+	settings := filepath.Join(t.TempDir(), "settings.json")
+	missing := filepath.Join(filepath.Dir(settings), "foreign.js")
+	raw, err := json.Marshal(map[string]any{"extensions": []string{missing}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settings, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f := danglingExtensions(settings)
+	if f.Status != Fail {
+		t.Fatalf("status = %v, want Fail; detail=%q", f.Status, f.Detail)
+	}
+	if f.Fix != "" {
+		t.Errorf("fix = %q, want empty Fix for foreign extension", f.Fix)
+	}
+}
+
+func TestPiDanglingMixedExtensionsHasNoFix(t *testing.T) {
+	dir := t.TempDir()
+	settings := filepath.Join(dir, "settings.json")
+	owned := render.PiBridgePath(settings)
+	foreign := filepath.Join(dir, "foreign.js")
+	raw, err := json.Marshal(map[string]any{"extensions": []string{owned, foreign}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settings, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f := danglingExtensions(settings)
+	if f.Status != Fail {
+		t.Fatalf("status = %v, want Fail; detail=%q", f.Status, f.Detail)
+	}
+	if f.Fix != "" {
+		t.Errorf("fix = %q, want empty Fix for mixed extensions", f.Fix)
+	}
 }
 
 func TestPiDanglingExtensionPassesWhenFileExists(t *testing.T) {
