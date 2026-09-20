@@ -348,6 +348,52 @@ func TestPiBuildGolden(t *testing.T) {
 	}
 }
 
+// TestPiBuildGolden's fixture passes exactly one manifest contributing
+// exactly one command, so `commands = append(commands, m.Commands...)` and a
+// plain last-manifest-wins overwrite render byte-identical output there. This
+// test uses two manifests, each contributing its own command, so a
+// regression that drops every manifest's commands but the last would leave
+// the rendered bridge missing one.
+func TestPiBuildAggregatesCommandsFromEveryManifest(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "handlers", "guard1.sh"), []byte("#!/bin/sh\n"), 0o755)
+	writeFile(t, filepath.Join(root, "handlers", "guard2.sh"), []byte("#!/bin/sh\n"), 0o755)
+	writeFile(t, filepath.Join(root, "scripts", "one.sh"), []byte("#!/bin/sh\n"), 0o755)
+	writeFile(t, filepath.Join(root, "scripts", "two.sh"), []byte("#!/bin/sh\n"), 0o755)
+
+	manifestOnePath := filepath.Join(t.TempDir(), "one.json")
+	writeFile(t, manifestOnePath, []byte(`{"handlers":[`+
+		`{"id":"guard-one","exec":"handlers/guard1.sh","events":["pre_tool"],"engines":["pi"],"match":["Bash"]}],`+
+		`"commands":[{"name":"cmd-one","description":"first command","exec":"scripts/one.sh"}]}`), 0o644)
+
+	manifestTwoPath := filepath.Join(t.TempDir(), "two.json")
+	writeFile(t, manifestTwoPath, []byte(`{"handlers":[`+
+		`{"id":"guard-two","exec":"handlers/guard2.sh","events":["pre_tool"],"engines":["pi"],"match":["Bash"]}],`+
+		`"commands":[{"name":"cmd-two","description":"second command","exec":"scripts/two.sh"}]}`), 0o644)
+
+	binaryPath := filepath.Join(t.TempDir(), "fake-hookyard")
+	writeFile(t, binaryPath, []byte("fake-binary"), 0o755)
+
+	if err := Build(vocab.Pi, Options{
+		Manifests: []string{manifestOnePath, manifestTwoPath},
+		Out:       root,
+		Name:      "example",
+		Binary:    binaryPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rendered, err := os.ReadFile(filepath.Join(root, "extensions", "hookyard.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"name":"cmd-one"`, `"name":"cmd-two"`} {
+		if !strings.Contains(string(rendered), want) {
+			t.Errorf("extensions/hookyard.ts does not contain %s: only one manifest's commands survived aggregation\n%s", want, rendered)
+		}
+	}
+}
+
 func TestPiBuildMergesPackageJSONAndIsIdempotent(t *testing.T) {
 	root, manifestPath, binaryPath := setupPiPlugin(t)
 	packageJSONPath := filepath.Join(root, "package.json")

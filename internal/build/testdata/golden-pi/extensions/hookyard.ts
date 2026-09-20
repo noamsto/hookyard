@@ -183,6 +183,11 @@ const extras = {
 // words — in any dash spelling — rather than on an exact flag list, is what
 // makes that fail closed: a secret-bearing flag pi adds in a later version is
 // dropped by a bridge written before it existed.
+//
+// The same words gate sanitizeEnv below: pi's own process env can carry live
+// LLM API keys, and a commands[] exec is a less-audited surface than a hook
+// handler, so it gets the same fail-closed name match rather than an
+// allowlist a legitimate command could fall outside of.
 const SECRET_FLAG_WORDS = ["key", "token", "secret", "password"];
 
 function sanitizeArgv(argv) {
@@ -202,6 +207,14 @@ function sanitizeArgv(argv) {
     // `--flag=value` carries its value inside the element that was just
     // dropped; a bare `--flag` takes the element after it, whatever that is.
     if (eq === -1) i++;
+  }
+  return kept;
+}
+
+function sanitizeEnv(env) {
+  const kept = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (!SECRET_FLAG_WORDS.some((word) => name.toLowerCase().includes(word))) kept[name] = value;
   }
   return kept;
 }
@@ -295,7 +308,7 @@ export default function (pi) {
         // wants its arguments split splits them itself.
         const child = spawn(resolve(base, command.bin), [...command.args, args], {
           env: {
-            ...process.env,
+            ...sanitizeEnv(process.env),
             HOOKYARD_SESSION_ID: ctx.sessionManager.getSessionId(),
             HOOKYARD_SESSION_FILE: ctx.sessionManager.getSessionFile() ?? "",
             HOOKYARD_CWD: ctx.cwd ?? "",

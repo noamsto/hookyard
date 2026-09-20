@@ -896,6 +896,92 @@ func TestPiBridgeSpawnsACommandDetachedWithTheSessionEnvironment(t *testing.T) {
 	}
 }
 
+// piCommandExecEnvProbe is piCommandExec's sibling for env sanitization: it
+// records a caller-chosen set of env var names instead of the three fixed
+// HOOKYARD_* keys, so a test can assert exactly which of the parent's env
+// vars reached the spawned child.
+func piCommandExecEnvProbe(gate, capturePath string, probeNames []string) string {
+	namesJSON, err := json.Marshal(probeNames)
+	if err != nil {
+		panic(err)
+	}
+	return `const fs = require("node:fs");
+(async () => {
+  const deadline = Date.now() + 30000;
+  while (!fs.existsSync(` + strconv.Quote(gate) + `) && Date.now() < deadline) {
+    await new Promise((settle) => setTimeout(settle, 10));
+  }
+  const names = ` + string(namesJSON) + `;
+  const env = {};
+  for (const name of names) env[name] = process.env[name] ?? null;
+  fs.writeFileSync(` + strconv.Quote(capturePath+".part") + `, JSON.stringify({ env }));
+  fs.renameSync(` + strconv.Quote(capturePath+".part") + `, ` + strconv.Quote(capturePath) + `);
+})();`
+}
+
+// commands[] hands its exec pi's own process.env, and pi's process env can
+// carry a live LLM API key — a secret-bearing name must not reach the child,
+// while a legitimately-needed one still must (sanitizeEnv in pi_bridge.ts,
+// reusing sanitizeArgv's SECRET_FLAG_WORDS against env key names rather than
+// flag names).
+func TestPiBridgeStripsSecretBearingEnvVarsFromCommandSpawn(t *testing.T) {
+	run := newPiBridgeRun(t)
+	gate := filepath.Join(run.dir, "gate")
+	capturePath := filepath.Join(run.dir, "captured-env.json")
+	probeNames := []string{"HOOKYARD_TEST_PROBE_API_KEY", "HOOKYARD_TEST_PROBE_TOKEN", "HOOKYARD_TEST_PROBE_SAFE_VAR"}
+	run.router(t, "envprobe", piCommandExecEnvProbe(gate, capturePath, probeNames))
+
+	t.Setenv("HOOKYARD_TEST_PROBE_API_KEY", "sk-probe-must-not-travel")
+	t.Setenv("HOOKYARD_TEST_PROBE_TOKEN", "probe-token-must-not-travel")
+	t.Setenv("HOOKYARD_TEST_PROBE_SAFE_VAR", "probe-safe-value")
+
+	root := "."
+	run.installData(t, piBridgeData{
+		TimeoutMS: EmittedTimeoutSeconds * 1000,
+		Root:      &root,
+		Entries:   []piBridgeEntry{},
+		Commands: []piBridgeCommand{{
+			Name:        "aeye",
+			Description: "Open the aeye image carousel for this session",
+			Bin:         "envprobe.cjs",
+			Args:        []string{},
+		}},
+	})
+
+	run.drive(t, []piBridgeStep{{Command: "aeye", Args: ""}}, "/probe/session.jsonl")
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(30 * time.Second)
+	var captured struct {
+		Env map[string]*string `json:"env"`
+	}
+	for {
+		raw, err := os.ReadFile(capturePath)
+		if err == nil {
+			if jsonErr := json.Unmarshal(raw, &captured); jsonErr != nil {
+				t.Fatalf("the exec recorded %s, which is not a capture: %v", raw, jsonErr)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the command's exec recorded nothing at %s: %v", capturePath, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if got := captured.Env["HOOKYARD_TEST_PROBE_API_KEY"]; got != nil {
+		t.Errorf("HOOKYARD_TEST_PROBE_API_KEY = %q, want it stripped from the child env", *got)
+	}
+	if got := captured.Env["HOOKYARD_TEST_PROBE_TOKEN"]; got != nil {
+		t.Errorf("HOOKYARD_TEST_PROBE_TOKEN = %q, want it stripped from the child env", *got)
+	}
+	if got := captured.Env["HOOKYARD_TEST_PROBE_SAFE_VAR"]; got == nil || *got != "probe-safe-value" {
+		t.Errorf("HOOKYARD_TEST_PROBE_SAFE_VAR = %v, want \"probe-safe-value\": a legitimately-needed var must still reach the command", got)
+	}
+}
+
 // Nothing escapes a command handler either. A failed spawn is the one failure a
 // handler that waits for nothing can still see — there is no exit status to
 // read — and it is shown to the user rather than thrown, because a user who

@@ -534,6 +534,13 @@ func validatePlugin(paths []string, root string) error {
 	if err := manifest.CheckPluginExecs(absRoot, handlers); err != nil {
 		return err
 	}
+	var commands []manifest.Command
+	for _, m := range manifests {
+		commands = append(commands, m.Commands...)
+	}
+	if err := manifest.CheckCommandExecs(absRoot, commands); err != nil {
+		return err
+	}
 	fmt.Printf("%d manifests, %d handlers, no problems found\n", len(paths), len(handlers))
 	return nil
 }
