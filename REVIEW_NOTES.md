@@ -36,3 +36,20 @@ the review batch; updated before each push.
 | codexRegistration distinguishes distinct events from same-event duplication | reviewer MEDIUM round 1 | 4909c78 | dc76d6e | `TestCodexRegistrationPassesWhenDistinctEvents`; same gate; targeted re-review accepted | fixed | 2 |
 
 recurrence_escalation: unused
+
+---
+
+# Review notes — hookyard #72 (pi pre_tool advisory channel)
+
+recurrence_escalation: unused
+
+| invariant/family | finding | observed head | fix commit | proof | disposition | rounds used |
+| --- | --- | --- | --- | --- | --- | --- |
+| pi pre_tool advisory lands at the call's next model request, once per call | TS(promoted) HIGH-1: steer trickles under pi's default steeringMode one-at-a-time (N parallel calls → N turns) | cfb56a0 | b675462 | pi 0.86.1 PendingMessageQueue.drain + settings.md default verified | fixing: mechanism B (append to same call's tool_result), dispatcher-approved | 1 |
+| same | TS MED-2: queued steer overrides tool terminate | cfb56a0 | b675462 | runLoop continue condition verified | fixed by B (no steer) | 1 |
+| record delivered truthfulness | TS MED-3: abort/dequeue clearAllQueues drops steer while record says delivered | cfb56a0 | b675462 | source-cited | fixed by B (no steer queue); residual: call aborted before execution never reaches tool_result — documented | 1 |
+| live test proves record delivered | Go HIGH: Delivered check skipped when record missing | cfb56a0 | b675462 | code read | fixing (t.Fatalf) | 1 |
+| public fixtures never leak machine data | Py HIGH: elide() only redacts str text/content keys | cfb56a0 | b675462 | code read; current samples clean | fixing (default-redact) | 1 |
+| fixture evidence honest | Py MED: exact-equality prompt match | cfb56a0 | b675462 | code read | fixing (substring) | 1 |
+| fixture evidence honest | Shell CRIT: readiness loop has no failure path | cfb56a0 | b675462 | code read | fixing (abort on not-ready) | 1 |
+| fixture portability | Shell HIGH: realpath -m GNU-only | cfb56a0 | b675462 | code read | fixing | 1 |
