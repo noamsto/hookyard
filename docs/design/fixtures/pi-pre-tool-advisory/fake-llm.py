@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 REQUEST_LOG = sys.argv[2]
 COMMAND = os.environ.get("PROBE_COMMAND", "echo PROBE_EXECUTED")
+PARALLEL = os.environ.get("PROBE_PARALLEL") == "1"
 count = 0
 
 
@@ -44,7 +45,14 @@ class Handler(BaseHTTPRequestHandler):
             # machine's working directory, so only the conversation is kept.
             messages = [m for m in body.get("messages", []) if m.get("role") != "system"]
             f.write(json.dumps({"request": count, "messages": messages}) + "\n")
-        if count == 1:
+        if count == 1 and PARALLEL:
+            calls = [
+                {"index": i, "id": f"PROBE-TOOLCALL-0{i + 1}", "type": "function",
+                 "function": {"name": "bash", "arguments": json.dumps({"command": f"echo PROBE_EXECUTED_{i + 1}"})}}
+                for i in range(2)
+            ]
+            chunks = [chunk({"role": "assistant", "tool_calls": calls}), chunk({}, "tool_calls")]
+        elif count == 1:
             chunks = [
                 chunk({"role": "assistant", "tool_calls": [{
                     "index": 0, "id": "PROBE-TOOLCALL-01", "type": "function",

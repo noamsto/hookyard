@@ -59,11 +59,12 @@ type cursorResponse struct {
 // with its reason, which the bridge answers by refusing the call (returning
 // nothing is allow), or a standalone advisory it delivers as a message — on
 // session_start and post_tool as an injected or appended message, and on
-// pre_tool as a queued steer message the model reads after the call runs
-// (§11.1). Block carries omitempty because the two paths are disjoint on the
-// wire — an advisory reply spelling "block":false would read as a decision no
-// handler made — and renderPiDeny, the only producer of a block, always sets
-// it true.
+// pre_tool as text appended to that call's own tool result, which the model
+// reads in the next request beside the result — the same place Claude Code's
+// pre_tool additionalContext lands (§11.1). Block carries omitempty because
+// the two paths are disjoint on the wire — an advisory reply spelling
+// "block":false would read as a decision no handler made — and renderPiDeny,
+// the only producer of a block, always sets it true.
 type piResponse struct {
 	Block    bool   `json:"block,omitempty"`
 	Reason   string `json:"reason,omitempty"`
@@ -197,11 +198,11 @@ func renderCursor(in Input) Rendered {
 // binary-channel engines — Pi has no ask arm and no wire form for allow at
 // all, so an explicit allow falls through to the default case below exactly
 // as Codex's does. That case also carries standalone advice, if any, as an
-// advisory: the bridge delivers it as a queued steer message that reaches the
-// model after the tool call runs (§11.1) — the same model step Claude Code's
-// pre_tool additionalContext reaches. With no advice there is nothing to
-// print, and Enforced stays false for an explicit allow: not blocking already
-// is allow, so there is nothing this render step could add.
+// advisory: the bridge appends it to that call's own tool result, which the
+// model reads in the next request beside the result — the same place Claude
+// Code's pre_tool additionalContext lands (§11.1). With no advice there is
+// nothing to print, and Enforced stays false for an explicit allow: not
+// blocking already is allow, so there is nothing this render step could add.
 func renderPi(in Input) Rendered {
 	switch in.Verdict {
 	case Deny:
@@ -230,9 +231,9 @@ func piAskDegradedReason(handlerReason string) string {
 
 // renderPiDeny joins reason and advice into Pi's one reason field, the same
 // way renderCursor joins them into user_message. Advice does not get its own
-// key here even though renderPi's default arm now has one for a standalone
+// key here even though renderPi's default arm has one for a standalone
 // advisory: a deny's advice rides the block reason only, so the bridge never
-// also steers it, and it is delivered exactly once.
+// also appends it to a tool result, and it is delivered exactly once.
 func renderPiDeny(reason, advice string) Rendered {
 	var message []string
 	if reason != "" {

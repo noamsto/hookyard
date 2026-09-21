@@ -50,12 +50,12 @@ func HasDecisionSlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bo
 // advisory set is exactly its decision set — and advice only rides there
 // alongside a rendered permission, which Render is what enforces. Pi's set is
 // wider than its decision set: on pre_tool, advice rides the block reason on
-// a deny, and a standalone advisory is delivered as a steer message the model
-// reads after the call runs — the same step Claude Code's pre_tool
-// additionalContext lands (§11.1). The bridge also delivers a standalone
-// advisory on session_start (as an injected message before the agent starts)
-// and on post_tool (appended to the tool result), neither of which can carry
-// a decision.
+// a deny, and a standalone advisory is appended to that call's own tool
+// result, which the model reads in the next request beside the result — the
+// same place Claude Code's pre_tool additionalContext lands (§11.1). The bridge
+// also delivers a standalone advisory on session_start (as an injected message
+// before the agent starts) and on post_tool (appended to the tool result),
+// neither of which can carry a decision.
 func HasAdvisorySlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bool {
 	switch engine {
 	case vocab.ClaudeCode:

@@ -123,12 +123,12 @@ function advisory(stdout) {
 // An appended block reaches the model as the tool's own bytes. Shown one with
 // nothing naming its source, the probe model called it "exactly the shape of an
 // injection attempt" and disregarded it — and advice nobody acts on is the same
-// loss as advice never delivered. So all three deliveries say whose they are in
-// their own text; the injected and steered messages also carry the customType
-// pi stores beside them, which is metadata rather than a second attribution —
-// whether pi puts it in front of the model is unverified, so nothing rests on
-// it. Fixed strings, never spliced — a per-install label would be a second
-// value reaching this source by concatenation (§8).
+// loss as advice never delivered. So every delivery says whose it is in its own
+// text; the before_agent_start message also carries the customType pi stores
+// beside it, which is metadata rather than a second attribution — whether pi
+// puts it in front of the model is unverified, so nothing rests on it. Fixed
+// strings, never spliced — a per-install label would be a second value
+// reaching this source by concatenation (§8).
 const ATTRIBUTION = "[hookyard advisory] ";
 const ADVISORY_CUSTOM_TYPE = "hookyard";
 
@@ -144,6 +144,19 @@ const ADVISORY_CUSTOM_TYPE = "hookyard";
 // this one.
 let queuedAdvisory;
 
+// tool_call's own return value is spent whole on the allow/block decision (see
+// the tool_call branch below), so a non-blocking verdict's advice has no
+// return slot of its own to ride. Probed (docs/design/fixtures/
+// pi-pre-tool-advisory/): a tool_call handler's return carries nothing pi
+// delivers to the model on allow, while a tool_result handler's returned
+// content lands in the very next model request beside that same call's own
+// output — the same place Claude Code's pre_tool additionalContext reaches.
+// So the advice waits here, keyed by toolCallId, for that call's own
+// tool_result to flush it. A blocked call never stashes: its advice already
+// rides the block reason in decision()'s reply, exactly once, and the
+// tool_call branch below returns before reaching this map.
+const pendingToolAdvice = new Map();
+
 // Pi documents a tool_result handler as chaining middleware whose omitted fields
 // keep their current value, so returning content alone is a patch rather than a
 // replacement — and the patch appends, because the tool's own output is what the
@@ -153,20 +166,6 @@ let queuedAdvisory;
 function appendAdvisory(event, advice) {
   if (advice === undefined || !Array.isArray(event.content)) return undefined;
   return { content: [...event.content, { type: "text", text: ATTRIBUTION + advice }] };
-}
-
-// tool_call's return value is spent entirely on the allow/block decision, so a
-// non-blocking verdict's advice has no return slot to ride and steers instead:
-// pi.sendMessage(..., {deliverAs:"steer"}) lands after the tool batch runs, the
-// same model step Claude Code's pre_tool additionalContext reaches. A deny's
-// advice is already folded into decision()'s reason, so the block path above
-// never calls this — delivered once, not twice.
-function steerAdvisory(pi, advice) {
-  if (advice === undefined) return;
-  pi.sendMessage(
-    { customType: ADVISORY_CUSTOM_TYPE, content: ATTRIBUTION + advice, display: false },
-    { deliverAs: "steer" },
-  );
 }
 
 // For Pi, and only for Pi, hookyard authors the inbound payload — pi sends none
@@ -253,6 +252,34 @@ function payload(name, event, ctx) {
 }
 
 export default function (pi) {
+  // Bridge-owned, not a manifest entry: it exists to flush pendingToolAdvice
+  // onto the same call's tool_result, so it is registered once, gated on
+  // whether any entry can ever populate the map at all. Registering it here,
+  // before the per-entry loop below, puts it first in pi's tool_result
+  // middleware chain — so a pre_tool advisory lands in `content` ahead of
+  // whatever a tool_result manifest entry's own appendAdvisory adds, and the
+  // model sees pre-call advice before post-call advice, in call order.
+  if (DATA.entries.some((entry) => entry.event === "tool_call")) {
+    pi.on("tool_result", (event) => {
+      try {
+        const advice = pendingToolAdvice.get(event.toolCallId);
+        pendingToolAdvice.delete(event.toolCallId);
+        return advice === undefined ? undefined : appendAdvisory(event, advice);
+      } catch {
+        return undefined;
+      }
+    });
+
+    // A call aborted after tool_call but before it ever executes fires no
+    // tool_result, so nothing would otherwise delete its stash. turn_end runs
+    // once the whole tool batch is finalized — after every real tool_result
+    // for this turn has already flushed above — so clearing the map here only
+    // ever discards advice that was never going to be claimed.
+    pi.on("turn_end", () => {
+      pendingToolAdvice.clear();
+    });
+  }
+
   for (const entry of DATA.entries) {
     pi.on(entry.event, async (event, ctx) => {
       try {
@@ -264,15 +291,17 @@ export default function (pi) {
         const stdout = await askRouter(entry.bin, entry.args, payload(entry.event, event, ctx));
 
         // Only tool_call carries a return channel that can block, and that
-        // channel is spent whole on the decision — so its advisory steers
-        // instead (see steerAdvisory). session_start and tool_result carry an
-        // advisory return channel of their own, and every other event ignores
-        // the reply. The spawn still happens whatever the event, because
-        // recording it is the router's job either way.
+        // channel is spent whole on the decision — so its advisory stashes in
+        // pendingToolAdvice instead, for the bridge-owned tool_result handler
+        // above to flush onto this same call's result. session_start and
+        // tool_result carry an advisory return channel of their own, and every
+        // other event ignores the reply. The spawn still happens whatever the
+        // event, because recording it is the router's job either way.
         if (entry.event === "tool_call") {
           const verdict = decision(stdout);
           if (verdict) return verdict;
-          steerAdvisory(pi, advisory(stdout));
+          const advice = advisory(stdout);
+          if (advice !== undefined) pendingToolAdvice.set(event.toolCallId, advice);
           return undefined;
         }
         if (entry.event === "tool_result") return appendAdvisory(event, advisory(stdout));

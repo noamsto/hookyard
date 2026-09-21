@@ -4,7 +4,8 @@
 set -euo pipefail
 
 claude_bin=$1
-out=$(realpath -m "$2")
+: >"$2"
+out=$(realpath "$2")
 here=$(dirname "$(realpath "$0")")
 port=${PROBE_PORT:-18766}
 
@@ -20,13 +21,17 @@ cat >"$scratch/settings.json" <<JSON
 {"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"$here/claude-pretool-hook.sh"}]}]}}
 JSON
 
-: >"$out"
 python3 "$here/fake-anthropic.py" "$port" "$out" &
 server_pid=$!
+ready=
 for _ in $(seq 50); do
-  if curl -s -o /dev/null "http://127.0.0.1:$port/"; then break; fi
+  if curl -s -o /dev/null "http://127.0.0.1:$port/"; then ready=1; break; fi
   sleep 0.1
 done
+if [[ -z $ready ]]; then
+  echo "fake-anthropic.py never became ready on port $port" >&2
+  exit 1
+fi
 
 # An empty config dir keeps the user's own hooks, plugins and settings out of
 # the run; --settings supplies the one hook under test.

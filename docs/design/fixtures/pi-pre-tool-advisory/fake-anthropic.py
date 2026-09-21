@@ -15,20 +15,41 @@ REQUEST_LOG = sys.argv[2]
 count = 0
 
 
+STRUCTURAL_KEYS = {"type", "id", "name", "input", "tool_use_id", "is_error", "cache_control", "role"}
+
+
+def marked_lines(text):
+    lines = [ln for ln in text.splitlines() if "PROBE" in ln or "Run the probe." in ln]
+    return "\n".join(lines) if lines else "[elided]"
+
+
 def elide(content):
-    """Keeps only PROBE-marked lines of each text block. The rest is Claude
-    Code's own environment preamble — this machine's paths, skills and
-    plugins — which is noise to the probe and not fit for a public repo."""
+    """Fails closed: keeps only the allow-listed structural keys verbatim and
+    PROBE-marked lines of text/content strings; every other key and every
+    other block type (thinking, redacted_thinking, a list-valued tool_result
+    content, ...) is recursed into or replaced with "[elided]", so a shape
+    this fixture doesn't special-case can't leak this machine's paths,
+    skills, or plugins into a public repo."""
     if isinstance(content, str):
         content = [{"type": "text", "text": content}]
+    if not isinstance(content, list):
+        return "[elided]"
     kept = []
     for block in content:
-        block = dict(block)
-        for key in ("text", "content"):
-            if isinstance(block.get(key), str):
-                lines = [ln for ln in block[key].splitlines() if "PROBE" in ln or ln == "Run the probe."]
-                block[key] = "\n".join(lines) if lines else "[elided]"
-        kept.append(block)
+        if not isinstance(block, dict):
+            kept.append("[elided]")
+            continue
+        out = {}
+        for key, value in block.items():
+            if key in STRUCTURAL_KEYS:
+                out[key] = value
+            elif key in ("text", "content") and isinstance(value, list):
+                out[key] = elide(value)
+            elif key in ("text", "content") and isinstance(value, str):
+                out[key] = marked_lines(value)
+            else:
+                out[key] = "[elided]"
+        kept.append(out)
     return kept
 
 

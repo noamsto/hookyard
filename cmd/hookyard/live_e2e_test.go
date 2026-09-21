@@ -709,6 +709,40 @@ func livePiWriteMultiEventManifest(t *testing.T, dir, handlerPath string) string
 	return path
 }
 
+// livePiWritePreAndPostManifest registers two handlers on the same tool
+// rather than livePiWriteManifest's one: a pre_tool advisory and a post_tool
+// advisory, both matching Bash, so a single call fires both and this suite can
+// prove the bridge orders the pre one ahead of the post one on the shared
+// tool_result.
+func livePiWritePreAndPostManifest(t *testing.T, dir, preHandlerPath, postHandlerPath string) string {
+	t.Helper()
+	m := manifest.Manifest{Handlers: []manifest.Handler{
+		{
+			ID:      "e2e-pi-pre",
+			Exec:    preHandlerPath,
+			Events:  []string{"pre_tool"},
+			Engines: []string{"pi"},
+			Match:   []string{"Bash"},
+		},
+		{
+			ID:      "e2e-pi-post",
+			Exec:    postHandlerPath,
+			Events:  []string{"post_tool"},
+			Engines: []string{"pi"},
+			Match:   []string{"Bash"},
+		},
+	}}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	path := filepath.Join(dir, "hookyard-pi.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	return path
+}
+
 // livePiInstall runs `hookyard install` with routerPath as the one path each
 // test varies, and every other destination pointed at scratch files under
 // root so no real engine config is ever touched. agentDirs registers the
@@ -1246,39 +1280,32 @@ func advisoryContentContains(raw json.RawMessage, substr string) bool {
 	return false
 }
 
-// toolResultThenUserAdvisory reports whether some captured request has a
-// tool-role message containing execSubstr, followed later in that SAME
-// request by a user-role message containing advisorySubstr — the shape
-// docs/design/fixtures/pi-pre-tool-advisory/README.md's steer probe captured
-// (sample-steer.jsonl request 2: tool result, then a user-role steer
-// message), and §11.1's documented timing: a standalone pre_tool advisory
-// reaches the model one request later than the call, appended after that
-// request's own tool result rather than attached to the call.
-func (c *advisoryCapture) toolResultThenUserAdvisory(execSubstr, advisorySubstr string) bool {
-	for _, msgs := range c.snapshot() {
-		for i, m := range msgs {
-			if m.Role != "tool" || !advisoryContentContains(m.Content, execSubstr) {
-				continue
-			}
-			for _, later := range msgs[i+1:] {
-				if later.Role == "user" && advisoryContentContains(later.Content, advisorySubstr) {
-					return true
-				}
-			}
-		}
+// advisoryContentText flattens one message's content to plain text for a
+// substring-position check. A live pi 0.86.1 tool-role message carries
+// content as a plain string already, its blocks newline-joined by pi itself
+// before this ever reaches the model (confirmed against a real process,
+// TestLivePiOrdersPreAndPostToolAdvisoriesOnOneCall): "<exec output>\n[hookyard
+// advisory] <pre>\n[hookyard advisory] <post>". The array-of-{type,text}-blocks
+// shape is flattened the same way, joined on "\n", so a caller can look for
+// ordering with strings.Index regardless of which shape a given message
+// arrived in.
+func advisoryContentText(raw json.RawMessage) (string, bool) {
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		return asString, true
 	}
-	return false
-}
-
-func (c *advisoryCapture) toolMessageContains(substr string) bool {
-	for _, msgs := range c.snapshot() {
-		for _, m := range msgs {
-			if m.Role == "tool" && advisoryContentContains(m.Content, substr) {
-				return true
-			}
-		}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
 	}
-	return false
+	if err := json.Unmarshal(raw, &parts); err == nil {
+		texts := make([]string, len(parts))
+		for i, p := range parts {
+			texts[i] = p.Text
+		}
+		return strings.Join(texts, "\n"), true
+	}
+	return "", false
 }
 
 func (c *advisoryCapture) toolMessageContainsBoth(a, b string) bool {
@@ -1344,6 +1371,17 @@ func writeAdvisorySSEChunk(w http.ResponseWriter, delta map[string]any, finish s
 	_, _ = fmt.Fprintf(w, "data: %s\n\n", raw)
 }
 
+// livePiPrintfRanCommand is the shell command the scripted bash tool call
+// runs by default: printf's own %s-%s differs from the command's source
+// text, so a substring match on the tool's captured output can tell "the
+// command ran" apart from "the command's text merely appeared in a message"
+// (e.g. an assistant tool_calls message, which carries the command as a JSON
+// string) — deliberately not `echo <execTok>-ran`, which would not have that
+// property.
+func livePiPrintfRanCommand(execTok string) string {
+	return fmt.Sprintf("printf '%%s-%%s' %s ran", execTok)
+}
+
 // liveNewAdvisoryModelServer starts an in-process OpenAI-compatible chat
 // server scripted by conversation state rather than by request count: pi on
 // PATH here may be a Nix wrapper that adds its own extensions when
@@ -1351,18 +1389,16 @@ func writeAdvisorySSEChunk(w http.ResponseWriter, delta map[string]any, finish s
 // requests a run makes before or after the one this test cares about, so
 // counting requests would be fragile in a way reading the conversation itself
 // is not. Until a tool-role message appears anywhere in the conversation, it
-// answers with one bash tool call running `printf '%s-%s' <execTok> ran` —
-// deliberately not `echo <execTok>-ran`, so the executed output differs from
-// the command's own source text and a substring match can tell "the command
-// ran" apart from "the command's text merely appeared in a message" (e.g. an
-// assistant tool_calls message, which carries the command as a JSON string).
-// Once a tool-role message exists, every later request gets plain text
-// ("done", finish_reason "stop"), which is enough to let pi's turn conclude
-// without looping. It has no notion of paths — every GET is answered as
-// /models and every POST as /chat/completions — mirroring
+// answers with one bash tool call running command — livePiPrintfRanCommand
+// for the common case, or a caller's own variant (e.g. one that also exits
+// non-zero, to prove advisory delivery survives a failed call too). Once a
+// tool-role message exists, every later request gets plain text ("done",
+// finish_reason "stop"), which is enough to let pi's turn conclude without
+// looping. It has no notion of paths — every GET is answered as /models and
+// every POST as /chat/completions — mirroring
 // docs/design/fixtures/pi-pre-tool-advisory/fake-llm.py's own handler, which
 // does the same and is proven against real pi (that fixture dir's README).
-func liveNewAdvisoryModelServer(t *testing.T, execTok string) (*httptest.Server, *advisoryCapture) {
+func liveNewAdvisoryModelServer(t *testing.T, command string) (*httptest.Server, *advisoryCapture) {
 	t.Helper()
 	capture := &advisoryCapture{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1405,7 +1441,7 @@ func liveNewAdvisoryModelServer(t *testing.T, execTok string) (*httptest.Server,
 		w.WriteHeader(http.StatusOK)
 		if !hasToolMessage {
 			args, err := json.Marshal(map[string]string{
-				"command": fmt.Sprintf("printf '%%s-%%s' %s ran", execTok),
+				"command": command,
 			})
 			if err != nil {
 				t.Errorf("marshal scripted bash tool arguments: %v", err)
@@ -1439,10 +1475,13 @@ func liveNewAdvisoryModelServer(t *testing.T, execTok string) (*httptest.Server,
 // of — a permissionDecision. body is the handler's entire stdout, already
 // shaped as hookyard's handler wire protocol (§7's hookSpecificOutput
 // wrapper, the same shape internal/router/handler.go's handlerOutput decodes
-// and every engine's own render reads back).
-func livePiWriteAdvisoryHandler(t *testing.T, dir, firedMarker, body string) string {
+// and every engine's own render reads back). name picks the script's own
+// filename, distinct from any other handler sharing dir — a test installing
+// two handlers at once (one on pre_tool, one on post_tool) would otherwise
+// have the second call's write silently clobber the first's script.
+func livePiWriteAdvisoryHandler(t *testing.T, dir, name, firedMarker, body string) string {
 	t.Helper()
-	path := filepath.Join(dir, "advisory-handler.sh")
+	path := filepath.Join(dir, name)
 	script := "#!/bin/sh\n" +
 		"touch " + firedMarker + "\n" +
 		"printf '%s' '" + body + "'\n"
@@ -1452,37 +1491,37 @@ func livePiWriteAdvisoryHandler(t *testing.T, dir, firedMarker, body string) str
 	return path
 }
 
-// TestLivePiDeliversAStandalonePreToolAdvisoryAfterTheCall is the delivery
-// half of docs/design/hookyard.md §11.1's amendment: a handler that allows by
-// abstaining and returns only additionalContext has no field in pi's
-// tool_call reply to carry it on (render.renderPi's default arm), so the
-// bridge queues it as a pi.sendMessage(..., {deliverAs: "steer"}) message
-// instead. This proves that delivery through the real installed bridge
-// (pi_bridge.ts, not a hand-written stand-in) against a real pi process,
-// deterministically: the scripted model in liveNewAdvisoryModelServer
-// replaces docs/design/fixtures/pi-pre-tool-advisory/fake-llm.py's manual,
-// one-off probe with something this suite can run unattended, without
-// Lemonade or any other local model.
+// TestLivePiDeliversAStandalonePreToolAdvisoryWithTheCallsResult is the
+// delivery half of docs/design/hookyard.md §11.1's amendment: a handler that
+// allows by abstaining and returns only additionalContext has no field in
+// pi's tool_call reply to carry it on (render.renderPi's default arm), so the
+// bridge stashes it and appends it to that same call's own tool_result — the
+// request immediately following execution, beside the result, the same place
+// Claude Code's pre_tool additionalContext lands. This proves that delivery
+// through the real installed bridge (pi_bridge.ts, not a hand-written
+// stand-in) against a real pi process, deterministically: the scripted model
+// in liveNewAdvisoryModelServer replaces
+// docs/design/fixtures/pi-pre-tool-advisory/fake-llm.py's manual, one-off
+// probe with something this suite can run unattended, without Lemonade or any
+// other local model.
 //
 // Two things distinguish "delivered" from "not delivered" here, both read off
-// the wire rather than off pi's own stdout: the advisory text must appear as
-// a user-role message in the SAME request that also carries the executed
-// command's own output (§11.1 — one request later than the call, not attached
-// to it), and it must never appear on the tool-role message itself, which
-// would mean the bridge appended it to the tool result instead of steering
-// it — the tool_result channel's own delivery path, not tool_call's.
-func TestLivePiDeliversAStandalonePreToolAdvisoryAfterTheCall(t *testing.T) {
+// the wire rather than off pi's own stdout: the advisory text must appear on
+// the SAME tool-role message as the executed command's own output, and it
+// must never appear on any non-tool message, which would mean the bridge
+// queued it as a separate delivery instead of appending it to the result.
+func TestLivePiDeliversAStandalonePreToolAdvisoryWithTheCallsResult(t *testing.T) {
 	piBin := liveRequirePiBinary(t)
 	hookyardBin, root, agentDir, projectDir, stateDir := liveScriptedPiLayout(t)
 
 	execTok := fmt.Sprintf("hookyard-e2e-pi-exec-%d", time.Now().UnixNano())
 	adviceTok := fmt.Sprintf("hookyard-e2e-pi-advice-%d", time.Now().UnixNano())
 
-	server, capture := liveNewAdvisoryModelServer(t, execTok)
+	server, capture := liveNewAdvisoryModelServer(t, livePiPrintfRanCommand(execTok))
 	livePiSeedScriptedAgentDir(t, agentDir, server.URL+"/v1")
 
 	body := `{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"` + adviceTok + `"}}`
-	handlerPath := livePiWriteAdvisoryHandler(t, root, filepath.Join(root, "handler-fired"), body)
+	handlerPath := livePiWriteAdvisoryHandler(t, root, "advisory-handler.sh", filepath.Join(root, "handler-fired"), body)
 	manifestPath := livePiWriteManifest(t, root, handlerPath)
 	livePiInstall(t, hookyardBin, root, []string{agentDir}, stateDir, manifestPath, hookyardBin)
 
@@ -1499,30 +1538,145 @@ func TestLivePiDeliversAStandalonePreToolAdvisoryAfterTheCall(t *testing.T) {
 	execOutput := execTok + "-ran"
 	advisoryText := "[hookyard advisory] " + adviceTok
 
-	if !capture.toolResultThenUserAdvisory(execOutput, advisoryText) {
-		t.Fatalf("advisory %q never followed the executed tool result %q as a later user-role message in the "+
-			"same request\n--- recorded requests ---\n%s\n--- pi output ---\n%s",
-			advisoryText, execOutput, capture.dump(), output)
+	if !capture.toolMessageContainsBoth(execOutput, advisoryText) {
+		t.Fatalf("no tool-role message carries both the executed output %q and the advisory %q; a standalone "+
+			"pre_tool advisory must reach the model appended to the call's own tool result\n"+
+			"--- recorded requests ---\n%s\n--- pi output ---\n%s", execOutput, advisoryText, capture.dump(), output)
 	}
-	if capture.toolMessageContains(adviceTok) {
-		t.Fatalf("advisory token %q appears on a tool-role message; it must reach the model only as a steered "+
-			"user message, never appended to the tool result\n--- recorded requests ---\n%s\n--- pi output ---\n%s",
+	if capture.nonToolMessageContains(adviceTok) {
+		t.Fatalf("advisory token %q appears on a non-tool message; it must reach the model only appended to the "+
+			"call's own tool result, never as a separate delivery\n--- recorded requests ---\n%s\n--- pi output ---\n%s",
 			adviceTok, capture.dump(), output)
 	}
 
-	if rec, ok := liveFindBashDenyRecord(t, stateDir); ok {
-		if len(rec.Handlers) == 0 || rec.Handlers[0].Outcome != record.OutcomeAdvise ||
-			rec.Handlers[0].Delivered == nil || !*rec.Handlers[0].Delivered {
-			t.Fatalf("hookyard's own record does not show the advisory as delivered: %+v\n"+
-				"--- recorded requests ---\n%s\n--- pi output ---\n%s", rec.Handlers, capture.dump(), output)
+	rec, ok := liveFindBashDenyRecord(t, stateDir)
+	if !ok {
+		t.Fatalf("the advisory handler fired, but hookyard's own record has no Bash pre_tool entry for it — "+
+			"a hookyard-side problem, not an engine one\n--- pi output ---\n%s", output)
+	}
+	if len(rec.Handlers) == 0 || rec.Handlers[0].Outcome != record.OutcomeAdvise ||
+		rec.Handlers[0].Delivered == nil || !*rec.Handlers[0].Delivered {
+		t.Fatalf("hookyard's own record does not show the advisory as delivered: %+v\n"+
+			"--- recorded requests ---\n%s\n--- pi output ---\n%s", rec.Handlers, capture.dump(), output)
+	}
+
+	t.Logf("recorded requests:\n%s\n--- pi output ---\n%s", capture.dump(), output)
+}
+
+// TestLivePiDeliversAPreToolAdvisoryWhenTheToolFails is the standalone
+// test's counterpart for a call that fails: pi's afterToolCall fires
+// tool_result for a call that threw too — the failure just becomes an
+// isError result — so the bridge's flush must not skip it. The scripted
+// command still prints its own output before exiting non-zero, so the same
+// exec-output-plus-advisory check applies.
+func TestLivePiDeliversAPreToolAdvisoryWhenTheToolFails(t *testing.T) {
+	piBin := liveRequirePiBinary(t)
+	hookyardBin, root, agentDir, projectDir, stateDir := liveScriptedPiLayout(t)
+
+	execTok := fmt.Sprintf("hookyard-e2e-pi-exec-fail-%d", time.Now().UnixNano())
+	adviceTok := fmt.Sprintf("hookyard-e2e-pi-advice-fail-%d", time.Now().UnixNano())
+
+	server, capture := liveNewAdvisoryModelServer(t, livePiPrintfRanCommand(execTok)+"; exit 3")
+	livePiSeedScriptedAgentDir(t, agentDir, server.URL+"/v1")
+
+	body := `{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"` + adviceTok + `"}}`
+	handlerPath := livePiWriteAdvisoryHandler(t, root, "advisory-handler.sh", filepath.Join(root, "handler-fired"), body)
+	manifestPath := livePiWriteManifest(t, root, handlerPath)
+	livePiInstall(t, hookyardBin, root, []string{agentDir}, stateDir, manifestPath, hookyardBin)
+
+	ctx, cancel := context.WithTimeout(context.Background(), livePiAdvisoryBudget)
+	defer cancel()
+	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", "--no-session", livePiAdvisoryPrompt)
+	probe.Dir = projectDir
+	probe.Env = livePiEnv(agentDir)
+	output, err := probe.CombinedOutput()
+	if err != nil {
+		t.Fatalf("pi run: %v\n--- pi output ---\n%s\n--- recorded requests ---\n%s", err, output, capture.dump())
+	}
+
+	execOutput := execTok + "-ran"
+	advisoryText := "[hookyard advisory] " + adviceTok
+
+	if !capture.toolMessageContainsBoth(execOutput, advisoryText) {
+		t.Fatalf("no tool-role message carries both the failed call's own output %q and the advisory %q — a "+
+			"failed call must still get its advisory\n--- recorded requests ---\n%s\n--- pi output ---\n%s",
+			execOutput, advisoryText, capture.dump(), output)
+	}
+
+	t.Logf("recorded requests:\n%s\n--- pi output ---\n%s", capture.dump(), output)
+}
+
+// TestLivePiOrdersPreAndPostToolAdvisoriesOnOneCall proves pi_bridge.ts's
+// registration-order guarantee end to end: the bridge registers its
+// tool_call-stash flush before the per-entry loop specifically so a pre_tool
+// advisory lands ahead of hookyard's own post_tool advisory on the same
+// call's tool_result — exec output first, then the pre-tool advisory, then
+// the post-tool one, each exactly once.
+func TestLivePiOrdersPreAndPostToolAdvisoriesOnOneCall(t *testing.T) {
+	piBin := liveRequirePiBinary(t)
+	hookyardBin, root, agentDir, projectDir, stateDir := liveScriptedPiLayout(t)
+
+	execTok := fmt.Sprintf("hookyard-e2e-pi-exec-order-%d", time.Now().UnixNano())
+	preTok := fmt.Sprintf("hookyard-e2e-pi-pre-%d", time.Now().UnixNano())
+	postTok := fmt.Sprintf("hookyard-e2e-pi-post-%d", time.Now().UnixNano())
+
+	server, capture := liveNewAdvisoryModelServer(t, livePiPrintfRanCommand(execTok))
+	livePiSeedScriptedAgentDir(t, agentDir, server.URL+"/v1")
+
+	preBody := `{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"` + preTok + `"}}`
+	postBody := `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"` + postTok + `"}}`
+	preHandlerPath := livePiWriteAdvisoryHandler(t, root, "pre-handler.sh", filepath.Join(root, "pre-handler-fired"), preBody)
+	postHandlerPath := livePiWriteAdvisoryHandler(t, root, "post-handler.sh", filepath.Join(root, "post-handler-fired"), postBody)
+	manifestPath := livePiWritePreAndPostManifest(t, root, preHandlerPath, postHandlerPath)
+	livePiInstall(t, hookyardBin, root, []string{agentDir}, stateDir, manifestPath, hookyardBin)
+
+	ctx, cancel := context.WithTimeout(context.Background(), livePiAdvisoryBudget)
+	defer cancel()
+	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", "--no-session", livePiAdvisoryPrompt)
+	probe.Dir = projectDir
+	probe.Env = livePiEnv(agentDir)
+	output, err := probe.CombinedOutput()
+	if err != nil {
+		t.Fatalf("pi run: %v\n--- pi output ---\n%s\n--- recorded requests ---\n%s", err, output, capture.dump())
+	}
+
+	execOutput := execTok + "-ran"
+	preText := "[hookyard advisory] " + preTok
+	postText := "[hookyard advisory] " + postTok
+
+	ordered := false
+	for _, msgs := range capture.snapshot() {
+		for _, m := range msgs {
+			if m.Role != "tool" {
+				continue
+			}
+			text, ok := advisoryContentText(m.Content)
+			if !ok {
+				continue
+			}
+			if strings.Count(text, execOutput) != 1 || strings.Count(text, preText) != 1 ||
+				strings.Count(text, postText) != 1 {
+				continue
+			}
+			execIdx := strings.Index(text, execOutput)
+			preIdx := strings.Index(text, preText)
+			postIdx := strings.Index(text, postText)
+			if execIdx < preIdx && preIdx < postIdx {
+				ordered = true
+			}
 		}
+	}
+	if !ordered {
+		t.Fatalf("no tool-role message carries the exec output, then the pre-tool advisory, then the "+
+			"post-tool advisory, each exactly once, in that order\n--- recorded requests ---\n%s\n--- pi output ---\n%s",
+			capture.dump(), output)
 	}
 
 	t.Logf("recorded requests:\n%s\n--- pi output ---\n%s", capture.dump(), output)
 }
 
 // TestLivePiDeliversADenyAdvisoryOnlyThroughTheReason is
-// TestLivePiDeliversAStandalonePreToolAdvisoryAfterTheCall's deny-side
+// TestLivePiDeliversAStandalonePreToolAdvisoryWithTheCallsResult's deny-side
 // counterpart: render.renderPiDeny joins a deny's reason and advice into
 // Pi's one reason field and never also steers it (§11.1, "delivered exactly
 // once"), so this proves that against a real pi process the advisory rides
@@ -1537,12 +1691,12 @@ func TestLivePiDeliversADenyAdvisoryOnlyThroughTheReason(t *testing.T) {
 	reasonTok := fmt.Sprintf("hookyard-e2e-pi-reason-%d", time.Now().UnixNano())
 	adviceTok := fmt.Sprintf("hookyard-e2e-pi-advice-deny-%d", time.Now().UnixNano())
 
-	server, capture := liveNewAdvisoryModelServer(t, execTok)
+	server, capture := liveNewAdvisoryModelServer(t, livePiPrintfRanCommand(execTok))
 	livePiSeedScriptedAgentDir(t, agentDir, server.URL+"/v1")
 
 	body := `{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"` + reasonTok +
 		`","additionalContext":"` + adviceTok + `"}}`
-	handlerPath := livePiWriteAdvisoryHandler(t, root, filepath.Join(root, "handler-fired"), body)
+	handlerPath := livePiWriteAdvisoryHandler(t, root, "advisory-handler.sh", filepath.Join(root, "handler-fired"), body)
 	manifestPath := livePiWriteManifest(t, root, handlerPath)
 	livePiInstall(t, hookyardBin, root, []string{agentDir}, stateDir, manifestPath, hookyardBin)
 

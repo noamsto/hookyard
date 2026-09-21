@@ -5,7 +5,8 @@ set -euo pipefail
 
 pi_bin=$1
 ext=$(realpath "$2")
-out=$(realpath -m "$3")
+: >"$3"
+out=$(realpath "$3")
 here=$(dirname "$(realpath "$0")")
 port=${PROBE_PORT:-18765}
 
@@ -24,13 +25,17 @@ cat >"$scratch/models.json" <<JSON
 JSON
 echo '{}' >"$scratch/settings.json"
 
-: >"$out"
 python3 "$here/fake-llm.py" "$port" "$out" &
 server_pid=$!
+ready=
 for _ in $(seq 50); do
-  if curl -sf "http://127.0.0.1:$port/v1/models" >/dev/null; then break; fi
+  if curl -sf "http://127.0.0.1:$port/v1/models" >/dev/null; then ready=1; break; fi
   sleep 0.1
 done
+if [[ -z $ready ]]; then
+  echo "fake-llm.py never became ready on port $port" >&2
+  exit 1
+fi
 
 env PI_CODING_AGENT_DIR="$scratch" PI_OFFLINE=1 \
   "$pi_bin" --no-session --print --mode json \
