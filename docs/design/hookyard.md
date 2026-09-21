@@ -4048,7 +4048,7 @@ was already taken by the `pendingToolAdvice.get`/`.delete` pair, so it's lost
 either way; or a foreign extension loaded after the bridge replaces
 `tool_result` content wholesale instead of appending to it, discarding
 whatever the bridge had already appended. On ordering, a single call carrying
-both a `pre_tool` and a `post_tool` advisory gets both, in that order — the
+both a `pre_tool` and a `post_tool` advisory gets both, in this order — the
 tool's own output first, then `post_tool`'s own advice (§7's table, "On
 `post_tool`, advice is appended to the tool result content"), then the
 `pre_tool` advisory last: the bridge's flush is registered *after* the
