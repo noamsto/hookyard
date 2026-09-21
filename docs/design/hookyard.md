@@ -2286,7 +2286,7 @@ strings it collected have to ride alongside it:
 | Claude Code | `hookSpecificOutput.permissionDecision` = `allow`/`deny`/`ask`, `permissionDecisionReason` = reason, on `pre_tool` only | `hookSpecificOutput.additionalContext`, the concatenation of every advisory collected, delivered on `pre_tool`, `session_start`, and `post_tool` — the latter two have no decision slot, only the advisory one | Verdict yes — documented field, tri-state including `ask`. Advisory arm confirmed on `pre_tool` by an existing guard emitting it, and confirmed live in production on `session_start` and `post_tool` by aeye's `diagram-guidance.sh` and `diagrams.sh` respectively |
 | Codex | Unconfirmed | No advisory slot on any event | Only fire-and-forget hooks observed deployed; Codex's deny path and its default timeout when an entry declares none were not verified this pass. Codex has no advisory channel at all — a settled boundary, not an open question |
 | Cursor | `permission` field | Unconfirmed | Field name confirmed; exact accepted value set (binary vs. tri-state) not confirmed this pass, and no advisory slot identified |
-| Pi | return `{block: true, reason: string}` from the extension's `tool_call` handler; there is no `allow` wire form — not blocking *is* allow, so an explicit allow renders nothing | `reason` reaches the model, but only riding with a block; standalone advice has no path to the model at all (`ctx.ui.notify` reaches the *user*, and only when `ctx.ui.hasUI`) | **Confirmed live, twice, including a filesystem side effect**: `touch SIDE-EFFECT.txt` was denied and the file did not exist afterward; a second denied `bash` call produced no `tool_result` event while the reason string still reached the model as the tool's outcome. Decision vocabulary is binary — no `ask` arm was found |
+| Pi | return `{block: true, reason: string}` from the extension's `tool_call` handler; there is no `allow` wire form — not blocking *is* allow, so an explicit allow renders nothing | Three channels, one per event, each prefixed `"[hookyard advisory] "`: on `pre_tool`, a deny's advice is joined into the block `reason` (rides with the block, as above); a standalone abstain/allow's advice has no field in the `tool_call` reply pi's agent loop reads, so the bridge delivers it as a `pi.sendMessage(..., {deliverAs: "steer"})` message, which the model reads after the tool call's own result rather than attached to it — §11.1. On `session_start`, queued advice is flushed as a `before_agent_start` injected message. On `post_tool`, advice is appended to the tool result content | **Confirmed live, twice, including a filesystem side effect**: `touch SIDE-EFFECT.txt` was denied and the file did not exist afterward; a second denied `bash` call produced no `tool_result` event while the reason string still reached the model as the tool's outcome. Decision vocabulary is binary — no `ask` arm was found. The `pre_tool` advisory channels (deny-reason and steer) are confirmed against `docs/design/fixtures/pi-pre-tool-advisory/` — §11.1 |
 
 **Where an engine has no advisory slot, the advice is recorded (§6) and not
 delivered.** That is a real loss and is stated rather than hidden: a handler
@@ -3901,6 +3901,105 @@ to use it. The reversal trigger is filed as issue #12, the first real handler
 that genuinely needs `prompt` or `agent`; until one exists, modelling a
 handler type nothing uses is exactly the kind of generality this document
 argues against elsewhere.
+
+## 11.1 Amendment: Pi's pre_tool advisory (issue #72)
+
+§7's outbound table shipped Pi's `pre_tool` advisory as riding only with a
+block; a standalone abstain/allow's advice — the shape
+`git-commit-autostage-guard.sh` uses, advisory-only, `additionalContext`, on
+`bash git commit` — had no stated path to the model at all. Issue #72 asked
+the question directly: can a pi `tool_call` handler return content alongside
+an allow, the way it can return a `reason` alongside a block? The answer is
+**no — a pi platform limit**, not a hookyard gap, on two independent kinds of
+evidence. First, source: pi 0.86.1's compiled binary embeds the agent loop,
+and its `beforeToolCall` consumer reads only `beforeResult.block`, `.reason`,
+and `.terminate` off a handler's return — every other key is discarded on an
+allow — and pi's own bundled `docs/extensions.md` documents the `tool_call`
+return type as exactly `{ block: true, reason?: string, terminate?: boolean }`,
+nothing more (code-reading + DOC). Second, LOCAL probe A
+(`ext-allow-content.ts`, `docs/design/fixtures/pi-pre-tool-advisory/`): an
+allow returning every content-bearing key a handler might plausibly reach
+for at once — `reason`, `content`, `message`, `additionalContext`,
+`systemMessage` — each carrying its own marker. `sample-allow-content.jsonl`
+shows the tool executed (`PROBE_EXECUTED\n` is the tool result) and *none* of
+the five markers appear in any request pi sent the model. Probe B
+(`ext-block.ts`) is the control: block-with-`reason` puts the reason string
+in as the tool result and the command never runs
+(`sample-block.jsonl`) — confirming the harness would have shown a marker had
+pi forwarded one, and didn't for any allow-side key.
+
+Given that limit, the fix is `pi.sendMessage(..., { deliverAs: "steer" })`,
+the one side channel a `tool_call` handler retains into model context while
+allowing the call — LOCAL probe C (`ext-steer.ts`): a handler that allows and
+also queues a `"PROBE_STEER"` steer message. `sample-steer.jsonl`'s request 2
+is `[user prompt, assistant tool_call, tool "PROBE_EXECUTED\n", user
+"PROBE_STEER"]` — the steer reaches the model, as a user-role message, placed
+after the tool result in the same request that carries it.
+
+**That placement is not a degraded deferral relative to Claude Code — it is
+timing parity, and that is the reason steer is the chosen channel rather than
+a fallback.** The Claude Code parity fixture
+(`probe-claude.sh` + `fake-anthropic.py` + `claude-pretool-hook.sh`, Claude
+Code 2.1.278, an isolated `CLAUDE_CONFIG_DIR`, `--setting-sources ""`, a
+`PreToolUse` hook emitting only `additionalContext` — the same
+abstain-with-advice shape) shows the identical structure on the engine §7
+already lists as having a real advisory slot: `sample-claude-pretool.jsonl`
+has two tool-bearing requests, and the marker first appears in request 2 as a
+system-role message, `"PreToolUse:Bash hook additional context:
+PROBE_CLAUDE_ADDITIONALCONTEXT"`, placed *after* the tool result
+`"PROBE_EXECUTED"` — not attached to the call, not in the request that issued
+it. The structural reason is the same on both engines: no engine here makes
+an LLM call between a pre-tool hook returning and the tool executing, so the
+model reads pre_tool context only at its *next* request, which is always
+after the call's own result — steer just makes that already-shared timing
+observable on Pi instead of dropping it. The concern this closes is real:
+`git-commit-autostage-guard`'s advice is exactly as actionable delivered this
+way as it is on Claude, because both engines hand the model the advisory
+alongside the same tool result, one request later than the call itself, never
+before it and never deferred to some later turn.
+
+**Implementation.** The router renders `{"advisory": "..."}` on a pi
+`tool_call` event for `abstain`/`allow` verdicts that carry advice (recorded
+delivered, per §6). The bridge, on a `tool_call` reply that is not a block,
+calls `pi.sendMessage({ customType: "hookyard", content: "[hookyard
+advisory] " + advice, display: false }, { deliverAs: "steer" })` and then
+allows. A `deny` — or an `ask` degraded to `deny` per §7's rule — joins its
+advice into the block `reason` instead and emits no `advisory` key; the
+bridge returns the block and never steers. A deny-with-advisory is therefore
+delivered exactly once, through the reason, never doubled onto a steer the
+blocked call will never see execute.
+
+**Real differences from Claude Code's `additionalContext`, stated rather than
+smoothed over:** (a) it is a user-role custom message, not text attached to
+the tool call's own turn; (b) it lands after the *whole* parallel tool batch
+completes — pi drains queued steering only once `executeToolCalls` finishes
+— not attached to the one call that queued it; (c) a pending steer keeps
+pi's `runLoop` alive (`while (hasMoreToolCalls || pendingMessages.length >
+0)`), which would force one further model call even had the batch otherwise
+terminated — unreachable for an allowed call unless the tool itself
+terminates the session; (d) the steer is stored as its own custom-message
+entry in the session transcript, not folded into the tool result or the
+system prompt; (e) the exactly-once guarantee above covers hookyard's own
+reply only — yard mode consolidates hookyard's own handlers into one reply
+per event (§7), but a *foreign*, non-hookyard extension loaded after the
+bridge and reacting to the same call independently of it could still block
+that call itself, and the model would then see hookyard's advisory *and*
+that foreign block both — advisory-then-deny, not a hookyard-caused double
+delivery.
+
+The live proof through the real yard bridge — not the throwaway probe
+extensions above — is a `HOOKYARD_E2E`-gated pair in
+`cmd/hookyard/live_e2e_test.go`:
+`TestLivePiDeliversAStandalonePreToolAdvisoryAfterTheCall` and
+`TestLivePiDeliversADenyAdvisoryOnlyThroughTheReason`. Full probe method,
+commands, and the redaction applied to each committed transcript are in
+`docs/design/fixtures/pi-pre-tool-advisory/README.md`.
+
+### What this amends
+
+| Section | Disposition | Reason |
+|---|---|---|
+| §7, outbound table, Pi row, "Advisory rendering" | Amended | "Standalone advice has no path to the model at all" is stale: `pre_tool` standalone advice rides a steer message delivered after the call, alongside the already-live `session_start` (`before_agent_start`) and `post_tool` (tool-result-appended) channels from issue #71 (issue #72) |
 
 ## 12. Open questions
 

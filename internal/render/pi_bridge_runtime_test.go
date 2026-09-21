@@ -36,15 +36,26 @@ import (
 const piBridgeHarness = `import { readFile } from "node:fs/promises";
 import bridge from "./bridge.mjs";
 
+const [scriptPath, ...rest] = process.argv.slice(2);
+const scripted = JSON.parse(await readFile(scriptPath, "utf8"));
+// A plain array is a plain sequence of steps; an object lets a test also tell
+// the stub sendMessage below to throw, the way a real pi.sendMessage never
+// does synchronously but the bridge's try/catch must still survive.
+const { sendThrows, steps } = Array.isArray(scripted) ? { sendThrows: false, steps: scripted } : scripted;
+
 const registered = [];
 const commands = [];
 const notifications = [];
+const sent = [];
 bridge({
   on: (event, handler) => registered.push({ event, handler }),
   registerCommand: (name, options) => commands.push({ name, ...options }),
+  sendMessage: (message, options) => {
+    if (sendThrows) throw new Error("PROBE_SEND_THROWS");
+    sent.push({ message, options });
+  },
 });
 
-const [scriptPath, ...rest] = process.argv.slice(2);
 const ctx = {
   cwd: "/probe/cwd",
   sessionManager: {
@@ -57,7 +68,7 @@ const ctx = {
 };
 
 const returns = [];
-for (const step of JSON.parse(await readFile(scriptPath, "utf8"))) {
+for (const step of steps) {
   if (step.command !== undefined) {
     const command = commands.find((c) => c.name === step.command);
     if (!command) throw new Error("the bridge registered no command named " + step.command);
@@ -76,6 +87,7 @@ process.stdout.write(JSON.stringify({
   registered: registered.map((r) => r.event),
   commands: commands.map((c) => ({ name: c.name, description: c.description })),
   notifications,
+  sent,
   returns,
 }));
 `
@@ -203,13 +215,28 @@ type piBridgeNotification struct {
 	Level   string `json:"level"`
 }
 
+// piBridgeSentMessage is one pi.sendMessage call the harness's stub recorded —
+// the steer channel a non-blocking tool_call advisory rides, since tool_call's
+// return value is spent whole on the allow/block decision.
+type piBridgeSentMessage struct {
+	Message struct {
+		CustomType string `json:"customType"`
+		Content    string `json:"content"`
+		Display    bool   `json:"display"`
+	} `json:"message"`
+	Options struct {
+		DeliverAs string `json:"deliverAs"`
+	} `json:"options"`
+}
+
 // piBridgeDrive is what one load of the bridge did: the events and commands it
-// registered, in order, each fired handler's return value as JSON text, and
-// what it asked pi to show the user.
+// registered, in order, each fired handler's return value as JSON text, what it
+// asked pi to show the user, and every message it steered.
 type piBridgeDrive struct {
 	Registered    []string               `json:"registered"`
 	Commands      []piBridgeRegistration `json:"commands"`
 	Notifications []piBridgeNotification `json:"notifications"`
+	Sent          []piBridgeSentMessage  `json:"sent"`
 	Returns       []json.RawMessage      `json:"returns"`
 }
 
@@ -227,12 +254,34 @@ func (d piBridgeDrive) ret(i int) string { return string(d.Returns[i]) }
 // sanitise.
 func (r *piBridgeRun) drive(t *testing.T, steps []piBridgeStep, argv ...string) piBridgeDrive {
 	t.Helper()
+	return r.driveScript(t, steps, false, argv...)
+}
+
+// driveSendThrows drives like drive, but tells the harness's stub
+// pi.sendMessage to throw synchronously on every call. pi 0.86.1 binds
+// sendMessage fire-and-forget with its own .catch, so an async failure can
+// never reach the handler — a synchronous throw is the one failure mode
+// steerAdvisory's caller has to survive without escalating to a block.
+func (r *piBridgeRun) driveSendThrows(t *testing.T, steps []piBridgeStep, argv ...string) piBridgeDrive {
+	t.Helper()
+	return r.driveScript(t, steps, true, argv...)
+}
+
+func (r *piBridgeRun) driveScript(t *testing.T, steps []piBridgeStep, sendThrows bool, argv ...string) piBridgeDrive {
+	t.Helper()
 	if steps == nil {
 		// A nil slice marshals to null and the harness iterates what it parses.
 		// A drive with no steps is how a test reads the registrations alone.
 		steps = []piBridgeStep{}
 	}
-	raw, err := json.Marshal(steps)
+	var scripted any = steps
+	if sendThrows {
+		scripted = struct {
+			SendThrows bool           `json:"sendThrows"`
+			Steps      []piBridgeStep `json:"steps"`
+		}{true, steps}
+	}
+	raw, err := json.Marshal(scripted)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,11 +490,12 @@ func TestPiBridgeBlocksOnlyOnToolCall(t *testing.T) {
 	}))
 }
 
-// The advisory path owes the same fail-open decision() owes, on both delivery
-// vehicles. None of these could block — only tool_call can — but a bridge that
-// read an advisory out of a reply it does not understand would put the router's
-// own failure in front of the model as hookyard's advice, and on tool_result it
-// would put it there in place of the tool's output.
+// The advisory path owes the same fail-open decision() owes, on all three
+// delivery vehicles. None of these could block — only tool_call can — but a
+// bridge that read an advisory out of a reply it does not understand would put
+// the router's own failure in front of the model as hookyard's advice: on
+// tool_result in place of the tool's output, on tool_call over the steer
+// channel.
 func TestPiBridgeDeliversNothingOnEveryUnreadableAdvisory(t *testing.T) {
 	for _, tc := range []struct{ name, body string }{
 		{name: "unparsable-stdout", body: `process.stdout.write("not json at all");`},
@@ -460,6 +510,7 @@ func TestPiBridgeDeliversNothingOnEveryUnreadableAdvisory(t *testing.T) {
 			run.install(t, EmittedTimeoutSeconds*1000,
 				piEntry("session_start", "", router),
 				piEntry("tool_result", "", router),
+				piEntry("tool_call", "", router),
 			)
 
 			drive := run.drive(t, []piBridgeStep{
@@ -468,15 +519,87 @@ func TestPiBridgeDeliversNothingOnEveryUnreadableAdvisory(t *testing.T) {
 				// The content is an array, so the only thing standing between
 				// this reply and an appended block is the reply itself.
 				{Event: "tool_result", Payload: piToolResult([]any{piTextBlock("the tool's own output")})},
+				{Event: "tool_call", Payload: piToolCall("bash", nil)},
 			})
 
-			for i, fired := range []string{"session_start", "the before_agent_start flush", "tool_result"} {
+			for i, fired := range []string{"session_start", "the before_agent_start flush", "tool_result", "tool_call"} {
 				if got := drive.ret(i); got != "null" {
 					t.Errorf("%s returned %s, want null: an unreadable reply delivers no advisory", fired, got)
 				}
 			}
+			if len(drive.Sent) != 0 {
+				t.Errorf("sent = %+v, want nothing steered from an unreadable advisory", drive.Sent)
+			}
 		})
 	}
+}
+
+// tool_call's return value is spent whole on the allow/block decision, so a
+// non-blocking verdict's advice has to leave through pi.sendMessage's steer
+// channel instead of the return value — the one channel that still reaches the
+// model after an allow.
+func TestPiBridgeSteersANonBlockingToolCallAdvisory(t *testing.T) {
+	run := newPiBridgeRun(t)
+	const advice = "the yard has notes about this command"
+	run.install(t, EmittedTimeoutSeconds*1000,
+		piEntry("tool_call", "", run.router(t, "advising", `process.stdout.write('{"advisory":`+strconv.Quote(advice)+`}');`)))
+
+	drive := run.drive(t, []piBridgeStep{{Event: "tool_call", Payload: piToolCall("bash", nil)}})
+
+	assertPiAllows(t, drive.ret(0))
+	if len(drive.Sent) != 1 {
+		t.Fatalf("sent = %+v, want exactly one steered message", drive.Sent)
+	}
+	sent := drive.Sent[0]
+	if sent.Message.CustomType != "hookyard" || sent.Message.Content != "[hookyard advisory] "+advice || sent.Message.Display {
+		t.Errorf("sent message = %+v, want an attributed, non-displayed hookyard message", sent.Message)
+	}
+	if sent.Options.DeliverAs != "steer" {
+		t.Errorf("sent options = %+v, want deliverAs steer", sent.Options)
+	}
+}
+
+// A well-formed deny already folds the router's advice into decision()'s
+// reason (§11.1), so the block path must never also steer it — that would
+// deliver the same advice twice, once as the refusal and once as an
+// unsolicited message the model never asked to see.
+func TestPiBridgeNeverSteersOnABlock(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{name: "block-alone", body: `process.stdout.write('{"block":true,"reason":"denied"}');`},
+		{
+			name: "block-with-advisory-already-folded-into-the-reason",
+			body: `process.stdout.write('{"block":true,"reason":"denied","advisory":"never delivered"}');`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := newPiBridgeRun(t)
+			run.install(t, EmittedTimeoutSeconds*1000, piEntry("tool_call", "", run.router(t, "deny", tc.body)))
+
+			drive := run.drive(t, []piBridgeStep{{Event: "tool_call", Payload: piToolCall("bash", nil)}})
+
+			if !strings.Contains(drive.ret(0), `"block":true`) {
+				t.Fatalf("verdict = %s, want a block", drive.ret(0))
+			}
+			if len(drive.Sent) != 0 {
+				t.Errorf("sent = %+v, want nothing steered when the call was blocked", drive.Sent)
+			}
+		})
+	}
+}
+
+// pi 0.86.1 binds sendMessage fire-and-forget with its own .catch, so the only
+// failure steerAdvisory's caller can ever see is a synchronous throw — and the
+// handler's existing try/catch has to swallow that into an allow, the same as
+// every other router or delivery failure, rather than letting it escape and
+// take the tool call down with it.
+func TestPiBridgeAllowsWhenSendMessageThrows(t *testing.T) {
+	run := newPiBridgeRun(t)
+	router := run.router(t, "advising", `process.stdout.write('{"advisory":"notes"}');`)
+	run.install(t, EmittedTimeoutSeconds*1000, piEntry("tool_call", "", router))
+
+	drive := run.driveSendThrows(t, []piBridgeStep{{Event: "tool_call", Payload: piToolCall("bash", nil)}})
+
+	assertPiAllows(t, drive.ret(0))
 }
 
 // The advisory is appended to the tool's own output and names

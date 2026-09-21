@@ -123,12 +123,12 @@ function advisory(stdout) {
 // An appended block reaches the model as the tool's own bytes. Shown one with
 // nothing naming its source, the probe model called it "exactly the shape of an
 // injection attempt" and disregarded it — and advice nobody acts on is the same
-// loss as advice never delivered. So both deliveries say whose they are in
-// their own text; the injected message also carries the customType pi stores
-// beside it, which is metadata rather than a second attribution — whether pi
-// puts it in front of the model is unverified, so nothing rests on it. Fixed
-// strings, never spliced — a per-install label would be a second value reaching
-// this source by concatenation (§8).
+// loss as advice never delivered. So all three deliveries say whose they are in
+// their own text; the injected and steered messages also carry the customType
+// pi stores beside them, which is metadata rather than a second attribution —
+// whether pi puts it in front of the model is unverified, so nothing rests on
+// it. Fixed strings, never spliced — a per-install label would be a second
+// value reaching this source by concatenation (§8).
 const ATTRIBUTION = "[hookyard advisory] ";
 const ADVISORY_CUSTOM_TYPE = "hookyard";
 
@@ -153,6 +153,20 @@ let queuedAdvisory;
 function appendAdvisory(event, advice) {
   if (advice === undefined || !Array.isArray(event.content)) return undefined;
   return { content: [...event.content, { type: "text", text: ATTRIBUTION + advice }] };
+}
+
+// tool_call's return value is spent entirely on the allow/block decision, so a
+// non-blocking verdict's advice has no return slot to ride and steers instead:
+// pi.sendMessage(..., {deliverAs:"steer"}) lands after the tool batch runs, the
+// same model step Claude Code's pre_tool additionalContext reaches. A deny's
+// advice is already folded into decision()'s reason, so the block path above
+// never calls this — delivered once, not twice.
+function steerAdvisory(pi, advice) {
+  if (advice === undefined) return;
+  pi.sendMessage(
+    { customType: ADVISORY_CUSTOM_TYPE, content: ATTRIBUTION + advice, display: false },
+    { deliverAs: "steer" },
+  );
 }
 
 // For Pi, and only for Pi, hookyard authors the inbound payload — pi sends none
@@ -249,11 +263,18 @@ export default function (pi) {
 
         const stdout = await askRouter(entry.bin, entry.args, payload(entry.event, event, ctx));
 
-        // Only tool_call carries a return channel that can block. session_start
-        // and tool_result carry an advisory one instead, and every other event
-        // ignores the reply. The spawn still happens whatever the event,
-        // because recording it is the router's job either way.
-        if (entry.event === "tool_call") return decision(stdout);
+        // Only tool_call carries a return channel that can block, and that
+        // channel is spent whole on the decision — so its advisory steers
+        // instead (see steerAdvisory). session_start and tool_result carry an
+        // advisory return channel of their own, and every other event ignores
+        // the reply. The spawn still happens whatever the event, because
+        // recording it is the router's job either way.
+        if (entry.event === "tool_call") {
+          const verdict = decision(stdout);
+          if (verdict) return verdict;
+          steerAdvisory(pi, advisory(stdout));
+          return undefined;
+        }
         if (entry.event === "tool_result") return appendAdvisory(event, advisory(stdout));
         if (entry.event === "session_start") queuedAdvisory = advisory(stdout);
         return undefined;

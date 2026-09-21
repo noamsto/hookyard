@@ -220,10 +220,12 @@ func TestRenderOnDecisionCapableEvents(t *testing.T) {
 			delivered: true,
 		},
 		{
-			// Pi's tool_call reply has no advisory key, and an allow
-			// prints nothing at all, so advice riding one has nowhere to go.
-			name: "pi allow drops the advice riding it",
-			in:   Input{Engine: vocab.Pi, CanonicalEvent: vocab.PreTool, NativeEvent: "tool_call", Verdict: Allow, Reason: "r", Advice: "a"},
+			// An allow has no block to carry the advice, so it rides as a
+			// standalone advisory instead, delivered as a steer message (§11.1).
+			name:      "pi allow carries the advice riding it as a standalone advisory",
+			in:        Input{Engine: vocab.Pi, CanonicalEvent: vocab.PreTool, NativeEvent: "tool_call", Verdict: Allow, Reason: "r", Advice: "a"},
+			stdout:    `{"advisory":"a"}`,
+			delivered: true,
 		},
 		{
 			name:      "pi ask joins the degraded reason and advice",
@@ -233,12 +235,14 @@ func TestRenderOnDecisionCapableEvents(t *testing.T) {
 			delivered: true,
 		},
 		{
-			// On tool_call the only slot is the block reason, so standalone
-			// advice is dropped rather than claimed as delivered — unlike
-			// session_start and post_tool, see TestRenderPiAdvisoryOnlyEvents.
-			name:     "pi standalone advice is not delivered",
-			in:       Input{Engine: vocab.Pi, CanonicalEvent: vocab.PreTool, NativeEvent: "tool_call", Verdict: Abstain, Advice: "a"},
-			enforced: true,
+			// Abstain plus advice on pre_tool now has a standalone advisory
+			// slot, delivered as a steer message the same as session_start and
+			// post_tool's (TestRenderPiAdvisoryOnlyEvents), even with no block.
+			name:      "pi standalone advice is delivered as a steer message",
+			in:        Input{Engine: vocab.Pi, CanonicalEvent: vocab.PreTool, NativeEvent: "tool_call", Verdict: Abstain, Advice: "a"},
+			stdout:    `{"advisory":"a"}`,
+			enforced:  true,
+			delivered: true,
 		},
 	}
 
@@ -361,6 +365,44 @@ func TestRenderPiAdvisoryOnlyEvents(t *testing.T) {
 				// acting on a verdict, and there is no decision slot here.
 				name := fmt.Sprintf("pi %s %s advice=%q", event, v, advice)
 				checkRendered(t, name, Render(in), want, v == Abstain, advice != "")
+			}
+		}
+	}
+}
+
+// TestRenderPiPreToolNeverMixesBlockAndAdvisory walks the whole (verdict ×
+// advice) matrix on Pi's pre_tool decision slot and decodes the reply as a
+// bare key set: "block" appears iff the verdict denies the call (deny, or ask
+// degraded to deny), "advisory" appears iff there's advice and the call was
+// not blocked, and the two never appear together — a block's advice rides the
+// reason field instead (renderPiDeny), never its own key.
+func TestRenderPiPreToolNeverMixesBlockAndAdvisory(t *testing.T) {
+	for _, v := range lattice {
+		for _, advice := range []string{"", "a"} {
+			in := Input{Engine: vocab.Pi, CanonicalEvent: vocab.PreTool, NativeEvent: "tool_call", Verdict: v, Reason: "r", Advice: advice}
+			got := Render(in)
+
+			keys := map[string]json.RawMessage{}
+			if len(got.Stdout) > 0 {
+				if err := json.Unmarshal(got.Stdout, &keys); err != nil {
+					t.Fatalf("verdict=%s advice=%q: stdout not valid JSON: %s", v, advice, got.Stdout)
+				}
+			}
+
+			_, hasBlock := keys["block"]
+			wantBlock := v == Deny || v == Ask
+			if hasBlock != wantBlock {
+				t.Errorf("verdict=%s advice=%q: block key = %v, want %v", v, advice, hasBlock, wantBlock)
+			}
+
+			_, hasAdvisory := keys["advisory"]
+			wantAdvisory := advice != "" && (v == Abstain || v == Allow)
+			if hasAdvisory != wantAdvisory {
+				t.Errorf("verdict=%s advice=%q: advisory key = %v, want %v", v, advice, hasAdvisory, wantAdvisory)
+			}
+
+			if hasBlock && hasAdvisory {
+				t.Errorf("verdict=%s advice=%q: stdout has both block and advisory keys: %s", v, advice, got.Stdout)
 			}
 		}
 	}
