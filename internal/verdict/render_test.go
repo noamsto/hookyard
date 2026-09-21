@@ -221,7 +221,8 @@ func TestRenderOnDecisionCapableEvents(t *testing.T) {
 		},
 		{
 			// An allow has no block to carry the advice, so it rides as a
-			// standalone advisory instead, delivered as a steer message (§11.1).
+			// standalone advisory instead, appended to the call's own tool
+			// result (§11.1).
 			name:      "pi allow carries the advice riding it as a standalone advisory",
 			in:        Input{Engine: vocab.Pi, CanonicalEvent: vocab.PreTool, NativeEvent: "tool_call", Verdict: Allow, Reason: "r", Advice: "a"},
 			stdout:    `{"advisory":"a"}`,
@@ -236,9 +237,10 @@ func TestRenderOnDecisionCapableEvents(t *testing.T) {
 		},
 		{
 			// Abstain plus advice on pre_tool now has a standalone advisory
-			// slot, delivered as a steer message the same as session_start and
-			// post_tool's (TestRenderPiAdvisoryOnlyEvents), even with no block.
-			name:      "pi standalone advice is delivered as a steer message",
+			// slot, appended to the call's own tool result the same as
+			// session_start and post_tool's (TestRenderPiAdvisoryOnlyEvents),
+			// even with no block.
+			name:      "pi standalone advice is appended to the call's own tool result",
 			in:        Input{Engine: vocab.Pi, CanonicalEvent: vocab.PreTool, NativeEvent: "tool_call", Verdict: Abstain, Advice: "a"},
 			stdout:    `{"advisory":"a"}`,
 			enforced:  true,

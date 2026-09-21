@@ -3978,10 +3978,15 @@ exercised the parallel case `pre_tool` advisory actually has to handle.
 **Mechanism B: appended to the call's own tool result.** The bridge's
 `tool_call` handler, on a non-block reply carrying advice, stashes
 `"[hookyard advisory] " + advice` keyed by `toolCallId` and allows; a
-bridge-owned `tool_result` handler — registered before hookyard's per-entry
-handlers, so first in pi's `tool_result` middleware chain — appends the
-stashed advice as a text block onto *that call's own* tool result; a
-bridge-owned `turn_end` handler clears the stash, so a call aborted after
+bridge-owned `tool_result` handler — registered after hookyard's per-entry
+handlers, so last in pi's `tool_result` middleware chain — appends the
+stashed advice as a text block onto *that call's own* tool result. Last,
+not first, is deliberate: a `post_tool` manifest entry's own `tool_result`
+handler builds its router payload from `event.content`, and that has to be
+the tool's own output, undisturbed by the `pre_tool` advisory — so the
+`pre_tool` advisory is appended only after every per-entry handler has
+already seen and acted on the unmodified content. A bridge-owned `turn_end`
+handler clears the stash, so a call aborted after
 `tool_call` but before it reaches `tool_result` can't leave stale advice for
 a later call that reuses the id space. LOCAL probe E
 (`ext-tool-result-append.ts`) reproduces this directly against pi under
@@ -4027,30 +4032,48 @@ yields a `tool_result` — pi runs `afterToolCall` on the error result too —
 so an advisory on a failing call still lands, appended the same way. The
 stash's lifetime is one turn: it is written at `tool_call`, read and cleared
 at `tool_result` for a call that completes, and cleared unconditionally at
-`turn_end` regardless. The one residual gap is a call aborted after
-`tool_call` stashes advice but before it reaches `tool_result` — it never
-executes, produces no `tool_result` event to append onto, and its stash
-entry is dropped at `turn_end` — while hookyard's delivery record, computed
-at render time from the router's reply rather than from a delivery
-confirmation, still says delivered. This is stated rather than hidden: it is
-the same class of gap issue #71 already accepts for other advisory paths,
-not a new one mechanism B introduces. On ordering, a single call carrying
+`turn_end` regardless. hookyard's delivery record is computed at render time
+from the router's reply, not from a delivery confirmation, so it can say
+delivered while the model never saw the text; this is stated rather than
+hidden — it is the same class of gap issue #71 already accepts for other
+advisory paths, not a new one mechanism B introduces. The record says
+delivered but the model never saw it whenever: a call is aborted after
+`tool_call` stashes advice but before it ever executes — it never reaches
+`tool_result` to append onto, and the stash entry is dropped, unclaimed, at
+`turn_end`; a foreign extension's own `tool_call` handler, running after the
+bridge's in pi's chain, blocks the call itself — again no `tool_result`
+fires; the `tool_result` event's `content` is not an array — `appendAdvisory`
+declines rather than guess at a shape it doesn't understand, and the stash
+was already taken by the `pendingToolAdvice.get`/`.delete` pair, so it's lost
+either way; or a foreign extension loaded after the bridge replaces
+`tool_result` content wholesale instead of appending to it, discarding
+whatever the bridge had already appended. On ordering, a single call carrying
 both a `pre_tool` and a `post_tool` advisory gets both, in that order — the
-`tool_call`-time stash is appended first (pi's `tool_result` middleware
-chain runs the bridge's handler before hookyard's per-entry `post_tool`
-handler), then `post_tool`'s own advice — §7's table, "On `post_tool`,
-advice is appended to the tool result content" — is appended after it.
+tool's own output first, then `post_tool`'s own advice (§7's table, "On
+`post_tool`, advice is appended to the tool result content"), then the
+`pre_tool` advisory last: the bridge's flush is registered *after* the
+per-entry loop, so it runs last in pi's `tool_result` middleware chain,
+which is what lets `post_tool`'s own handler build its router payload from
+the tool's unmodified content rather than from content the `pre_tool`
+advisory has already touched.
 
 **Real differences from Claude Code's `additionalContext`, stated rather
 than smoothed over:** (a) it is text appended inside the tool result's own
 content (role `tool` / a Claude-shaped `tool_result` block), not a separate
-system-role message the way Claude's is; (b) a foreign, non-hookyard
-extension loaded before the bridge that rewrites `tool_result` content
-wholesale — replacing rather than appending, since `tool_result` handlers
-chain like middleware over each other's patches — could still drop
-hookyard's appended block; only a foreign handler that *replaces* the
-content, not one that also appends, defeats it. Both are the same class of
-caveat §7 already states for a foreign extension racing a `tool_call` block.
+system-role message the way Claude's is — Claude Code delivers a `pre_tool`
+hook's `additionalContext` as its own system message placed after the tool
+result, while on pi both advisories are text appended inside the tool
+result itself, `post_tool` before `pre_tool`, specifically so `post_tool`
+routers see only the tool's own output and never the `pre_tool` advisory;
+(b) a foreign, non-hookyard extension loaded *after* the bridge in pi's
+`tool_result` chain that rewrites `tool_result` content wholesale —
+replacing rather than appending, since `tool_result` handlers chain like
+middleware over each other's patches — could still drop hookyard's appended
+block; a foreign handler loaded *before* the bridge is harmless, since the
+bridge appends onto whatever content that handler already produced. Only a
+foreign handler that *replaces* the content, loaded after the bridge, not
+one that also appends, defeats it. Both are the same class of caveat §7
+already states for a foreign extension racing a `tool_call` block.
 
 The live proof through the real yard bridge — not the throwaway probe
 extensions above — is a `HOOKYARD_E2E`-gated set in

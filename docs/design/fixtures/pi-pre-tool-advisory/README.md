@@ -118,11 +118,17 @@ default `toolExecution: "parallel"`) makes routine.
 Mechanism B avoids all of the above by never touching the steering queue.
 The bridge's `tool_call` handler, on a non-block reply carrying advice,
 stashes it keyed by `toolCallId` and allows; a bridge-owned `tool_result`
-handler — registered before hookyard's per-entry handlers, so first in pi's
+handler — registered after hookyard's per-entry handlers, so last in pi's
 `tool_result` middleware chain — appends `"[hookyard advisory] " + advice` as
-a text block onto *that call's own* tool result; a bridge-owned `turn_end`
-handler clears the stash so a call aborted before it reaches `tool_result`
-can't leave stale advice for a future call that reuses the id space.
+a text block onto *that call's own* tool result. Last, not first, is
+deliberate: a `post_tool` manifest entry's own `tool_result` handler builds
+its router payload from the tool's own content, which has to stay
+undisturbed by the `pre_tool` advisory until every per-entry handler has
+already run — so the model-visible order on one call is tool output, then
+the `post_tool` advisory, then the `pre_tool` advisory. A bridge-owned
+`turn_end` handler clears the stash so a call aborted before it reaches
+`tool_result` can't leave stale advice for a future call that reuses the id
+space.
 `ext-tool-result-append.ts` (probe E) is that mechanism reproduced directly
 against pi, and `sample-tool-result-append-parallel.jsonl` shows the result:
 one request, two tool results, each carrying its own advisory — no trickle,
@@ -147,12 +153,19 @@ the one `tool_result` reply for its own call.
 
 Real differences that remain, stated rather than smoothed over: it is text
 appended inside the tool result's own content (role `tool`/`user`
-`tool_result`), not a separate system-role message the way Claude's is; and a
-foreign, non-hookyard extension loaded before the bridge that rewrites
-`tool_result` content wholesale (replacing rather than appending, since
-`tool_result` handlers chain like middleware over each other's patches)
-could still drop hookyard's appended block — the same class of caveat §11.1
-already states for a foreign extension racing a `tool_call` block.
+`tool_result`), not a separate system-role message the way Claude's is —
+Claude Code delivers a `PreToolUse` hook's `additionalContext` as its own
+system message placed after the tool result, while on pi both advisories
+are text appended inside the tool result itself, `post_tool` before
+`pre_tool`, specifically so a `post_tool` router sees only the tool's own
+output; and a foreign, non-hookyard extension loaded *after* the bridge in
+pi's `tool_result` chain that rewrites `tool_result` content wholesale
+(replacing rather than appending, since `tool_result` handlers chain like
+middleware over each other's patches) could still drop hookyard's appended
+block — a foreign handler loaded *before* the bridge is harmless, since the
+bridge appends onto whatever content it already produced. Same class of
+caveat §11.1 already states for a foreign extension racing a `tool_call`
+block.
 
 ## Redaction
 

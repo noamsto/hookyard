@@ -1285,7 +1285,7 @@ func advisoryContentContains(raw json.RawMessage, substr string) bool {
 // content as a plain string already, its blocks newline-joined by pi itself
 // before this ever reaches the model (confirmed against a real process,
 // TestLivePiOrdersPreAndPostToolAdvisoriesOnOneCall): "<exec output>\n[hookyard
-// advisory] <pre>\n[hookyard advisory] <post>". The array-of-{type,text}-blocks
+// advisory] <post>\n[hookyard advisory] <pre>". The array-of-{type,text}-blocks
 // shape is flattened the same way, joined on "\n", so a caller can look for
 // ordering with strings.Index regardless of which shape a given message
 // arrived in.
@@ -1608,10 +1608,11 @@ func TestLivePiDeliversAPreToolAdvisoryWhenTheToolFails(t *testing.T) {
 
 // TestLivePiOrdersPreAndPostToolAdvisoriesOnOneCall proves pi_bridge.ts's
 // registration-order guarantee end to end: the bridge registers its
-// tool_call-stash flush before the per-entry loop specifically so a pre_tool
-// advisory lands ahead of hookyard's own post_tool advisory on the same
-// call's tool_result — exec output first, then the pre-tool advisory, then
-// the post-tool one, each exactly once.
+// tool_call-stash flush after the per-entry loop specifically so hookyard's
+// own post_tool advisory — built from the tool's original content — lands on
+// the same call's tool_result ahead of the pre_tool advisory the flush
+// appends afterward — exec output first, then the post-tool advisory, then
+// the pre-tool one, each exactly once.
 func TestLivePiOrdersPreAndPostToolAdvisoriesOnOneCall(t *testing.T) {
 	piBin := liveRequirePiBinary(t)
 	hookyardBin, root, agentDir, projectDir, stateDir := liveScriptedPiLayout(t)
@@ -1661,14 +1662,14 @@ func TestLivePiOrdersPreAndPostToolAdvisoriesOnOneCall(t *testing.T) {
 			execIdx := strings.Index(text, execOutput)
 			preIdx := strings.Index(text, preText)
 			postIdx := strings.Index(text, postText)
-			if execIdx < preIdx && preIdx < postIdx {
+			if execIdx < postIdx && postIdx < preIdx {
 				ordered = true
 			}
 		}
 	}
 	if !ordered {
-		t.Fatalf("no tool-role message carries the exec output, then the pre-tool advisory, then the "+
-			"post-tool advisory, each exactly once, in that order\n--- recorded requests ---\n%s\n--- pi output ---\n%s",
+		t.Fatalf("no tool-role message carries the exec output, then the post-tool advisory, then the "+
+			"pre-tool advisory, each exactly once, in that order\n--- recorded requests ---\n%s\n--- pi output ---\n%s",
 			capture.dump(), output)
 	}
 
@@ -1678,11 +1679,12 @@ func TestLivePiOrdersPreAndPostToolAdvisoriesOnOneCall(t *testing.T) {
 // TestLivePiDeliversADenyAdvisoryOnlyThroughTheReason is
 // TestLivePiDeliversAStandalonePreToolAdvisoryWithTheCallsResult's deny-side
 // counterpart: render.renderPiDeny joins a deny's reason and advice into
-// Pi's one reason field and never also steers it (§11.1, "delivered exactly
-// once"), so this proves that against a real pi process the advisory rides
-// only the block reason — reaching the model as the tool's own result, the
-// same request the call itself was made in, per the fixture dir's ext-block.ts
-// probe — and never as a second, steered message.
+// Pi's one reason field and never also appends it to the call's own tool
+// result (§11.1, "delivered exactly once"), so this proves that against a
+// real pi process the advisory rides only the block reason — reaching the
+// model as the tool's own result, the same request the call itself was made
+// in, per the fixture dir's ext-block.ts probe — and never as a second
+// message appended to the call's own tool result.
 func TestLivePiDeliversADenyAdvisoryOnlyThroughTheReason(t *testing.T) {
 	piBin := liveRequirePiBinary(t)
 	hookyardBin, root, agentDir, projectDir, stateDir := liveScriptedPiLayout(t)
@@ -1723,7 +1725,8 @@ func TestLivePiDeliversADenyAdvisoryOnlyThroughTheReason(t *testing.T) {
 	}
 	if capture.nonToolMessageContains(adviceTok) {
 		t.Fatalf("advisory %q also appears on a non-tool message; on a deny it must be delivered exactly once, "+
-			"folded into the block reason, never also steered\n--- recorded requests ---\n%s\n--- pi output ---\n%s",
+			"folded into the block reason, never separately appended to a tool result\n"+
+			"--- recorded requests ---\n%s\n--- pi output ---\n%s",
 			adviceTok, capture.dump(), output)
 	}
 

@@ -252,34 +252,6 @@ function payload(name, event, ctx) {
 }
 
 export default function (pi) {
-  // Bridge-owned, not a manifest entry: it exists to flush pendingToolAdvice
-  // onto the same call's tool_result, so it is registered once, gated on
-  // whether any entry can ever populate the map at all. Registering it here,
-  // before the per-entry loop below, puts it first in pi's tool_result
-  // middleware chain — so a pre_tool advisory lands in `content` ahead of
-  // whatever a tool_result manifest entry's own appendAdvisory adds, and the
-  // model sees pre-call advice before post-call advice, in call order.
-  if (DATA.entries.some((entry) => entry.event === "tool_call")) {
-    pi.on("tool_result", (event) => {
-      try {
-        const advice = pendingToolAdvice.get(event.toolCallId);
-        pendingToolAdvice.delete(event.toolCallId);
-        return advice === undefined ? undefined : appendAdvisory(event, advice);
-      } catch {
-        return undefined;
-      }
-    });
-
-    // A call aborted after tool_call but before it ever executes fires no
-    // tool_result, so nothing would otherwise delete its stash. turn_end runs
-    // once the whole tool batch is finalized — after every real tool_result
-    // for this turn has already flushed above — so clearing the map here only
-    // ever discards advice that was never going to be claimed.
-    pi.on("turn_end", () => {
-      pendingToolAdvice.clear();
-    });
-  }
-
   for (const entry of DATA.entries) {
     pi.on(entry.event, async (event, ctx) => {
       try {
@@ -293,7 +265,7 @@ export default function (pi) {
         // Only tool_call carries a return channel that can block, and that
         // channel is spent whole on the decision — so its advisory stashes in
         // pendingToolAdvice instead, for the bridge-owned tool_result handler
-        // above to flush onto this same call's result. session_start and
+        // below to flush onto this same call's result. session_start and
         // tool_result carry an advisory return channel of their own, and every
         // other event ignores the reply. The spawn still happens whatever the
         // event, because recording it is the router's job either way.
@@ -313,6 +285,36 @@ export default function (pi) {
         // guarantee this file owns.
         return undefined;
       }
+    });
+  }
+
+  // Bridge-owned, not a manifest entry: it exists to flush pendingToolAdvice
+  // onto the same call's tool_result, so it is registered once, gated on
+  // whether any entry can ever populate the map at all. Registering it here,
+  // after the per-entry loop above, puts it last in pi's tool_result
+  // middleware chain — so a tool_result manifest entry's own post_tool router
+  // sees the tool's original content, undisturbed by the pre_tool advisory,
+  // and that advisory lands in `content` only after whatever appendAdvisory
+  // above already added. The model-visible order is therefore [tool output,
+  // post_tool advisory, pre_tool advisory].
+  if (DATA.entries.some((entry) => entry.event === "tool_call")) {
+    pi.on("tool_result", (event) => {
+      try {
+        const advice = pendingToolAdvice.get(event.toolCallId);
+        pendingToolAdvice.delete(event.toolCallId);
+        return advice === undefined ? undefined : appendAdvisory(event, advice);
+      } catch {
+        return undefined;
+      }
+    });
+
+    // A call aborted after tool_call but before it ever executes fires no
+    // tool_result, so nothing would otherwise delete its stash. turn_end runs
+    // once the whole tool batch is finalized — after every real tool_result
+    // for this turn has already flushed above — so clearing the map here only
+    // ever discards advice that was never going to be claimed.
+    pi.on("turn_end", () => {
+      pendingToolAdvice.clear();
     });
   }
 

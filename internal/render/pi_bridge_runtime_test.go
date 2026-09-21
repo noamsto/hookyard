@@ -663,11 +663,13 @@ func TestPiBridgeKeepsParallelCallsAdviceSeparate(t *testing.T) {
 	}
 }
 
-// The bridge-owned flush is registered before the per-entry loop specifically
-// so a pre_tool advisory lands in tool_result's content ahead of hookyard's own
-// post_tool advisory on the same call — chronological order, pre before post,
-// neither dropped nor duplicated.
-func TestPiBridgeOrdersItsOwnPreAndPostToolAdvisoriesOnOneCall(t *testing.T) {
+// The bridge-owned flush is registered after the per-entry loop specifically
+// so a post_tool manifest entry's own tool_result handler sees the tool's
+// original content, undisturbed by the pre_tool advisory — and the pre_tool
+// advisory lands in tool_result's content only after whatever the post_tool
+// advisory already added. Model-visible order: tool output, then post, then
+// pre.
+func TestPiBridgeOrdersItsOwnPostAndPreToolAdvisoriesOnOneCall(t *testing.T) {
 	run := newPiBridgeRun(t)
 	preRouter := run.router(t, "pre", `process.stdout.write('{"advisory":"pre"}');`)
 	postRouter := run.router(t, "post", `process.stdout.write('{"advisory":"post"}');`)
@@ -684,13 +686,56 @@ func TestPiBridgeOrdersItsOwnPreAndPostToolAdvisoriesOnOneCall(t *testing.T) {
 	assertPiAllows(t, drive.ret(0))
 	texts := piResultTexts(t, drive.ret(1))
 	if len(texts) != 3 {
-		t.Fatalf("content = %v, want the original block plus exactly one pre and one post advisory", texts)
+		t.Fatalf("content = %v, want the original block plus exactly one post and one pre advisory", texts)
 	}
 	if texts[0] != "the tool's own output" {
 		t.Errorf("content[0] = %q, want the tool's own output first", texts[0])
 	}
-	if texts[1] != "[hookyard advisory] pre" || texts[2] != "[hookyard advisory] post" {
-		t.Errorf("content = %v, want the pre-tool advisory immediately before the post-tool one", texts)
+	if texts[1] != "[hookyard advisory] post" || texts[2] != "[hookyard advisory] pre" {
+		t.Errorf("content = %v, want the post-tool advisory immediately before the pre-tool one", texts)
+	}
+}
+
+// A post_tool manifest entry's tool_result handler builds its router payload
+// from event.content before the bridge-owned flush ever runs, so it must see
+// the tool's own output only — never the pre_tool advisory the flush appends
+// afterward.
+func TestPiBridgePostToolRouterPayloadExcludesThePreToolAdvisory(t *testing.T) {
+	run := newPiBridgeRun(t)
+	preRouter := run.router(t, "pre", `process.stdout.write('{"advisory":"pre"}');`)
+	postRouter, capturePath := run.capturingRouter(t)
+	run.install(t, EmittedTimeoutSeconds*1000,
+		piEntry("tool_call", "", preRouter),
+		piEntry("tool_result", "", postRouter),
+	)
+
+	drive := run.drive(t, []piBridgeStep{
+		{Event: "tool_call", Payload: piToolCall("bash", nil)},
+		{Event: "tool_result", Payload: piToolResult([]any{piTextBlock("the tool's own output")})},
+	})
+
+	assertPiAllows(t, drive.ret(0))
+	texts := piResultTexts(t, drive.ret(1))
+	if len(texts) != 2 || texts[0] != "the tool's own output" || texts[1] != "[hookyard advisory] pre" {
+		t.Fatalf("content = %v, want the tool's own output plus the flushed pre advisory", texts)
+	}
+
+	payload := piCapturedPayload(t, capturePath)
+	var response struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(payload["tool_response"], &response); err != nil {
+		t.Fatalf("unmarshal tool_response: %v", err)
+	}
+	if len(response.Content) != 1 || response.Content[0].Text != "the tool's own output" {
+		t.Fatalf("captured tool_response.content = %+v, want only the tool's own output, no hookyard advisory text", response.Content)
+	}
+	for _, block := range response.Content {
+		if strings.Contains(block.Text, "[hookyard advisory]") {
+			t.Fatalf("captured tool_response.content = %+v, must not contain the pre_tool advisory", response.Content)
+		}
 	}
 }
 
