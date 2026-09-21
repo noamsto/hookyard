@@ -1384,20 +1384,11 @@ func livePiPrintfRanCommand(execTok string) string {
 
 // liveNewAdvisoryModelServer starts an in-process OpenAI-compatible chat
 // server scripted by conversation state rather than by request count: pi on
-// PATH here may be a Nix wrapper that adds its own extensions when
-// CREW_WORKER_ID is unset (§8's coexistence hazard), which can change how many
-// requests a run makes before or after the one this test cares about, so
-// counting requests would be fragile in a way reading the conversation itself
-// is not. Until a tool-role message appears anywhere in the conversation, it
-// answers with one bash tool call running command — livePiPrintfRanCommand
-// for the common case, or a caller's own variant (e.g. one that also exits
-// non-zero, to prove advisory delivery survives a failed call too). Once a
-// tool-role message exists, every later request gets plain text ("done",
-// finish_reason "stop"), which is enough to let pi's turn conclude without
-// looping. It has no notion of paths — every GET is answered as /models and
-// every POST as /chat/completions — mirroring
-// docs/design/fixtures/pi-pre-tool-advisory/fake-llm.py's own handler, which
-// does the same and is proven against real pi (that fixture dir's README).
+// PATH may be a Nix wrapper that adds its own extensions when CREW_WORKER_ID
+// is unset (§8's coexistence hazard), which changes how many requests a run
+// makes. Until a tool-role message appears it answers with one bash tool call
+// running command; after that, plain text, which ends pi's turn. Like
+// docs/design/fixtures/pi-pre-tool-advisory/fake-llm.py, it ignores paths.
 func liveNewAdvisoryModelServer(t *testing.T, command string) (*httptest.Server, *advisoryCapture) {
 	t.Helper()
 	capture := &advisoryCapture{}

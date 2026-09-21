@@ -144,17 +144,13 @@ const ADVISORY_CUSTOM_TYPE = "hookyard";
 // this one.
 let queuedAdvisory;
 
-// tool_call's own return value is spent whole on the allow/block decision (see
-// the tool_call branch below), so a non-blocking verdict's advice has no
-// return slot of its own to ride. Probed (docs/design/fixtures/
-// pi-pre-tool-advisory/): a tool_call handler's return carries nothing pi
-// delivers to the model on allow, while a tool_result handler's returned
-// content lands in the very next model request beside that same call's own
-// output — the same place Claude Code's pre_tool additionalContext reaches.
-// So the advice waits here, keyed by toolCallId, for that call's own
-// tool_result to flush it. A blocked call never stashes: its advice already
-// rides the block reason in decision()'s reply, exactly once, and the
-// tool_call branch below returns before reaching this map.
+// tool_call's return is spent whole on the allow/block decision, and pi
+// delivers nothing else a tool_call handler returns (probed:
+// docs/design/fixtures/pi-pre-tool-advisory/). A tool_result handler's content
+// does land in the next model request, beside that call's own output — where
+// Claude Code puts pre_tool additionalContext. So the advice waits here, keyed
+// by toolCallId, for that call's tool_result. A blocked call never stashes: its
+// advice already rides the block reason, exactly once.
 const pendingToolAdvice = new Map();
 
 // Pi documents a tool_result handler as chaining middleware whose omitted fields
@@ -262,13 +258,12 @@ export default function (pi) {
 
         const stdout = await askRouter(entry.bin, entry.args, payload(entry.event, event, ctx));
 
-        // Only tool_call carries a return channel that can block, and that
-        // channel is spent whole on the decision — so its advisory stashes in
-        // pendingToolAdvice instead, for the bridge-owned tool_result handler
-        // below to flush onto this same call's result. session_start and
-        // tool_result carry an advisory return channel of their own, and every
-        // other event ignores the reply. The spawn still happens whatever the
-        // event, because recording it is the router's job either way.
+        // Only tool_call carries a return channel that can block, and it is
+        // spent whole on the decision, so its advice waits in pendingToolAdvice.
+        // session_start and tool_result carry an advisory return channel of
+        // their own, and every other event ignores the reply. The spawn still
+        // happens whatever the event, because recording it is the router's job
+        // either way.
         if (entry.event === "tool_call") {
           const verdict = decision(stdout);
           if (verdict) return verdict;

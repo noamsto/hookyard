@@ -59,12 +59,10 @@ type cursorResponse struct {
 // with its reason, which the bridge answers by refusing the call (returning
 // nothing is allow), or a standalone advisory it delivers as a message — on
 // session_start and post_tool as an injected or appended message, and on
-// pre_tool as text appended to that call's own tool result, which the model
-// reads in the next request beside the result — the same place Claude Code's
-// pre_tool additionalContext lands (§11.1). Block carries omitempty because
-// the two paths are disjoint on the wire — an advisory reply spelling
-// "block":false would read as a decision no handler made — and renderPiDeny,
-// the only producer of a block, always sets it true.
+// pre_tool as text appended to that call's own tool result (§11.1). Block
+// carries omitempty because the two paths are disjoint on the wire — an
+// advisory reply spelling "block":false would read as a decision no handler
+// made — and renderPiDeny, the only producer of a block, always sets it true.
 type piResponse struct {
 	Block    bool   `json:"block,omitempty"`
 	Reason   string `json:"reason,omitempty"`
@@ -198,11 +196,10 @@ func renderCursor(in Input) Rendered {
 // binary-channel engines — Pi has no ask arm and no wire form for allow at
 // all, so an explicit allow falls through to the default case below exactly
 // as Codex's does. That case also carries standalone advice, if any, as an
-// advisory: the bridge appends it to that call's own tool result, which the
-// model reads in the next request beside the result — the same place Claude
-// Code's pre_tool additionalContext lands (§11.1). With no advice there is
-// nothing to print, and Enforced stays false for an explicit allow: not
-// blocking already is allow, so there is nothing this render step could add.
+// advisory, which the bridge appends to that call's own tool result. With no
+// advice there is nothing to print, and Enforced stays false for an explicit
+// allow: not blocking already is allow, so there is nothing this render step
+// could add.
 func renderPi(in Input) Rendered {
 	switch in.Verdict {
 	case Deny:
