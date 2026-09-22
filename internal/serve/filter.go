@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/noamsto/hookyard/internal/record"
-	"github.com/noamsto/hookyard/internal/vocab"
 )
 
 // ParseFilter reads the five filter params (SPEC 4.6). Empty strings are
@@ -41,7 +40,7 @@ func (f Filter) Match(r record.Record) bool {
 	if f.Session != "" && !strings.Contains(strings.ToLower(r.SessionID), strings.ToLower(f.Session)) {
 		return false
 	}
-	if len(f.Events) > 0 && !matchesEvent(f.Events, r) {
+	if len(f.Events) > 0 && !slices.Contains(f.Events, r.CanonicalEvent) && !slices.Contains(f.Events, r.NativeEvent) {
 		return false
 	}
 	if len(f.Handlers) > 0 && !matchesHandler(f.Handlers, r) {
@@ -51,27 +50,6 @@ func (f Filter) Match(r record.Record) bool {
 		return false
 	}
 	return true
-}
-
-// matchesEvent treats each wanted value independently: a canonical event name
-// (vocab.CanonicalEvents) matches only r.CanonicalEvent, never r.NativeEvent,
-// so filtering on the canonical "turn_end" doesn't also pick up pi's native
-// per-turn turn_end records, which carry canonical_event "" and
-// native_event "turn_end". A non-canonical value (an engine-scoped native
-// name) keeps matching either field, as before.
-func matchesEvent(want []string, r record.Record) bool {
-	for _, w := range want {
-		if slices.Contains(vocab.CanonicalEvents, w) {
-			if w == r.CanonicalEvent {
-				return true
-			}
-			continue
-		}
-		if w == r.CanonicalEvent || w == r.NativeEvent {
-			return true
-		}
-	}
-	return false
 }
 
 func matchesHandler(want []string, r record.Record) bool {

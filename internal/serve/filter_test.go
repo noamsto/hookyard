@@ -81,47 +81,6 @@ func TestFilterMatch(t *testing.T) {
 	}
 }
 
-// D1 (docs/design/hookyard.md §11.2, issue #76): a canonical turn_end filter
-// must not pick up pi's native per-turn turn_end records (canonical_event
-// "", native_event "turn_end") alongside the canonical agent_before_settle
-// ones, or the two frequencies collapse into one filter result.
-func TestFilterMatchCanonicalTurnEndVersusPiPerTurn(t *testing.T) {
-	canonicalTurnEnd := record.Record{
-		Engine:         "pi",
-		CanonicalEvent: "turn_end",
-		NativeEvent:    "agent_before_settle",
-	}
-	piPerTurn := record.Record{
-		Engine:         "pi",
-		CanonicalEvent: "",
-		NativeEvent:    "turn_end",
-	}
-	preChangeTurnEnd := record.Record{
-		Engine:         "codex",
-		CanonicalEvent: "turn_end",
-		NativeEvent:    "turn_end",
-	}
-
-	tests := []struct {
-		name string
-		f    Filter
-		rec  record.Record
-		want bool
-	}{
-		{"turn_end filter keeps canonical agent_before_settle record", Filter{Events: []string{"turn_end"}}, canonicalTurnEnd, true},
-		{"turn_end filter drops pi per-turn record", Filter{Events: []string{"turn_end"}}, piPerTurn, false},
-		{"turn_end filter keeps pre-change turn_end/turn_end record", Filter{Events: []string{"turn_end"}}, preChangeTurnEnd, true},
-		{"agent_before_settle filter keeps the canonical record via native match", Filter{Events: []string{"agent_before_settle"}}, canonicalTurnEnd, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.f.Match(tt.rec); got != tt.want {
-				t.Errorf("Match() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestParseFilter(t *testing.T) {
 	q, err := url.ParseQuery("engine=codex&engine=&event=pre_tool&handler=guard-a&verdict=deny&session=abc")
 	if err != nil {

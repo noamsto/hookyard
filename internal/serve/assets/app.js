@@ -158,17 +158,6 @@ function fmtMS(ms) {
   return ms + "ms";
 }
 
-// eventLabel: a record with no canonical_event (pi's per-turn native events,
-// per D1 §11.2) would otherwise show its bare native_event, identical to a
-// canonical row of the same name (e.g. pi's per-turn "turn_end" next to
-// canonical "turn_end"). Falling back to the manifest's own engine-scoped
-// spelling — "pi:turn_end" — keeps the two distinguishable in the table.
-function eventLabel(rec) {
-  if (rec.canonical_event) return rec.canonical_event;
-  if (rec.native_event) return rec.engine + ":" + rec.native_event;
-  return "—";
-}
-
 function buildChip(h) {
   const node = chipTemplate.content.cloneNode(true);
   const chip = node.querySelector(".chip");
@@ -215,7 +204,7 @@ function buildRow(entry) {
   node.querySelector(".c-time").textContent = fmtTime(rec.ts);
   node.querySelector(".c-engine").textContent = rec.engine;
   node.querySelector(".c-key").textContent = rec.key;
-  node.querySelector(".c-event").textContent = eventLabel(rec);
+  node.querySelector(".c-event").textContent = rec.canonical_event || rec.native_event || "—";
   node.querySelector(".c-tool").textContent = rec.tool_name || "—";
 
   const verdictEl = node.querySelector(".c-verdict");
