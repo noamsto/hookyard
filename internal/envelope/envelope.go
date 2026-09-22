@@ -195,11 +195,8 @@ func synthesizeShell(e *Envelope, native map[string]json.RawMessage) {
 
 // PiOutcome reads pi's native outcome (completed|error|aborted) off the
 // payload's turn_end/agent_before_settle field (D2, docs/design/hookyard.md
-// §11.2). It is pi-only — gated on e.Engine rather than just reading the key
-// off any payload — because hookyard authors pi's payload shape, so an
-// outcome key on another engine's payload is not ours to interpret. The
-// envelope's own JSON shape is unchanged: this reads straight out of Native
-// rather than adding a field to Envelope.
+// §11.2). It is pi-only because hookyard authors pi's payload shape; an
+// outcome key on another engine's payload is not ours to interpret.
 func (e *Envelope) PiOutcome() string {
 	if e.Engine != vocab.Pi {
 		return ""

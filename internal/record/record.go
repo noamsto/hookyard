@@ -69,10 +69,7 @@ const maxRecordBytes = 65536
 const maxReasonBytes = 512
 
 // maxFieldBytes bounds CWD and ToolName during the size-reduction cascade,
-// and TurnOutcome unconditionally in toRecord (TurnOutcome is short in
-// practice — pi's outcome vocabulary is completed|error|aborted — so it needs
-// no place in the cascade itself, just the same bound the other short fields
-// get).
+// and TurnOutcome unconditionally in toRecord.
 const maxFieldBytes = 256
 
 // Event is the minimal input the router builds per handled hook event.
@@ -86,14 +83,9 @@ type Event struct {
 	CWD            string
 	ToolName       string
 	// TurnOutcome is pi's native run outcome (completed|error|aborted) on
-	// turn_end and agent_before_settle, per D2 (docs/design/hookyard.md
-	// §11.2). It is named distinctly from this package's Outcome* handler
-	// vocabulary: that vocabulary classifies a handler's contribution to a
-	// verdict (where "error" means a handler failed), while TurnOutcome
-	// reports whether pi's own provider turn failed. It is additive and
-	// engine-specific: the router fills it only for pi, since hookyard
-	// authors pi's payload and an outcome key on any other engine is not ours
-	// to interpret.
+	// turn_end and agent_before_settle (docs/design/hookyard.md §11.2), filled
+	// for pi only. It is not the Outcome* vocabulary above: there "error"
+	// means a handler failed, here it means pi's provider turn did.
 	TurnOutcome   string
 	Verdict       string
 	Enforced      bool

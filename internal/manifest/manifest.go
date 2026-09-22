@@ -393,11 +393,7 @@ func validateCoverage(where string, h Handler, engines []vocab.Engine) error {
 // for one more continuation and guards nothing. The router never waits for a
 // fire-and-forget handler (§4), so a verdict computed there has nowhere to
 // go on a guard event — the handler's author would reasonably believe it
-// guards a call it in fact never can. HasGuardSlot, not HasDecisionSlot, is
-// the right predicate here: rejecting pi turn_end would reject every
-// fire-and-forget turn_end observer that claims pi, forcing the common case —
-// an observer, not a guard — onto pi's synchronous verdict lane for no
-// guarding benefit.
+// guards a call it in fact never can.
 func validateLane(where string, h Handler, engines []vocab.Engine) error {
 	if !h.FireAndForget() {
 		return nil

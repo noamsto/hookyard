@@ -35,9 +35,7 @@ var cursorScopedDecisionEvents = map[string]bool{
 // consolidated deny there means "do not settle yet — continue with this
 // reason", the same protocol as pre_tool's block, not a new verdict value.
 // Claude Code and Codex's Stop have the same shape available (native
-// stop_hook_active bounds the loop identically) but are deliberately not
-// wired up here — filed as follow-up issue #77, cross-engine work out of
-// #76's scope. `enforced: true` on a settle deny means hookyard rendered a
+// stop_hook_active bounds the loop identically); issue #77. `enforced: true` on a settle deny means hookyard rendered a
 // block the bridge acted on, not that pi's run actually continued: pi may
 // still decline it (canContinue false, or an abort during before_settle),
 // the same class of gap pre_tool's `enforced` already accepts. The bridge
@@ -57,13 +55,10 @@ func HasDecisionSlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bo
 
 // HasGuardSlot reports whether engine's decision slot on this event guards a
 // call hookyard's router can veto, as opposed to pi's turn_end slot (D3),
-// which only requests one more continuation and guards no call at all.
-// validateLane calls this instead of HasDecisionSlot: giving pi turn_end a
-// decision slot would otherwise reject every fire-and-forget turn_end
-// observer that claims pi, forcing the common case — an observer, not a
-// guard — onto pi's synchronous verdict-lane critical path. A fire-and-forget
-// turn_end handler still records "dispatched", so nothing claims enforcement
-// it never had.
+// which only requests one more continuation and guards no call at all. Only a
+// guard slot makes a fire-and-forget handler misleading: turn-end observers
+// are the common case, and a fire-and-forget one records "dispatched", so
+// nothing claims enforcement it never had.
 func HasGuardSlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bool {
 	return HasDecisionSlot(engine, canonicalEvent, nativeEvent) && canonicalEvent != vocab.TurnEnd
 }
