@@ -207,11 +207,13 @@ func (e *Envelope) PiOutcome() string {
 	return stringField(e.Native, "outcome")
 }
 
-// PiStopHookActive reads pi's turn_end payload's stop_hook_active (D3,
-// docs/design/hookyard.md §11.2): true iff the bridge already spent this
-// run's one continuation. Pi-only for the same reason PiOutcome is; a
-// non-bool value (including absent) reads as false, since "the bridge has not
-// forced a continuation" is the safe default for a field it never sent.
+// PiStopHookActive reads pi's agent_before_settle (canonical turn_end)
+// payload's stop_hook_active (D3, docs/design/hookyard.md §11.2): true iff
+// the bridge already spent this run's one continuation. pi's native per-turn
+// turn_end payload never carries this field. Pi-only for the same reason
+// PiOutcome is; a non-bool value (including absent) reads as false, since
+// "the bridge has not forced a continuation" is the safe default for a field
+// it never sent.
 func (e *Envelope) PiStopHookActive() bool {
 	if e.Engine != vocab.Pi {
 		return false

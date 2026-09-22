@@ -411,12 +411,15 @@ func TestRenderPiPreToolNeverMixesBlockAndAdvisory(t *testing.T) {
 }
 
 // TestRenderPiTurnEnd walks pi's settle-boundary decision slot (D3): deny
-// renders the same block shape as pre_tool, ask/allow print nothing and stay
-// unenforced (no degrade-to-deny, unlike pre_tool — there is no safe
-// direction to force a continuation toward), abstain is enforced with no
-// output, and a standalone advisory is never rendered even when the handler
-// gave one. StopHookActive short-circuits every verdict to "print nothing",
-// with Enforced tracking abstain alone.
+// renders the same block shape as pre_tool — falling back to
+// piTurnEndEmptyDenyReason when a handler gives neither reason nor advice,
+// rather than printing a bare block the bridge's own decision() would then
+// caption "Blocked by hookyard" — ask/allow print nothing and stay unenforced
+// (no degrade-to-deny, unlike pre_tool — there is no safe direction to force
+// a continuation toward), abstain is enforced with no output, and a
+// standalone advisory is never rendered even when the handler gave one.
+// StopHookActive short-circuits every verdict to "print nothing", with
+// Enforced tracking abstain alone.
 func TestRenderPiTurnEnd(t *testing.T) {
 	native, ok := vocab.NativeEvent(vocab.Pi, vocab.TurnEnd)
 	if !ok {
@@ -425,31 +428,37 @@ func TestRenderPiTurnEnd(t *testing.T) {
 	cases := []struct {
 		name      string
 		verdict   Verdict
+		reason    string
 		advice    string
 		stopHook  bool
 		stdout    string
 		enforced  bool
 		delivered bool
 	}{
-		{name: "deny", verdict: Deny, stdout: `{"block":true,"reason":"r"}`, enforced: true},
+		{name: "deny", verdict: Deny, reason: "r", stdout: `{"block":true,"reason":"r"}`, enforced: true},
 		{
-			name: "deny with advice joins reason and advice", verdict: Deny, advice: "adv",
+			name: "deny with advice joins reason and advice", verdict: Deny, reason: "r", advice: "adv",
 			stdout: `{"block":true,"reason":"r\n\nadv"}`, enforced: true, delivered: true,
 		},
-		{name: "ask prints nothing, unenforced", verdict: Ask},
-		{name: "allow prints nothing, unenforced", verdict: Allow},
-		{name: "abstain prints nothing, enforced", verdict: Abstain, enforced: true},
+		{
+			name:    "deny with no reason and no advice falls back to the fixed continuation reason",
+			verdict: Deny, reason: "", advice: "",
+			stdout: `{"block":true,"reason":"` + piTurnEndEmptyDenyReason + `"}`, enforced: true,
+		},
+		{name: "ask prints nothing, unenforced", verdict: Ask, reason: "r"},
+		{name: "allow prints nothing, unenforced", verdict: Allow, reason: "r"},
+		{name: "abstain prints nothing, enforced", verdict: Abstain, reason: "r", enforced: true},
 		{
 			name:    "abstain with advice still delivers nothing: turn_end has no advisory slot",
-			verdict: Abstain, advice: "adv", enforced: true,
+			verdict: Abstain, reason: "r", advice: "adv", enforced: true,
 		},
-		{name: "deny + stop_hook_active prints nothing, unenforced", verdict: Deny, stopHook: true},
-		{name: "abstain + stop_hook_active stays enforced", verdict: Abstain, stopHook: true, enforced: true},
+		{name: "deny + stop_hook_active prints nothing, unenforced", verdict: Deny, reason: "r", stopHook: true},
+		{name: "abstain + stop_hook_active stays enforced", verdict: Abstain, reason: "r", stopHook: true, enforced: true},
 	}
 	for _, c := range cases {
 		in := Input{
 			Engine: vocab.Pi, CanonicalEvent: vocab.TurnEnd, NativeEvent: native,
-			Verdict: c.verdict, Reason: "r", Advice: c.advice, StopHookActive: c.stopHook,
+			Verdict: c.verdict, Reason: c.reason, Advice: c.advice, StopHookActive: c.stopHook,
 		}
 		checkRendered(t, "pi turn_end "+c.name, Render(in), c.stdout, c.enforced, c.delivered)
 	}

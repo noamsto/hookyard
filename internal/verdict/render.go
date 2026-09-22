@@ -41,6 +41,13 @@ type Rendered struct {
 // a deny that carries none — and a rejected deny is an allowed tool call.
 const codexEmptyDenyReason = "denied by hookyard handler"
 
+// piTurnEndEmptyDenyReason stands in for a turn_end deny with no reason and
+// no advice. Without it, renderPiDeny would print bare "{"block":true}", and
+// the bridge's own decision() falls back to "Blocked by hookyard" for the
+// continuation message — the opposite of what a handler that denies a settle
+// is trying to say (keep going, don't stop).
+const piTurnEndEmptyDenyReason = "a hookyard handler asked you to keep working before finishing"
+
 // hookSpecificOutput is the wrapper Claude Code and Codex share. Codex gets
 // the same nested shape rather than a top-level decision because capture-hook.sh
 // sent both engines this byte-identical response and Codex blocked the call;
@@ -257,7 +264,11 @@ func renderPiTurnEnd(in Input) Rendered {
 	}
 	switch in.Verdict {
 	case Deny:
-		return renderPiDeny(in.Reason, in.Advice)
+		reason := in.Reason
+		if reason == "" && in.Advice == "" {
+			reason = piTurnEndEmptyDenyReason
+		}
+		return renderPiDeny(reason, in.Advice)
 	case Abstain:
 		return Rendered{Enforced: true}
 	default: // Ask, Allow

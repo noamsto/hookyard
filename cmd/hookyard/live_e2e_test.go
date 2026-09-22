@@ -2046,9 +2046,9 @@ func TestLivePiTurnEndDenyForcesExactlyOneContinuation(t *testing.T) {
 			turnEndRecords[1].Verdict, turnEndRecords[1].Enforced, output)
 	}
 	for i, rec := range turnEndRecords {
-		if rec.Outcome != "completed" {
-			t.Fatalf("canonical turn_end record %d outcome = %q, want %q\n--- pi output ---\n%s",
-				i, rec.Outcome, "completed", output)
+		if rec.TurnOutcome != "completed" {
+			t.Fatalf("canonical turn_end record %d turn_outcome = %q, want %q\n--- pi output ---\n%s",
+				i, rec.TurnOutcome, "completed", output)
 		}
 	}
 
@@ -2057,9 +2057,9 @@ func TestLivePiTurnEndDenyForcesExactlyOneContinuation(t *testing.T) {
 			"the canonical ones\n--- pi output ---\n%s", output)
 	}
 	for i, rec := range perTurnRecords {
-		if !livePiValidOutcome(rec.Outcome) {
-			t.Fatalf("pi:turn_end record %d outcome %q is not one of completed/error/aborted\n--- pi output ---\n%s",
-				i, rec.Outcome, output)
+		if !livePiValidOutcome(rec.TurnOutcome) {
+			t.Fatalf("pi:turn_end record %d turn_outcome %q is not one of completed/error/aborted\n--- pi output ---\n%s",
+				i, rec.TurnOutcome, output)
 		}
 	}
 

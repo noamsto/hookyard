@@ -116,15 +116,16 @@ func assertJSONString(t *testing.T, top map[string]json.RawMessage, key, want st
 	}
 }
 
-// D2: pi's native outcome rides the record as an additive, optional field —
-// present when the router filled it (pi only), omitted entirely otherwise, so
-// pre-#76 records and non-pi records keep their exact old shape.
-func TestToRecordOutcome(t *testing.T) {
+// D2: pi's native run outcome rides the record as an additive, optional
+// turn_outcome field — present when the router filled it (pi only), omitted
+// entirely otherwise, so pre-#76 records and non-pi records keep their exact
+// old shape.
+func TestToRecordTurnOutcome(t *testing.T) {
 	base := Event{Engine: vocab.Pi, SessionID: "s", Verdict: "allow", Router: RouterOK}
 
-	withOutcome := base
-	withOutcome.Outcome = "completed"
-	line, err := buildLine(toRecord(withOutcome, time.Now(), "k"))
+	withTurnOutcome := base
+	withTurnOutcome.TurnOutcome = "completed"
+	line, err := buildLine(toRecord(withTurnOutcome, time.Now(), "k"))
 	if err != nil {
 		t.Fatalf("buildLine: %v", err)
 	}
@@ -132,18 +133,18 @@ func TestToRecordOutcome(t *testing.T) {
 	if err := json.Unmarshal(line, &top); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	assertJSONString(t, top, "outcome", `"completed"`)
+	assertJSONString(t, top, "turn_outcome", `"completed"`)
 
 	line, err = buildLine(toRecord(base, time.Now(), "k"))
 	if err != nil {
 		t.Fatalf("buildLine: %v", err)
 	}
-	var topNoOutcome map[string]json.RawMessage
-	if err := json.Unmarshal(line, &topNoOutcome); err != nil {
+	var topNoTurnOutcome map[string]json.RawMessage
+	if err := json.Unmarshal(line, &topNoTurnOutcome); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if _, ok := topNoOutcome["outcome"]; ok {
-		t.Errorf("empty Outcome should omit the key entirely, got %s", topNoOutcome["outcome"])
+	if _, ok := topNoTurnOutcome["turn_outcome"]; ok {
+		t.Errorf("empty TurnOutcome should omit the key entirely, got %s", topNoTurnOutcome["turn_outcome"])
 	}
 }
 

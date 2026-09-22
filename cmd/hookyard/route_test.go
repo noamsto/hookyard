@@ -441,8 +441,8 @@ func TestRunRouteAgentBeforeSettleDenyOutcomeAndStopHookActive(t *testing.T) {
 	if rec.Verdict != record.OutcomeDeny || !rec.Enforced {
 		t.Errorf("want an enforced deny, got %q enforced=%v", rec.Verdict, rec.Enforced)
 	}
-	if rec.Outcome != "completed" {
-		t.Errorf("want outcome %q, got %q", "completed", rec.Outcome)
+	if rec.TurnOutcome != "completed" {
+		t.Errorf("want turn_outcome %q, got %q", "completed", rec.TurnOutcome)
 	}
 	if rec.CanonicalEvent != "turn_end" || rec.NativeEvent != "agent_before_settle" {
 		t.Errorf("want canonical_event turn_end / native_event agent_before_settle, got %+v", rec)
@@ -458,8 +458,32 @@ func TestRunRouteAgentBeforeSettleDenyOutcomeAndStopHookActive(t *testing.T) {
 	if rec.Verdict != record.OutcomeDeny || rec.Enforced {
 		t.Errorf("want an unenforced deny once stop_hook_active is true, got %q enforced=%v", rec.Verdict, rec.Enforced)
 	}
-	if rec.Outcome != "completed" {
-		t.Errorf("want outcome %q, got %q", "completed", rec.Outcome)
+	if rec.TurnOutcome != "completed" {
+		t.Errorf("want turn_outcome %q, got %q", "completed", rec.TurnOutcome)
+	}
+}
+
+// A deny handler that gives neither reason nor advice must still render a
+// non-empty block reason (verdict.piTurnEndEmptyDenyReason): without one,
+// the bridge's own decision() falls back to "Blocked by hookyard" for the
+// continuation message it injects, which reads as a rejection rather than
+// the "keep going" instruction a turn_end deny is meant to carry.
+func TestRunRoutePiTurnEndDenyWithNoReasonFallsBackToFixedReason(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	writeTable(t, stateDir, piDenyHandler(t, dir, "deny-a", "", []string{"turn_end"}))
+
+	printed := runPipeline(t, piRouteOpts(stateDir), fmt.Sprintf(piSettleTemplate, "false"))
+	wantStdout := `{"block":true,"reason":"a hookyard handler asked you to keep working before finishing"}` + "\n"
+	if printed != wantStdout {
+		t.Errorf("want %q printed, got %q", wantStdout, printed)
+	}
+	rec := readRecord(t, stateDir)
+	if rec.Verdict != record.OutcomeDeny || !rec.Enforced {
+		t.Errorf("want an enforced deny, got %q enforced=%v", rec.Verdict, rec.Enforced)
+	}
+	if rec.Reason != "" {
+		t.Errorf("want the record's own reason field empty (the fallback lives only in the rendered stdout), got %q", rec.Reason)
 	}
 }
 
@@ -482,8 +506,8 @@ func TestRunRoutePiTurnEndNativeRecordsBlankCanonicalEventAndOutcome(t *testing.
 	if rec.CanonicalEvent != "" || rec.NativeEvent != "turn_end" {
 		t.Errorf("want canonical_event \"\" / native_event turn_end, got %+v", rec)
 	}
-	if rec.Outcome != "completed" {
-		t.Errorf("want outcome %q, got %q", "completed", rec.Outcome)
+	if rec.TurnOutcome != "completed" {
+		t.Errorf("want turn_outcome %q, got %q", "completed", rec.TurnOutcome)
 	}
 	if len(rec.Handlers) != 1 || rec.Handlers[0].Name != "observer" || rec.Handlers[0].Outcome != record.OutcomeAbstain {
 		t.Errorf("want the pi:turn_end observer recorded abstain, got %+v", rec.Handlers)

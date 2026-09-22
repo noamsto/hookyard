@@ -1720,11 +1720,14 @@ rather than disappearing. In the example above `delivered` is `false` because
 the engine is Codex, which has no advisory slot — the advice happened, the
 model never saw it, and the record says both.
 
-`outcome` is the one field in the example above that isn't there: it is
+`turn_outcome` is the one field in the example above that isn't there: it is
 optional, `omitempty`, and populated only for pi's `turn_end` and
 `agent_before_settle` records, carrying pi's own
 `completed`/`error`/`aborted` vocabulary verbatim (amendment §11.2, issue
-#76). It exists because
+#76). It is named `turn_outcome`, not `outcome`, so it cannot be confused with
+the per-handler `outcome` vocabulary above — that one classifies a handler's
+own contribution ("error" means a handler failed); `turn_outcome` reports
+whether pi's provider turn itself failed. It exists because
 hookyard authors pi's payload and can vouch for that key's meaning there; the
 router leaves it empty on every other engine and event rather than reading an
 `outcome` key off a payload it didn't write. Adding it is the additive-only
@@ -4198,14 +4201,17 @@ has the field-by-field reasoning; in short, `entries`/`context` are
 whole-session projections that can outgrow the router's 1 MiB inbound cap,
 the entry ids are session-file internals no consumer needs, and `continue` is
 pi's own loop-control input, already stale by the time a value read back from
-it would matter. `record.Event`/`record.Record` gain an `Outcome` field,
-`json:"outcome,omitempty"` (§6) — additive, no `v` bump. The router fills it
-from the native payload's `outcome` string only when `env.Engine ==
-vocab.Pi`, via `Envelope.PiOutcome()`: hookyard authors pi's payload, so it
-can vouch for that key's meaning there, but an `outcome` key on any other
-engine's payload is not hookyard's to interpret. Absent or non-string reads
-as empty. Cursor's `stop.status` is a related field that could plausibly feed
-the same concept; normalizing it into `outcome` is out of scope here.
+it would matter. `record.Event`/`record.Record` gain a `TurnOutcome` field,
+`json:"turn_outcome,omitempty"` (§6) — additive, no `v` bump, named apart from
+the package's per-handler `outcome` vocabulary since the two "error"s mean
+different things (a handler failing vs. pi's provider turn failing). The
+router fills it from the native payload's `outcome` string only when
+`env.Engine == vocab.Pi`, via `Envelope.PiOutcome()`: hookyard authors pi's
+payload, so it can vouch for that key's meaning there, but an `outcome` key
+on any other engine's payload is not hookyard's to interpret. Absent or
+non-string reads as empty. Cursor's `stop.status` is a related field that
+could plausibly feed the same concept; normalizing it into `turn_outcome` is
+out of scope here.
 
 **D3. pi's `turn_end` gets a decision slot — pi-only, bounded to one
 continuation per run.** `HasDecisionSlot(Pi, TurnEnd, "agent_before_settle")`
@@ -4304,8 +4310,8 @@ every `turn_end`. pi made exactly two provider requests. The second carried
 `[hookyard turn_end] <reason>` as a user-role message and the first did not.
 The handler saw `stop_hook_active` false, then true. The two canonical
 `turn_end` records read deny/enforced, then deny/unenforced, both with
-`outcome: "completed"`, and the `pi:turn_end` observer's records carry
-`outcome` beside an empty `canonical_event`.
+`turn_outcome: "completed"`, and the `pi:turn_end` observer's records carry
+`turn_outcome` beside an empty `canonical_event`.
 
 ### What this amends
 
@@ -4313,7 +4319,7 @@ The handler saw `stop_hook_active` false, then true. The two canonical
 |---|---|---|
 | §7, concept table, "turn end" row, Pi cell | Amended | `turn_end` → `agent_before_settle`: pi's per-response settle boundary now fills the cell every other engine's once-per-response `Stop`/`stop` already fills; pi's own per-turn `turn_end` survives as the engine-scoped `pi:turn_end` (D1, issue #76) |
 | §7, engine field table, "second id" row, Pi cell | Amended | `turn_index` no longer rides canonical `turn_end`; it rides `pi:turn_end` instead, and both `turn_end` and `agent_before_settle` gained `outcome` on 0.87.0 (D1–D2, issue #76) |
-| §6, the record | Amended | `outcome` is a new optional, pi-only field, additive under the `v` schema's grow-only rule (D2, issue #76) |
+| §6, the record | Amended | `turn_outcome` is a new optional, pi-only field, additive under the `v` schema's grow-only rule (D2, issue #76) |
 | `internal/verdict/capability.go`, `HasDecisionSlot`/`HasAdvisorySlot` | Amended | pi `turn_end` gains a decision slot, pi-only; no advisory slot anywhere (D3, issue #76) |
 | `internal/manifest/manifest.go`, `validateLane` | Amended | Now calls the new `HasGuardSlot`, not `HasDecisionSlot`, so a fire-and-forget `turn_end` handler on pi stays legal (D3, issue #76) |
 | Cross-engine `Stop` decision slots (Claude Code, Codex) | Deferred | Filed as issue #77; the loop-bound mechanism here (native `stop_hook_active`, `HasGuardSlot` already generalized) is the template it would reuse |
