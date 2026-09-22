@@ -1,0 +1,2 @@
+{"request": 1, "messages": [{"role": "user", "content": [{"type": "text", "text": "Run the probe."}]}]}
+{"request": 2, "messages": [{"role": "user", "content": [{"type": "text", "text": "Run the probe."}]}, {"role": "assistant", "content": null, "tool_calls": [{"id": "PROBE-TOOLCALL-01", "type": "function", "function": {"name": "bash", "arguments": "{\"command\":\"echo PROBE_EXECUTED\"}"}}]}, {"role": "tool", "content": "PROBE_EXECUTED\n", "tool_call_id": "PROBE-TOOLCALL-01"}, {"role": "user", "content": [{"type": "text", "text": "PROBE_STEER"}]}]}

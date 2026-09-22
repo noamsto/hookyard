@@ -29,12 +29,16 @@ import (
 // arrives in a file rather than in argv because one case carries megabytes,
 // which is the whole point of it.
 //
-// A sequence rather than a single event because one delivery needs two: an
+// A sequence rather than a single event because some deliveries need two: an
 // advisory queued by session_start is flushed by the before_agent_start that
-// follows it, and the slot holding it lives in the module — so both firings have
-// to happen inside one load of the bridge.
+// follows it, and one a tool_call stashes is flushed by that same call's
+// tool_result — and both slots live in the module, so both firings of a pair
+// have to happen inside one load of the bridge.
 const piBridgeHarness = `import { readFile } from "node:fs/promises";
 import bridge from "./bridge.mjs";
+
+const [scriptPath, ...rest] = process.argv.slice(2);
+const steps = JSON.parse(await readFile(scriptPath, "utf8"));
 
 const registered = [];
 const commands = [];
@@ -44,7 +48,6 @@ bridge({
   registerCommand: (name, options) => commands.push({ name, ...options }),
 });
 
-const [scriptPath, ...rest] = process.argv.slice(2);
 const ctx = {
   cwd: "/probe/cwd",
   sessionManager: {
@@ -56,17 +59,50 @@ const ctx = {
   ui: { notify: (message, level) => notifications.push({ message, level }) },
 };
 
+// pi fires every handler registered for an event, in order, not just the
+// first — the bridge itself relies on that for tool_result, where its own
+// flush handler has to run ahead of a manifest entry's. tool_call's return is
+// a decision, so the first block wins outright and short-circuits the rest;
+// every other event carries no decision, only content a handler may patch
+// (emitToolResult's own middleware rule: a returned {content} replaces
+// event.content for the next handler), so the merge rule below drives all of
+// them, and with a single handler — true everywhere but tool_result — it
+// reduces to exactly what firing that one handler already meant.
+async function runHandlers(eventName, handlers, payload, ctx) {
+  if (eventName === "tool_call") {
+    let lastTruthy = null;
+    for (const { handler } of handlers) {
+      const result = await handler(payload, ctx);
+      if (result && result.block === true) return result;
+      if (result != null) lastTruthy = result;
+    }
+    return lastTruthy;
+  }
+  let event = payload;
+  let changed = false;
+  let lastReturn = null;
+  for (const { handler } of handlers) {
+    const result = await handler(event, ctx);
+    if (result != null) lastReturn = result;
+    if (result && result.content !== undefined) {
+      event = { ...event, content: result.content };
+      changed = true;
+    }
+  }
+  return changed ? { content: event.content } : lastReturn;
+}
+
 const returns = [];
-for (const step of JSON.parse(await readFile(scriptPath, "utf8"))) {
+for (const step of steps) {
   if (step.command !== undefined) {
     const command = commands.find((c) => c.name === step.command);
     if (!command) throw new Error("the bridge registered no command named " + step.command);
     returns.push((await command.handler(step.args, ctx)) ?? null);
     continue;
   }
-  const entry = registered.find((r) => r.event === step.event);
-  if (!entry) throw new Error("the bridge registered nothing for " + step.event);
-  returns.push((await entry.handler(step.payload, ctx)) ?? null);
+  const handlers = registered.filter((r) => r.event === step.event);
+  if (handlers.length === 0) throw new Error("the bridge registered nothing for " + step.event);
+  returns.push((await runHandlers(step.event, handlers, step.payload, ctx)) ?? null);
 }
 // A failed spawn reaches its handler after the command handler has already
 // resolved — that is the contract — so the notification it produces lands one
@@ -265,14 +301,25 @@ func (r *piBridgeRun) fire(t *testing.T, event string, payload map[string]any, a
 	return r.drive(t, []piBridgeStep{{Event: event, Payload: payload}}, argv...).ret(0)
 }
 
+// "call-1" is the toolCallId every single-call test can share; piToolCallID
+// exists only for a drive that plays two calls against each other and needs
+// them to carry different ids.
 func piToolCall(name string, input any) map[string]any {
-	return map[string]any{"toolName": name, "input": input, "toolCallId": "call-1"}
+	return piToolCallID("call-1", name, input)
+}
+
+func piToolCallID(toolCallID, name string, input any) map[string]any {
+	return map[string]any{"toolName": name, "input": input, "toolCallId": toolCallID}
 }
 
 // content is `any` because what the bridge does with a content that is not the
 // array pi documents is itself part of the contract.
 func piToolResult(content any) map[string]any {
-	return map[string]any{"toolName": "bash", "input": nil, "toolCallId": "call-1", "content": content, "isError": false}
+	return piToolResultID("call-1", content, false)
+}
+
+func piToolResultID(toolCallID string, content any, isError bool) map[string]any {
+	return map[string]any{"toolName": "bash", "input": nil, "toolCallId": toolCallID, "content": content, "isError": isError}
 }
 
 func piTextBlock(text string) map[string]any {
@@ -441,11 +488,12 @@ func TestPiBridgeBlocksOnlyOnToolCall(t *testing.T) {
 	}))
 }
 
-// The advisory path owes the same fail-open decision() owes, on both delivery
-// vehicles. None of these could block — only tool_call can — but a bridge that
-// read an advisory out of a reply it does not understand would put the router's
-// own failure in front of the model as hookyard's advice, and on tool_result it
-// would put it there in place of the tool's output.
+// The advisory path owes the same fail-open decision() owes, on every
+// delivery vehicle. None of these could block — only tool_call can — but a
+// bridge that read an advisory out of a reply it does not understand would put
+// the router's own failure in front of the model as hookyard's advice: on
+// tool_result in place of the tool's output, or stashed for a tool_call's own
+// tool_result to carry later (covered on its own below).
 func TestPiBridgeDeliversNothingOnEveryUnreadableAdvisory(t *testing.T) {
 	for _, tc := range []struct{ name, body string }{
 		{name: "unparsable-stdout", body: `process.stdout.write("not json at all");`},
@@ -473,6 +521,298 @@ func TestPiBridgeDeliversNothingOnEveryUnreadableAdvisory(t *testing.T) {
 			for i, fired := range []string{"session_start", "the before_agent_start flush", "tool_result"} {
 				if got := drive.ret(i); got != "null" {
 					t.Errorf("%s returned %s, want null: an unreadable reply delivers no advisory", fired, got)
+				}
+			}
+		})
+	}
+}
+
+// piResultTexts decodes a tool_result handler's returned content patch into
+// its text blocks, in order — the shape every advisory test on this path
+// needs to assert against, whether the advisory came from tool_result's own
+// router or was flushed out of a tool_call's stash.
+func piResultTexts(t *testing.T, verdict string) []string {
+	t.Helper()
+	var patch struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(verdict), &patch); err != nil {
+		t.Fatalf("tool_result returned %s, which is not a content patch: %v", verdict, err)
+	}
+	texts := make([]string, len(patch.Content))
+	for i, block := range patch.Content {
+		texts[i] = block.Text
+	}
+	return texts
+}
+
+// tool_call's return channel is spent whole on the allow/block decision, so a
+// non-blocking advisory stashes in pendingToolAdvice and rides the SAME call's
+// own tool_result instead, keyed by toolCallId: a different call's tool_result
+// must never see it, and once flushed the stash is gone, so a second
+// tool_result for the same call sees nothing either.
+func TestPiBridgeAttachesAToolCallAdvisoryOnlyToTheSameCallsToolResult(t *testing.T) {
+	run := newPiBridgeRun(t)
+	const advice = "the yard has notes about this command"
+	router := run.router(t, "advising", `process.stdout.write('{"advisory":`+strconv.Quote(advice)+`}');`)
+	run.install(t, EmittedTimeoutSeconds*1000, piEntry("tool_call", "", router))
+
+	original := []any{piTextBlock("the tool's own output")}
+	drive := run.drive(t, []piBridgeStep{
+		{Event: "tool_call", Payload: piToolCall("bash", nil)},
+		{Event: "tool_result", Payload: piToolResultID("call-2", original, false)},
+		{Event: "tool_result", Payload: piToolResultID("call-1", original, false)},
+		{Event: "tool_result", Payload: piToolResultID("call-1", original, false)},
+	})
+
+	assertPiAllows(t, drive.ret(0))
+	if got := drive.ret(1); got != "null" {
+		t.Errorf("a different call's tool_result returned %s, want null: the advice belongs to call-1 alone", got)
+	}
+	texts := piResultTexts(t, drive.ret(2))
+	if len(texts) != 2 || texts[0] != "the tool's own output" || !strings.Contains(texts[1], advice) {
+		t.Fatalf("content = %v, want the original block plus the attributed advisory", texts)
+	}
+	if got := drive.ret(3); got != "null" {
+		t.Errorf("a second tool_result for the same call returned %s, want null: delivered exactly once", got)
+	}
+}
+
+// A well-formed deny already folds the router's advice into decision()'s
+// reason (§11.1), so the tool_call branch returns before ever reaching
+// pendingToolAdvice — a blocked call has nothing for the following
+// tool_result to find, which would otherwise deliver the same advice twice.
+func TestPiBridgeNeverStashesAToolCallAdvisoryOnABlock(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{name: "block-alone", body: `process.stdout.write('{"block":true,"reason":"denied"}');`},
+		{
+			name: "block-with-advisory-already-folded-into-the-reason",
+			body: `process.stdout.write('{"block":true,"reason":"denied","advisory":"never delivered"}');`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := newPiBridgeRun(t)
+			run.install(t, EmittedTimeoutSeconds*1000, piEntry("tool_call", "", run.router(t, "deny", tc.body)))
+
+			drive := run.drive(t, []piBridgeStep{
+				{Event: "tool_call", Payload: piToolCall("bash", nil)},
+				{Event: "tool_result", Payload: piToolResult([]any{piTextBlock("never produced")})},
+			})
+
+			if !strings.Contains(drive.ret(0), `"block":true`) {
+				t.Fatalf("verdict = %s, want a block", drive.ret(0))
+			}
+			if got := drive.ret(1); got != "null" {
+				t.Errorf("tool_result returned %s, want null: a blocked call never stashes advice", got)
+			}
+		})
+	}
+}
+
+// A call aborted after tool_call but before it ever executes fires no
+// tool_result, so nothing would otherwise delete its stash — turn_end sweeps
+// it. Firing turn_end and then a tool_result for the same id proves the sweep
+// actually ran, not merely that this id was never stashed.
+func TestPiBridgeClearsStashedAdviceOnTurnEnd(t *testing.T) {
+	run := newPiBridgeRun(t)
+	router := run.router(t, "advising", `process.stdout.write('{"advisory":"never claimed"}');`)
+	run.install(t, EmittedTimeoutSeconds*1000, piEntry("tool_call", "", router))
+
+	drive := run.drive(t, []piBridgeStep{
+		{Event: "tool_call", Payload: piToolCall("bash", nil)},
+		{Event: "turn_end", Payload: map[string]any{"turnIndex": 0}},
+		{Event: "tool_result", Payload: piToolResult([]any{piTextBlock("the tool's own output")})},
+	})
+
+	assertPiAllows(t, drive.ret(0))
+	if got := drive.ret(2); got != "null" {
+		t.Errorf("tool_result after turn_end returned %s, want null: turn_end must have cleared the stash", got)
+	}
+}
+
+// Two tool_calls stash under their own toolCallId, and a router that answers
+// per-call proves the keys never cross — even when the flushes arrive in the
+// opposite order the calls were made.
+func TestPiBridgeKeepsParallelCallsAdviceSeparate(t *testing.T) {
+	run := newPiBridgeRun(t)
+	router := run.router(t, "per-call",
+		`const payload = JSON.parse(require("node:fs").readFileSync(0, "utf8"));`+"\n"+
+			`const advice = payload.tool_use_id === "call-A" ? "advice for A" : "advice for B";`+"\n"+
+			`process.stdout.write(JSON.stringify({ advisory: advice }));`)
+	run.install(t, EmittedTimeoutSeconds*1000, piEntry("tool_call", "", router))
+
+	original := []any{piTextBlock("output")}
+	drive := run.drive(t, []piBridgeStep{
+		{Event: "tool_call", Payload: piToolCallID("call-A", "bash", nil)},
+		{Event: "tool_call", Payload: piToolCallID("call-B", "bash", nil)},
+		{Event: "tool_result", Payload: piToolResultID("call-B", original, false)},
+		{Event: "tool_result", Payload: piToolResultID("call-A", original, false)},
+	})
+
+	assertPiAllows(t, drive.ret(0))
+	assertPiAllows(t, drive.ret(1))
+	bTexts := piResultTexts(t, drive.ret(2))
+	if len(bTexts) != 2 || !strings.Contains(bTexts[1], "advice for B") {
+		t.Fatalf("call-B's tool_result content = %v, want its own advice, not call-A's", bTexts)
+	}
+	aTexts := piResultTexts(t, drive.ret(3))
+	if len(aTexts) != 2 || !strings.Contains(aTexts[1], "advice for A") {
+		t.Fatalf("call-A's tool_result content = %v, want its own advice, not call-B's", aTexts)
+	}
+}
+
+// The bridge-owned flush is registered after the per-entry loop specifically
+// so a post_tool manifest entry's own tool_result handler sees the tool's
+// original content, undisturbed by the pre_tool advisory — and the pre_tool
+// advisory lands in tool_result's content only after whatever the post_tool
+// advisory already added. Model-visible order: tool output, then post, then
+// pre.
+func TestPiBridgeOrdersItsOwnPostAndPreToolAdvisoriesOnOneCall(t *testing.T) {
+	run := newPiBridgeRun(t)
+	preRouter := run.router(t, "pre", `process.stdout.write('{"advisory":"pre"}');`)
+	postRouter := run.router(t, "post", `process.stdout.write('{"advisory":"post"}');`)
+	run.install(t, EmittedTimeoutSeconds*1000,
+		piEntry("tool_call", "", preRouter),
+		piEntry("tool_result", "", postRouter),
+	)
+
+	drive := run.drive(t, []piBridgeStep{
+		{Event: "tool_call", Payload: piToolCall("bash", nil)},
+		{Event: "tool_result", Payload: piToolResult([]any{piTextBlock("the tool's own output")})},
+	})
+
+	assertPiAllows(t, drive.ret(0))
+	texts := piResultTexts(t, drive.ret(1))
+	if len(texts) != 3 {
+		t.Fatalf("content = %v, want the original block plus exactly one post and one pre advisory", texts)
+	}
+	if texts[0] != "the tool's own output" {
+		t.Errorf("content[0] = %q, want the tool's own output first", texts[0])
+	}
+	if texts[1] != "[hookyard advisory] post" || texts[2] != "[hookyard advisory] pre" {
+		t.Errorf("content = %v, want the post-tool advisory immediately before the pre-tool one", texts)
+	}
+}
+
+// A post_tool manifest entry's tool_result handler builds its router payload
+// from event.content before the bridge-owned flush ever runs, so it must see
+// the tool's own output only — never the pre_tool advisory the flush appends
+// afterward.
+func TestPiBridgePostToolRouterPayloadExcludesThePreToolAdvisory(t *testing.T) {
+	run := newPiBridgeRun(t)
+	preRouter := run.router(t, "pre", `process.stdout.write('{"advisory":"pre"}');`)
+	postRouter, capturePath := run.capturingRouter(t)
+	run.install(t, EmittedTimeoutSeconds*1000,
+		piEntry("tool_call", "", preRouter),
+		piEntry("tool_result", "", postRouter),
+	)
+
+	drive := run.drive(t, []piBridgeStep{
+		{Event: "tool_call", Payload: piToolCall("bash", nil)},
+		{Event: "tool_result", Payload: piToolResult([]any{piTextBlock("the tool's own output")})},
+	})
+
+	assertPiAllows(t, drive.ret(0))
+	texts := piResultTexts(t, drive.ret(1))
+	if len(texts) != 2 || texts[0] != "the tool's own output" || texts[1] != "[hookyard advisory] pre" {
+		t.Fatalf("content = %v, want the tool's own output plus the flushed pre advisory", texts)
+	}
+
+	payload := piCapturedPayload(t, capturePath)
+	var response struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(payload["tool_response"], &response); err != nil {
+		t.Fatalf("unmarshal tool_response: %v", err)
+	}
+	if len(response.Content) != 1 || response.Content[0].Text != "the tool's own output" {
+		t.Fatalf("captured tool_response.content = %+v, want only the tool's own output, no hookyard advisory text", response.Content)
+	}
+	for _, block := range response.Content {
+		if strings.Contains(block.Text, "[hookyard advisory]") {
+			t.Fatalf("captured tool_response.content = %+v, must not contain the pre_tool advisory", response.Content)
+		}
+	}
+}
+
+// afterToolCall fires tool_result for a call that failed too — the error just
+// becomes an isError result — so the advisory owed to it must reach the model
+// the same way a successful call's does.
+func TestPiBridgeAttachesAdviceToAnErroredToolResult(t *testing.T) {
+	run := newPiBridgeRun(t)
+	router := run.router(t, "advising", `process.stdout.write('{"advisory":"notes on the failure"}');`)
+	run.install(t, EmittedTimeoutSeconds*1000, piEntry("tool_call", "", router))
+
+	drive := run.drive(t, []piBridgeStep{
+		{Event: "tool_call", Payload: piToolCall("bash", nil)},
+		{Event: "tool_result", Payload: piToolResultID("call-1", []any{piTextBlock("command exited 1")}, true)},
+	})
+
+	assertPiAllows(t, drive.ret(0))
+	texts := piResultTexts(t, drive.ret(1))
+	if len(texts) != 2 || !strings.Contains(texts[1], "notes on the failure") {
+		t.Fatalf("content = %v, want the advisory appended to the errored result too", texts)
+	}
+}
+
+// The same fail-open decision() owes covers the stash: an unreadable reply on
+// tool_call must leave nothing for the following tool_result to find.
+func TestPiBridgeStashesNothingFromAnUnreadableToolCallAdvisory(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{name: "unparsable-stdout", body: `process.stdout.write("not json at all");`},
+		{name: "empty-stdout", body: `process.exitCode = 0;`},
+		{name: "empty-advisory", body: `process.stdout.write('{"advisory":""}');`},
+		{name: "non-string-advisory", body: `process.stdout.write('{"advisory":5}');`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := newPiBridgeRun(t)
+			router := run.router(t, "advising", tc.body)
+			run.install(t, EmittedTimeoutSeconds*1000, piEntry("tool_call", "", router))
+
+			drive := run.drive(t, []piBridgeStep{
+				{Event: "tool_call", Payload: piToolCall("bash", nil)},
+				{Event: "tool_result", Payload: piToolResult([]any{piTextBlock("the tool's own output")})},
+			})
+
+			assertPiAllows(t, drive.ret(0))
+			if got := drive.ret(1); got != "null" {
+				t.Errorf("tool_result returned %s, want null: an unreadable tool_call reply stashes nothing", got)
+			}
+		})
+	}
+}
+
+// The flush and its turn_end sweep exist only to serve a tool_call entry, so
+// an install with none registers neither — the same pattern
+// TestPiBridgeRegistersBeforeAgentStartOnlyForSessionStart proves for
+// before_agent_start and session_start.
+func TestPiBridgeRegistersItsAdvisoryFlushOnlyForToolCall(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		entry piBridgeEntry
+		want  int
+	}{
+		{name: "with-a-tool-call-entry", entry: piEntry("tool_call", "", "router-never-spawned"), want: 1},
+		{name: "without-one", entry: piEntry("session_start", "", "router-never-spawned"), want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := newPiBridgeRun(t)
+			run.install(t, EmittedTimeoutSeconds*1000, tc.entry)
+
+			registered := run.drive(t, nil).Registered
+			for _, event := range []string{"tool_result", "turn_end"} {
+				got := 0
+				for _, e := range registered {
+					if e == event {
+						got++
+					}
+				}
+				if got != tc.want {
+					t.Errorf("registered = %q, want %s registered %d time(s)", registered, event, tc.want)
 				}
 			}
 		})

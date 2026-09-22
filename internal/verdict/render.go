@@ -57,7 +57,9 @@ type cursorResponse struct {
 
 // piResponse is the bridge's wire shape on both of Pi's reply paths: a block
 // with its reason, which the bridge answers by refusing the call (returning
-// nothing is allow), or a standalone advisory it delivers as a message. Block
+// nothing is allow), or a standalone advisory it delivers as a message — on
+// session_start and post_tool as an injected or appended message, and on
+// pre_tool as text appended to that call's own tool result (§11.1). Block
 // carries omitempty because the two paths are disjoint on the wire — an
 // advisory reply spelling "block":false would read as a decision no handler
 // made — and renderPiDeny, the only producer of a block, always sets it true.
@@ -193,8 +195,11 @@ func renderCursor(in Input) Rendered {
 // renderPi renders the deny arm, plus ask degraded to deny per §7's rule for
 // binary-channel engines — Pi has no ask arm and no wire form for allow at
 // all, so an explicit allow falls through to the default case below exactly
-// as Codex's does, printing nothing and recording Enforced false: not
-// blocking already is allow, so there is nothing this render step could add.
+// as Codex's does. That case also carries standalone advice, if any, as an
+// advisory, which the bridge appends to that call's own tool result. With no
+// advice there is nothing to print, and Enforced stays false for an explicit
+// allow: not blocking already is allow, so there is nothing this render step
+// could add.
 func renderPi(in Input) Rendered {
 	switch in.Verdict {
 	case Deny:
@@ -202,6 +207,9 @@ func renderPi(in Input) Rendered {
 	case Ask:
 		return renderPiDeny(piAskDegradedReason(in.Reason), in.Advice)
 	default:
+		if in.Advice != "" {
+			return Rendered{Stdout: marshal(piResponse{Advisory: in.Advice}), Enforced: in.Verdict == Abstain, AdviceDelivered: true}
+		}
 		return Rendered{Enforced: in.Verdict == Abstain}
 	}
 }
@@ -220,10 +228,9 @@ func piAskDegradedReason(handlerReason string) string {
 
 // renderPiDeny joins reason and advice into Pi's one reason field, the same
 // way renderCursor joins them into user_message. Advice does not get its own
-// key here even though renderPiAdvisoryOnly has one: Pi's tool_call return
-// shape is {block, reason, terminate} with no advisory channel, so an advisory
-// key on this path would be a field the bridge cannot deliver. The asymmetry
-// with session_start and post_tool is the return shapes', not hookyard's.
+// key here even though renderPi's default arm has one for a standalone
+// advisory: a deny's advice rides the block reason only, so the bridge never
+// also appends it to a tool result, and it is delivered exactly once.
 func renderPiDeny(reason, advice string) Rendered {
 	var message []string
 	if reason != "" {

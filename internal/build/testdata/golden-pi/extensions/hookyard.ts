@@ -123,12 +123,12 @@ function advisory(stdout) {
 // An appended block reaches the model as the tool's own bytes. Shown one with
 // nothing naming its source, the probe model called it "exactly the shape of an
 // injection attempt" and disregarded it — and advice nobody acts on is the same
-// loss as advice never delivered. So both deliveries say whose they are in
-// their own text; the injected message also carries the customType pi stores
+// loss as advice never delivered. So every delivery says whose it is in its own
+// text; the before_agent_start message also carries the customType pi stores
 // beside it, which is metadata rather than a second attribution — whether pi
 // puts it in front of the model is unverified, so nothing rests on it. Fixed
-// strings, never spliced — a per-install label would be a second value reaching
-// this source by concatenation (§8).
+// strings, never spliced — a per-install label would be a second value
+// reaching this source by concatenation (§8).
 const ATTRIBUTION = "[hookyard advisory] ";
 const ADVISORY_CUSTOM_TYPE = "hookyard";
 
@@ -143,6 +143,15 @@ const ADVISORY_CUSTOM_TYPE = "hookyard";
 // and reload the extensions for the new session, so no two sessions ever share
 // this one.
 let queuedAdvisory;
+
+// tool_call's return is spent whole on the allow/block decision, and pi
+// delivers nothing else a tool_call handler returns (probed:
+// docs/design/fixtures/pi-pre-tool-advisory/). A tool_result handler's content
+// does land in the next model request, beside that call's own output — where
+// Claude Code puts pre_tool additionalContext. So the advice waits here, keyed
+// by toolCallId, for that call's tool_result. A blocked call never stashes: its
+// advice already rides the block reason, exactly once.
+const pendingToolAdvice = new Map();
 
 // Pi documents a tool_result handler as chaining middleware whose omitted fields
 // keep their current value, so returning content alone is a patch rather than a
@@ -249,11 +258,19 @@ export default function (pi) {
 
         const stdout = await askRouter(entry.bin, entry.args, payload(entry.event, event, ctx));
 
-        // Only tool_call carries a return channel that can block. session_start
-        // and tool_result carry an advisory one instead, and every other event
-        // ignores the reply. The spawn still happens whatever the event,
-        // because recording it is the router's job either way.
-        if (entry.event === "tool_call") return decision(stdout);
+        // Only tool_call carries a return channel that can block, and it is
+        // spent whole on the decision, so its advice waits in pendingToolAdvice.
+        // session_start and tool_result carry an advisory return channel of
+        // their own, and every other event ignores the reply. The spawn still
+        // happens whatever the event, because recording it is the router's job
+        // either way.
+        if (entry.event === "tool_call") {
+          const verdict = decision(stdout);
+          if (verdict) return verdict;
+          const advice = advisory(stdout);
+          if (advice !== undefined) pendingToolAdvice.set(event.toolCallId, advice);
+          return undefined;
+        }
         if (entry.event === "tool_result") return appendAdvisory(event, advisory(stdout));
         if (entry.event === "session_start") queuedAdvisory = advisory(stdout);
         return undefined;
@@ -263,6 +280,36 @@ export default function (pi) {
         // guarantee this file owns.
         return undefined;
       }
+    });
+  }
+
+  // Bridge-owned, not a manifest entry: it exists to flush pendingToolAdvice
+  // onto the same call's tool_result, so it is registered once, gated on
+  // whether any entry can ever populate the map at all. Registering it here,
+  // after the per-entry loop above, puts it last in pi's tool_result
+  // middleware chain — so a tool_result manifest entry's own post_tool router
+  // sees the tool's original content, undisturbed by the pre_tool advisory,
+  // and that advisory lands in `content` only after whatever appendAdvisory
+  // above already added. The model-visible order is therefore [tool output,
+  // post_tool advisory, pre_tool advisory].
+  if (DATA.entries.some((entry) => entry.event === "tool_call")) {
+    pi.on("tool_result", (event) => {
+      try {
+        const advice = pendingToolAdvice.get(event.toolCallId);
+        pendingToolAdvice.delete(event.toolCallId);
+        return advice === undefined ? undefined : appendAdvisory(event, advice);
+      } catch {
+        return undefined;
+      }
+    });
+
+    // A call aborted after tool_call but before it ever executes fires no
+    // tool_result, so nothing would otherwise delete its stash. turn_end runs
+    // once the whole tool batch is finalized — after every real tool_result
+    // for this turn has already flushed above — so clearing the map here only
+    // ever discards advice that was never going to be claimed.
+    pi.on("turn_end", () => {
+      pendingToolAdvice.clear();
     });
   }
 
