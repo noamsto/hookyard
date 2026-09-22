@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -385,6 +386,107 @@ func TestRunRouteRecordsTheEnvelopeAndTheHandlerItRan(t *testing.T) {
 	if len(rec.Handlers) != 1 || rec.Handlers[0].Name != "deny-a" ||
 		rec.Handlers[0].Outcome != record.OutcomeDeny {
 		t.Errorf("want one deny handler entry, got %+v", rec.Handlers)
+	}
+}
+
+// piSettle is pi's agent_before_settle payload (D1's canonical turn_end
+// native), trimmed to the fields the envelope and Outcome/StopHookActive
+// plumbing read. %s is stop_hook_active's value.
+const piSettleTemplate = `{"pi_version":"0.87.0","session_id":"sess-1","hook_event_name":"agent_before_settle",` +
+	`"cwd":"/work","outcome":"completed","stop_hook_active":%s}`
+
+// piTurnEndNative is pi's own per-turn turn_end payload (D1: engine-scoped
+// only, canonical_event resolves to "").
+const piTurnEndNative = `{"pi_version":"0.87.0","session_id":"sess-1","hook_event_name":"turn_end",` +
+	`"cwd":"/work","outcome":"completed","turn_index":0}`
+
+// piDenyHandler is decides()'s hookSpecificOutput dialect (the handler wire
+// protocol every handler speaks regardless of the engine it targets —
+// internal/router/handler.go) rescoped onto pi's turn_end. verdict.Render is
+// what translates the consolidated deny into pi's own {"block",...} wire
+// shape; the handler itself never speaks that shape.
+func piDenyHandler(t *testing.T, dir, id, reason string, events []string) manifest.Handler {
+	t.Helper()
+	h := decides(t, dir, id, "deny", reason)
+	h.Events = events
+	h.Engines = []string{"pi"}
+	return h
+}
+
+func piRouteOpts(stateDir string) routeOptions {
+	return routeOptions{
+		start:         time.Now(),
+		registeredFor: "pi",
+		event:         "agent_before_settle",
+		stateDir:      stateDir,
+	}
+}
+
+// D2/D3: a deny on pi's settle boundary renders the same block shape as
+// pre_tool and is recorded enforced, with the native outcome riding the
+// record; once stop_hook_active is true (the bridge already spent its one
+// continuation) the same deny renders nothing and is recorded unenforced —
+// the record must not claim an enforcement the bridge cannot act on.
+func TestRunRouteAgentBeforeSettleDenyOutcomeAndStopHookActive(t *testing.T) {
+	dir := t.TempDir()
+
+	stateDir := filepath.Join(dir, "state-active")
+	writeTable(t, stateDir, piDenyHandler(t, dir, "deny-a", "A", []string{"turn_end"}))
+	printed := runPipeline(t, piRouteOpts(stateDir), fmt.Sprintf(piSettleTemplate, "false"))
+	wantStdout := `{"block":true,"reason":"A"}` + "\n"
+	if printed != wantStdout {
+		t.Errorf("want %q printed, got %q", wantStdout, printed)
+	}
+	rec := readRecord(t, stateDir)
+	if rec.Verdict != record.OutcomeDeny || !rec.Enforced {
+		t.Errorf("want an enforced deny, got %q enforced=%v", rec.Verdict, rec.Enforced)
+	}
+	if rec.Outcome != "completed" {
+		t.Errorf("want outcome %q, got %q", "completed", rec.Outcome)
+	}
+	if rec.CanonicalEvent != "turn_end" || rec.NativeEvent != "agent_before_settle" {
+		t.Errorf("want canonical_event turn_end / native_event agent_before_settle, got %+v", rec)
+	}
+
+	stoppedStateDir := filepath.Join(dir, "state-stopped")
+	writeTable(t, stoppedStateDir, piDenyHandler(t, dir, "deny-b", "A", []string{"turn_end"}))
+	printed = runPipeline(t, piRouteOpts(stoppedStateDir), fmt.Sprintf(piSettleTemplate, "true"))
+	if printed != "" {
+		t.Errorf("want nothing printed once stop_hook_active is true, got %q", printed)
+	}
+	rec = readRecord(t, stoppedStateDir)
+	if rec.Verdict != record.OutcomeDeny || rec.Enforced {
+		t.Errorf("want an unenforced deny once stop_hook_active is true, got %q enforced=%v", rec.Verdict, rec.Enforced)
+	}
+	if rec.Outcome != "completed" {
+		t.Errorf("want outcome %q, got %q", "completed", rec.Outcome)
+	}
+}
+
+// D1: pi's per-turn turn_end (the native event, not the settle boundary) is
+// routable only as pi:turn_end, and its record carries canonical_event "" —
+// the same posture as session_shutdown — with outcome still present.
+func TestRunRoutePiTurnEndNativeRecordsBlankCanonicalEventAndOutcome(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	observer := handlerScript(t, dir, "observer", "exit 0")
+	observer.Events = []string{"pi:turn_end"}
+	observer.Engines = []string{"pi"}
+	writeTable(t, stateDir, observer)
+
+	printed := runPipeline(t, piRouteOpts(stateDir), piTurnEndNative)
+	if printed != "" {
+		t.Errorf("want nothing printed, got %q", printed)
+	}
+	rec := readRecord(t, stateDir)
+	if rec.CanonicalEvent != "" || rec.NativeEvent != "turn_end" {
+		t.Errorf("want canonical_event \"\" / native_event turn_end, got %+v", rec)
+	}
+	if rec.Outcome != "completed" {
+		t.Errorf("want outcome %q, got %q", "completed", rec.Outcome)
+	}
+	if len(rec.Handlers) != 1 || rec.Handlers[0].Name != "observer" || rec.Handlers[0].Outcome != record.OutcomeAbstain {
+		t.Errorf("want the pi:turn_end observer recorded abstain, got %+v", rec.Handlers)
 	}
 }
 

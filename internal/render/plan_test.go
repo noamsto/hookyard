@@ -169,6 +169,37 @@ func TestClaudeCatalogPlanRefusesAStateDirContainingWhitespace(t *testing.T) {
 	}
 }
 
+// D1 (docs/design/hookyard.md §11.2): canonical turn_end on pi renders to the
+// settle boundary, agent_before_settle, not pi's own per-turn native.
+func TestBuildPlanRendersPiTurnEndAsAgentBeforeSettle(t *testing.T) {
+	handlers := []manifest.Handler{
+		{ID: "a", Events: []string{vocab.TurnEnd}, Engines: []string{"pi"}},
+	}
+	plan, err := BuildPlan(handlers, routerPath, stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan[vocab.Pi]) != 1 || plan[vocab.Pi][0].Event != "agent_before_settle" {
+		t.Errorf("want one pi entry on agent_before_settle, got %+v", plan[vocab.Pi])
+	}
+}
+
+// pi's per-turn turn_end has no canonical mapping any more (D1), so it is
+// reachable only as the engine-scoped pi:turn_end, rendering a bridge entry
+// on the native event verbatim.
+func TestBuildPlanRendersPiScopedTurnEndOnTheNativeEvent(t *testing.T) {
+	handlers := []manifest.Handler{
+		{ID: "a", Events: []string{"pi:turn_end"}, Engines: []string{"pi"}},
+	}
+	plan, err := BuildPlan(handlers, routerPath, stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan[vocab.Pi]) != 1 || plan[vocab.Pi][0].Event != "turn_end" {
+		t.Errorf("want one pi entry on turn_end, got %+v", plan[vocab.Pi])
+	}
+}
+
 func TestBuildPlanRoutesEngineScopedEventsToTheirOwnEngine(t *testing.T) {
 	handlers := []manifest.Handler{
 		{ID: "a", Events: []string{"cursor:beforeShellExecution"}, Engines: []string{"cursor", "codex"}, Match: []string{"Bash"}},

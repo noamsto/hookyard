@@ -104,8 +104,16 @@ func TestDecodeEveryFixture(t *testing.T) {
 			toolName: "Bash", toolInputJSON: `{"command":"echo hookyard-probe"}`,
 			cwd: "<PROBE>/work",
 		},
+		// D1: pi's per-turn turn_end has no canonical counterpart any more — it
+		// decodes with canonical_event "", exactly like session_shutdown — since
+		// canonical TurnEnd now maps onto the settle boundary, below.
 		"pi-turn_end.json": {
-			engine: vocab.Pi, canonicalEvent: vocab.TurnEnd, nativeEvent: "turn_end",
+			engine: vocab.Pi, canonicalEvent: "", nativeEvent: "turn_end",
+			toolName: "", toolInputJSON: "",
+			cwd: "<PROBE>/work",
+		},
+		"pi-agent_before_settle.json": {
+			engine: vocab.Pi, canonicalEvent: vocab.TurnEnd, nativeEvent: "agent_before_settle",
 			toolName: "", toolInputJSON: "",
 			cwd: "<PROBE>/work",
 		},
@@ -447,6 +455,56 @@ func TestNativeRetainsEngineOnlyFields(t *testing.T) {
 	env = decodeFixture(t, "claude-PreToolUse.json")
 	if _, ok := env.Native["transcript_path"]; !ok {
 		t.Error("Native should retain transcript_path")
+	}
+}
+
+// D2/D3: PiOutcome and PiStopHookActive are pi-only — hookyard authors pi's
+// payload, so an outcome or stop_hook_active key on another engine's payload
+// is not ours to interpret, and reads as absent regardless of its value.
+func TestPiOutcome(t *testing.T) {
+	env := decodeFixture(t, "pi-agent_before_settle.json")
+	if got := env.PiOutcome(); got != "completed" {
+		t.Errorf("PiOutcome = %q, want completed", got)
+	}
+
+	env = decodeFixture(t, "pi-session_start.json")
+	if got := env.PiOutcome(); got != "" {
+		t.Errorf("PiOutcome on a payload with no outcome key = %q, want \"\"", got)
+	}
+
+	env = From(vocab.ClaudeCode, map[string]json.RawMessage{"outcome": json.RawMessage(`"completed"`)})
+	if got := env.PiOutcome(); got != "" {
+		t.Errorf("PiOutcome on a non-pi engine = %q, want \"\"", got)
+	}
+}
+
+func TestPiStopHookActive(t *testing.T) {
+	env := decodeFixture(t, "pi-agent_before_settle.json")
+	if env.PiStopHookActive() {
+		t.Error("PiStopHookActive on the fixture (stop_hook_active: false) = true, want false")
+	}
+
+	env = From(vocab.Pi, map[string]json.RawMessage{"stop_hook_active": json.RawMessage(`true`)})
+	if !env.PiStopHookActive() {
+		t.Error("PiStopHookActive with stop_hook_active: true = false, want true")
+	}
+
+	env = From(vocab.Pi, map[string]json.RawMessage{})
+	if env.PiStopHookActive() {
+		t.Error("PiStopHookActive with no stop_hook_active key = true, want false")
+	}
+
+	env = From(vocab.Pi, map[string]json.RawMessage{"stop_hook_active": json.RawMessage(`"yes"`)})
+	if env.PiStopHookActive() {
+		t.Error("PiStopHookActive with a non-bool value = true, want false")
+	}
+
+	// Claude Code's own Stop payload carries this same field name and
+	// meaning, but PiStopHookActive must not read it: it is pi's own loop
+	// bound, not a cross-engine convention.
+	env = From(vocab.ClaudeCode, map[string]json.RawMessage{"stop_hook_active": json.RawMessage(`true`)})
+	if env.PiStopHookActive() {
+		t.Error("PiStopHookActive on a non-pi engine carrying stop_hook_active:true = true, want false")
 	}
 }
 

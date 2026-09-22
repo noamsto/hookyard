@@ -911,6 +911,7 @@ the full generated layout and command form.
 | §3 (standalone tool) | Amended | The "fifth thing" cost is real either way; build mode moves who pays it (intro, above) |
 | §4, consolidation rule | Carried, scoped | hookyard's own deny-wins lattice governs within one plugin unchanged; across plugins in build mode, the engine's native rule governs instead (question 4, above) |
 | §5, fail-open | Carried, scoped | Build mode's blast radius is one plugin, not the machine; an unsupported arch/launcher joins §9's enumerated fail-open set (question 1, above) |
+| §7, outbound rendering table (Pi row) and the ask-degrades-to-deny rule | Amended | pi `turn_end` renders a deny as a continuation, and an `ask` there renders nothing, unenforced: the rule protects a call, and a turn end holds back none (D3, issue #76) |
 | §6, the record | Amended | Build mode appends conditionally, never creates the state directory; the line schema's additive-only rule is stated as a cross-version contract (question 4, above) |
 | §8, one declarative table | Scoped to yard mode | "Invoked exactly once per activation" is yard mode's aggregation invariant; build mode renders one plugin's own table into files only that plugin ships, with no shared-file strip to get wrong |
 | §8, registration interface | Amended | `exec` gains a second resolution rule, selected by mode (Build-mode manifest semantics, above) |
@@ -1719,6 +1720,17 @@ rather than disappearing. In the example above `delivered` is `false` because
 the engine is Codex, which has no advisory slot — the advice happened, the
 model never saw it, and the record says both.
 
+`outcome` is the one field in the example above that isn't there: it is
+optional, `omitempty`, and populated only for pi's `turn_end` and
+`agent_before_settle` records, carrying pi's own
+`completed`/`error`/`aborted` vocabulary verbatim (amendment §11.2, issue
+#76). It exists because
+hookyard authors pi's payload and can vouch for that key's meaning there; the
+router leaves it empty on every other engine and event rather than reading an
+`outcome` key off a payload it didn't write. Adding it is the additive-only
+schema change §5 already commits to — `v` stays `1`, and an older reader that
+doesn't know the key simply doesn't see it.
+
 One thing is deliberately absent: the record carries `tool_name` but not
 `tool_input`, and not §7's raw `native` blob. The envelope handlers see is an
 in-process value; the record is a durable file on disk, and tool inputs
@@ -1819,22 +1831,32 @@ The six event concepts already line up across engines almost exactly:
 | pre tool | `PreToolUse` | `PreToolUse` | `preToolUse` | `tool_call` |
 | post tool | `PostToolUse` | `PostToolUse` | `postToolUse` | `tool_result` |
 | pre compact | `PreCompact` | `PreCompact` | `preCompact` | `session_before_compact` (inferred) |
-| turn end | `Stop` | `Stop` | `stop` | `turn_end` |
+| turn end | `Stop` | `Stop` | `stop` | `agent_before_settle` |
 
-Five of Pi's six cells are captured, live, in
+**Pi's turn-end cell changed under amendment §11.2 (issue #76).** pi 0.87.0
+added `agent_before_settle`, the boundary that fires once per settle attempt
+— after retries and recovery, skipped on an abort — matching what Claude
+Code's `Stop`, Codex's `Stop` and Cursor's `stop` already mean: the agent has
+finished responding, once per response. pi's own `turn_end` fires once per
+LLM turn instead, several times per response whenever a tool round happens,
+which is why it no longer holds this cell; it stays reachable as the
+engine-scoped `pi:turn_end` for a handler that wants per-turn granularity.
+§11.2 has the full rationale and the decision slot this remap makes room for.
+
+Six of Pi's seven cells are captured, live, in
 [`fixtures/hook-payloads/`](fixtures/hook-payloads/): `pi-session_start.json`,
 `pi-input.json`, `pi-tool_call.json`, `pi-tool_result.json`,
-`pi-turn_end.json`. The sixth, `session_before_compact`, is **not** — no
-capture run triggered a compaction, so that cell is inferred from Pi's event
-name and its documented session lifecycle, not observed, and this document
-does not claim otherwise (§12). Pi's own event vocabulary also exposes
-`session_compact` and `session_compact_failed`, names that read like the
-completion and failure of a compaction rather than the pre-compact moment
-this row wants; which of the three, if any, actually fires before hookyard
-would need to act is exactly what an uncaptured event leaves open. `pre_tool`
-and `post_tool` also carry a caveat the table doesn't show: on a Pi deny, no
-`tool_result` fires at all (below), so `post_tool` on Pi only ever means
-"the tool ran".
+`pi-turn_end.json`, `pi-agent_before_settle.json`. The seventh,
+`session_before_compact`, is **not** — no capture run triggered a compaction,
+so that cell is inferred from Pi's event name and its documented session
+lifecycle, not observed, and this document does not claim otherwise (§12). Pi's
+own event vocabulary also exposes `session_compact` and
+`session_compact_failed`, names that read like the completion and failure of
+a compaction rather than the pre-compact moment this row wants; which of the
+three, if any, actually fires before hookyard would need to act is exactly
+what an uncaptured event leaves open. `pre_tool` and `post_tool` also carry a
+caveat the table doesn't show: on a Pi deny, no `tool_result` fires at all
+(below), so `post_tool` on Pi only ever means "the tool ran".
 
 The Cursor column of this table is not read off documentation. The live
 `~/.cursor/hooks.json` on this machine was inspected directly this pass: its
@@ -1916,7 +1938,7 @@ rather than harder.
 | | Claude Code 2.1.263 | Codex 0.153.4 | Cursor 2026.09.08 | Pi 0.85.1 |
 |---|---|---|---|---|
 | session id | `session_id` | `session_id` | `session_id` | `session_id` |
-| second id | `prompt_id` | `turn_id` | `conversation_id` + `generation_id` | none — no per-turn or per-prompt id was observed anywhere in the five captures; `turn_index` (a plain integer, `turn_end` only) is the nearest thing, not a correlation key |
+| second id | `prompt_id` | `turn_id` | `conversation_id` + `generation_id` | none — no per-turn or per-prompt id was observed anywhere in the five captures; `turn_index` (a plain integer) is the nearest thing, not a correlation key. Since amendment §11.2 (issue #76, re-verified live on pi 0.87.0) `turn_index` no longer rides canonical `turn_end` — canonical `turn_end` remapped to `agent_before_settle`, which carries no `turn_index` at all — so a handler that wants it subscribes to the engine-scoped `pi:turn_end` instead. Both `turn_end` and `agent_before_settle` gained `outcome` (`completed`/`error`/`aborted`) on 0.87.0 |
 | working dir | `cwd`, populated | `cwd`, populated | `cwd` **empty**; real path in `workspace_roots[0]` | `cwd`, populated — checked on all five captured events, no Cursor-style empty-`cwd` trap |
 | tool name | `tool_name: "Bash"` | `tool_name: "Bash"` | `tool_name: "Shell"` | `tool_name: "bash"` — lowercase |
 | tool args | `tool_input` (`command`, `description`) | `tool_input` (`command`) | `tool_input` (`command`, `cwd`, `timeout`) | `tool_input` (`command`) |
@@ -2286,7 +2308,7 @@ strings it collected have to ride alongside it:
 | Claude Code | `hookSpecificOutput.permissionDecision` = `allow`/`deny`/`ask`, `permissionDecisionReason` = reason, on `pre_tool` only | `hookSpecificOutput.additionalContext`, the concatenation of every advisory collected, delivered on `pre_tool`, `session_start`, and `post_tool` — the latter two have no decision slot, only the advisory one | Verdict yes — documented field, tri-state including `ask`. Advisory arm confirmed on `pre_tool` by an existing guard emitting it, and confirmed live in production on `session_start` and `post_tool` by aeye's `diagram-guidance.sh` and `diagrams.sh` respectively |
 | Codex | Unconfirmed | No advisory slot on any event | Only fire-and-forget hooks observed deployed; Codex's deny path and its default timeout when an entry declares none were not verified this pass. Codex has no advisory channel at all — a settled boundary, not an open question |
 | Cursor | `permission` field | Unconfirmed | Field name confirmed; exact accepted value set (binary vs. tri-state) not confirmed this pass, and no advisory slot identified |
-| Pi | return `{block: true, reason: string}` from the extension's `tool_call` handler; there is no `allow` wire form — not blocking *is* allow, so an explicit allow renders nothing | Three channels, one per event, each prefixed `"[hookyard advisory] "`: on `pre_tool`, a deny's advice is joined into the block `reason` (rides with the block, as above); a standalone abstain/allow's advice has no field in the `tool_call` reply pi's agent loop reads, so the bridge stashes it keyed by `toolCallId` and a bridge-owned `tool_result` handler appends it as a text block onto that same call's own tool result — §11.1. On `session_start`, queued advice is flushed as a `before_agent_start` injected message. On `post_tool`, advice is appended to the tool result content | **Confirmed live, twice, including a filesystem side effect**: `touch SIDE-EFFECT.txt` was denied and the file did not exist afterward; a second denied `bash` call produced no `tool_result` event while the reason string still reached the model as the tool's outcome. Decision vocabulary is binary — no `ask` arm was found. The `pre_tool` advisory channels (deny-reason and tool-result-append) are confirmed against `docs/design/fixtures/pi-pre-tool-advisory/` — §11.1 |
+| Pi | return `{block: true, reason: string}` from the extension's `tool_call` handler; there is no `allow` wire form — not blocking *is* allow, so an explicit allow renders nothing. On `turn_end` (native `agent_before_settle`) a deny renders the same shape, and the bridge turns it into one continuation carrying the reason — §11.2 | Three channels, one per event, each prefixed `"[hookyard advisory] "`: on `pre_tool`, a deny's advice is joined into the block `reason` (rides with the block, as above); a standalone abstain/allow's advice has no field in the `tool_call` reply pi's agent loop reads, so the bridge stashes it keyed by `toolCallId` and a bridge-owned `tool_result` handler appends it as a text block onto that same call's own tool result — §11.1. On `session_start`, queued advice is flushed as a `before_agent_start` injected message. On `post_tool`, advice is appended to the tool result content | **Confirmed live, twice, including a filesystem side effect**: `touch SIDE-EFFECT.txt` was denied and the file did not exist afterward; a second denied `bash` call produced no `tool_result` event while the reason string still reached the model as the tool's outcome. Decision vocabulary is binary — no `ask` arm was found. The `pre_tool` advisory channels (deny-reason and tool-result-append) are confirmed against `docs/design/fixtures/pi-pre-tool-advisory/` — §11.1 |
 
 **Where an engine has no advisory slot, the advice is recorded (§6) and not
 delivered.** That is a real loss and is stated rather than hidden: a handler
@@ -2312,7 +2334,11 @@ binary shape is read off its own validation rejecting every other value,
 where Pi's was watched directly — block or nothing, twice, with no third
 return value found anywhere in the extension API's types. A consolidated
 `ask` targeting Pi renders as a deny with `enforced: true`, the same rule,
-for the same reason.
+for the same reason. Pi's `turn_end` is the one exception (§11.2). There an
+`ask` renders nothing and is recorded unenforced. The rule exists to keep a
+call from proceeding without the review a guard asked for, and a turn end
+holds back no call: degrading to deny would force a continuation, and that
+is not the conservative direction.
 
 **This is not §5's fail-open case, and the two must not be conflated.** §5
 covers hookyard *failing* to produce an opinion at all — the router
@@ -4090,6 +4116,207 @@ commands, and the redaction applied to each committed transcript are in
 | Section | Disposition | Reason |
 |---|---|---|
 | §7, outbound table, Pi row, "Advisory rendering" | Amended | "Standalone advice has no path to the model at all" is stale: `pre_tool` standalone advice is appended as a text block onto that call's own tool result, alongside the already-live `session_start` (`before_agent_start`) and `post_tool` (tool-result-appended) channels from issue #71 (issue #72) |
+
+## 11.2 Amendment: pi 0.87 turn-end boundary (issue #76)
+
+pi 0.87.0 changed the extension lifecycle in two ways that matter here, read
+off the installed 0.87.0 binary and its bundled `docs/extensions.md`:
+`turn_end` gained `outcome` (`completed`/`error`/`aborted`) and a set of
+boundary fields; and a new event, `agent_before_settle`, became the final
+*actionable* boundary — a handler can return `{entries, continue}` to force
+one more provider request. Before this amendment, canonical `turn_end` mapped
+onto pi's native `turn_end` (§7's concept table), which already sat on
+borrowed ground: pi's `turn_end` fires once per LLM turn, while Claude Code's
+`Stop`, Codex's `Stop` and Cursor's `stop` each fire once per agent response.
+`agent_before_settle` is the first pi event that actually matches that
+once-per-response shape, and this amendment moves canonical `turn_end` onto
+it.
+
+**D1. Canonical `turn_end` on pi remaps to `agent_before_settle`.**
+`nativeEvents[Pi][TurnEnd] = "agent_before_settle"`
+(`internal/vocab/vocab.go`); `"turn_end"` leaves the pi inbound map
+(`internal/vocab/inbound.go`), so an inbound `turn_end` payload now decodes
+with `canonical_event: ""`, the same posture `session_shutdown` already has.
+pi's own per-turn `turn_end` stays reachable, but only as the engine-scoped
+`pi:turn_end`: `PiCatalog` gains `"turn_end"` as a member beside
+`session_shutdown` (`buildPiCatalog`).
+
+Three pi boundary events were on the table for this cell, and
+`agent_before_settle` is the only one that fits. `agent_end` fires *before*
+retry and compaction recovery, so it can fire more than once for one
+user-visible response — the same over-firing problem `turn_end` itself has,
+just one layer up. `agent_settled` is notification-only: it cannot carry
+D3's decision slot, and Claude Code's `Stop` "runs when the main agent has
+finished responding" is squarely a decision point, not a notification.
+`agent_before_settle` is the one that matches both properties `Stop` has: it
+fires once per settle attempt, after retries and recovery have already run
+their course, and — like `Stop` on a user interrupt — it is skipped
+entirely when the run was aborted (`_agentRunAbortRequested` breaks pi's own
+loop before it fires).
+
+Consequences of the remap, accepted rather than hidden:
+
+- **Frequency drops.** Canonical `turn_end` records on pi go from
+  N-per-prompt (one per LLM turn) to one per settle — two when D3's
+  continuation fires, the same doubling Claude Code's `Stop` already exhibits
+  when it re-fires with `stop_hook_active: true`.
+- **`turn_index` moves.** It is no longer on canonical `turn_end` for pi;
+  `agent_before_settle`'s own event carries no `turnIndex` at all (read off
+  the 0.87.0 binary: `emitBoundary({ type: "agent_before_settle", outcome:
+  this._lastActivityOutcome }, …)` — nothing else). A handler that wants
+  per-turn granularity subscribes to `pi:turn_end` instead, where
+  `turn_index` still rides every firing. No consumer of `turn_index` exists
+  in this repo or in nix-config (searched before making the cut).
+- **An aborted run fires no canonical `turn_end` on pi**, matching Claude
+  Code's `Stop` not firing on interrupt. `pi:turn_end` still fires per turn
+  regardless, with `outcome: "aborted"` on the turn that was cut off.
+- **A user follow-up queued mid-run doesn't get its own settle.** pi's
+  `_handlePostAgentRun` keeps the agent looping on a queued follow-up
+  without ever reaching `agent_before_settle` for the prompt that triggered
+  it, so the queued follow-up shares the run, D3's per-run continuation
+  budget, and the single canonical `turn_end` its eventual settle produces —
+  it does not get a `turn_end` record of its own.
+- **Old and new records coexist on one stream.** Records written before this
+  change read `native_event: "turn_end", canonical_event: "turn_end"`;
+  records written after read `native_event: "agent_before_settle"` for the
+  canonical firing and `native_event: "turn_end", canonical_event: ""` for
+  the per-turn one. `internal/serve`'s filter matches on `canonical_event OR
+  native_event`, so a subscriber filtering on `turn_end` still catches both
+  the pre-amendment records and the post-amendment per-turn ones without any
+  serve-side change.
+- **The `pendingToolAdvice` sweep is unaffected.** It is registered by the
+  bridge directly on pi's *native* `turn_end`, not through the canonical
+  mapping (§11.1), so the remap does not move it.
+
+**D2. `outcome` is forwarded, additively.** The bridge's payload builders
+become `turn_end: (event) => ({ turn_index: event.turnIndex, outcome:
+event.outcome })` and `agent_before_settle: (event) => ({ outcome:
+event.outcome, stop_hook_active: continuedThisRun })` (`pi_bridge.ts`).
+`messageEntryId`, `toolResultEntryIds`, `entries`, `continue` and `context`
+are deliberately not forwarded — `docs/design/fixtures/hook-payloads/README.md`
+has the field-by-field reasoning; in short, `entries`/`context` are
+whole-session projections that can outgrow the router's 1 MiB inbound cap,
+the entry ids are session-file internals no consumer needs, and `continue` is
+pi's own loop-control input, already stale by the time a value read back from
+it would matter. `record.Event`/`record.Record` gain an `Outcome` field,
+`json:"outcome,omitempty"` (§6) — additive, no `v` bump. The router fills it
+from the native payload's `outcome` string only when `env.Engine ==
+vocab.Pi`, via `Envelope.PiOutcome()`: hookyard authors pi's payload, so it
+can vouch for that key's meaning there, but an `outcome` key on any other
+engine's payload is not hookyard's to interpret. Absent or non-string reads
+as empty. Cursor's `stop.status` is a related field that could plausibly feed
+the same concept; normalizing it into `outcome` is out of scope here.
+
+**D3. pi's `turn_end` gets a decision slot — pi-only, bounded to one
+continuation per run.** `HasDecisionSlot(Pi, TurnEnd, "agent_before_settle")`
+is now `true` (`internal/verdict/capability.go`); Claude Code, Codex and
+Cursor are unchanged, and their `Stop` has the same shape available (native
+`stop_hook_active` would bound the loop identically) but is deliberately not
+wired up here — filed as follow-up issue **#77**, cross-engine `Stop`
+decision work out of #76's scope.
+
+The semantics are pre_tool's block protocol, reused rather than reinvented: a
+consolidated **deny** on pi `turn_end` means "do not settle yet — continue
+with this reason," the same `permissionDecision: "deny"` + reason contract a
+handler already speaks for pre_tool. The verdict lattice needed no new value.
+Render (`renderPiTurnEnd`, `internal/verdict/render.go`) dispatches on
+`CanonicalEvent == vocab.TurnEnd` for pi: `Deny` renders the same
+`{"block":true,"reason":"..."}` shape `pre_tool` uses, via `renderPiDeny`,
+which joins reason and advice into that one field the same way `pre_tool`'s
+own deny path already does — enforced true; `Ask` prints nothing and is
+**not** enforced — unlike `renderPi`'s
+default arm, an ask is not degraded to deny here, because there is no safe
+direction to degrade to: a forced continuation is not "safer" than settling;
+`Allow` prints nothing, enforced false; `Abstain` prints nothing, enforced
+true. A standalone (non-deny) advisory is never rendered on `turn_end`:
+`HasAdvisorySlot` still excludes `TurnEnd` on every engine, the same as
+Claude Code's `Stop` having no `additionalContext` channel at all — pi
+`turn_end` has a decision slot but no advisory slot, and those are
+independent questions with independent answers here.
+
+**The loop bound is a bridge-side hard cap of one continuation per bridge per
+run.** `continue: true` is re-evaluated after the next model response, so an
+unconditional continue loops forever — pi's own docs warn about exactly
+this — and the bound cannot be left to the router's verdict alone, because a
+handler that ignores the bridge's signal would still be able to loop it. The
+bridge tracks a module-level `continuedThisRun` flag
+(`internal/render/pi_bridge.ts`); on a well-formed deny with the flag still
+clear, it returns `{entries: [...event.entries, {type: "custom_message",
+customType: "hookyard", content: "[hookyard turn_end] " + reason,
+display: false}], continue: true}` and sets the flag. Any other outcome —
+including a second deny in the same run — returns `undefined`, leaving pi's
+proposal untouched, and a bridge-owned `pi.on("agent_settled", …)` handler
+(registered only when some manifest entry names `agent_before_settle`)
+resets the flag; `agent_settled` fires from pi's `finally` for every
+`_runAgentPrompt`, aborts included, so no run can leave the next prompt
+starting with the cap already spent. The bound is *per bridge per run*, not
+global: each installed bridge — the yard bridge, and each built pi package's
+own bridge — holds its own flag, so N installed hookyard bridges allow up to
+N continuations in one run, one each. `stop_hook_active` — same field name
+and meaning as Claude Code's own `Stop` payload field (`claude-Stop.json`) —
+is how the bridge tells the router it has already spent this run's
+continuation: `true` iff `continuedThisRun` was already set when
+`agent_before_settle` fired again. `renderPiTurnEnd` checks it first, ahead
+of the verdict: when true, nothing is printed and `Enforced` is `Verdict ==
+Abstain`, because a block printed here would be silently ignored by the
+bridge, and the record must say so rather than claim an enforcement that
+never happened.
+
+One difference from Claude Code is worth stating rather than smoothing over:
+**pi's settle fires on an error ending, Claude Code's `Stop` does not.**
+Claude Code skips `Stop` on an API-error ending; pi's `agent_before_settle`
+fires regardless, with `outcome: "error"`, because it is defined as "about to
+go idle," not "finished successfully." The block is honored for any
+`outcome` here — a handler that wants to skip errored runs reads `outcome`
+itself and abstains — because pi's own `canContinue` check still gates
+whether the appended message actually reaches another model call; hookyard's
+job is only to ask.
+
+And `enforced: true` on a settle deny is a narrower claim than it looks:
+it means **hookyard rendered a block the bridge acted on**, not that pi's run
+actually continued. pi may still decline the continuation — `canContinue`
+false, or an abort landing during `before_settle` itself. pre_tool's
+`enforced` already accepts gaps of this class: the record is written from what
+the router rendered, and nothing reports back what the engine then did. The
+gap is documented in `capability.go`'s doc comment, not hidden.
+
+**The lane rule changes to accommodate a decision slot that guards
+nothing.** `validateLane` (`internal/manifest/manifest.go`) used to refuse a
+fire-and-forget handler on any event `HasDecisionSlot` returned true for.
+Giving pi `turn_end` a decision slot would, under that rule, reject every
+fire-and-forget `turn_end` observer that claims pi — forcing the common
+case, an observer that wants to log or notify on turn boundaries, onto pi's
+synchronous verdict lane for no guarding benefit. `HasGuardSlot(engine,
+canonical, native) = HasDecisionSlot(...) && canonical != vocab.TurnEnd` is
+the new predicate `validateLane` calls instead: a turn-end slot requests one
+more continuation and guards no call at all, unlike `pre_tool`, whose
+decision gates whether a tool actually runs. A fire-and-forget `turn_end`
+handler still records `dispatched` (§4), so nothing claims an enforcement it
+never had; `pre_tool` and Cursor's scoped decision events are unaffected —
+`HasGuardSlot` agrees with `HasDecisionSlot` everywhere except pi `turn_end`.
+
+**Live evidence.** The full pi live e2e arm (`HOOKYARD_E2E=1 go test
+./cmd/hookyard -run 'TestLivePi' -count=1 -v`) was run against pi 0.87.0 on
+2026-09-22, and all ten tests passed, the eight that predate this amendment
+included. The new `TestLivePiTurnEndDenyForcesExactlyOneContinuation` drives a
+real pi process against a scripted model server with a handler that denies
+every `turn_end`. pi made exactly two provider requests. The second carried
+`[hookyard turn_end] <reason>` as a user-role message and the first did not.
+The handler saw `stop_hook_active` false, then true. The two canonical
+`turn_end` records read deny/enforced, then deny/unenforced, both with
+`outcome: "completed"`, and the `pi:turn_end` observer's records carry
+`outcome` beside an empty `canonical_event`.
+
+### What this amends
+
+| Section | Disposition | Reason |
+|---|---|---|
+| §7, concept table, "turn end" row, Pi cell | Amended | `turn_end` → `agent_before_settle`: pi's per-response settle boundary now fills the cell every other engine's once-per-response `Stop`/`stop` already fills; pi's own per-turn `turn_end` survives as the engine-scoped `pi:turn_end` (D1, issue #76) |
+| §7, engine field table, "second id" row, Pi cell | Amended | `turn_index` no longer rides canonical `turn_end`; it rides `pi:turn_end` instead, and both `turn_end` and `agent_before_settle` gained `outcome` on 0.87.0 (D1–D2, issue #76) |
+| §6, the record | Amended | `outcome` is a new optional, pi-only field, additive under the `v` schema's grow-only rule (D2, issue #76) |
+| `internal/verdict/capability.go`, `HasDecisionSlot`/`HasAdvisorySlot` | Amended | pi `turn_end` gains a decision slot, pi-only; no advisory slot anywhere (D3, issue #76) |
+| `internal/manifest/manifest.go`, `validateLane` | Amended | Now calls the new `HasGuardSlot`, not `HasDecisionSlot`, so a fire-and-forget `turn_end` handler on pi stays legal (D3, issue #76) |
+| Cross-engine `Stop` decision slots (Claude Code, Codex) | Deferred | Filed as issue #77; the loop-bound mechanism here (native `stop_hook_active`, `HasGuardSlot` already generalized) is the template it would reuse |
 
 ## 12. Open questions
 

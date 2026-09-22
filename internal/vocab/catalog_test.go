@@ -100,3 +100,13 @@ func TestIsPiEvent(t *testing.T) {
 		}
 	}
 }
+
+// D1: both pi's settle boundary (the new canonical TurnEnd native) and its
+// per-turn turn_end (now scoped-only) must remain routable natives.
+func TestIsPiEventTurnEndAndAgentBeforeSettle(t *testing.T) {
+	for _, native := range []string{"turn_end", "agent_before_settle"} {
+		if !IsPiEvent(native) {
+			t.Errorf("IsPiEvent(%q) = false, want true", native)
+		}
+	}
+}

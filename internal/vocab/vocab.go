@@ -93,7 +93,15 @@ var nativeEvents = map[Engine]map[string]string{
 		PreTool:      "tool_call",
 		PostTool:     "tool_result",
 		PreCompact:   "session_before_compact", // inferred, not captured
-		TurnEnd:      "turn_end",
+		// Claude Code/Codex's Stop and Cursor's stop each fire once per agent
+		// response; pi's own turn_end fires once per LLM turn, i.e. multiple
+		// times per response when tool rounds are involved. agent_before_settle
+		// is pi 0.87.0's settle boundary — it fires once per settle attempt
+		// after retries/recovery, mirroring Stop's "main agent has finished
+		// responding" and, like Stop on an interrupt, is skipped on an aborted
+		// run. Read off the 0.87.0 binary. pi's per-turn turn_end stays
+		// reachable as the engine-scoped pi:turn_end (PiCatalog, below).
+		TurnEnd: "agent_before_settle",
 	},
 }
 
@@ -143,13 +151,17 @@ func IsClaudeCodeEvent(native string) bool {
 }
 
 // PiCatalog is the fixed set of pi native events hookyard routes: the six
-// canonical natives, in CanonicalEvents order, plus session_shutdown, which
-// pi fires with no canonical counterpart. before_agent_start is
-// deliberately absent — the bridge registers it itself, outside any manifest
-// event, solely to flush a queued session_start advisory. A
-// manifest naming pi:before_agent_start would ask hookyard to register a
-// second handler for that one event, one of which would answer a protocol
-// the router does not speak.
+// canonical natives, in CanonicalEvents order, plus session_shutdown and
+// turn_end, which pi fires with no canonical counterpart of their own.
+// turn_end is pi's per-LLM-turn boundary (D1, docs/design/hookyard.md §11.2):
+// since canonical TurnEnd now maps onto agent_before_settle, turn_end is
+// reachable only as the engine-scoped pi:turn_end, for a consumer that wants
+// per-turn granularity instead of the once-per-settle canonical event.
+// before_agent_start is deliberately absent — the bridge registers it itself,
+// outside any manifest event, solely to flush a queued session_start
+// advisory. A manifest naming pi:before_agent_start would ask hookyard to
+// register a second handler for that one event, one of which would answer a
+// protocol the router does not speak.
 //
 // Unlike ClaudeCodeCatalog, PiCatalog is a []string of native names rather
 // than a []ClaudeCodeEvent pair: every consumer here (IsPiEvent, the
@@ -159,11 +171,11 @@ func IsClaudeCodeEvent(native string) bool {
 var PiCatalog = buildPiCatalog()
 
 func buildPiCatalog() []string {
-	catalog := make([]string, 0, len(CanonicalEvents)+1)
+	catalog := make([]string, 0, len(CanonicalEvents)+2)
 	for _, canonical := range CanonicalEvents {
 		catalog = append(catalog, nativeEvents[Pi][canonical])
 	}
-	return append(catalog, "session_shutdown")
+	return append(catalog, "session_shutdown", "turn_end")
 }
 
 // IsPiEvent reports whether native is one of PiCatalog's members.

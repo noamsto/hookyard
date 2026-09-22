@@ -17,7 +17,8 @@ import (
 // than configuration, and the only other gate this repo runs over it is
 // `node --check` (nix/checks/pi_bridge.nix), which proves it parses. Everything
 // it actually promises is behaviour: that every router failure resolves to
-// allow, that only tool_call can block, that a matcher filters before anything
+// allow, that only tool_call can block and only agent_before_settle can
+// continue — at most once a run — that a matcher filters before anything
 // is spawned. The live end-to-end arm reaches that too, but needs both pi and a
 // model server. These tests splice real data into the embedded template and
 // drive the result under node against stubbed routers.
@@ -25,7 +26,8 @@ import (
 // piBridgeHarness stands in for pi: it collects what the bridge registers, fires
 // a scripted sequence of events through the matching handlers, and prints what
 // it registered alongside each return value as JSON. `null` is the allow the
-// bridge owes on every router failure; anything else is a block. The script
+// bridge owes on every router failure; anything else is the bridge acting — a
+// block, patched content, or a continuation. The script
 // arrives in a file rather than in argv because one case carries megabytes,
 // which is the whole point of it.
 //
@@ -62,12 +64,16 @@ const ctx = {
 // pi fires every handler registered for an event, in order, not just the
 // first — the bridge itself relies on that for tool_result, where its own
 // flush handler has to run ahead of a manifest entry's. tool_call's return is
-// a decision, so the first block wins outright and short-circuits the rest;
-// every other event carries no decision, only content a handler may patch
-// (emitToolResult's own middleware rule: a returned {content} replaces
-// event.content for the next handler), so the merge rule below drives all of
-// them, and with a single handler — true everywhere but tool_result — it
-// reduces to exactly what firing that one handler already meant.
+// a decision, so the first block wins outright and short-circuits the rest.
+// turn_end and agent_before_settle are pi 0.87's boundaries, dispatched through
+// emitBoundary: each handler sees the proposal so far as event.entries and
+// event.continue, and a returned entries or continue replaces only that field
+// for the handlers after it. Every other event carries no decision, only
+// content a handler may patch (emitToolResult's own middleware rule: a
+// returned {content} replaces event.content for the next handler), so the
+// merge rule at the bottom drives all of them, and with a single handler —
+// true everywhere but tool_result — it reduces to exactly what firing that one
+// handler already meant.
 async function runHandlers(eventName, handlers, payload, ctx) {
   if (eventName === "tool_call") {
     let lastTruthy = null;
@@ -77,6 +83,25 @@ async function runHandlers(eventName, handlers, payload, ctx) {
       if (result != null) lastTruthy = result;
     }
     return lastTruthy;
+  }
+  if (eventName === "turn_end" || eventName === "agent_before_settle") {
+    let entries = payload.entries ?? [];
+    let proceed = payload.continue ?? false;
+    let changed = false;
+    let lastReturn = null;
+    for (const { handler } of handlers) {
+      const result = await handler({ ...payload, entries, continue: proceed }, ctx);
+      if (result != null) lastReturn = result;
+      if (result && result.entries !== undefined) {
+        entries = result.entries;
+        changed = true;
+      }
+      if (result && result.continue !== undefined) {
+        proceed = result.continue;
+        changed = true;
+      }
+    }
+    return changed ? { entries, continue: proceed } : lastReturn;
   }
   let event = payload;
   let changed = false;
@@ -326,6 +351,24 @@ func piTextBlock(text string) map[string]any {
 	return map[string]any{"type": "text", "text": text}
 }
 
+// piTurnEnd and piSettle are pi 0.87's boundary events as emitBoundary hands
+// them over, the whole-session projections included so a test can see the
+// bridge leave them behind. entries is `any` for piToolResult's reason.
+func piTurnEnd(turnIndex int, outcome string, entries any) map[string]any {
+	return map[string]any{
+		"type": "turn_end", "turnIndex": turnIndex, "outcome": outcome,
+		"messageEntryId": "entry-message", "toolResultEntryIds": []any{},
+		"entries": entries, "continue": false, "context": map[string]any{"messages": []any{}},
+	}
+}
+
+func piSettle(outcome string, entries any) map[string]any {
+	return map[string]any{
+		"type": "agent_before_settle", "outcome": outcome,
+		"entries": entries, "continue": false, "context": map[string]any{"messages": []any{}},
+	}
+}
+
 func assertPiAllows(t *testing.T, verdict string) {
 	t.Helper()
 	if verdict != "null" {
@@ -369,14 +412,26 @@ func TestPiBridgeSurvivesARouterThatClosesThePipeEarly(t *testing.T) {
 	assertPiAllows(t, run.fire(t, "tool_call", huge))
 }
 
-// §5 spends every router failure on allow. Each of these is a different way for
-// the router to be useless, and none of them may become a block.
-func TestPiBridgeFailsOpenOnEveryRouterFailure(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		timeoutMS int
-		command   func(t *testing.T, run *piBridgeRun) string
-	}{
+// piRouterFailure is one way for a router to be useless: command lays it out in
+// run's scratch directory and returns the path the bridge will spawn. A zero
+// timeoutMS means the emitted default.
+type piRouterFailure struct {
+	name      string
+	timeoutMS int
+	command   func(t *testing.T, run *piBridgeRun) string
+}
+
+func (f piRouterFailure) timeout() int {
+	if f.timeoutMS == 0 {
+		return EmittedTimeoutSeconds * 1000
+	}
+	return f.timeoutMS
+}
+
+// piRouterFailures is shared by every event whose reply the bridge acts on,
+// because §5's fail-open is owed on each of them alike.
+func piRouterFailures() []piRouterFailure {
+	return []piRouterFailure{
 		{
 			name: "missing-binary",
 			command: func(_ *testing.T, run *piBridgeRun) string {
@@ -429,14 +484,16 @@ func TestPiBridgeFailsOpenOnEveryRouterFailure(t *testing.T) {
 				return run.router(t, "wedged", `setInterval(() => {}, 1000);`)
 			},
 		},
-	} {
+	}
+}
+
+// §5 spends every router failure on allow. Each of these is a different way for
+// the router to be useless, and none of them may become a block.
+func TestPiBridgeFailsOpenOnEveryRouterFailure(t *testing.T) {
+	for _, tc := range piRouterFailures() {
 		t.Run(tc.name, func(t *testing.T) {
 			run := newPiBridgeRun(t)
-			timeout := tc.timeoutMS
-			if timeout == 0 {
-				timeout = EmittedTimeoutSeconds * 1000
-			}
-			run.install(t, timeout, piEntry("tool_call", "", tc.command(t, run)))
+			run.install(t, tc.timeout(), piEntry("tool_call", "", tc.command(t, run)))
 			assertPiAllows(t, run.fire(t, "tool_call", piToolCall("bash", map[string]any{"command": "echo hi"})))
 		})
 	}
@@ -468,17 +525,23 @@ func TestPiBridgeMatcherFiltersBeforeSpawning(t *testing.T) {
 	}
 }
 
-// tool_call is the only event pi gives a return channel that can block; a reply
-// to any other event is recorded and ignored. A bridge that honoured them all
-// would block on a tool_result, which pi turns into a refusal of a call that has
-// already run.
+// tool_call is the only event pi gives a return channel that can block, and
+// agent_before_settle (covered on its own below) the only other one whose deny
+// is acted on; a reply to any other event is recorded and ignored. A bridge
+// that honoured them all would block on a tool_result, which pi turns into a
+// refusal of a call that has already run, and would force a continuation from
+// pi's per-LLM-turn turn_end, which pi honours but hookyard gives no decision
+// slot.
 func TestPiBridgeBlocksOnlyOnToolCall(t *testing.T) {
 	run := newPiBridgeRun(t)
 	router := run.router(t, "deny-everything", `process.stdout.write('{"block":true,"reason":"always"}');`)
 	run.install(t, EmittedTimeoutSeconds*1000,
 		piEntry("tool_call", "", router),
 		piEntry("tool_result", "", router),
+		piEntry("turn_end", "", router),
 	)
+
+	assertPiAllows(t, run.fire(t, "turn_end", piTurnEnd(0, "completed", []any{})))
 
 	if verdict := run.fire(t, "tool_call", piToolCall("bash", nil)); !strings.Contains(verdict, `"block":true`) {
 		t.Fatalf("verdict = %s, want the same router to block a tool_call", verdict)
@@ -1363,5 +1426,298 @@ func TestPiBridgeRegistersNoCommandsInYardMode(t *testing.T) {
 
 	if drive := run.drive(t, nil); len(drive.Commands) != 0 {
 		t.Errorf("registered commands = %+v, want none in yard mode", drive.Commands)
+	}
+}
+
+// denyingCaptureRouter denies every call with reason and appends each payload
+// it was piped as one line of capturePath — the settle tests need both at once,
+// because what stop_hook_active said is only worth checking on the fire whose
+// deny the bridge then did or did not act on.
+func (r *piBridgeRun) denyingCaptureRouter(t *testing.T, reason string) (router, capturePath string) {
+	t.Helper()
+	capturePath = filepath.Join(r.dir, "captured-payloads.jsonl")
+	reply, err := json.Marshal(map[string]any{"block": true, "reason": reason})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `const fs = require("node:fs");` + "\n" +
+		`fs.appendFileSync(` + strconv.Quote(capturePath) + `, fs.readFileSync(0, "utf8") + "\n");` + "\n" +
+		`process.stdout.write(` + strconv.Quote(string(reply)) + `);`
+	return r.router(t, "deny-and-capture", body), capturePath
+}
+
+func piCapturedPayloads(t *testing.T, capturePath string) []map[string]json.RawMessage {
+	t.Helper()
+	raw, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatalf("the router recorded no payload: %v", err)
+	}
+	var payloads []map[string]json.RawMessage
+	for line := range strings.Lines(string(raw)) {
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(line), &payload); err != nil {
+			t.Fatalf("a captured payload is not valid JSON: %v\n%s", err, line)
+		}
+		payloads = append(payloads, payload)
+	}
+	return payloads
+}
+
+// piCanonicalJSON re-marshals through Go's own maps, whose keys marshal sorted,
+// so two JSON texts compare equal exactly when they carry the same value.
+func piCanonicalJSON(t *testing.T, raw []byte) string {
+	t.Helper()
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("%s is not JSON: %v", raw, err)
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(canonical)
+}
+
+// piContinuation is what a settle deny owes pi: every entry already proposed,
+// then the reason as a hidden, attributed user-role message, and a request for
+// one more provider call.
+func piContinuation(t *testing.T, reason string, prior ...any) string {
+	t.Helper()
+	entries := slices.Concat(prior, []any{map[string]any{
+		"type": "custom_message", "customType": "hookyard",
+		"content": "[hookyard turn_end] " + reason, "display": false,
+	}})
+	raw, err := json.Marshal(map[string]any{"entries": entries, "continue": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return piCanonicalJSON(t, raw)
+}
+
+func assertPiContinues(t *testing.T, got, want string) {
+	t.Helper()
+	if piCanonicalJSON(t, []byte(got)) != want {
+		t.Errorf("settle returned %s, want %s", got, want)
+	}
+}
+
+// The per-turn turn_end is routable as pi:turn_end, and its payload is the one
+// place per-turn granularity survives the remap: turn_index still rides it,
+// now beside the outcome pi 0.87 added. The boundary projections stay behind.
+func TestPiBridgeForwardsTheOutcomeOnTurnEnd(t *testing.T) {
+	run := newPiBridgeRun(t)
+	router, capturePath := run.capturingRouter(t)
+	run.install(t, EmittedTimeoutSeconds*1000, piEntry("turn_end", "", router))
+
+	assertPiAllows(t, run.fire(t, "turn_end", piTurnEnd(3, "error", []any{})))
+
+	payload := piCapturedPayload(t, capturePath)
+	if got := string(payload["turn_index"]); got != "3" {
+		t.Errorf("turn_index = %s, want 3", got)
+	}
+	if got := string(payload["outcome"]); got != `"error"` {
+		t.Errorf("outcome = %s, want \"error\"", got)
+	}
+	for _, key := range []string{"entries", "continue", "context", "messageEntryId", "stop_hook_active"} {
+		if _, ok := payload[key]; ok {
+			t.Errorf("the turn_end payload carries %q, which the bridge must not forward: %v", key, payload)
+		}
+	}
+}
+
+// agent_before_settle is canonical turn_end on pi, and its payload is pi's
+// outcome plus the bridge's own stop_hook_active — false until this bridge has
+// forced a continuation in the run.
+func TestPiBridgeForwardsTheOutcomeAndStopHookActiveOnSettle(t *testing.T) {
+	run := newPiBridgeRun(t)
+	router, capturePath := run.capturingRouter(t)
+	run.install(t, EmittedTimeoutSeconds*1000, piEntry("agent_before_settle", "", router))
+
+	assertPiAllows(t, run.fire(t, "agent_before_settle", piSettle("completed", []any{})))
+
+	payload := piCapturedPayload(t, capturePath)
+	if got := string(payload["hook_event_name"]); got != `"agent_before_settle"` {
+		t.Errorf("hook_event_name = %s, want \"agent_before_settle\"", got)
+	}
+	if got := string(payload["outcome"]); got != `"completed"` {
+		t.Errorf("outcome = %s, want \"completed\"", got)
+	}
+	if got := string(payload["stop_hook_active"]); got != "false" {
+		t.Errorf("stop_hook_active = %s, want false on the run's first settle", got)
+	}
+	for _, key := range []string{"entries", "continue", "context", "turn_index"} {
+		if _, ok := payload[key]; ok {
+			t.Errorf("the settle payload carries %q, which the bridge must not forward: %v", key, payload)
+		}
+	}
+}
+
+// A settle deny is a continuation: the reason goes to the model as a hidden,
+// attributed message, and pi is asked for one more provider request. pi chains
+// boundary handlers, so an entry an earlier extension already proposed has to
+// survive — first, and untouched.
+func TestPiBridgeContinuesOnASettleDenyAndKeepsEarlierEntries(t *testing.T) {
+	run := newPiBridgeRun(t)
+	router := run.router(t, "deny", `process.stdout.write('{"block":true,"reason":"tests are still red"}');`)
+	run.install(t, EmittedTimeoutSeconds*1000, piEntry("agent_before_settle", "", router))
+
+	prior := map[string]any{"type": "custom", "customType": "earlier-extension", "data": map[string]any{"n": 1}}
+	got := run.fire(t, "agent_before_settle", piSettle("completed", []any{prior}))
+	assertPiContinues(t, got, piContinuation(t, "tests are still red", prior))
+}
+
+// pi re-fires agent_before_settle after the continuation it grants, and a
+// router that denies unconditionally would keep the agent running forever. The
+// bridge's cap holds whatever the router answers: the second settle's payload
+// tells the router its deny will not be acted on, and it is not.
+func TestPiBridgeContinuesASettleAtMostOncePerRun(t *testing.T) {
+	run := newPiBridgeRun(t)
+	router, capturePath := run.denyingCaptureRouter(t, "again")
+	run.install(t, EmittedTimeoutSeconds*1000, piEntry("agent_before_settle", "", router))
+
+	drive := run.drive(t, []piBridgeStep{
+		{Event: "agent_before_settle", Payload: piSettle("completed", []any{})},
+		{Event: "agent_before_settle", Payload: piSettle("completed", []any{})},
+	})
+
+	assertPiContinues(t, drive.ret(0), piContinuation(t, "again"))
+	if got := drive.ret(1); got != "null" {
+		t.Errorf("the second settle returned %s, want null: the run's one continuation is spent", got)
+	}
+	payloads := piCapturedPayloads(t, capturePath)
+	if len(payloads) != 2 {
+		t.Fatalf("the router saw %d payloads, want 2", len(payloads))
+	}
+	for i, want := range []string{"false", "true"} {
+		if got := string(payloads[i]["stop_hook_active"]); got != want {
+			t.Errorf("settle %d: stop_hook_active = %s, want %s", i, got, want)
+		}
+	}
+}
+
+// Two entries denying one settle still continue it once: the cap is read after
+// the router answers, not off the payload each entry was sent.
+func TestPiBridgeContinuesOneSettleOnceAcrossEntries(t *testing.T) {
+	run := newPiBridgeRun(t)
+	first := run.router(t, "deny-first", `process.stdout.write('{"block":true,"reason":"first"}');`)
+	second := run.router(t, "deny-second", `process.stdout.write('{"block":true,"reason":"second"}');`)
+	run.install(t, EmittedTimeoutSeconds*1000,
+		piEntry("agent_before_settle", "", first),
+		piEntry("agent_before_settle", "", second),
+	)
+
+	got := run.fire(t, "agent_before_settle", piSettle("completed", []any{}))
+	assertPiContinues(t, got, piContinuation(t, "first"))
+}
+
+// agent_settled ends the run the cap counts in — pi fires it after every run,
+// aborted ones included — so the next prompt's settle may continue again, and
+// its payload says so.
+func TestPiBridgeResetsTheContinuationCapOnAgentSettled(t *testing.T) {
+	run := newPiBridgeRun(t)
+	router, capturePath := run.denyingCaptureRouter(t, "again")
+	run.install(t, EmittedTimeoutSeconds*1000, piEntry("agent_before_settle", "", router))
+
+	drive := run.drive(t, []piBridgeStep{
+		{Event: "agent_before_settle", Payload: piSettle("completed", []any{})},
+		{Event: "agent_settled", Payload: map[string]any{"type": "agent_settled"}},
+		{Event: "agent_before_settle", Payload: piSettle("completed", []any{})},
+	})
+
+	assertPiContinues(t, drive.ret(0), piContinuation(t, "again"))
+	assertPiAllows(t, drive.ret(1))
+	assertPiContinues(t, drive.ret(2), piContinuation(t, "again"))
+	payloads := piCapturedPayloads(t, capturePath)
+	if len(payloads) != 2 {
+		t.Fatalf("the router saw %d payloads, want 2", len(payloads))
+	}
+	if got := string(payloads[1]["stop_hook_active"]); got != "false" {
+		t.Errorf("stop_hook_active after agent_settled = %s, want false: a new run has its own continuation", got)
+	}
+}
+
+// §5's fail-open on the settle: no router failure may keep pi running, and none
+// may spend the run's one continuation either. The failing entry is registered
+// first, so a later deny on the same settle is what proves the cap untouched —
+// and the proposal ending up with the deny's message alone proves the failure
+// added nothing to it.
+func TestPiBridgeSettlesOnEveryRouterFailure(t *testing.T) {
+	for _, tc := range piRouterFailures() {
+		t.Run(tc.name, func(t *testing.T) {
+			run := newPiBridgeRun(t)
+			deny := run.router(t, "settle-deny", `process.stdout.write('{"block":true,"reason":"after the failure"}');`)
+			// One clock covers both entries, and the deny has to beat it: the
+			// timeout case's own 300ms is a budget for a wedged router, not
+			// for a node start on a loaded machine.
+			run.install(t, max(tc.timeout(), 2000),
+				piEntry("agent_before_settle", "", tc.command(t, run)),
+				piEntry("agent_before_settle", "", deny),
+			)
+
+			got := run.fire(t, "agent_before_settle", piSettle("completed", []any{}))
+			assertPiContinues(t, got, piContinuation(t, "after the failure"))
+		})
+	}
+}
+
+// A reply the router means as advice or as a go-ahead is not a deny, and only a
+// deny keeps pi from settling: turn_end has no advisory slot on any engine.
+func TestPiBridgeSettlesOnANonDenyReply(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{name: "advisory-only", body: `process.stdout.write('{"advisory":"consider the docs"}');`},
+		{name: "explicit-no-block", body: `process.stdout.write('{"block":false,"reason":"fine"}');`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := newPiBridgeRun(t)
+			run.install(t, EmittedTimeoutSeconds*1000, piEntry("agent_before_settle", "", run.router(t, tc.name, tc.body)))
+			assertPiAllows(t, run.fire(t, "agent_before_settle", piSettle("completed", []any{})))
+		})
+	}
+}
+
+// An entries that is not an array is a proposal shape this bridge does not
+// understand, and it declines rather than replacing what earlier handlers
+// proposed — without spending the cap, so the next settle still continues.
+func TestPiBridgeDeclinesASettleWhoseEntriesItCannotRead(t *testing.T) {
+	run := newPiBridgeRun(t)
+	router := run.router(t, "deny", `process.stdout.write('{"block":true,"reason":"keep going"}');`)
+	run.install(t, EmittedTimeoutSeconds*1000, piEntry("agent_before_settle", "", router))
+
+	drive := run.drive(t, []piBridgeStep{
+		{Event: "agent_before_settle", Payload: piSettle("completed", "not an array")},
+		{Event: "agent_before_settle", Payload: piSettle("completed", []any{})},
+	})
+
+	assertPiAllows(t, drive.ret(0))
+	assertPiContinues(t, drive.ret(1), piContinuation(t, "keep going"))
+}
+
+// agent_settled exists only to reset what an agent_before_settle entry sets, so
+// an install with none registers no handler on it.
+func TestPiBridgeRegistersAgentSettledOnlyForAgentBeforeSettle(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		entry piBridgeEntry
+		want  int
+	}{
+		{name: "with-an-agent-before-settle-entry", entry: piEntry("agent_before_settle", "", "router-never-spawned"), want: 1},
+		{name: "with-a-per-turn-turn-end-entry", entry: piEntry("turn_end", "", "router-never-spawned"), want: 0},
+		{name: "with-a-tool-call-entry", entry: piEntry("tool_call", "", "router-never-spawned"), want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := newPiBridgeRun(t)
+			run.install(t, EmittedTimeoutSeconds*1000, tc.entry)
+
+			registered := run.drive(t, nil).Registered
+			got := 0
+			for _, event := range registered {
+				if event == "agent_settled" {
+					got++
+				}
+			}
+			if got != tc.want {
+				t.Errorf("registered = %q, want agent_settled registered %d time(s)", registered, tc.want)
+			}
+		})
 	}
 }

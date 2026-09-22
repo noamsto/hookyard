@@ -107,7 +107,11 @@ var inboundEvents = map[Engine]map[string]string{
 		"tool_call":              PreTool,      // observed: pi-tool_call.json
 		"tool_result":            PostTool,     // observed: pi-tool_result.json
 		"session_before_compact": PreCompact,   // inferred, not captured
-		"turn_end":               TurnEnd,      // observed: pi-turn_end.json
+		// turn_end deliberately does not appear here (D1): it is pi's per-turn
+		// boundary, routable only as the engine-scoped pi:turn_end, so an
+		// inbound turn_end payload decodes with canonical_event: "" — the same
+		// posture as session_shutdown, which also has no canonical mapping.
+		"agent_before_settle": TurnEnd, // observed: pi-agent_before_settle.json
 	},
 }
 

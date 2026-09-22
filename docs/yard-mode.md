@@ -162,10 +162,14 @@ through a destination option at all (#29).
 - `engines` is any of `claude-code`, `codex`, `cursor`.
 - `lane` is `"verdict"` (the default, safe to omit) or `"fire_and_forget"`, for
   a handler with no verdict to give (design doc §4). A fire-and-forget handler
-  can never guard, so `validate` refuses one declared on a decision event or
-  carrying a non-zero `timeout_ms`. Using `lane` at all needs the hookyard
-  version that introduced it — an older binary silently drops the field and
-  runs the entry in the verdict lane instead.
+  can never guard, so `validate` refuses one declared on a guard event — an
+  event whose verdict actually gates a call, such as `pre_tool` — or carrying
+  a non-zero `timeout_ms`. `turn_end` on pi is a decision slot too (design doc
+  §11.2, issue #76) but not a guard slot: a deny there asks pi to keep going
+  rather than blocking anything, so a fire-and-forget `turn_end` observer
+  stays legal. Using `lane` at all needs the hookyard version that introduced
+  it — an older binary silently drops the field and runs the entry in the
+  verdict lane instead.
 - `match` filters by normalized tool name; an empty list matches every tool. A
   tool with no equivalent on a claimed engine — Codex has no `Grep` or `Glob`,
   Cursor has no `Glob` — fails validation rather than installing a handler that
@@ -181,6 +185,13 @@ ones; see [`internal/vocab`](../internal/vocab) for the full tables. The six
 canonical events are `session_start`, `prompt_submit`, `pre_tool`, `post_tool`,
 `pre_compact` and `turn_end`. The normalized tool names are `Read`, `Write`,
 `Bash`, `Grep` and `Glob`.
+
+On pi, canonical `turn_end` maps to pi's `agent_before_settle` native, not to
+pi's own `turn_end` (design doc §11.2, issue #76): `agent_before_settle` fires
+once per settle attempt, matching the once-per-response meaning `turn_end`
+has on every other engine, while pi's own `turn_end` fires once per LLM turn.
+A handler that wants that per-turn firing subscribes to the engine-scoped
+`pi:turn_end` instead — it carries no canonical name of its own.
 
 ## Event record details
 

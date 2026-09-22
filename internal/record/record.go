@@ -68,7 +68,10 @@ const maxRecordBytes = 65536
 // truncated to this length before the record is even assembled.
 const maxReasonBytes = 512
 
-// maxFieldBytes bounds CWD and ToolName during the size-reduction cascade.
+// maxFieldBytes bounds CWD and ToolName during the size-reduction cascade,
+// and Outcome unconditionally in toRecord (Outcome is short in practice —
+// pi's outcome vocabulary is completed|error|aborted — so it needs no place
+// in the cascade itself, just the same bound the other short fields get).
 const maxFieldBytes = 256
 
 // Event is the minimal input the router builds per handled hook event.
@@ -81,12 +84,18 @@ type Event struct {
 	NativeEvent    string
 	CWD            string
 	ToolName       string
-	Verdict        string
-	Enforced       bool
-	Reason         string
-	Router         string
-	RouterElapsed  time.Duration
-	Handlers       []HandlerOutcome
+	// Outcome is pi's native outcome (completed|error|aborted) on turn_end and
+	// agent_before_settle, per D2 (docs/design/hookyard.md §11.2). It is
+	// additive and engine-specific: the router fills it only for pi, since
+	// hookyard authors pi's payload and an outcome key on any other engine is
+	// not ours to interpret.
+	Outcome       string
+	Verdict       string
+	Enforced      bool
+	Reason        string
+	Router        string
+	RouterElapsed time.Duration
+	Handlers      []HandlerOutcome
 }
 
 // HandlerOutcome is one handler's contribution to an Event. toRecord clears
@@ -126,6 +135,7 @@ type Record struct {
 	NativeEvent    string          `json:"native_event"`
 	CWD            string          `json:"cwd"`
 	ToolName       string          `json:"tool_name"`
+	Outcome        string          `json:"outcome,omitempty"`
 	Verdict        string          `json:"verdict"`
 	Enforced       bool            `json:"enforced"`
 	Reason         string          `json:"reason,omitempty"`
@@ -203,6 +213,7 @@ func toRecord(e Event, now time.Time, key string) Record {
 		NativeEvent:    e.NativeEvent,
 		CWD:            e.CWD,
 		ToolName:       e.ToolName,
+		Outcome:        truncateUTF8(e.Outcome, maxFieldBytes),
 		Verdict:        e.Verdict,
 		Enforced:       e.Enforced,
 		Reason:         truncateUTF8(e.Reason, maxReasonBytes),

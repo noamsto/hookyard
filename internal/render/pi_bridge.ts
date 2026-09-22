@@ -92,7 +92,9 @@ function askRouter(bin, args, payload) {
 
 // Blocks only on a well-formed deny. Empty stdout is how the router abstains,
 // and unparsable stdout or a reply carrying no decision are the router's own
-// failures — all three land here as allow.
+// failures — all three land here as allow. agent_before_settle reads the same
+// reply, where a deny means "continue" rather than "block", and owes the same
+// fail-open: every one of those failures lets pi settle.
 function decision(stdout) {
   let reply;
   try {
@@ -132,6 +134,11 @@ function advisory(stdout) {
 const ATTRIBUTION = "[hookyard advisory] ";
 const ADVISORY_CUSTOM_TYPE = "hookyard";
 
+// A settle deny's reason reaches the model as a user-role message it never
+// typed, so it is attributed for ATTRIBUTION's reason — and under its own
+// label, because it is a demand to keep going rather than advice to weigh.
+const CONTINUATION_ATTRIBUTION = "[hookyard turn_end] ";
+
 // session_start's own return value reaches nothing, so its advisory waits here
 // for the next before_agent_start. One slot, latest wins, and that is not lossy:
 // buildPlan collapses every handler for one (engine, event) into a single entry,
@@ -153,6 +160,15 @@ let queuedAdvisory;
 // advice already rides the block reason, exactly once.
 const pendingToolAdvice = new Map();
 
+// Whether this bridge already forced a continuation in the current run. pi
+// re-fires agent_before_settle after every continuation it grants, so a handler
+// that denies unconditionally would otherwise keep the agent running forever;
+// this cap holds whatever the router answers. Module-level for queuedAdvisory's
+// reason — one bridge instance per session — which makes the bound one
+// continuation per bridge per run: every installed hookyard bridge holds its
+// own flag.
+let continuedThisRun = false;
+
 // Pi documents a tool_result handler as chaining middleware whose omitted fields
 // keep their current value, so returning content alone is a patch rather than a
 // replacement — and the patch appends, because the tool's own output is what the
@@ -168,6 +184,13 @@ function appendAdvisory(event, advice) {
 // — so its shape is pinned by the committed pi-*.json fixtures rather than by
 // the engine. A key added here that no re-captured fixture carries does not
 // exist.
+//
+// The boundary events' entries and context are left behind on purpose: both are
+// whole-session projections that can outgrow the router's 1 MiB inbound cap,
+// and a payload the router refuses outright reaches no handler at all — the
+// outcome it was meant to carry included. stop_hook_active is not pi's at all
+// but this bridge's own cap, named and meant as in Claude Code's Stop payload:
+// true means a deny here will not be acted on.
 const extras = {
   session_start: (event) => ({ reason: event.reason }),
   input: (event) => ({ prompt: event.text, source: event.source }),
@@ -182,7 +205,8 @@ const extras = {
     tool_use_id: event.toolCallId,
     tool_response: { content: event.content, is_error: event.isError },
   }),
-  turn_end: (event) => ({ turn_index: event.turnIndex }),
+  turn_end: (event) => ({ turn_index: event.turnIndex, outcome: event.outcome }),
+  agent_before_settle: (event) => ({ outcome: event.outcome, stop_hook_active: continuedThisRun }),
   session_shutdown: (event) => ({ reason: event.reason }),
 };
 
@@ -260,16 +284,43 @@ export default function (pi) {
 
         // Only tool_call carries a return channel that can block, and it is
         // spent whole on the decision, so its advice waits in pendingToolAdvice.
-        // session_start and tool_result carry an advisory return channel of
-        // their own, and every other event ignores the reply. The spawn still
-        // happens whatever the event, because recording it is the router's job
-        // either way.
+        // agent_before_settle is the one other event whose reply is acted on: a
+        // deny there becomes a continuation instead of a settle. session_start
+        // and tool_result carry an advisory return channel of their own, and
+        // every other event — pi's per-LLM-turn turn_end included, whose own
+        // continuation channel hookyard leaves to the settle — ignores the
+        // reply. The spawn still happens whatever the event, because recording
+        // it is the router's job either way.
         if (entry.event === "tool_call") {
           const verdict = decision(stdout);
           if (verdict) return verdict;
           const advice = advisory(stdout);
           if (advice !== undefined) pendingToolAdvice.set(event.toolCallId, advice);
           return undefined;
+        }
+        // pi chains boundary handlers: a returned entries or continue replaces
+        // only that field of the proposal the next handler sees, so the spread
+        // is what keeps every earlier handler's entries, and returning nothing
+        // is the only way to leave the proposal untouched. The cap is read
+        // live, after the await, rather than off the payload: two entries
+        // denying one settle still continue it once. An entries that is not an
+        // array declines without spending the cap, for appendAdvisory's reason.
+        if (entry.event === "agent_before_settle") {
+          const verdict = decision(stdout);
+          if (!verdict || continuedThisRun || !Array.isArray(event.entries)) return undefined;
+          continuedThisRun = true;
+          return {
+            entries: [
+              ...event.entries,
+              {
+                type: "custom_message",
+                customType: ADVISORY_CUSTOM_TYPE,
+                content: CONTINUATION_ATTRIBUTION + verdict.reason,
+                display: false,
+              },
+            ],
+            continue: true,
+          };
         }
         if (entry.event === "tool_result") return appendAdvisory(event, advisory(stdout));
         if (entry.event === "session_start") queuedAdvisory = advisory(stdout);
@@ -325,6 +376,16 @@ export default function (pi) {
       queuedAdvisory = undefined;
       if (advice === undefined) return undefined;
       return { message: { customType: ADVISORY_CUSTOM_TYPE, content: ATTRIBUTION + advice, display: false } };
+    });
+  }
+
+  // Bridge-owned for the same reason: it ends the run continuedThisRun counts
+  // in, and only an agent_before_settle entry ever sets the flag. pi fires
+  // agent_settled from a finally after every run, aborted ones included, so no
+  // run can leave the cap spent for the next prompt.
+  if (DATA.entries.some((entry) => entry.event === "agent_before_settle")) {
+    pi.on("agent_settled", () => {
+      continuedThisRun = false;
     });
   }
 

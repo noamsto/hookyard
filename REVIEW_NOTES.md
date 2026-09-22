@@ -55,3 +55,14 @@ recurrence_escalation: unused
 | fixture portability | Shell HIGH: realpath -m GNU-only | cfb56a0 | b675462 | code read | fixed | 2 |
 | post_tool router input is the tool's own output | round-2 promoted HIGH: pre advice flushed before post handlers leaked into post_tool router's tool_response | b675462 | c060e66 | TestPiBridgePostToolRouterPayloadExcludesThePreToolAdvisory + live ordering test; round-3 (dispatcher-authorized, final) re-review accepted | fixed | 3 |
 | docs accuracy | round-2 MED: caveat direction, incomplete dropped-advice list, stale steer wording; round-3 MED: "in that order" ambiguity | b675462 | c060e66 + follow-up | round-3 re-review | fixed | 3 |
+
+---
+
+# Review notes — hookyard #76 (pi 0.87 turn-end boundary: outcome, evidence refresh, agent_before_settle continuation)
+
+Base `8c802d5` (`origin/main`). Ledger opened before the independent review batch.
+
+| invariant/family | finding or thread IDs | observed head | fix commit | proof | disposition | rounds used |
+| --- | --- | --- | --- | --- | --- | --- |
+
+recurrence_escalation: unused
