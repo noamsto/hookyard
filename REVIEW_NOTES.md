@@ -64,8 +64,8 @@ Ledger opened before the independent review batch; base `origin/main` `8c802d5`.
 
 | invariant/family | finding or thread IDs | observed head | fix commit | proof | disposition | rounds used |
 | --- | --- | --- | --- | --- | --- | --- |
-| docs must not assert the --registered-for fallback is Claude-only once it is widened | reviewer MEDIUM (round 1), hookyard.md §7/§12 | bb5a8a8 | pending | doc-only; re-checked against main.go behaviour | fixed | 1 |
-| the consumer-contract link must not imply codex/cursor payloads are captured | reviewer MEDIUM (round 1), README.md | bb5a8a8 | pending | doc-only; fixtures README labels them inferred | fixed | 1 |
-| the fallback comment must not imply canonical codex session_start is rescued | reviewer MEDIUM (round 1), cmd/hookyard/main.go | bb5a8a8 | pending | comment-only; codex session_start still router=error | fixed | 1 |
+| docs must not assert the --registered-for fallback is Claude-only once it is widened | reviewer MEDIUM (round 1), hookyard.md §7/§12 | bb5a8a8 | 3463666 | doc-only; round-2 targeted re-review approved each fix | fixed | 1 |
+| the consumer-contract link must not imply codex/cursor payloads are captured | reviewer MEDIUM (round 1), README.md | bb5a8a8 | 3463666 | doc-only; round-2 targeted re-review approved each fix | fixed | 1 |
+| the fallback comment must not imply canonical codex session_start is rescued | reviewer MEDIUM (round 1), cmd/hookyard/main.go | bb5a8a8 | 3463666 | comment-only; round-2 targeted re-review verified condition byte-identical | fixed | 1 |
 
 recurrence_escalation: unused
