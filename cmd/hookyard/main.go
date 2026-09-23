@@ -926,15 +926,18 @@ func runRoute(ctx context.Context, opts routeOptions, in io.Reader, out io.Write
 	env, err := envelope.Decode(bytes.NewReader(raw))
 	// A payload that carries no engine discriminator is trusted to
 	// --registered-for only in yard mode, where each engine reads only its own
-	// config; a build-mode plugin can be loaded by another engine. Two shapes
+	// config; a build-mode plugin can be loaded by another engine. Two arms
 	// qualify. Claude Code omits prompt_id and effort on some events
-	// (SessionStart, SessionEnd), so its fixed catalog names them. Codex's
-	// shipped schema omits turn_id from SessionStart and SessionEnd (0.154.0
-	// session-end.command.input), so an engine-scoped event is trusted only
-	// when argv's --event names exactly that event for that engine --
-	// "codex:SessionEnd" plus a payload whose hook_event_name is "SessionEnd"
-	// is the config's own event coming back. A look-alike payload from another
-	// engine, or a non-scoped event, still falls through to the router error.
+	// (SessionStart, SessionEnd), so its fixed catalog names them. The second
+	// arm is narrower: an engine-scoped event is trusted only when argv's
+	// --event names exactly that event for that engine -- "codex:SessionEnd"
+	// plus a payload whose hook_event_name is "SessionEnd" is the config's own
+	// event coming back. That is what routes Codex 0.154.0's SessionEnd, whose
+	// shipped schema omits turn_id. Canonical events are deliberately NOT
+	// rescued: codex session_start carries no turn_id either and still records
+	// a router error, preserving the existing open item (#81's scope is session
+	// end). A look-alike payload from another engine, or a non-scoped event,
+	// also still falls through to the router error.
 	if errors.Is(err, envelope.ErrUnknownEngine) && opts.pluginRoot == "" {
 		if fallback, fallbackErr := envelope.DecodeAs(raw, registered); fallbackErr == nil {
 			claudeCatalog := registered == vocab.ClaudeCode && vocab.IsClaudeCodeEvent(fallback.NativeEvent)

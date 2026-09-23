@@ -140,9 +140,11 @@ appends a normal record with `canonical_event: ""`; a subscriber keys on
 Every record also carries `engine`, `session_id`, `cwd`, `verdict` and
 `router`, as every other event does. `codex:SessionEnd` sends no engine
 discriminator on the wire, so it routes only in yard mode, where the config's
-own `--registered-for` supplies the engine (see
-[hookyard.md §7](docs/design/hookyard.md) and the
-[captured payloads](docs/design/fixtures/hook-payloads/) for the shapes).
+own `--registered-for` supplies the engine. See [hookyard.md §7](docs/design/hookyard.md)
+and the fixtures README's [session-end payloads that are inferred, not
+captured](docs/design/fixtures/hook-payloads/README.md#session-end-payloads-that-are-inferred-not-captured);
+the codex and cursor payloads are inferred from their shipped builds, not
+captured, and only the pi payload has a fixture.
 
 ## More
 

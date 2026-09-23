@@ -1986,12 +1986,17 @@ anyway, and the record's reason notes that the engine was taken from
 in the record even though routing succeeds. It stops there deliberately:
 Cursor's own event names are camelCase (`sessionStart`, `stop`), so a
 same-named-but-wrong-case Cursor payload does not match and still errors,
-and the fallback is wired into yard mode's Claude Code path only, because the
-yard-mode Claude entries live solely in the Nix `--settings` overlay — a
-store file only the consumer's own `claude` wrapper ever passes to Claude
-Code — so no other engine's traffic can reach this code path through it.
-Build-mode plugin `hooks.json` files can be loaded by other engines (a Codex
-plugin can carry one), so the fallback is not extended to build mode, and a
+and the fallback's Claude catalog arm is wired into yard mode's Claude Code
+path, because the yard-mode Claude entries live solely in the Nix `--settings`
+overlay — a store file only the consumer's own `claude` wrapper ever passes to
+Claude Code — so no other engine's traffic can reach that arm through it. #81
+widens the fallback with a second, narrower arm: an engine-scoped event is
+rescued only when argv's own `--event` names exactly that event for that engine
+(`codex:SessionEnd` plus a payload whose `hook_event_name` is `SessionEnd`),
+which is how Codex 0.154.0's discriminator-less `SessionEnd` routes. Canonical
+`SessionStart`/`Stop` on Codex and Cursor are deliberately not rescued and stay
+open. Build-mode plugin `hooks.json` files can be loaded by other engines (a
+Codex plugin can carry one), so neither arm is extended to build mode, and a
 payload the router *does* detect as another engine keeps today's suppression
 path unchanged.
 
@@ -4559,10 +4564,12 @@ because the captures don't reach them yet, not because they were missed.**
   `hook_event_name` is exactly a catalog native, and every record it produces
   carries the reason `engine taken from --registered-for claude-code: payload
   carried no engine discriminator` — so an operator reading the stream still
-  sees that detection, not observation, put the record there. Codex and
-  Cursor equivalents, and Claude Code's build mode, are unchanged: this item
-  stays open for `SessionStart`/`Stop` on those engines, since no equivalent
-  capture or fallback exists for them.
+  sees that detection, not observation, put the record there. #81 adds a
+  narrower fallback for one engine-scoped Codex event — `codex:SessionEnd`,
+  whose shipped schema lacks `turn_id` — keyed on argv's exact `--event`.
+  Codex and Cursor canonical `SessionStart`/`Stop`, and Claude Code's build
+  mode, are unchanged: this item stays open for those events, since no
+  equivalent capture or fallback exists for them.
 - **Payload-level `hook_event_name` spellings are unverified for twelve of the
   table's eighteen rows.** Only `PreToolUse`/`PostToolUse` (Claude Code),
   `PreToolUse`/`UserPromptSubmit` (Codex) and `preToolUse`/`postToolUse`
