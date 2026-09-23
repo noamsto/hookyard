@@ -1,9 +1,9 @@
 # Captured hook payloads
 
 Real hook payloads, captured from live agent sessions on 2026-09-10,
-2026-09-15, 2026-09-17 and 2026-09-22. These are the ground truth behind §7's
-inbound field table; before them, that table was derived from each engine's
-documentation.
+2026-09-15, 2026-09-17, 2026-09-22 and 2026-09-23. These are the ground truth
+behind §7's inbound field table; before them, that table was derived from
+each engine's documentation.
 
 | File | Engine | Event | Notes |
 |---|---|---|---|
@@ -25,10 +25,48 @@ documentation.
 | `pi-turn_end.json` | Pi 0.87.0 | `turn_end` | carries `turn_index` and `outcome` (`completed`/`error`/`aborted`, new in 0.87.0); `turn_index` is an integer, not a correlation id. Canonical `turn_end` no longer maps here (design doc §11.2, issue #76) — this pins the engine-scoped `pi:turn_end` payload, pi's per-LLM-turn native |
 | `pi-agent_before_settle.json` | Pi 0.87.0 | `agent_before_settle` | new in 0.87.0; now carries canonical `turn_end`'s routing (§11.2) — the once-per-settle boundary that matches `Stop`/`stop` on the other three engines. `outcome` as above; `stop_hook_active` is hookyard's own bridge-side continuation cap, not a field pi sends (mirrors Claude Code's `Stop` payload field of the same name) |
 | `pi-session_shutdown.json` | Pi 0.85.1 | `session_shutdown` | `reason` is `"quit"`; no canonical counterpart, so a manifest names it `pi:session_shutdown`; key set re-verified on 0.87.0 |
+| `pi-agent_settled.json` | Pi 0.87.0 | `agent_settled` | no canonical counterpart, so a manifest names it `pi:agent_settled`; the terminal "run settled, waiting on input" signal (see below) |
 | `claude-SessionStart.json` | Claude Code 2.1.272 | `SessionStart` | no `prompt_id`/`effort`; the router's yard-mode fallback exists because of this (R-G) |
 | `claude-UserPromptSubmit.json` | Claude Code 2.1.272 | `UserPromptSubmit` | carries the literal probe `prompt` |
 | `claude-Stop.json` | Claude Code 2.1.272 | `Stop` | `last_assistant_message` is `"ok"`; `background_tasks`/`session_crons` are empty |
 | `claude-SessionEnd.json` | Claude Code 2.1.272 | `SessionEnd` | `reason` is `"other"` |
+
+`pi-agent_settled.json` is captured from a real `pi -p` run, but its
+`argv` shape is the same as the other seven (the wrapper's own flags plus the
+caller's). pi fires `agent_settled` once the whole run has settled — after
+retries, compaction retries and queued follow-ups — and notifies only, so it
+is the unambiguous "idle, waiting on the human" signal `turn_end` cannot be
+(turn_end fires after every LLM response, including intermediate tool turns).
+The shipped binary emits it from the `finally` of the agent run, so an aborted
+(Esc) run settles too.
+
+### Session-end payloads that are inferred, not captured
+
+Two newly routed session-end events have **no fixture here**, deliberately:
+`codex:SessionEnd` and `cursor:sessionEnd`. Both engines are installed on the
+capture machine but neither is authenticated (`codex login status` and
+`cursor-agent status` both report "Not logged in"), so a real session-end run
+could not be captured and a hand-written payload would be this directory's
+only file that is reasoning rather than transcript — the same rule that leaves
+`session_before_compact` without a fixture. Their shapes are instead read off
+each engine's shipped build and pinned in Go tests:
+
+- **codex 0.154.0**'s binary embeds a `session-end.command.input` JSON schema
+  with exactly `cwd`, `hook_event_name: "SessionEnd"`, `reason: "other"`,
+  `session_id`, `transcript_path` (nullable). It carries **no `turn_id`**, so
+  `envelope.Detect` cannot place it; yard mode's `--registered-for` fallback
+  routes it (see `cmd/hookyard/main.go`). Tests:
+  `internal/envelope.TestDetectCannotPlaceCodexSessionEnd`,
+  `TestDecodeAsPlacesCodexSessionEnd`, and
+  `cmd/hookyard.TestRunRouteCodexSessionEndRoutesViaRegisteredFor`.
+- **cursor-agent 2026.09.18** builds the `sessionEnd` payload in
+  `share/cursor-agent/7021.index.js` (`executeHookForStep(_E.sessionEnd, ...)`)
+  and carries `cursor_version`, so `Detect` places it. Tests:
+  `internal/envelope.TestDetectPlacesCursorSessionEnd`,
+  `cmd/hookyard.TestRunRouteCursorSessionEndRoutes`.
+
+Re-capture both once either engine is authenticated: replace the inferred
+vectors above with real files and delete this section.
 
 Pi's payloads are not like the other ten. Pi has no subprocess hook
 protocol of its own — it fires in-process TypeScript extension callbacks,
@@ -151,6 +189,12 @@ is the same class as the entry ids rather than data about the turn: it
 reflects whatever the handler chain has decided *so far*, mutable by
 whichever handler pi calls next, so a value forwarded to hookyard's router is
 already stale by the time it would be read back.
+
+`pi-agent_settled.json` was added 2026-09-23 against **pi 0.87.0** (the
+version this machine now ships) through the same installed-bridge setup, with
+the manifest declaring `pi:agent_settled` and the scratch router path placed
+at a non-default location so `install` left the capture wrapper in place
+rather than symlinking its own binary over it.
 
 The model was `openrouter/deepseek-v4.1-flash` for the 2026-09-17 pi
 captures. The 2026-09-10 captures used a local Lemonade server

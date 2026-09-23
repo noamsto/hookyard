@@ -105,6 +105,26 @@ var nativeEvents = map[Engine]map[string]string{
 	},
 }
 
+// No canonical session_end exists: the six canonical concepts above are the
+// only ones all engines share, and "the agent finished and is idle" is not one
+// of them. The lifecycle signals that fill that gap are therefore routed under
+// explicit engine-scoped names, each read off a shipped build:
+//
+//   - pi:agent_settled  - pi 0.87.0 docs/extensions.md ("final and
+//     notification-only"); the shipped binary emits it from the finally of the
+//     agent run, so an aborted (Esc) run settles too.
+//   - codex:SessionEnd  - codex 0.154.0 binary HookEventsToml enum plus its
+//     embedded session-end.command.input schema (fields: cwd, hook_event_name,
+//     reason, session_id, transcript_path). The schema carries no turn_id, so
+//     envelope.Detect cannot place the payload; yard mode's --registered-for
+//     fallback does.
+//   - cursor:sessionEnd - cursor-agent 2026.09.18's shipped hook-step enum and
+//     executeHookForStep(_E.sessionEnd, ...).
+//
+// Codex and Cursor have no catalog: SplitEngineScoped resolves any
+// eventPattern-shaped engine-scoped name for them, so they need only this
+// documentation, while Pi's catalog gates what a manifest may name.
+
 // ClaudeCodeEvent pairs a Claude Code native hook key with the --event value
 // hookyard's router command uses to route it.
 type ClaudeCodeEvent struct {
@@ -151,12 +171,22 @@ func IsClaudeCodeEvent(native string) bool {
 }
 
 // PiCatalog is the fixed set of pi native events hookyard routes: the six
-// canonical natives, in CanonicalEvents order, plus session_shutdown and
-// turn_end, which pi fires with no canonical counterpart of their own.
+// canonical natives, in CanonicalEvents order, plus session_shutdown,
+// agent_settled, and turn_end, which pi fires with no canonical counterpart
+// of their own.
+//
+// agent_settled is pi's terminal "the run is settled and will not continue
+// automatically" lifecycle event (pi 0.87.0 docs/extensions.md, docs/rpc.md);
+// the shipped binary emits it from the finally of the agent run, so an
+// aborted run (Esc) settles too — which is what lets a dashboard tell the
+// final turn from an intermediate tool turn, since turn_end fires after every
+// LLM response.
+//
 // turn_end is pi's per-LLM-turn boundary (D1, docs/design/hookyard.md §11.2):
 // since canonical TurnEnd now maps onto agent_before_settle, turn_end is
 // reachable only as the engine-scoped pi:turn_end, for a consumer that wants
 // per-turn granularity instead of the once-per-settle canonical event.
+//
 // before_agent_start is deliberately absent — the bridge registers it itself,
 // outside any manifest event, solely to flush a queued session_start
 // advisory. A manifest naming pi:before_agent_start would ask hookyard to
@@ -171,11 +201,11 @@ func IsClaudeCodeEvent(native string) bool {
 var PiCatalog = buildPiCatalog()
 
 func buildPiCatalog() []string {
-	catalog := make([]string, 0, len(CanonicalEvents)+2)
+	catalog := make([]string, 0, len(CanonicalEvents)+3)
 	for _, canonical := range CanonicalEvents {
 		catalog = append(catalog, nativeEvents[Pi][canonical])
 	}
-	return append(catalog, "session_shutdown", "turn_end")
+	return append(catalog, "session_shutdown", "agent_settled", "turn_end")
 }
 
 // IsPiEvent reports whether native is one of PiCatalog's members.

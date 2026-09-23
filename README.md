@@ -124,6 +124,28 @@ Every call through `hookyard route` appends one JSON line to
 `doctor` tells you whether hooks are wired up right now; the record tells you
 what actually happened.
 
+### Session lifecycle for dashboards
+
+The six canonical events carry no "the agent finished and is idle" concept, so
+three lifecycle signals are routed under explicit engine-scoped names. Each
+appends a normal record with `canonical_event: ""`; a subscriber keys on
+`engine` + `native_event`:
+
+| `engine` | `native_event` | when it fires |
+| --- | --- | --- |
+| `pi` | `agent_settled` | the whole pi run has settled — after retries, compaction retries and queued follow-ups — i.e. pi is idle and waiting on the human. Also fires on an aborted (Esc) run, unlike the per-turn `turn_end`. |
+| `codex` | `SessionEnd` | the codex session ends. |
+| `cursor` | `sessionEnd` | the cursor session ends. |
+
+Every record also carries `engine`, `session_id`, `cwd`, `verdict` and
+`router`, as every other event does. `codex:SessionEnd` sends no engine
+discriminator on the wire, so it routes only in yard mode, where the config's
+own `--registered-for` supplies the engine. See [hookyard.md §7](docs/design/hookyard.md)
+and the fixtures README's [session-end payloads that are inferred, not
+captured](docs/design/fixtures/hook-payloads/README.md#session-end-payloads-that-are-inferred-not-captured);
+the codex and cursor payloads are inferred from their shipped builds, not
+captured, and only the pi payload has a fixture.
+
 ## More
 
 - [Yard mode in depth](docs/yard-mode.md): per-engine verdict rendering,

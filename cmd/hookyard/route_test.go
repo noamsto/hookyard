@@ -23,6 +23,23 @@ import (
 const claudePreTool = `{"prompt_id":"p1","session_id":"sess-1","hook_event_name":"PreToolUse",` +
 	`"tool_name":"Bash","cwd":"/work","tool_input":{"command":"ls"}}`
 
+// codexSessionEnd is the discriminator-less payload Codex 0.154.0 sends for
+// its SessionEnd hook: exactly the shipped session-end.command.input schema
+// (cwd, hook_event_name, reason, session_id, transcript_path), with no turn_id,
+// so envelope.Detect cannot place it. Inferred from the shipped binary's
+// embedded schema, not captured: codex is not authenticated on this machine.
+const codexSessionEnd = `{"cwd":"/work","hook_event_name":"SessionEnd","reason":"other",` +
+	`"session_id":"sess-1","transcript_path":null}`
+
+// cursorSessionEnd is the payload cursor-agent 2026.09.18 builds for
+// _E.sessionEnd. It carries cursor_version, so envelope.Detect places it; the
+// rest is inferred from the shipped bundle, not captured (cursor is not
+// authenticated on this machine).
+const cursorSessionEnd = `{"cursor_version":"2026.09.18-9a7762b","hook_event_name":"sessionEnd",` +
+	`"session_id":"sess-1","conversation_id":"c1","generation_id":"g1","cwd":"",` +
+	`"workspace_roots":["/work"],"reason":"completed","duration_ms":1234,` +
+	`"is_background_agent":false,"final_status":"completed","model":"gpt-5"}`
+
 // denyStdout is what verdict.Render prints for that payload consolidated to a
 // deny whose reason is "A".
 const denyStdout = `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",` +
@@ -151,6 +168,7 @@ func TestRunRouteRecordsDecodeFailuresAsRouterErrors(t *testing.T) {
 }
 
 const wantRegisteredForNote = "engine taken from --registered-for claude-code: payload carried no engine discriminator"
+const wantRegisteredForCodexNote = "engine taken from --registered-for codex: payload carried no engine discriminator"
 
 // withoutDiscriminator returns a committed fixture with prompt_id and effort
 // stripped, the shape Claude Code sends on events that carry neither.
@@ -262,11 +280,16 @@ func TestRunRouteRegisteredForFallbackIsNarrow(t *testing.T) {
 	yardCases := []struct {
 		name          string
 		registeredFor string
+		event         string
 		stdin         string
 	}{
-		{"registered for codex", "codex", sessionStart},
-		{"registered for codex, bare PreToolUse", "codex", `{"hook_event_name":"PreToolUse"}`},
-		{"not an exact catalog event", "claude-code", `{"hook_event_name":"sessionStart","session_id":"s","cwd":"/w"}`},
+		{"registered for codex", "codex", "", sessionStart},
+		{"registered for codex, bare PreToolUse", "codex", "", `{"hook_event_name":"PreToolUse"}`},
+		{"not an exact catalog event", "claude-code", "", `{"hook_event_name":"sessionStart","session_id":"s","cwd":"/w"}`},
+		// An engine-scoped fallback needs the payload's event to match the one
+		// argv named for that engine; a mismatched no-discriminator payload
+		// stays a router error rather than being claimed as codex.
+		{"registered for codex, event named but payload event differs", "codex", "codex:SessionEnd", sessionStart},
 	}
 	for _, c := range yardCases {
 		t.Run(c.name, func(t *testing.T) {
@@ -274,6 +297,9 @@ func TestRunRouteRegisteredForFallbackIsNarrow(t *testing.T) {
 			writeTable(t, stateDir)
 			opts := routeOpts(stateDir)
 			opts.registeredFor = c.registeredFor
+			if c.event != "" {
+				opts.event = c.event
+			}
 
 			printed := runPipeline(t, opts, c.stdin)
 
@@ -297,6 +323,98 @@ func TestRunRouteRegisteredForFallbackIsNarrow(t *testing.T) {
 
 		wantUnknownEngine(t, printed, readRecord(t, stateDir), "claude-code")
 	})
+
+	t.Run("build mode codex SessionEnd", func(t *testing.T) {
+		root := t.TempDir()
+		handlersDir := filepath.Join(root, "handlers")
+		if err := os.MkdirAll(handlersDir, 0o700); err != nil {
+			t.Fatalf("mkdir handlers: %v", err)
+		}
+		opts, stateDir := pluginOpts(t, root)
+		opts.registeredFor = "codex"
+		opts.event = "codex:SessionEnd"
+		if err := record.EnsureStateDir(stateDir); err != nil {
+			t.Fatalf("create state dir: %v", err)
+		}
+		writePluginTable(t, root, decides(t, handlersDir, "deny-a", "deny", "A"))
+
+		printed := runPipeline(t, opts, codexSessionEnd)
+
+		wantUnknownEngine(t, printed, readRecord(t, stateDir), "codex")
+	})
+}
+
+// Codex's SessionEnd payload carries no turn_id, so Detect cannot identify it;
+// a yard-mode entry whose --event names codex:SessionEnd is trusted to
+// --registered-for and the engine-scoped event routes.
+func TestRunRouteCodexSessionEndRoutesViaRegisteredFor(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := t.TempDir()
+	h := decides(t, dir, "end", "allow", "")
+	h.Events = []string{"codex:SessionEnd"}
+	h.Engines = []string{"codex"}
+	writeTable(t, stateDir, h)
+	opts := routeOpts(stateDir)
+	opts.registeredFor = "codex"
+	opts.event = "codex:SessionEnd"
+
+	printed := runPipeline(t, opts, codexSessionEnd)
+
+	if printed != "" {
+		t.Errorf("want nothing printed, got %q", printed)
+	}
+	rec := readRecord(t, stateDir)
+	if rec.Router == record.RouterError {
+		t.Fatalf("want a routed run, got a router error: %q", rec.Reason)
+	}
+	if rec.Engine != "codex" {
+		t.Errorf("Engine = %q, want codex", rec.Engine)
+	}
+	if rec.NativeEvent != "SessionEnd" {
+		t.Errorf("NativeEvent = %q, want SessionEnd", rec.NativeEvent)
+	}
+	if rec.CanonicalEvent != "" {
+		t.Errorf("CanonicalEvent = %q, want empty (no canonical session-end)", rec.CanonicalEvent)
+	}
+	if !strings.Contains(rec.Reason, wantRegisteredForCodexNote) {
+		t.Errorf("reason %q does not carry the --registered-for codex note", rec.Reason)
+	}
+}
+
+// Cursor's SessionEnd carries cursor_version, so Detect places it with no
+// fallback: an entry whose --event names cursor:sessionEnd routes normally.
+func TestRunRouteCursorSessionEndRoutes(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := t.TempDir()
+	h := decides(t, dir, "end", "allow", "")
+	h.Events = []string{"cursor:sessionEnd"}
+	h.Engines = []string{"cursor"}
+	writeTable(t, stateDir, h)
+	opts := routeOpts(stateDir)
+	opts.registeredFor = "cursor"
+	opts.event = "cursor:sessionEnd"
+
+	printed := runPipeline(t, opts, cursorSessionEnd)
+
+	if printed != "" {
+		t.Errorf("want nothing printed, got %q", printed)
+	}
+	rec := readRecord(t, stateDir)
+	if rec.Router == record.RouterError {
+		t.Fatalf("want a routed run, got a router error: %q", rec.Reason)
+	}
+	if rec.Engine != "cursor" {
+		t.Errorf("Engine = %q, want cursor", rec.Engine)
+	}
+	if rec.NativeEvent != "sessionEnd" {
+		t.Errorf("NativeEvent = %q, want sessionEnd", rec.NativeEvent)
+	}
+	if rec.CanonicalEvent != "" {
+		t.Errorf("CanonicalEvent = %q, want empty", rec.CanonicalEvent)
+	}
+	if strings.Contains(rec.Reason, "--registered-for") {
+		t.Errorf("reason %q should not carry a fallback note; cursor_version detected it", rec.Reason)
+	}
 }
 
 // The note is joined inside appendRecord, so a failure after the fallback

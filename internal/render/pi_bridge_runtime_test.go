@@ -1113,6 +1113,33 @@ func TestPiBridgeFiresOnSessionShutdownAndCarriesTheReason(t *testing.T) {
 	}
 }
 
+// agent_settled is pi's terminal idle signal and the other pi event with no
+// canonical counterpart. It carries no event-specific fields, so its payload
+// must be exactly the base envelope — the bridge must still spawn the router
+// (that is what records the event) and must not invent a field pi never sent.
+func TestPiBridgeFiresOnAgentSettledWithTheBasePayload(t *testing.T) {
+	run := newPiBridgeRun(t)
+	router, capturePath := run.capturingRouter(t)
+	run.install(t, EmittedTimeoutSeconds*1000, piEntry("agent_settled", "", router))
+
+	assertPiAllows(t, run.fire(t, "agent_settled", map[string]any{}, "/probe/sessions/probe.jsonl"))
+
+	payload := piCapturedPayload(t, capturePath)
+	if got := string(payload["hook_event_name"]); got != `"agent_settled"` {
+		t.Errorf("hook_event_name = %s, want \"agent_settled\"", got)
+	}
+	if got := string(payload["session_file"]); got != `"/probe/sessions/probe.jsonl"` {
+		t.Errorf("session_file = %s, want the session file", got)
+	}
+	// No extras row exists for agent_settled, so no event field rides the
+	// payload; a key added here that pi does not send is a fabricated contract.
+	for _, unexpected := range []string{"reason", "turn_index", "tool_name"} {
+		if _, ok := payload[unexpected]; ok {
+			t.Errorf("payload carries %q, which agent_settled never sends", unexpected)
+		}
+	}
+}
+
 // The bridge no longer splits a command string on spaces, so a router path
 // containing one has to spawn. The stub denies rather than abstains because
 // only a block proves the router ran at all: the old split would have handed
@@ -1633,6 +1660,44 @@ func TestPiBridgeResetsTheContinuationCapOnAgentSettled(t *testing.T) {
 	}
 	if got := string(payloads[1]["stop_hook_active"]); got != "false" {
 		t.Errorf("stop_hook_active after agent_settled = %s, want false: a new run has its own continuation", got)
+	}
+}
+
+// A manifest can name both agent_before_settle and pi:agent_settled: the
+// per-entry loop registers a second pi.on("agent_settled", ...) handler
+// alongside the bridge-owned reset one (§ "Bridge-owned for the same
+// reason"). Neither may crowd the other out — the manifest entry's router
+// must still see the event, and the reset must still run so the next run's
+// settle can continue again.
+func TestPiBridgeCombinesAManifestAgentSettledEntryWithTheContinuationReset(t *testing.T) {
+	run := newPiBridgeRun(t)
+	denyRouter, denyCapturePath := run.denyingCaptureRouter(t, "again")
+	settledRouter, settledCapturePath := run.capturingRouter(t)
+	run.install(t, EmittedTimeoutSeconds*1000,
+		piEntry("agent_before_settle", "", denyRouter),
+		piEntry("agent_settled", "", settledRouter),
+	)
+
+	drive := run.drive(t, []piBridgeStep{
+		{Event: "agent_before_settle", Payload: piSettle("completed", []any{})},
+		{Event: "agent_settled", Payload: map[string]any{"type": "agent_settled"}},
+		{Event: "agent_before_settle", Payload: piSettle("completed", []any{})},
+	})
+
+	assertPiContinues(t, drive.ret(0), piContinuation(t, "again"))
+	assertPiAllows(t, drive.ret(1))
+	assertPiContinues(t, drive.ret(2), piContinuation(t, "again"))
+
+	settledPayload := piCapturedPayload(t, settledCapturePath)
+	if got := string(settledPayload["hook_event_name"]); got != `"agent_settled"` {
+		t.Errorf("manifest agent_settled entry saw hook_event_name = %s, want \"agent_settled\"", got)
+	}
+	payloads := piCapturedPayloads(t, denyCapturePath)
+	if len(payloads) != 2 {
+		t.Fatalf("the agent_before_settle router saw %d payloads, want 2", len(payloads))
+	}
+	if got := string(payloads[1]["stop_hook_active"]); got != "false" {
+		t.Errorf("stop_hook_active after agent_settled = %s, want false: the manifest entry must not block the bridge-owned reset", got)
 	}
 }
 

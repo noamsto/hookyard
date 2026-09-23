@@ -70,3 +70,17 @@ Base `8c802d5` (`origin/main`). Ledger opened before the independent review batc
 | consumer map: doctor `piBridgeDrift` is a consumer (flags stale bridges), not absent | go-reviewer map note (round 1) | a8291f3 | n/a | doctor.go:878 read; behavior correct | fixed (map corrected) | 1 |
 
 recurrence_escalation: unused
+
+---
+
+# Review notes — hookyard #81 (route pi agent_settled and codex/cursor session-end signals)
+
+Ledger opened before the independent review batch; base `origin/main` `8c802d5`.
+
+| invariant/family | finding or thread IDs | observed head | fix commit | proof | disposition | rounds used |
+| --- | --- | --- | --- | --- | --- | --- |
+| docs must not assert the --registered-for fallback is Claude-only once it is widened | reviewer MEDIUM (round 1), hookyard.md §7/§12 | bb5a8a8 | 3463666 | doc-only; round-2 targeted re-review approved each fix | fixed | 1 |
+| the consumer-contract link must not imply codex/cursor payloads are captured | reviewer MEDIUM (round 1), README.md | bb5a8a8 | 3463666 | doc-only; round-2 targeted re-review approved each fix | fixed | 1 |
+| the fallback comment must not imply canonical codex session_start is rescued | reviewer MEDIUM (round 1), cmd/hookyard/main.go | bb5a8a8 | 3463666 | comment-only; round-2 targeted re-review verified condition byte-identical | fixed | 1 |
+
+recurrence_escalation: unused
