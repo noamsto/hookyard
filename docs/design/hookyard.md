@@ -2023,6 +2023,24 @@ handler subscribes either to a canonical name, which fires across every
 engine that has an equivalent, or to an explicit engine-scoped name, which
 fires only for that one engine's literal event.
 
+The session-end signals are the first consumers of that rule. No canonical
+`session_end` exists, so #81 routes `pi:agent_settled`, `codex:SessionEnd` and
+`cursor:sessionEnd` engine-scoped. Pi's `agent_settled` is the terminal
+"settled and waiting on the human" event (0.87.0 `docs/extensions.md`,
+`docs/rpc.md`; the shipped binary emits it from the `finally` of the agent run,
+so an aborted run settles too), captured through the installed bridge in
+`pi-agent_settled.json`. Codex 0.154.0 declares `SessionEnd` in its
+`HookEventsToml` enum and embeds a `session-end.command.input` schema whose
+fields carry no `turn_id`; because `envelope.Detect` therefore cannot place the
+payload, `runRoute`'s yard-mode `--registered-for` fallback was widened from
+the Claude catalog to also accept an engine-scoped event whose payload
+`hook_event_name` exactly equals the registered event. Cursor's `sessionEnd`
+is in shipped 2026.09.18's hook-step enum
+(`executeHookForStep(_E.sessionEnd, …)`) and carries `cursor_version`, so it
+detects normally. Codex and Cursor payload shapes are inferred from those
+shipped builds, not captured — neither engine is authenticated on the capture
+machine — and the fixtures README says so.
+
 Cursor's tool events need an explicit call, and this pass's evidence changes
 what that call is. The prior pass described Cursor as splitting tool events by
 protocol — `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile` and

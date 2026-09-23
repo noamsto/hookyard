@@ -159,7 +159,7 @@ through a destination option at all (#29).
   `Notification`, `SessionEnd` — the same eight `emit` renders; anything else
   fails validation with a message naming the catalog, whatever the handler's
   `engines` say.
-- `engines` is any of `claude-code`, `codex`, `cursor`.
+- `engines` is any of `claude-code`, `codex`, `cursor`, `pi`.
 - `lane` is `"verdict"` (the default, safe to omit) or `"fire_and_forget"`, for
   a handler with no verdict to give (design doc §4). A fire-and-forget handler
   can never guard, so `validate` refuses one declared on a decision event or
@@ -181,6 +181,22 @@ ones; see [`internal/vocab`](../internal/vocab) for the full tables. The six
 canonical events are `session_start`, `prompt_submit`, `pre_tool`, `post_tool`,
 `pre_compact` and `turn_end`. The normalized tool names are `Read`, `Write`,
 `Bash`, `Grep` and `Glob`.
+
+An event one engine has and the others do not is subscribed to as
+`engine:NativeName`. The lifecycle signals a dashboard reads are these
+engine-scoped events, because no canonical session-end exists:
+
+- `pi:agent_settled` — pi's terminal "run settled, idle on the human" signal
+  (fires after retries, compaction retries and queued follow-ups, and on an
+  aborted run). `pi:session_shutdown` is the session-teardown event beside it.
+- `codex:SessionEnd` — codex's session-end hook. Its payload carries no
+  `turn_id`, so it routes only in yard mode, where the entry's own
+  `--registered-for` supplies the engine.
+- `cursor:sessionEnd` — cursor's session-end hook.
+
+Codex and Cursor accept any `engine:NativeName` scoped to their own engine;
+Pi and Claude Code additionally validate the native half against a fixed
+catalog.
 
 ## Event record details
 

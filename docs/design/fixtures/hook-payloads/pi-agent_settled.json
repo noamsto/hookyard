@@ -1,0 +1,18 @@
+{
+  "argv": [
+    "--skill",
+    "/home/<REDACTED-USER>/.claude/skills",
+    "--skill",
+    "/nix/store/11pnadlaypf4b1rshn0b7fi84nsmphi3-xdg-claude/context-efficient-tools/skills",
+    "--prompt-template",
+    "/home/<REDACTED-USER>/.claude/commands",
+    "-p",
+    "--approve",
+    "Reply with the single word ok."
+  ],
+  "cwd": "<PROBE>/work",
+  "hook_event_name": "agent_settled",
+  "pi_version": "0.87.0",
+  "session_file": "<PROBE>/pi-agent/sessions/-<PROBE>-work--/2026-09-23T08-21-13-282Z_01a0cd5a-c5c2-7503-956b-493370a9d38c.jsonl",
+  "session_id": "01a0cd5a-c5c2-7503-956b-493370a9d38c"
+}

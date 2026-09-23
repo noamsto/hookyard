@@ -924,16 +924,26 @@ func runRoute(ctx context.Context, opts routeOptions, in io.Reader, out io.Write
 		return
 	}
 	env, err := envelope.Decode(bytes.NewReader(raw))
-	// Claude Code omits prompt_id and effort on some events (SessionStart), so
-	// Detect cannot place them (§12). Trusting --registered-for is safe only in
-	// yard mode: the Claude overlay is the only yard-mode surface registered for
-	// claude-code and only Claude Code reads it, whereas a build-mode plugin can
-	// be loaded by another engine. The exact catalog name keeps a look-alike
-	// payload from riding the fallback.
-	if errors.Is(err, envelope.ErrUnknownEngine) && opts.pluginRoot == "" && registered == vocab.ClaudeCode {
-		if fallback, fallbackErr := envelope.DecodeAs(raw, vocab.ClaudeCode); fallbackErr == nil && vocab.IsClaudeCodeEvent(fallback.NativeEvent) {
-			env, err = fallback, nil
-			registeredForNote = "engine taken from --registered-for claude-code: payload carried no engine discriminator"
+	// A payload that carries no engine discriminator is trusted to
+	// --registered-for only in yard mode, where each engine reads only its own
+	// config; a build-mode plugin can be loaded by another engine. Two shapes
+	// qualify. Claude Code omits prompt_id and effort on some events
+	// (SessionStart, SessionEnd), so its fixed catalog names them. Codex's
+	// shipped schema omits turn_id from SessionStart and SessionEnd (0.154.0
+	// session-end.command.input), so an engine-scoped event is trusted only
+	// when argv's --event names exactly that event for that engine --
+	// "codex:SessionEnd" plus a payload whose hook_event_name is "SessionEnd"
+	// is the config's own event coming back. A look-alike payload from another
+	// engine, or a non-scoped event, still falls through to the router error.
+	if errors.Is(err, envelope.ErrUnknownEngine) && opts.pluginRoot == "" {
+		if fallback, fallbackErr := envelope.DecodeAs(raw, registered); fallbackErr == nil {
+			claudeCatalog := registered == vocab.ClaudeCode && vocab.IsClaudeCodeEvent(fallback.NativeEvent)
+			scoped, native, isScoped := vocab.SplitEngineScoped(opts.event)
+			exactScoped := isScoped && scoped == registered && native == fallback.NativeEvent
+			if claudeCatalog || exactScoped {
+				env, err = fallback, nil
+				registeredForNote = fmt.Sprintf("engine taken from --registered-for %s: payload carried no engine discriminator", registered)
+			}
 		}
 	}
 	if err != nil {

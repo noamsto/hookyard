@@ -184,3 +184,36 @@ func TestBuildPlanRoutesEngineScopedEventsToTheirOwnEngine(t *testing.T) {
 		t.Errorf("codex should get nothing from a cursor-scoped event, got %+v", plan[vocab.Codex])
 	}
 }
+
+// The session-end events are engine-scoped (no canonical session_end), so each
+// must render under its own engine's native key and nowhere else.
+func TestBuildPlanRoutesSessionEndToItsOwnEngine(t *testing.T) {
+	cases := []struct {
+		event  string
+		engine vocab.Engine
+		native string
+		other  vocab.Engine
+	}{
+		{"cursor:sessionEnd", vocab.Cursor, "sessionEnd", vocab.Codex},
+		{"codex:SessionEnd", vocab.Codex, "SessionEnd", vocab.Cursor},
+	}
+	for _, c := range cases {
+		t.Run(c.event, func(t *testing.T) {
+			handlers := []manifest.Handler{{
+				ID:      "a",
+				Events:  []string{c.event},
+				Engines: []string{string(c.engine), string(c.other)},
+			}}
+			plan, err := BuildPlan(handlers, routerPath, stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plan[c.engine]) != 1 || plan[c.engine][0].Event != c.native {
+				t.Errorf("%s should get one %q entry, got %+v", c.engine, c.native, plan[c.engine])
+			}
+			if len(plan[c.other]) != 0 {
+				t.Errorf("%s should get nothing from a %s-scoped event, got %+v", c.other, c.engine, plan[c.other])
+			}
+		})
+	}
+}

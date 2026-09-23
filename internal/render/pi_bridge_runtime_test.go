@@ -1050,6 +1050,33 @@ func TestPiBridgeFiresOnSessionShutdownAndCarriesTheReason(t *testing.T) {
 	}
 }
 
+// agent_settled is pi's terminal idle signal and the other pi event with no
+// canonical counterpart. It carries no event-specific fields, so its payload
+// must be exactly the base envelope — the bridge must still spawn the router
+// (that is what records the event) and must not invent a field pi never sent.
+func TestPiBridgeFiresOnAgentSettledWithTheBasePayload(t *testing.T) {
+	run := newPiBridgeRun(t)
+	router, capturePath := run.capturingRouter(t)
+	run.install(t, EmittedTimeoutSeconds*1000, piEntry("agent_settled", "", router))
+
+	assertPiAllows(t, run.fire(t, "agent_settled", map[string]any{}, "/probe/sessions/probe.jsonl"))
+
+	payload := piCapturedPayload(t, capturePath)
+	if got := string(payload["hook_event_name"]); got != `"agent_settled"` {
+		t.Errorf("hook_event_name = %s, want \"agent_settled\"", got)
+	}
+	if got := string(payload["session_file"]); got != `"/probe/sessions/probe.jsonl"` {
+		t.Errorf("session_file = %s, want the session file", got)
+	}
+	// No extras row exists for agent_settled, so no event field rides the
+	// payload; a key added here that pi does not send is a fabricated contract.
+	for _, unexpected := range []string{"reason", "turn_index", "tool_name"} {
+		if _, ok := payload[unexpected]; ok {
+			t.Errorf("payload carries %q, which agent_settled never sends", unexpected)
+		}
+	}
+}
+
 // The bridge no longer splits a command string on spaces, so a router path
 // containing one has to spawn. The stub denies rather than abstains because
 // only a block proves the router ran at all: the old split would have handed
