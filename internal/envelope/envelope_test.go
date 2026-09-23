@@ -109,6 +109,11 @@ func TestDecodeEveryFixture(t *testing.T) {
 			toolName: "", toolInputJSON: "",
 			cwd: "<PROBE>/work",
 		},
+		"pi-agent_settled.json": {
+			engine: vocab.Pi, canonicalEvent: "", nativeEvent: "agent_settled",
+			toolName: "", toolInputJSON: "",
+			cwd: "<PROBE>/work",
+		},
 	}
 
 	for name, w := range tests {
@@ -549,6 +554,62 @@ func TestDecodeAsBuildsTheNamedEngineWithoutDetect(t *testing.T) {
 	}
 	if env.NativeEvent != "SessionStart" {
 		t.Errorf("NativeEvent = %q, want SessionStart", env.NativeEvent)
+	}
+}
+
+// Codex 0.154.0's session-end.command.input schema carries no turn_id, so
+// Detect cannot place the payload; DecodeAs is how the router's yard-mode
+// --registered-for fallback reads it. Inferred from the shipped binary's
+// embedded schema, not captured: codex is not authenticated on this machine.
+const codexSessionEndPayload = `{"cwd":"/work","hook_event_name":"SessionEnd","reason":"other",` +
+	`"session_id":"sess-1","transcript_path":null}`
+
+func TestDetectCannotPlaceCodexSessionEnd(t *testing.T) {
+	_, err := Decode(bytes.NewReader([]byte(codexSessionEndPayload)))
+	if !errors.Is(err, ErrUnknownEngine) {
+		t.Fatalf("Decode: got %v, want ErrUnknownEngine (SessionEnd carries no turn_id)", err)
+	}
+}
+
+func TestDecodeAsPlacesCodexSessionEnd(t *testing.T) {
+	env, err := DecodeAs([]byte(codexSessionEndPayload), vocab.Codex)
+	if err != nil {
+		t.Fatalf("DecodeAs: %v", err)
+	}
+	if env.Engine != vocab.Codex {
+		t.Errorf("Engine = %q, want codex", env.Engine)
+	}
+	if env.NativeEvent != "SessionEnd" {
+		t.Errorf("NativeEvent = %q, want SessionEnd", env.NativeEvent)
+	}
+	if env.CanonicalEvent != "" {
+		t.Errorf("CanonicalEvent = %q, want empty (no canonical session-end)", env.CanonicalEvent)
+	}
+}
+
+// Cursor's sessionEnd carries cursor_version, so Detect places it with no
+// fallback. Inferred from the shipped 2026.09.18 bundle, not captured.
+const cursorSessionEndPayload = `{"cursor_version":"2026.09.18-9a7762b","hook_event_name":"sessionEnd",` +
+	`"session_id":"sess-1","conversation_id":"c1","generation_id":"g1","cwd":"",` +
+	`"workspace_roots":["/work"],"reason":"completed","duration_ms":1234,` +
+	`"is_background_agent":false,"final_status":"completed","model":"gpt-5"}`
+
+func TestDetectPlacesCursorSessionEnd(t *testing.T) {
+	env, err := Decode(bytes.NewReader([]byte(cursorSessionEndPayload)))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if env.Engine != vocab.Cursor {
+		t.Errorf("Engine = %q, want cursor", env.Engine)
+	}
+	if env.NativeEvent != "sessionEnd" {
+		t.Errorf("NativeEvent = %q, want sessionEnd", env.NativeEvent)
+	}
+	if env.CanonicalEvent != "" {
+		t.Errorf("CanonicalEvent = %q, want empty", env.CanonicalEvent)
+	}
+	if env.Cwd != "/work" {
+		t.Errorf("Cwd = %q, want /work (workspace_roots[0] fallback)", env.Cwd)
 	}
 }
 
