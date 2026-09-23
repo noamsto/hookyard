@@ -29,14 +29,38 @@ var cursorScopedDecisionEvents = map[string]bool{
 // Pi's input event (prompt_submit) can suppress a turn, but it carries no
 // reason channel back to the model — unlike pre_tool's block reason — so it
 // is deliberately not a decision slot rather than an oversight left for later.
+//
+// Pi's turn_end (canonical TurnEnd, native agent_before_settle) is also a
+// decision slot, but a pi-only one (D3, docs/design/hookyard.md §11.2): a
+// consolidated deny there means "do not settle yet — continue with this
+// reason", the same protocol as pre_tool's block, not a new verdict value.
+// Claude Code and Codex's Stop have the same shape available (native
+// stop_hook_active bounds the loop identically); issue #77. `enforced: true` on a settle deny means hookyard rendered a
+// block the bridge acted on, not that pi's run actually continued: pi may
+// still decline it (canContinue false, or an abort during before_settle),
+// the same class of gap pre_tool's `enforced` already accepts. The bridge
+// bounds a settle deny to one continuation per bridge per run (pi_bridge.ts);
+// a router failure or a second settle in the same run fails open.
 func HasDecisionSlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bool {
 	switch engine {
-	case vocab.ClaudeCode, vocab.Codex, vocab.Pi:
+	case vocab.ClaudeCode, vocab.Codex:
 		return canonicalEvent == vocab.PreTool
+	case vocab.Pi:
+		return canonicalEvent == vocab.PreTool || canonicalEvent == vocab.TurnEnd
 	case vocab.Cursor:
 		return canonicalEvent == vocab.PreTool || cursorScopedDecisionEvents[nativeEvent]
 	}
 	return false
+}
+
+// HasGuardSlot reports whether engine's decision slot on this event guards a
+// call hookyard's router can veto, as opposed to pi's turn_end slot (D3),
+// which only requests one more continuation and guards no call at all. Only a
+// guard slot makes a fire-and-forget handler misleading: turn-end observers
+// are the common case, and a fire-and-forget one records "dispatched", so
+// nothing claims enforcement it never had.
+func HasGuardSlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bool {
+	return HasDecisionSlot(engine, canonicalEvent, nativeEvent) && canonicalEvent != vocab.TurnEnd
 }
 
 // HasAdvisorySlot reports whether engine has anywhere to put an advisory
@@ -55,7 +79,10 @@ func HasDecisionSlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bo
 // same place Claude Code's pre_tool additionalContext lands (§11.1). The bridge
 // also delivers a standalone advisory on session_start (as an injected message
 // before the agent starts) and on post_tool (appended to the tool result),
-// neither of which can carry a decision.
+// neither of which can carry a decision. turn_end is the mirror case: it has
+// a decision slot (above) but no advisory slot here — Claude Code's Stop has
+// no additionalContext either, and a standalone (non-deny) verdict on pi
+// turn_end is never delivered.
 func HasAdvisorySlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bool {
 	switch engine {
 	case vocab.ClaudeCode:

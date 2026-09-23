@@ -388,9 +388,11 @@ func validateCoverage(where string, h Handler, engines []vocab.Engine) error {
 }
 
 // validateLane refuses a fire-and-forget handler registered on an event where
-// the engine would hand it a decision slot. The router never waits for a
-// fire-and-forget handler (§4), so a verdict computed
-// there has nowhere to go — the handler's author would reasonably believe it
+// the engine would hand it a guard slot: a decision slot that actually gates
+// a call, as opposed to pi's turn_end slot (D3), which only asks the bridge
+// for one more continuation and guards nothing. The router never waits for a
+// fire-and-forget handler (§4), so a verdict computed there has nowhere to
+// go on a guard event — the handler's author would reasonably believe it
 // guards a call it in fact never can.
 func validateLane(where string, h Handler, engines []vocab.Engine) error {
 	if !h.FireAndForget() {
@@ -402,8 +404,8 @@ func validateLane(where string, h Handler, engines []vocab.Engine) error {
 			if canonical == "" && native == "" {
 				continue
 			}
-			if verdict.HasDecisionSlot(engine, canonical, native) {
-				return fmt.Errorf("%s: event %q on %s has a decision slot, but a fire-and-forget "+
+			if verdict.HasGuardSlot(engine, canonical, native) {
+				return fmt.Errorf("%s: event %q on %s has a guard slot, but a fire-and-forget "+
 					"handler never returns a verdict so it cannot guard this event", where, event, engine)
 			}
 		}
@@ -412,8 +414,8 @@ func validateLane(where string, h Handler, engines []vocab.Engine) error {
 }
 
 // resolveEvent fills both halves of a manifest event name for engine.
-// HasDecisionSlot asks about a canonical name and a native one, and a
-// manifest carries only ever one of them.
+// HasGuardSlot (via HasDecisionSlot) asks about a canonical name and a native
+// one, and a manifest carries only ever one of them.
 func resolveEvent(engine vocab.Engine, event string) (canonical, native string) {
 	if scoped, n, ok := vocab.SplitEngineScoped(event); ok {
 		if scoped != engine {

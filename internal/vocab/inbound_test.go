@@ -76,6 +76,18 @@ func TestInboundEventUnrecognizedNativeReturnsFalse(t *testing.T) {
 	}
 }
 
+// D1: pi's settle boundary resolves to canonical TurnEnd; pi's per-turn
+// turn_end has no canonical counterpart any more, so it must decode with
+// canonical_event: "" instead of resolving to TurnEnd.
+func TestInboundEventPiTurnEndRemap(t *testing.T) {
+	if got, ok := InboundEvent(Pi, "agent_before_settle"); !ok || got != TurnEnd {
+		t.Errorf("InboundEvent(Pi, agent_before_settle) = (%q, %v), want (%q, true)", got, ok, TurnEnd)
+	}
+	if got, ok := InboundEvent(Pi, "turn_end"); ok || got != "" {
+		t.Errorf("InboundEvent(Pi, turn_end) = (%q, %v), want (\"\", false)", got, ok)
+	}
+}
+
 func TestProtocol(t *testing.T) {
 	tests := []struct {
 		native string

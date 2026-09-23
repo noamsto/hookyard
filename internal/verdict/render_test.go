@@ -410,12 +410,113 @@ func TestRenderPiPreToolNeverMixesBlockAndAdvisory(t *testing.T) {
 	}
 }
 
+// TestRenderPiTurnEnd walks pi's settle-boundary decision slot (D3): deny
+// renders the same block shape as pre_tool — falling back to
+// piTurnEndEmptyDenyReason when a handler gives neither reason nor advice,
+// rather than printing a bare block the bridge's own decision() would then
+// caption "Blocked by hookyard" — ask/allow print nothing and stay unenforced
+// (no degrade-to-deny, unlike pre_tool — there is no safe direction to force
+// a continuation toward), abstain is enforced with no output, and a
+// standalone advisory is never rendered even when the handler gave one.
+// StopHookActive short-circuits every verdict to "print nothing", with
+// Enforced tracking abstain alone.
+func TestRenderPiTurnEnd(t *testing.T) {
+	native, ok := vocab.NativeEvent(vocab.Pi, vocab.TurnEnd)
+	if !ok {
+		t.Fatal("pi has no native turn_end event")
+	}
+	cases := []struct {
+		name      string
+		verdict   Verdict
+		reason    string
+		advice    string
+		stopHook  bool
+		stdout    string
+		enforced  bool
+		delivered bool
+	}{
+		{name: "deny", verdict: Deny, reason: "r", stdout: `{"block":true,"reason":"r"}`, enforced: true},
+		{
+			name: "deny with advice joins reason and advice", verdict: Deny, reason: "r", advice: "adv",
+			stdout: `{"block":true,"reason":"r\n\nadv"}`, enforced: true, delivered: true,
+		},
+		{
+			name:    "deny with no reason and no advice falls back to the fixed continuation reason",
+			verdict: Deny, reason: "", advice: "",
+			stdout: `{"block":true,"reason":"` + piTurnEndEmptyDenyReason + `"}`, enforced: true,
+		},
+		{name: "ask prints nothing, unenforced", verdict: Ask, reason: "r"},
+		{name: "allow prints nothing, unenforced", verdict: Allow, reason: "r"},
+		{name: "abstain prints nothing, enforced", verdict: Abstain, reason: "r", enforced: true},
+		{
+			name:    "abstain with advice still delivers nothing: turn_end has no advisory slot",
+			verdict: Abstain, reason: "r", advice: "adv", enforced: true,
+		},
+		{name: "deny + stop_hook_active prints nothing, unenforced", verdict: Deny, reason: "r", stopHook: true},
+		{name: "abstain + stop_hook_active stays enforced", verdict: Abstain, reason: "r", stopHook: true, enforced: true},
+	}
+	for _, c := range cases {
+		in := Input{
+			Engine: vocab.Pi, CanonicalEvent: vocab.TurnEnd, NativeEvent: native,
+			Verdict: c.verdict, Reason: c.reason, Advice: c.advice, StopHookActive: c.stopHook,
+		}
+		checkRendered(t, "pi turn_end "+c.name, Render(in), c.stdout, c.enforced, c.delivered)
+	}
+}
+
 func TestRenderDoesNotRenderPermissionRequest(t *testing.T) {
 	// A confirmed decision channel hookyard deliberately leaves unrendered
 	// (§4): a computed deny arrives here unenforced, and says so.
 	for _, v := range lattice {
 		in := Input{Engine: vocab.ClaudeCode, NativeEvent: "PermissionRequest", Verdict: v, Reason: "r", Advice: "a"}
 		checkRendered(t, "claude-code:PermissionRequest "+string(v), Render(in), "", v == Abstain, false)
+	}
+}
+
+// TestHasDecisionSlotPiTurnEnd pins D3: pi alone gets a decision slot on
+// turn_end, and pi's pre_tool slot is unaffected by the split of Pi out of
+// the shared Claude/Codex case in HasDecisionSlot.
+func TestHasDecisionSlotPiTurnEnd(t *testing.T) {
+	if !HasDecisionSlot(vocab.Pi, vocab.TurnEnd, "agent_before_settle") {
+		t.Error("HasDecisionSlot(Pi, TurnEnd, agent_before_settle) = false, want true")
+	}
+	if !HasDecisionSlot(vocab.Pi, vocab.PreTool, "tool_call") {
+		t.Error("HasDecisionSlot(Pi, PreTool, tool_call) = false, want true")
+	}
+	for _, engine := range []vocab.Engine{vocab.ClaudeCode, vocab.Codex, vocab.Cursor} {
+		native, ok := vocab.NativeEvent(engine, vocab.TurnEnd)
+		if !ok {
+			t.Fatalf("%s has no native turn_end event", engine)
+		}
+		if HasDecisionSlot(engine, vocab.TurnEnd, native) {
+			t.Errorf("HasDecisionSlot(%s, TurnEnd, %s) = true, want false", engine, native)
+		}
+	}
+}
+
+// TestHasAdvisorySlotPiTurnEnd pins that pi's turn_end decision slot has no
+// matching advisory slot: a standalone advisory is never delivered there.
+func TestHasAdvisorySlotPiTurnEnd(t *testing.T) {
+	if HasAdvisorySlot(vocab.Pi, vocab.TurnEnd, "agent_before_settle") {
+		t.Error("HasAdvisorySlot(Pi, TurnEnd, agent_before_settle) = true, want false")
+	}
+}
+
+// TestHasGuardSlot pins the predicate validateLane uses (D3): it agrees with
+// HasDecisionSlot everywhere except pi turn_end, which requests a
+// continuation and guards no call.
+func TestHasGuardSlot(t *testing.T) {
+	if !HasGuardSlot(vocab.Pi, vocab.PreTool, "tool_call") {
+		t.Error("HasGuardSlot(Pi, PreTool, tool_call) = false, want true")
+	}
+	if HasGuardSlot(vocab.Pi, vocab.TurnEnd, "agent_before_settle") {
+		t.Error("HasGuardSlot(Pi, TurnEnd, agent_before_settle) = true, want false")
+	}
+	if !HasGuardSlot(vocab.Cursor, "", "beforeShellExecution") {
+		t.Error("HasGuardSlot(Cursor, beforeShellExecution) = false, want true")
+	}
+	if !HasGuardSlot(vocab.ClaudeCode, vocab.PreTool, "PreToolUse") {
+		t.Error("HasGuardSlot(ClaudeCode, PreTool, PreToolUse) = false, want true")
 	}
 }
 
@@ -427,6 +528,12 @@ func TestCapabilityTable(t *testing.T) {
 				t.Fatalf("%s has no native %s event", engine, event)
 			}
 			want := event == vocab.PreTool
+			// Pi alone also has a decision slot on turn_end (D3): a
+			// consolidated deny there asks the bridge to continue instead of
+			// settling.
+			if engine == vocab.Pi && event == vocab.TurnEnd {
+				want = true
+			}
 			if got := HasDecisionSlot(engine, event, native); got != want {
 				t.Errorf("HasDecisionSlot(%s, %s) = %v, want %v", engine, event, got, want)
 			}

@@ -683,19 +683,21 @@ func livePiWriteManifest(t *testing.T, dir, handlerPath string) string {
 
 // livePiWriteMultiEventManifest is livePiWriteManifest's sibling for the
 // fixture-shape test: one handler registered for every event that test
-// captures — session_start, pre_tool, post_tool and pi:session_shutdown —
-// rather than pre_tool alone, since a manifest that never asks pi to fire the
-// other three would leave their fixtures unverifiable no matter what the
-// capture router does. No Match: an unset matcher renders empty for every
-// event (render.buildPlan's everyTool case), and a non-empty one would
-// silently drop session_start/session_shutdown, whose events carry no
-// toolName for the bridge's matcher check to compare against.
+// captures — session_start, pre_tool, post_tool, pi:session_shutdown, the
+// canonical turn_end (which pi routes as agent_before_settle, D1) and
+// pi:turn_end (pi's own per-LLM-turn native) — rather than pre_tool alone,
+// since a manifest that never asks pi to fire the rest would leave their
+// fixtures unverifiable no matter what the capture router does. No Match: an
+// unset matcher renders empty for every event (render.buildPlan's everyTool
+// case), and a non-empty one would silently drop session_start/
+// session_shutdown/agent_before_settle, whose events carry no toolName for
+// the bridge's matcher check to compare against.
 func livePiWriteMultiEventManifest(t *testing.T, dir, handlerPath string) string {
 	t.Helper()
 	m := manifest.Manifest{Handlers: []manifest.Handler{{
 		ID:      "e2e-pi-fixture-shape",
 		Exec:    handlerPath,
-		Events:  []string{"session_start", "pre_tool", "post_tool", "pi:session_shutdown"},
+		Events:  []string{"session_start", "pre_tool", "post_tool", "pi:session_shutdown", "turn_end", "pi:turn_end"},
 		Engines: []string{"pi"},
 	}}}
 	raw, err := json.Marshal(m)
@@ -916,16 +918,21 @@ func liveWritePiCaptureRouter(t *testing.T, root, captureDir string) string {
 }
 
 // liveReadPiCaptures reads every payload liveWritePiCaptureRouter's router
-// wrote into dir and keys each by its own hook_event_name — the bridge's
-// native pi event name — since that is the only thing identifying which
-// firing produced it; the capture filename carries nothing but a PID.
-func liveReadPiCaptures(t *testing.T, dir string) map[string]map[string]json.RawMessage {
+// wrote into dir and groups them by hook_event_name — the bridge's native pi
+// event name — since that is the only thing identifying which firing
+// produced each one; the capture filename carries nothing but a PID. It
+// collects every firing rather than fataling on a second one, because pi's
+// own turn_end is a per-LLM-turn native (D1, docs/design/hookyard.md §11.2)
+// and can fire more than once for a single probe; liveAssertPayloadMatchesFixture
+// is where a caller that expects exactly one firing (every event but
+// turn_end) enforces that.
+func liveReadPiCaptures(t *testing.T, dir string) map[string][]map[string]json.RawMessage {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read capture dir %s: %v", dir, err)
 	}
-	captures := map[string]map[string]json.RawMessage{}
+	captures := map[string][]map[string]json.RawMessage{}
 	for _, entry := range entries {
 		capturePath := filepath.Join(dir, entry.Name())
 		raw, err := os.ReadFile(capturePath)
@@ -940,10 +947,7 @@ func liveReadPiCaptures(t *testing.T, dir string) map[string]map[string]json.Raw
 		if err := json.Unmarshal(payload["hook_event_name"], &name); err != nil {
 			t.Fatalf("captured payload %s carries no hook_event_name: %v\n%s", capturePath, err, raw)
 		}
-		if _, dup := captures[name]; dup {
-			t.Fatalf("more than one captured payload names hook_event_name %q; expected one firing per event", name)
-		}
-		captures[name] = payload
+		captures[name] = append(captures[name], payload)
 	}
 	return captures
 }
@@ -954,10 +958,13 @@ func liveReadPiCaptures(t *testing.T, dir string) map[string]map[string]json.Raw
 // docs/design/fixtures/hook-payloads/pi-*.json with go build, go vet, go test
 // and the nix syntax gate all green, since none of those runs the bridge
 // against a real pi process. It covers every event that table carries an
-// entry for — session_start, tool_call, tool_result and session_shutdown —
-// not tool_call alone, so a bridge that registers one of the other three and
-// never actually fires it fails here instead of going quiet on someone's
-// machine.
+// entry for — session_start, tool_call, tool_result, session_shutdown,
+// turn_end (pi's per-LLM-turn native) and agent_before_settle (canonical
+// turn_end on pi, D1) — not tool_call alone, so a bridge that registers one
+// of the others and never actually fires it fails here instead of going
+// quiet on someone's machine. It also checks turn_end's outcome is one of
+// D2's three values, since the key-set comparison alone would pass on an
+// empty or malformed one.
 func TestLivePiPayloadMatchesTheCommittedFixtureShape(t *testing.T) {
 	piBin := liveRequirePi(t)
 	hookyardBin, root, agentDir, projectDir, stateDir := livePiSetup(t)
@@ -979,20 +986,37 @@ func TestLivePiPayloadMatchesTheCommittedFixtureShape(t *testing.T) {
 	}
 
 	captures := liveReadPiCaptures(t, captureDir)
-	liveAssertPayloadMatchesFixture(t, captures, "session_start", "pi-session_start.json")
-	liveAssertPayloadMatchesFixture(t, captures, "tool_call", "pi-tool_call.json")
-	liveAssertPayloadMatchesFixture(t, captures, "tool_result", "pi-tool_result.json")
-	liveAssertPayloadMatchesFixture(t, captures, "session_shutdown", "pi-session_shutdown.json")
+	liveAssertPayloadMatchesFixture(t, captures, "session_start", "pi-session_start.json", true)
+	liveAssertPayloadMatchesFixture(t, captures, "tool_call", "pi-tool_call.json", true)
+	liveAssertPayloadMatchesFixture(t, captures, "tool_result", "pi-tool_result.json", true)
+	liveAssertPayloadMatchesFixture(t, captures, "session_shutdown", "pi-session_shutdown.json", true)
+	// turn_end is not asserted to fire exactly once: it is pi's per-LLM-turn
+	// native, not the once-per-settle canonical event (D1).
+	liveAssertPayloadMatchesFixture(t, captures, "turn_end", "pi-turn_end.json", false)
+	liveAssertPayloadMatchesFixture(t, captures, "agent_before_settle", "pi-agent_before_settle.json", true)
+
+	turnEndCaptures, ok := captures["turn_end"]
+	if !ok || len(turnEndCaptures) == 0 {
+		t.Fatalf("the bridge never fired turn_end: no captured payload names it in hook_event_name")
+	}
+	livePiAssertOutcomePayload(t, turnEndCaptures[0]["outcome"], "turn_end")
 }
 
-// liveAssertPayloadMatchesFixture isolates nativeEvent's captured payload
-// from captures and compares its key set against fixtureName, the committed
-// fixture naming that event.
-func liveAssertPayloadMatchesFixture(t *testing.T, captures map[string]map[string]json.RawMessage, nativeEvent, fixtureName string) {
+// liveAssertPayloadMatchesFixture isolates nativeEvent's captured payloads
+// from captures and compares the first one's key set against fixtureName,
+// the committed fixture naming that event. mustFireOnce is false only for
+// turn_end, pi's per-LLM-turn native (D1): every other event this test covers
+// fires exactly once per settled run, and asserting that here is what proves
+// the multi-event manifest actually drove every one of them rather than
+// leaving a stale capture from an earlier run behind.
+func liveAssertPayloadMatchesFixture(t *testing.T, captures map[string][]map[string]json.RawMessage, nativeEvent, fixtureName string, mustFireOnce bool) {
 	t.Helper()
 	got, ok := captures[nativeEvent]
-	if !ok {
+	if !ok || len(got) == 0 {
 		t.Fatalf("the bridge never fired %s: no captured payload names it in hook_event_name", nativeEvent)
+	}
+	if mustFireOnce && len(got) != 1 {
+		t.Fatalf("%s fired %d times; expected exactly one firing for this event", nativeEvent, len(got))
 	}
 
 	fixturePath := filepath.Join("..", "..", "docs", "design", "fixtures", "hook-payloads", fixtureName)
@@ -1005,8 +1029,35 @@ func liveAssertPayloadMatchesFixture(t *testing.T, captures map[string]map[strin
 		t.Fatalf("%s is not valid JSON: %v", fixturePath, err)
 	}
 
-	if diff := liveKeySetDiff(got, want); diff != "" {
+	if diff := liveKeySetDiff(got[0], want); diff != "" {
 		t.Fatalf("%s payload key set does not match %s: %s", nativeEvent, fixturePath, diff)
+	}
+}
+
+// livePiValidOutcome reports whether outcome is one of D2's three
+// settle/turn values (docs/design/hookyard.md §11.2: completed, error,
+// aborted) — pi 0.87's own outcome vocabulary, forwarded on both canonical
+// turn_end (native agent_before_settle) and pi:turn_end payloads and records.
+func livePiValidOutcome(outcome string) bool {
+	switch outcome {
+	case "completed", "error", "aborted":
+		return true
+	}
+	return false
+}
+
+// livePiAssertOutcomePayload decodes raw — a captured payload's "outcome"
+// key — as a JSON string and fails the test unless livePiValidOutcome
+// accepts it, so a key-set match that happens to carry an empty or malformed
+// outcome value does not read as "the bridge forwards outcome".
+func livePiAssertOutcomePayload(t *testing.T, raw json.RawMessage, context string) {
+	t.Helper()
+	var outcome string
+	if err := json.Unmarshal(raw, &outcome); err != nil {
+		t.Fatalf("%s payload's outcome is not a JSON string: %v\n%s", context, err, raw)
+	}
+	if !livePiValidOutcome(outcome) {
+		t.Fatalf("%s payload's outcome %q is not one of completed/error/aborted", context, outcome)
 	}
 }
 
@@ -1719,6 +1770,297 @@ func TestLivePiDeliversADenyAdvisoryOnlyThroughTheReason(t *testing.T) {
 			"folded into the block reason, never separately appended to a tool result\n"+
 			"--- recorded requests ---\n%s\n--- pi output ---\n%s",
 			adviceTok, capture.dump(), output)
+	}
+
+	t.Logf("recorded requests:\n%s\n--- pi output ---\n%s", capture.dump(), output)
+}
+
+// liveNewTextOnlyModelServer is liveNewAdvisoryModelServer's counterpart for
+// tests that need pi to settle without ever calling a tool: every request
+// gets a plain-text reply that ends the turn immediately, so a run drives one
+// settle attempt (one agent_before_settle firing) per provider request
+// instead of a tool_call/tool_result round trip in between. Like
+// liveNewAdvisoryModelServer, system-role messages are stripped before
+// recording, since they are identical noise on every request.
+func liveNewTextOnlyModelServer(t *testing.T) (*httptest.Server, *advisoryCapture) {
+	t.Helper()
+	capture := &advisoryCapture{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprint(w, `{"object":"list","data":[{"id":"probe","object":"model"}]}`)
+			return
+		}
+
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read scripted model request body: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		var body struct {
+			Messages []advisoryMessage `json:"messages"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Errorf("scripted model request body is not valid JSON: %v\n%s", err, raw)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		kept := make([]advisoryMessage, 0, len(body.Messages))
+		for _, m := range body.Messages {
+			if m.Role == "system" {
+				continue
+			}
+			kept = append(kept, m)
+		}
+		capture.record(kept)
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		writeAdvisorySSEChunk(w, map[string]any{"role": "assistant", "content": "done"}, "")
+		writeAdvisorySSEChunk(w, map[string]any{}, "stop")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(server.Close)
+	return server, capture
+}
+
+// advisoryMessagesContain reports whether any message in msgs — one
+// provider request's own kept messages, e.g. one entry of
+// advisoryCapture.snapshot() — carries substr. It exists beside
+// advisoryCapture's own anyMessageContains/nonToolMessageContains because
+// those scan every recorded request; the turn_end continuation test needs to
+// pin the continuation text to one specific request, not "somewhere in the
+// run".
+func advisoryMessagesContain(msgs []advisoryMessage, substr string) bool {
+	for _, m := range msgs {
+		if advisoryContentContains(m.Content, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// livePiWriteTurnEndDenyHandler is liveWriteDenyHandler's sibling for the
+// turn_end continuation test: besides always denying with reason, it appends
+// its own stdin — the router's own envelope payload, one JSON document per
+// invocation — to captureFile, so the test can read back stop_hook_active off
+// the exact bytes hookyard sent the handler rather than inferring it from
+// provider-request timing. `cat >>` reads stdin to completion, and the `echo`
+// after it lands the line break, before anything is printed to stdout — a
+// handler that printed first and read stdin after could race pi's own read of
+// its stdout against this capture.
+func livePiWriteTurnEndDenyHandler(t *testing.T, dir, firedMarker, captureFile, reason string) string {
+	t.Helper()
+	path := filepath.Join(dir, "turn-end-deny-handler.sh")
+	script := "#!/bin/sh\n" +
+		"cat >> " + captureFile + "\n" +
+		"echo >> " + captureFile + "\n" +
+		"touch " + firedMarker + "\n" +
+		"printf '%s' '{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"" + reason + "\"}}'\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatalf("write turn_end deny handler: %v", err)
+	}
+	return path
+}
+
+// livePiWriteTurnEndManifest registers the two handlers
+// TestLivePiTurnEndDenyForcesExactlyOneContinuation drives: one on canonical
+// turn_end (pi's settle boundary, native agent_before_settle, D1) that always
+// denies — the continuation slot D3 describes — and one on pi:turn_end (pi's
+// own per-LLM-turn native, no decision slot of its own) that prints nothing,
+// so the run still produces pi:turn_end's own records (D2) alongside the
+// canonical ones. Both are left on the default verdict lane: D3's lane rule
+// (HasGuardSlot) only exempts fire-and-forget handlers from the
+// decision-slot check, and this test wants pi:turn_end's record regardless.
+func livePiWriteTurnEndManifest(t *testing.T, dir, denyHandlerPath, observerHandlerPath string) string {
+	t.Helper()
+	m := manifest.Manifest{Handlers: []manifest.Handler{
+		{
+			ID:      "e2e-pi-turn-end-deny",
+			Exec:    denyHandlerPath,
+			Events:  []string{"turn_end"},
+			Engines: []string{"pi"},
+		},
+		{
+			ID:      "e2e-pi-turn-end-observer",
+			Exec:    observerHandlerPath,
+			Events:  []string{"pi:turn_end"},
+			Engines: []string{"pi"},
+		},
+	}}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	path := filepath.Join(dir, "hookyard-pi.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	return path
+}
+
+// liveReadAllRecords reads every record hookyard wrote to stateDir's stream
+// file for today, in write order. liveFindBashDenyRecord only needs the
+// first Bash entry; the turn_end continuation test needs every record of a
+// given event, to prove exactly two canonical turn_end settles fired rather
+// than merely that one did.
+func liveReadAllRecords(t *testing.T, stateDir string) []record.Record {
+	t.Helper()
+	raw, err := os.ReadFile(record.StreamPath(stateDir, time.Now()))
+	if err != nil {
+		t.Fatalf("read stream file: %v", err)
+	}
+	var recs []record.Record
+	for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec record.Record
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("decode record line %q: %v", line, err)
+		}
+		recs = append(recs, rec)
+	}
+	return recs
+}
+
+// livePiReadHandlerStdinCaptures parses path — livePiWriteTurnEndDenyHandler's
+// own capture of every payload the router piped it on stdin, one JSON
+// envelope per line (envelope.Envelope's own wire shape: the native pi
+// payload nested under "native") — into one bool per line, read off that
+// envelope's native.stop_hook_active, in the order the handler saw them. The
+// handler's stdin is the router's envelope, not the bare pi payload, which is
+// why stop_hook_active is read from under "native" rather than top-level.
+func livePiReadHandlerStdinCaptures(t *testing.T, path string) []bool {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read handler stdin capture %s: %v", path, err)
+	}
+	var out []bool
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line == "" {
+			continue
+		}
+		var envelope struct {
+			Native map[string]json.RawMessage `json:"native"`
+		}
+		if err := json.Unmarshal([]byte(line), &envelope); err != nil {
+			t.Fatalf("decode handler stdin capture line %q: %v", line, err)
+		}
+		var stopHookActive bool
+		if err := json.Unmarshal(envelope.Native["stop_hook_active"], &stopHookActive); err != nil {
+			t.Fatalf("decode native.stop_hook_active from handler stdin capture line %q: %v", line, err)
+		}
+		out = append(out, stopHookActive)
+	}
+	return out
+}
+
+// TestLivePiTurnEndDenyForcesExactlyOneContinuation proves D3's continuation
+// slot end to end, against the real installed bridge (pi_bridge.ts) and a
+// real pi process, not a mocked harness: a handler that always denies
+// canonical turn_end must force exactly one extra provider request carrying
+// the deny's reason as "[hookyard turn_end] <reason>", and the bridge's own
+// per-run cap must mean the handler sees stop_hook_active false on the first
+// settle attempt and true on the second — never a third request. It also
+// proves D2's per-turn record alongside the canonical one: an observer
+// handler on pi:turn_end that guards nothing still gets its own records,
+// each carrying an outcome.
+func TestLivePiTurnEndDenyForcesExactlyOneContinuation(t *testing.T) {
+	piBin := liveRequirePiBinary(t)
+	hookyardBin, root, agentDir, projectDir, stateDir := liveScriptedPiLayout(t)
+
+	server, capture := liveNewTextOnlyModelServer(t)
+	livePiSeedScriptedAgentDir(t, agentDir, server.URL+"/v1")
+
+	reasonTok := fmt.Sprintf("hookyard-e2e-pi-turnend-%d", time.Now().UnixNano())
+	stdinCapture := filepath.Join(root, "turn-end-handler-stdin.jsonl")
+	denyHandlerPath := livePiWriteTurnEndDenyHandler(t, root, filepath.Join(root, "turn-end-handler-fired"), stdinCapture, reasonTok)
+	observerHandlerPath := livePiWriteAdvisoryHandler(t, root, "pi-turn-end-observer.sh", filepath.Join(root, "pi-turn-end-observer-fired"), "")
+	manifestPath := livePiWriteTurnEndManifest(t, root, denyHandlerPath, observerHandlerPath)
+	livePiInstall(t, hookyardBin, root, []string{agentDir}, stateDir, manifestPath, hookyardBin)
+
+	ctx, cancel := context.WithTimeout(context.Background(), livePiAdvisoryBudget)
+	defer cancel()
+	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", "--no-session", livePiAdvisoryPrompt)
+	probe.Dir = projectDir
+	probe.Env = livePiEnv(agentDir)
+	output, err := probe.CombinedOutput()
+	if err != nil {
+		t.Fatalf("pi run: %v\n--- pi output ---\n%s\n--- recorded requests ---\n%s", err, output, capture.dump())
+	}
+
+	requests := capture.snapshot()
+	if len(requests) != 2 {
+		t.Fatalf("expected exactly 2 provider requests (one settle attempt, one forced continuation), got %d\n"+
+			"--- recorded requests ---\n%s\n--- pi output ---\n%s", len(requests), capture.dump(), output)
+	}
+	continuationText := "[hookyard turn_end] " + reasonTok
+	if advisoryMessagesContain(requests[0], continuationText) {
+		t.Fatalf("the first provider request already carries the continuation message %q; it must appear only "+
+			"starting with the second, forced request\n--- recorded requests ---\n%s\n--- pi output ---\n%s",
+			continuationText, capture.dump(), output)
+	}
+	if !advisoryMessagesContain(requests[1], continuationText) {
+		t.Fatalf("no message on the second provider request carries the continuation text %q\n"+
+			"--- recorded requests ---\n%s\n--- pi output ---\n%s", continuationText, capture.dump(), output)
+	}
+
+	stopHookActiveSeen := livePiReadHandlerStdinCaptures(t, stdinCapture)
+	if len(stopHookActiveSeen) != 2 || stopHookActiveSeen[0] || !stopHookActiveSeen[1] {
+		t.Fatalf("expected the turn_end handler to see native.stop_hook_active false then true across exactly "+
+			"2 invocations, got %v\n--- recorded requests ---\n%s\n--- pi output ---\n%s",
+			stopHookActiveSeen, capture.dump(), output)
+	}
+
+	records := liveReadAllRecords(t, stateDir)
+	// "turn_end" is vocab.TurnEnd's own string value: the canonical event
+	// name, which pi routes as native agent_before_settle (D1).
+	var turnEndRecords []record.Record
+	var perTurnRecords []record.Record
+	for _, rec := range records {
+		if rec.CanonicalEvent == "turn_end" {
+			turnEndRecords = append(turnEndRecords, rec)
+		}
+		if rec.NativeEvent == "turn_end" && rec.CanonicalEvent == "" {
+			perTurnRecords = append(perTurnRecords, rec)
+		}
+	}
+
+	if len(turnEndRecords) != 2 {
+		t.Fatalf("expected exactly 2 canonical turn_end records (one per settle attempt), got %d: %+v\n"+
+			"--- pi output ---\n%s", len(turnEndRecords), turnEndRecords, output)
+	}
+	if turnEndRecords[0].Verdict != record.OutcomeDeny || !turnEndRecords[0].Enforced {
+		t.Fatalf("the first canonical turn_end record must be an enforced deny (the continuation the bridge "+
+			"granted), got verdict=%q enforced=%v\n--- pi output ---\n%s",
+			turnEndRecords[0].Verdict, turnEndRecords[0].Enforced, output)
+	}
+	if turnEndRecords[1].Verdict != record.OutcomeDeny || turnEndRecords[1].Enforced {
+		t.Fatalf("the second canonical turn_end record must be an unenforced deny (the cap already spent, "+
+			"stop_hook_active true), got verdict=%q enforced=%v\n--- pi output ---\n%s",
+			turnEndRecords[1].Verdict, turnEndRecords[1].Enforced, output)
+	}
+	for i, rec := range turnEndRecords {
+		if rec.TurnOutcome != "completed" {
+			t.Fatalf("canonical turn_end record %d turn_outcome = %q, want %q\n--- pi output ---\n%s",
+				i, rec.TurnOutcome, "completed", output)
+		}
+	}
+
+	if len(perTurnRecords) == 0 {
+		t.Fatalf("expected at least one pi:turn_end record (native turn_end, canonical_event empty) alongside "+
+			"the canonical ones\n--- pi output ---\n%s", output)
+	}
+	for i, rec := range perTurnRecords {
+		if !livePiValidOutcome(rec.TurnOutcome) {
+			t.Fatalf("pi:turn_end record %d turn_outcome %q is not one of completed/error/aborted\n--- pi output ---\n%s",
+				i, rec.TurnOutcome, output)
+		}
 	}
 
 	t.Logf("recorded requests:\n%s\n--- pi output ---\n%s", capture.dump(), output)

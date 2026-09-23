@@ -196,6 +196,59 @@ func TestLoadAcceptsFireAndForgetWithExplicitZeroTimeout(t *testing.T) {
 	}
 }
 
+// D3: pi's turn_end decision slot (canonical, engine-scoped, or the settle
+// native directly) requests a continuation rather than guarding a call, so
+// HasGuardSlot excludes it and a fire-and-forget handler stays legal there —
+// unlike pi's pre_tool, which still guards a call and still rejects (below).
+func TestLoadAcceptsFireAndForgetOnPiTurnEnd(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "canonical turn_end claiming pi",
+			body: `{"handlers":[{"id":"a","exec":"EXEC","events":["turn_end"],
+			  "engines":["pi"],"lane":"fire_and_forget"}]}`,
+		}, {
+			name: "pi:turn_end (the per-turn native)",
+			body: `{"handlers":[{"id":"a","exec":"EXEC","events":["pi:turn_end"],
+			  "engines":["pi"],"lane":"fire_and_forget"}]}`,
+		}, {
+			name: "pi:agent_before_settle (the settle native)",
+			body: `{"handlers":[{"id":"a","exec":"EXEC","events":["pi:agent_before_settle"],
+			  "engines":["pi"],"lane":"fire_and_forget"}]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Load(writeManifest(t, tc.body)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// Regression: pi's pre_tool slot still guards a call and is unaffected by
+// HasGuardSlot excluding turn_end.
+func TestLoadRejectsFireAndForgetOnPiPreTool(t *testing.T) {
+	body := `{"handlers":[{"id":"a","exec":"EXEC","events":["pre_tool"],
+	  "engines":["pi"],"lane":"fire_and_forget"}]}`
+	_, err := Load(writeManifest(t, body))
+	if err == nil || !strings.Contains(err.Error(), "cannot guard this event") {
+		t.Fatalf("got %v, want an error saying it cannot guard this event", err)
+	}
+}
+
+// A verdict-lane handler on pi:turn_end has always been legal (the lane rule
+// only ever restricts fire-and-forget); this pins that D1's remap didn't
+// change that.
+func TestLoadAcceptsVerdictLaneOnPiTurnEnd(t *testing.T) {
+	path := writeManifest(t, `{"handlers":[
+	  {"id":"a","exec":"EXEC","events":["pi:turn_end"],"engines":["pi"]}]}`)
+	if _, err := Load(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // An event scoped to an engine the handler does not declare is skipped by the
 // lane check, exactly as validateCoverage already skips it: the handler here
 // declares only cursor, so claude-code:PreToolUse is not this handler's

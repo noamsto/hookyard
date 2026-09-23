@@ -1,9 +1,9 @@
 # Captured hook payloads
 
 Real hook payloads, captured from live agent sessions on 2026-09-10,
-2026-09-15, 2026-09-17 and 2026-09-23. These are the ground truth behind §7's inbound
-field table; before them, that table was derived from each engine's
-documentation.
+2026-09-15, 2026-09-17, 2026-09-22 and 2026-09-23. These are the ground truth
+behind §7's inbound field table; before them, that table was derived from
+each engine's documentation.
 
 | File | Engine | Event | Notes |
 |---|---|---|---|
@@ -17,13 +17,14 @@ documentation.
 | `cursor-beforeShellExecution.json` | Cursor 2026.09.08 | `beforeShellExecution` | no `tool_name`; top-level `command` + `sandbox` |
 | `cursor-postToolUse.json` | Cursor 2026.09.08 | `postToolUse` | `tool_output` is a JSON *string*, not an object |
 | `cursor-preToolUse-DENY.json` | Cursor 2026.09.08 | `preToolUse` | denying here short-circuits `beforeShellExecution` |
-| `pi-session_start.json` | Pi 0.85.1 | `session_start` | `reason` is `"startup"`, the only value reachable headlessly |
-| `pi-input.json` | Pi 0.85.1 | `input` | Pi's `prompt_submit` equivalent; `source: "interactive"` |
-| `pi-tool_call.json` | Pi 0.85.1 | `tool_call` | `tool_name` is `bash`, lowercase |
+| `pi-session_start.json` | Pi 0.85.1 | `session_start` | `reason` is `"startup"`, the only value reachable headlessly; key set re-verified on 0.87.0 |
+| `pi-input.json` | Pi 0.85.1 | `input` | Pi's `prompt_submit` equivalent; `source: "interactive"`; key set re-verified on 0.87.0 |
+| `pi-tool_call.json` | Pi 0.85.1 | `tool_call` | `tool_name` is `bash`, lowercase; key set re-verified on 0.87.0 |
 | `pi-tool_call-DENY.json` | Pi 0.85.1 | `tool_call` | denied a `touch`; the file did not exist afterward |
-| `pi-tool_result.json` | Pi 0.85.1 | `tool_result` | does not fire at all on a denied call |
-| `pi-turn_end.json` | Pi 0.85.1 | `turn_end` | carries `turn_index`, an integer, not a correlation id |
-| `pi-session_shutdown.json` | Pi 0.85.1 | `session_shutdown` | `reason` is `"quit"`; no canonical counterpart, so a manifest names it `pi:session_shutdown` |
+| `pi-tool_result.json` | Pi 0.85.1 | `tool_result` | does not fire at all on a denied call; key set re-verified on 0.87.0 |
+| `pi-turn_end.json` | Pi 0.87.0 | `turn_end` | carries `turn_index` and `outcome` (`completed`/`error`/`aborted`, new in 0.87.0); `turn_index` is an integer, not a correlation id. Canonical `turn_end` no longer maps here (design doc §11.2, issue #76) — this pins the engine-scoped `pi:turn_end` payload, pi's per-LLM-turn native |
+| `pi-agent_before_settle.json` | Pi 0.87.0 | `agent_before_settle` | new in 0.87.0; now carries canonical `turn_end`'s routing (§11.2) — the once-per-settle boundary that matches `Stop`/`stop` on the other three engines. `outcome` as above; `stop_hook_active` is hookyard's own bridge-side continuation cap, not a field pi sends (mirrors Claude Code's `Stop` payload field of the same name) |
+| `pi-session_shutdown.json` | Pi 0.85.1 | `session_shutdown` | `reason` is `"quit"`; no canonical counterpart, so a manifest names it `pi:session_shutdown`; key set re-verified on 0.87.0 |
 | `pi-agent_settled.json` | Pi 0.87.0 | `agent_settled` | no canonical counterpart, so a manifest names it `pi:agent_settled`; the terminal "run settled, waiting on input" signal (see below) |
 | `claude-SessionStart.json` | Claude Code 2.1.272 | `SessionStart` | no `prompt_id`/`effort`; the router's yard-mode fallback exists because of this (R-G) |
 | `claude-UserPromptSubmit.json` | Claude Code 2.1.272 | `UserPromptSubmit` | carries the literal probe `prompt` |
@@ -128,7 +129,9 @@ document's earlier claim that this was uniform across all engines.
 
 Pi's captures use a different scratch setup, because its hook surface is an
 in-process extension rather than a subprocess protocol (above). All seven
-`pi-*.json` files were re-captured on 2026-09-17 against pi 0.85.1, and
+`pi-*.json` files that existed at the time were re-captured on 2026-09-17
+against pi 0.85.1 (`pi-turn_end.json` was later superseded and
+`pi-agent_before_settle.json` did not exist yet — both below), and
 through hookyard's own installed bridge rather than through a probe
 extension: what is committed has to be the bridge's output, and a probe
 extension would only be a second author of the same shape. `pi`'s config dir
@@ -149,16 +152,54 @@ SIDE-EFFECT.txt` and nothing else, whose router answered
 `{"block":true,…}`: the file did not exist afterward, and no `tool_result`
 fired.
 
+`pi-turn_end.json` and `pi-agent_before_settle.json` were (re-)captured on
+2026-09-22 against pi 0.87.0, the version that added `agent_before_settle`
+and `outcome` (amendment §11.2, issue #76). The setup is the same scratch
+`PI_CODING_AGENT_DIR`, `hookyard install --pi-settings` with `--router-path`
+naming a script that execs `capture-hook.sh` in directory mode, and
+`pi -p --approve "Run the shell command: echo hookyard-probe"` under
+`PI_AGENT_HOOKS=` — except the model was
+`docs/design/fixtures/pi-pre-tool-advisory/fake-llm.py`, this repo's own
+scripted OpenAI-compatible server, run with `PI_OFFLINE=1`, in place of a
+hosted model: its first request answers the one bash tool call
+(`echo hookyard-probe`) and every later request answers plain text, and the
+payload shape committed here is the bridge's own output regardless of which
+model answered it, so no real model was needed. The manifest registered on
+that run named `session_start`, `prompt_submit`, `pre_tool`, `post_tool`,
+`turn_end`, `pi:turn_end` and `pi:session_shutdown`. The other five pi
+fixtures (`pi-session_start.json`, `pi-input.json`, `pi-tool_call.json`,
+`pi-tool_result.json`, `pi-session_shutdown.json`) were captured again in
+this same run and their key sets matched the committed 2026-09-17 files
+exactly — recorded above as "key set re-verified on 0.87.0" — so their
+committed bytes were left alone rather than replaced with a byte-identical
+shape under a new date; `pi-tool_call-DENY.json` was not re-run and carries
+no 0.87.0 claim at all.
+
+Five native `turn_end`/`agent_before_settle` fields pi 0.87.0 added are
+deliberately not in either fixture: `messageEntryId`, `toolResultEntryIds`,
+`entries`, `continue` and `context`. `entries` and `context` are
+whole-session projections — pi's entire message history, replayed on every
+boundary call — that can exceed the router's 1 MiB inbound cap
+(`envelope.maxPayload`) long before a real session gets deep; a payload the
+router refuses outright never reaches a handler at all, `outcome` included,
+which is a worse failure than never forwarding the field. `messageEntryId`
+and `toolResultEntryIds` are session-file internals — offsets into the jsonl
+transcript — that no consumer of hookyard's stream has a use for. `continue`
+is the same class as the entry ids rather than data about the turn: it
+reflects whatever the handler chain has decided *so far*, mutable by
+whichever handler pi calls next, so a value forwarded to hookyard's router is
+already stale by the time it would be read back.
+
 `pi-agent_settled.json` was added 2026-09-23 against **pi 0.87.0** (the
 version this machine now ships) through the same installed-bridge setup, with
 the manifest declaring `pi:agent_settled` and the scratch router path placed
 at a non-default location so `install` left the capture wrapper in place
 rather than symlinking its own binary over it.
 
-The model was `openrouter/deepseek-v4.1-flash`. The 2026-09-10 captures used
-a local Lemonade server (`http://127.0.0.1:13305/v1`, Qwen3-Coder-30B); it is
-deliberately not used here, because it saturates the machine these captures
-run on.
+The model was `openrouter/deepseek-v4.1-flash` for the 2026-09-17 pi
+captures. The 2026-09-10 captures used a local Lemonade server
+(`http://127.0.0.1:13305/v1`, Qwen3-Coder-30B); it is deliberately not used
+here, because it saturates the machine these captures run on.
 
 ### What a live probe settled
 

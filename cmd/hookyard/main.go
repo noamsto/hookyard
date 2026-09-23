@@ -963,6 +963,7 @@ func runRoute(ctx context.Context, opts routeOptions, in io.Reader, out io.Write
 			NativeEvent:    env.NativeEvent,
 			CWD:            env.Cwd,
 			ToolName:       env.ToolName,
+			TurnOutcome:    env.PiOutcome(),
 			Verdict:        record.OutcomeSuppressed,
 			Enforced:       true,
 			Router:         record.RouterOK,
@@ -1002,6 +1003,7 @@ func runRoute(ctx context.Context, opts routeOptions, in io.Reader, out io.Write
 		Verdict:        result.Verdict,
 		Reason:         result.Reason,
 		Advice:         result.Advice,
+		StopHookActive: env.PiStopHookActive(),
 	})
 	// Printed before the record is touched, and that order is load-bearing
 	// (§6): the verdict is complete and flushed before any filesystem I/O that
@@ -1016,6 +1018,7 @@ func runRoute(ctx context.Context, opts routeOptions, in io.Reader, out io.Write
 		NativeEvent:    env.NativeEvent,
 		CWD:            env.Cwd,
 		ToolName:       env.ToolName,
+		TurnOutcome:    env.PiOutcome(),
 		Verdict:        string(result.Verdict),
 		Enforced:       rendered.Enforced,
 		Reason:         result.Reason,

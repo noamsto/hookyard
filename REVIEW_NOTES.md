@@ -58,6 +58,21 @@ recurrence_escalation: unused
 
 ---
 
+# Review notes — hookyard #76 (pi 0.87 turn-end boundary: outcome, evidence refresh, agent_before_settle continuation)
+
+Base `8c802d5` (`origin/main`). Ledger opened before the independent review batch; round 1 (go-reviewer@opus, typescript-reviewer, security-reviewer, test-runner) launched at head `a8291f3`.
+
+| invariant/family | finding or thread IDs | observed head | fix commit | proof | disposition | rounds used |
+| --- | --- | --- | --- | --- | --- | --- |
+| record top-level run outcome must not share a name with handlers[].outcome's vocabulary | go-reviewer MEDIUM-1 (round 1) | a8291f3 | 699a418 | `TestToRecordTurnOutcome`; full gate; live continuation test; round-2 targeted re-review confirmed | fixed | 2 |
+| serve event filter/label for canonical `turn_end` must not include pi's per-turn `pi:turn_end` records | go-reviewer MEDIUM-2 (round 1); round-2 HIGH on the attempted fix (canonical-only rule hid router-error records, label mislabelled them) + 2 MEDIUM | 699a418 | reverted to a8291f3 bytes | serve files byte-identical to round-1-reviewed a8291f3; full gate green; §11.2 documents the gap | deferred (#78) | 2 |
+| a turn_end continuation must never carry pre_tool's "Blocked by hookyard" default text | go-reviewer MEDIUM-3 (round 1) | a8291f3 | 699a418 | `TestRenderPiTurnEnd` empty-reason row; `TestRunRoutePiTurnEndDenyWithNoReasonFallsBackToFixedReason`; round-2 targeted re-review confirmed | fixed | 2 |
+| consumer map: doctor `piBridgeDrift` is a consumer (flags stale bridges), not absent | go-reviewer map note (round 1) | a8291f3 | n/a | doctor.go:878 read; behavior correct | fixed (map corrected) | 1 |
+
+recurrence_escalation: unused
+
+---
+
 # Review notes — hookyard #81 (route pi agent_settled and codex/cursor session-end signals)
 
 Ledger opened before the independent review batch; base `origin/main` `8c802d5`.

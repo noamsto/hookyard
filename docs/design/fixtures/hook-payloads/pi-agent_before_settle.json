@@ -11,10 +11,10 @@
     "Run the shell command: echo hookyard-probe"
   ],
   "cwd": "<PROBE>/work",
-  "hook_event_name": "turn_end",
+  "hook_event_name": "agent_before_settle",
   "outcome": "completed",
   "pi_version": "0.87.0",
   "session_file": "<PROBE>/pi-agent/sessions/-<PROBE>-work--/2026-09-22T20-30-29-907Z_01a0cad0-1613-776c-8246-47cba0a9e4e2.jsonl",
   "session_id": "01a0cad0-1613-776c-8246-47cba0a9e4e2",
-  "turn_index": 0
+  "stop_hook_active": false
 }

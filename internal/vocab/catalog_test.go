@@ -101,6 +101,16 @@ func TestIsPiEvent(t *testing.T) {
 	}
 }
 
+// D1: both pi's settle boundary (the new canonical TurnEnd native) and its
+// per-turn turn_end (now scoped-only) must remain routable natives.
+func TestIsPiEventTurnEndAndAgentBeforeSettle(t *testing.T) {
+	for _, native := range []string{"turn_end", "agent_before_settle"} {
+		if !IsPiEvent(native) {
+			t.Errorf("IsPiEvent(%q) = false, want true", native)
+		}
+	}
+}
+
 // agent_settled is the terminal idle signal a dashboard reads; if it ever fell
 // out of the catalog a manifest naming pi:agent_settled would fail validation
 // and the signal would silently stop being routable.
@@ -108,7 +118,7 @@ func TestPiCatalogIncludesAgentSettled(t *testing.T) {
 	if !IsPiEvent("agent_settled") {
 		t.Error("IsPiEvent(\"agent_settled\") = false, want true")
 	}
-	if PiCatalog[len(PiCatalog)-1] != "agent_settled" {
-		t.Errorf("PiCatalog last row = %q, want the scoped agent_settled row", PiCatalog[len(PiCatalog)-1])
+	if PiCatalog[len(PiCatalog)-1] != "turn_end" {
+		t.Errorf("PiCatalog last row = %q, want the scoped turn_end row", PiCatalog[len(PiCatalog)-1])
 	}
 }

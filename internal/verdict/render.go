@@ -17,6 +17,13 @@ type Input struct {
 	Verdict        Verdict
 	Reason         string
 	Advice         string
+	// StopHookActive is set only for pi turn_end, from the native payload's
+	// stop_hook_active (D3, docs/design/hookyard.md §11.2): true means the
+	// bridge already spent this run's one continuation, so it will not act on
+	// a block here. Render must not print a block it knows the bridge will
+	// ignore — doing so would leave the record claiming an enforcement that
+	// never happened.
+	StopHookActive bool
 }
 
 // Rendered is what the router prints and what it records. Enforced is false
@@ -33,6 +40,13 @@ type Rendered struct {
 // codexEmptyDenyReason stands in for an absent reason on Codex, which rejects
 // a deny that carries none — and a rejected deny is an allowed tool call.
 const codexEmptyDenyReason = "denied by hookyard handler"
+
+// piTurnEndEmptyDenyReason stands in for a turn_end deny with no reason and
+// no advice. Without it, renderPiDeny would print bare "{"block":true}", and
+// the bridge's own decision() falls back to "Blocked by hookyard" for the
+// continuation message — the opposite of what a handler that denies a settle
+// is trying to say (keep going, don't stop).
+const piTurnEndEmptyDenyReason = "a hookyard handler asked you to keep working before finishing"
 
 // hookSpecificOutput is the wrapper Claude Code and Codex share. Codex gets
 // the same nested shape rather than a top-level decision because capture-hook.sh
@@ -84,6 +98,9 @@ func Render(in Input) Rendered {
 		case vocab.Cursor:
 			return renderCursor(in)
 		case vocab.Pi:
+			if in.CanonicalEvent == vocab.TurnEnd {
+				return renderPiTurnEnd(in)
+			}
 			return renderPi(in)
 		}
 		return Rendered{Enforced: in.Verdict == Abstain}
@@ -224,6 +241,39 @@ func piAskDegradedReason(handlerReason string) string {
 		return degraded
 	}
 	return handlerReason + " — " + degraded
+}
+
+// renderPiTurnEnd renders pi's settle-boundary decision slot (D3). Deny means
+// "do not settle yet — continue with this reason", rendered with the same
+// block wire shape as pre_tool via renderPiDeny; unlike renderPi, Ask is not
+// degraded to deny, because there is no safe direction to degrade to here — a
+// forced continuation is not "safer" than settling. Allow and Abstain print
+// nothing; Abstain alone is enforced, since it is the only verdict here that
+// matches what pi would have done anyway. A standalone (non-deny) advisory is
+// never rendered: HasAdvisorySlot excludes TurnEnd on every engine, the same
+// as Claude Code's Stop having no additionalContext.
+//
+// StopHookActive short-circuits everything above: it means the bridge already
+// spent this run's one continuation (pi_bridge.ts's per-run cap), so a block
+// printed here would be silently ignored. Render reports that honestly —
+// nothing printed, Enforced true only for Abstain — rather than claiming an
+// enforcement the bridge cannot act on.
+func renderPiTurnEnd(in Input) Rendered {
+	if in.StopHookActive {
+		return Rendered{Enforced: in.Verdict == Abstain}
+	}
+	switch in.Verdict {
+	case Deny:
+		reason := in.Reason
+		if reason == "" && in.Advice == "" {
+			reason = piTurnEndEmptyDenyReason
+		}
+		return renderPiDeny(reason, in.Advice)
+	case Abstain:
+		return Rendered{Enforced: true}
+	default: // Ask, Allow
+		return Rendered{Enforced: false}
+	}
 }
 
 // renderPiDeny joins reason and advice into Pi's one reason field, the same

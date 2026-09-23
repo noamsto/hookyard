@@ -193,6 +193,39 @@ func synthesizeShell(e *Envelope, native map[string]json.RawMessage) {
 	e.ToolInput = append(append([]byte(`{"command":`), native["command"]...), '}')
 }
 
+// PiOutcome reads pi's native outcome (completed|error|aborted) off the
+// payload's turn_end/agent_before_settle field (D2, docs/design/hookyard.md
+// §11.2). It is pi-only because hookyard authors pi's payload shape; an
+// outcome key on another engine's payload is not ours to interpret.
+func (e *Envelope) PiOutcome() string {
+	if e.Engine != vocab.Pi {
+		return ""
+	}
+	return stringField(e.Native, "outcome")
+}
+
+// PiStopHookActive reads pi's agent_before_settle (canonical turn_end)
+// payload's stop_hook_active (D3, docs/design/hookyard.md §11.2): true iff
+// the bridge already spent this run's one continuation. pi's native per-turn
+// turn_end payload never carries this field. Pi-only for the same reason
+// PiOutcome is; a non-bool value (including absent) reads as false, since
+// "the bridge has not forced a continuation" is the safe default for a field
+// it never sent.
+func (e *Envelope) PiStopHookActive() bool {
+	if e.Engine != vocab.Pi {
+		return false
+	}
+	raw, ok := e.Native["stop_hook_active"]
+	if !ok {
+		return false
+	}
+	var b bool
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return false
+	}
+	return b
+}
+
 func stringField(native map[string]json.RawMessage, key string) string {
 	raw, ok := native[key]
 	if !ok {

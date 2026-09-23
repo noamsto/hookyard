@@ -68,7 +68,8 @@ const maxRecordBytes = 65536
 // truncated to this length before the record is even assembled.
 const maxReasonBytes = 512
 
-// maxFieldBytes bounds CWD and ToolName during the size-reduction cascade.
+// maxFieldBytes bounds CWD and ToolName during the size-reduction cascade,
+// and TurnOutcome unconditionally in toRecord.
 const maxFieldBytes = 256
 
 // Event is the minimal input the router builds per handled hook event.
@@ -81,12 +82,17 @@ type Event struct {
 	NativeEvent    string
 	CWD            string
 	ToolName       string
-	Verdict        string
-	Enforced       bool
-	Reason         string
-	Router         string
-	RouterElapsed  time.Duration
-	Handlers       []HandlerOutcome
+	// TurnOutcome is pi's native run outcome (completed|error|aborted) on
+	// turn_end and agent_before_settle (docs/design/hookyard.md §11.2), filled
+	// for pi only. It is not the Outcome* vocabulary above: there "error"
+	// means a handler failed, here it means pi's provider turn did.
+	TurnOutcome   string
+	Verdict       string
+	Enforced      bool
+	Reason        string
+	Router        string
+	RouterElapsed time.Duration
+	Handlers      []HandlerOutcome
 }
 
 // HandlerOutcome is one handler's contribution to an Event. toRecord clears
@@ -126,6 +132,7 @@ type Record struct {
 	NativeEvent    string          `json:"native_event"`
 	CWD            string          `json:"cwd"`
 	ToolName       string          `json:"tool_name"`
+	TurnOutcome    string          `json:"turn_outcome,omitempty"`
 	Verdict        string          `json:"verdict"`
 	Enforced       bool            `json:"enforced"`
 	Reason         string          `json:"reason,omitempty"`
@@ -203,6 +210,7 @@ func toRecord(e Event, now time.Time, key string) Record {
 		NativeEvent:    e.NativeEvent,
 		CWD:            e.CWD,
 		ToolName:       e.ToolName,
+		TurnOutcome:    truncateUTF8(e.TurnOutcome, maxFieldBytes),
 		Verdict:        e.Verdict,
 		Enforced:       e.Enforced,
 		Reason:         truncateUTF8(e.Reason, maxReasonBytes),
