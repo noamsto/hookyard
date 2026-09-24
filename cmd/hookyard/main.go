@@ -926,24 +926,25 @@ func runRoute(ctx context.Context, opts routeOptions, in io.Reader, out io.Write
 	env, err := envelope.Decode(bytes.NewReader(raw))
 	// A payload that carries no engine discriminator is trusted to
 	// --registered-for only in yard mode, where each engine reads only its own
-	// config; a build-mode plugin can be loaded by another engine. Two arms
+	// config; a build-mode plugin can be loaded by another engine. Three arms
 	// qualify. Claude Code omits prompt_id and effort on some events
 	// (SessionStart, SessionEnd), so its fixed catalog names them. The second
 	// arm is narrower: an engine-scoped event is trusted only when argv's
 	// --event names exactly that event for that engine -- "codex:SessionEnd"
 	// plus a payload whose hook_event_name is "SessionEnd" is the config's own
 	// event coming back. That is what routes Codex 0.154.0's SessionEnd, whose
-	// shipped schema omits turn_id. Canonical events are deliberately NOT
-	// rescued: codex session_start carries no turn_id either and still records
-	// a router error, preserving the existing open item (#81's scope is session
-	// end). A look-alike payload from another engine, or a non-scoped event,
-	// also still falls through to the router error.
+	// shipped schema omits turn_id. The third arm is Codex's canonical
+	// session_start only: that payload also omits turn_id, and it routes when
+	// --event is session_start and hook_event_name is SessionStart. Stop,
+	// Cursor, an empty --event, and a mismatched hook_event_name stay router
+	// errors, and none of this runs in build mode.
 	if errors.Is(err, envelope.ErrUnknownEngine) && opts.pluginRoot == "" {
 		if fallback, fallbackErr := envelope.DecodeAs(raw, registered); fallbackErr == nil {
 			claudeCatalog := registered == vocab.ClaudeCode && vocab.IsClaudeCodeEvent(fallback.NativeEvent)
 			scoped, native, isScoped := vocab.SplitEngineScoped(opts.event)
 			exactScoped := isScoped && scoped == registered && native == fallback.NativeEvent
-			if claudeCatalog || exactScoped {
+			codexSessionStart := registered == vocab.Codex && opts.event == vocab.SessionStart && fallback.NativeEvent == "SessionStart"
+			if claudeCatalog || exactScoped || codexSessionStart {
 				env, err = fallback, nil
 				registeredForNote = fmt.Sprintf("engine taken from --registered-for %s: payload carried no engine discriminator", registered)
 			}

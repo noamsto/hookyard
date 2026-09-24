@@ -381,6 +381,50 @@ func TestRunRouteCodexSessionEndRoutesViaRegisteredFor(t *testing.T) {
 	}
 }
 
+// Codex's SessionStart payload carries no turn_id, so Detect cannot identify
+// it; a yard-mode entry whose --event is the canonical session_start is
+// trusted to --registered-for when hook_event_name is SessionStart.
+func TestRunRouteCodexSessionStartRoutesViaRegisteredFor(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := t.TempDir()
+	h := decides(t, dir, "start", "allow", "")
+	h.Events = []string{"session_start"}
+	h.Engines = []string{"codex"}
+	writeTable(t, stateDir, h)
+	opts := routeOpts(stateDir)
+	opts.registeredFor = "codex"
+	opts.event = "session_start"
+
+	printed := runPipeline(t, opts, codexAdvisorySessionStartPayload(t))
+
+	if printed != "" {
+		t.Errorf("want nothing printed, got %q", printed)
+	}
+	rec := readRecord(t, stateDir)
+	if rec.Router == record.RouterError {
+		t.Fatalf("want a routed run, got a router error: %q", rec.Reason)
+	}
+	if rec.CanonicalEvent != "session_start" {
+		t.Errorf("CanonicalEvent = %q, want session_start", rec.CanonicalEvent)
+	}
+	if !strings.Contains(rec.Reason, wantRegisteredForCodexNote) {
+		t.Errorf("reason %q does not carry the --registered-for codex note", rec.Reason)
+	}
+}
+
+func codexAdvisorySessionStartPayload(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs", "design", "fixtures", "codex-advisory", "hook-log-both.jsonl"))
+	if err != nil {
+		t.Fatalf("read codex advisory hook log: %v", err)
+	}
+	line, _, _ := strings.Cut(string(raw), "\n")
+	if line == "" {
+		t.Fatal("codex advisory hook log has no first line")
+	}
+	return line
+}
+
 // Cursor's SessionEnd carries cursor_version, so Detect places it with no
 // fallback: an entry whose --event names cursor:sessionEnd routes normally.
 func TestRunRouteCursorSessionEndRoutes(t *testing.T) {

@@ -65,13 +65,12 @@ const liveProbeSideEffect = "SIDE-EFFECT.txt"
 // or copies that credential, it only lets the child process inherit the
 // environment it is given.
 //
-// Claude Code is the engine covered, chosen over Codex and Cursor because it
-// is the one with a documented, scriptable non-interactive mode (`claude -p`).
-// Codex's per-entry hook-trust hashing and Cursor's `cursor-agent` trust flow
-// are both unverified here, and a live check for either means nothing until
-// they are. The shape below — scratch config, a deny handler, a probe prompt,
-// checking both hookyard's own record and the engine's own output —
-// generalizes to either once that groundwork exists.
+// Claude Code is covered here. Codex is covered by
+// TestLiveCodexDeliversSessionStartAndPromptSubmitAdvice; its trust bypass is
+// --dangerously-bypass-hook-trust. Cursor's `cursor-agent` trust flow is still
+// unverified here. The shape below — scratch config, a deny handler, a probe
+// prompt, checking both hookyard's own record and the engine's own output —
+// is what that Codex test generalizes.
 //
 // Not accounted for below: claude on PATH here may itself be a launcher that
 // passes its own `--plugin-dir` trees, each with hooks of its own. That is
@@ -197,6 +196,187 @@ func TestLiveClaudeCodeRefusesTheDeniedToolCall(t *testing.T) {
 	}
 
 	t.Logf("claude refused the probe call and the base's own hook still fired; full output:\n%s", output)
+}
+
+// TestLiveCodexDeliversSessionStartAndPromptSubmitAdvice drives a real codex
+// exec and checks the session rollout, not hookyard's record: each advisory
+// marker must show up once as a developer-role response_item Codex labels
+// hooks.additional_context. An unauthenticated exit is expected; the hooks
+// run before the API call. CODEX_HOME is a subdirectory of the user cache
+// dir, which is where Codex writes the session rollout this test reads.
+func TestLiveCodexDeliversSessionStartAndPromptSubmitAdvice(t *testing.T) {
+	if os.Getenv("HOOKYARD_E2E") != "1" {
+		t.Skip("set HOOKYARD_E2E=1 to run this test against a live codex binary")
+	}
+	codexBin, err := exec.LookPath("codex")
+	if err != nil {
+		t.Skip("codex binary not found on PATH")
+	}
+	if out, err := exec.Command(codexBin, "--version").CombinedOutput(); err != nil {
+		t.Fatalf("codex --version: %v\n%s", err, out)
+	} else {
+		t.Logf("codex --version: %s", out)
+	}
+
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatalf("user cache dir: %v", err)
+	}
+	scratch, err := os.MkdirTemp(cacheDir, "hookyard-codex-e2e-")
+	if err != nil {
+		t.Fatalf("mkdir scratch: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(scratch) })
+
+	hookyardBin := liveBuildHookyard(t)
+	work := filepath.Join(scratch, "work")
+	stateDir := filepath.Join(scratch, "state")
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", work, err)
+	}
+
+	ssMarker := fmt.Sprintf("HY-SS-%d", time.Now().UnixNano())
+	upsMarker := fmt.Sprintf("HY-UPS-%d", time.Now().UnixNano())
+	const prompt = "say hi"
+	ssHandler := liveWriteAdviseHandler(t, scratch, "session-start", ssMarker)
+	upsHandler := liveWriteAdviseHandler(t, scratch, "prompt-submit", upsMarker)
+	manifestPath := liveWriteCodexAdvisoryManifest(t, scratch, ssHandler, upsHandler)
+
+	install := exec.Command(hookyardBin, "install",
+		"--manifest", manifestPath,
+		"--router-path", hookyardBin,
+		"--state-dir", stateDir,
+		"--codex-config", filepath.Join(scratch, "config.toml"),
+		"--cursor-hooks", filepath.Join(scratch, "unused-cursor", "hooks.json"),
+		"--pi-settings", filepath.Join(scratch, "unused-pi", "settings.json"),
+	)
+	if out, err := install.CombinedOutput(); err != nil {
+		t.Fatalf("hookyard install: %v\n%s", err, out)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	probe := exec.CommandContext(ctx, codexBin,
+		"--dangerously-bypass-hook-trust",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"-C", work,
+		"exec", prompt)
+	probe.Env = append(os.Environ(), "CODEX_HOME="+scratch)
+	output, _ := probe.CombinedOutput()
+
+	files := liveCodexSessionLogs(t, scratch)
+	if len(files) == 0 {
+		t.Fatalf("no sessions/**/*.jsonl under %s\n--- codex output ---\n%s", scratch, output)
+	}
+	assertCodexAdviceMarker(t, files, ssMarker, output)
+	assertCodexAdviceMarker(t, files, upsMarker, output)
+}
+
+func liveWriteAdviseHandler(t *testing.T, dir, id, marker string) string {
+	t.Helper()
+	path := filepath.Join(dir, id+".sh")
+	script := "#!/bin/sh\nprintf '%s' '{\"hookSpecificOutput\":{\"additionalContext\":\"" + marker + "\"}}'\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatalf("write advise handler: %v", err)
+	}
+	return path
+}
+
+func liveWriteCodexAdvisoryManifest(t *testing.T, dir, sessionStartExec, promptSubmitExec string) string {
+	t.Helper()
+	m := manifest.Manifest{Handlers: []manifest.Handler{
+		{
+			ID:      "e2e-session-start",
+			Exec:    sessionStartExec,
+			Events:  []string{"session_start"},
+			Engines: []string{"codex"},
+			Match:   []string{},
+		},
+		{
+			ID:      "e2e-prompt-submit",
+			Exec:    promptSubmitExec,
+			Events:  []string{"prompt_submit"},
+			Engines: []string{"codex"},
+			Match:   []string{},
+		},
+	}}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	path := filepath.Join(dir, "hookyard.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	return path
+}
+
+func liveCodexSessionLogs(t *testing.T, codexHome string) []string {
+	t.Helper()
+	var files []string
+	root := filepath.Join(codexHome, "sessions")
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if strings.HasSuffix(path, ".jsonl") {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	return files
+}
+
+func assertCodexAdviceMarker(t *testing.T, files []string, marker string, codexOutput []byte) {
+	t.Helper()
+	var hits []string
+	for _, path := range files {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			if strings.Contains(line, marker) {
+				hits = append(hits, line)
+			}
+		}
+	}
+	if len(hits) != 1 {
+		t.Fatalf("marker %s occurs %d times in sessions/**/*.jsonl, want 1\n--- codex output ---\n%s",
+			marker, len(hits), codexOutput)
+	}
+	var row struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Role string `json:"role"`
+			Meta struct {
+				Kinds []string `json:"content_item_kinds"`
+			} `json:"internal_chat_message_metadata_passthrough"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal([]byte(hits[0]), &row); err != nil {
+		t.Fatalf("marker %s line is not JSON: %v\n%s", marker, err, hits[0])
+	}
+	if row.Type != "response_item" || row.Payload.Role != "developer" {
+		t.Fatalf("marker %s line type=%q role=%q, want response_item / developer\n%s",
+			marker, row.Type, row.Payload.Role, hits[0])
+	}
+	found := false
+	for _, kind := range row.Payload.Meta.Kinds {
+		if kind == "hooks.additional_context" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("marker %s line content_item_kinds = %v, want hooks.additional_context\n%s",
+			marker, row.Payload.Meta.Kinds, hits[0])
+	}
 }
 
 // liveBuildHookyard compiles cmd/hookyard at a path containing

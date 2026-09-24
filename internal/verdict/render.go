@@ -126,13 +126,15 @@ func Render(in Input) Rendered {
 		}
 		return Rendered{Enforced: in.Verdict == Abstain}
 	}
-	// Only Claude Code and Pi can reach this branch: Cursor's advisory set is
-	// defined as identical to its decision set (already false here), and Codex
-	// has no advisory slot at all.
+	// Cursor's advisory set is identical to its decision set (already false
+	// here). Claude Code, Pi, and Codex reach this branch on events that have
+	// an advisory slot and no decision slot.
 	if HasAdvisorySlot(in.Engine, in.CanonicalEvent, in.NativeEvent) {
 		switch in.Engine {
 		case vocab.ClaudeCode:
 			return renderClaudeCodeAdvisoryOnly(in)
+		case vocab.Codex:
+			return renderCodexAdvisoryOnly(in)
 		case vocab.Pi:
 			return renderPiAdvisoryOnly(in)
 		}
@@ -161,6 +163,18 @@ func renderClaudeCode(in Input) Rendered {
 // non-Abstain verdict here is recorded unenforced, the same as any other
 // verdict computed off a decision slot.
 func renderClaudeCodeAdvisoryOnly(in Input) Rendered {
+	if in.Advice == "" {
+		return Rendered{Enforced: in.Verdict == Abstain}
+	}
+	out := hookSpecificOutput{HookEventName: in.NativeEvent, AdditionalContext: in.Advice}
+	return Rendered{Stdout: marshal(hookResponse{out}), Enforced: in.Verdict == Abstain, AdviceDelivered: true}
+}
+
+// renderCodexAdvisoryOnly renders additionalContext on session_start and
+// prompt_submit. Those output schemas are deny_unknown_fields and have no
+// permissionDecision, so a non-Abstain verdict is recorded unenforced and
+// only the advice is printed.
+func renderCodexAdvisoryOnly(in Input) Rendered {
 	if in.Advice == "" {
 		return Rendered{Enforced: in.Verdict == Abstain}
 	}

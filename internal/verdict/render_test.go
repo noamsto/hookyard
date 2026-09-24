@@ -339,6 +339,42 @@ func TestRenderAdvisoryOnlyEvents(t *testing.T) {
 			name: "post_tool deny with reason only drops the reason silently",
 			in:   Input{Engine: vocab.ClaudeCode, CanonicalEvent: vocab.PostTool, NativeEvent: "PostToolUse", Verdict: Deny, Reason: "r"},
 		},
+		{
+			name:      "codex session_start abstain with advice",
+			in:        Input{Engine: vocab.Codex, CanonicalEvent: vocab.SessionStart, NativeEvent: "SessionStart", Verdict: Abstain, Advice: "a"},
+			stdout:    `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"a"}}`,
+			enforced:  true,
+			delivered: true,
+		},
+		{
+			name:      "codex prompt_submit abstain with advice",
+			in:        Input{Engine: vocab.Codex, CanonicalEvent: vocab.PromptSubmit, NativeEvent: "UserPromptSubmit", Verdict: Abstain, Advice: "a"},
+			stdout:    `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"a"}}`,
+			enforced:  true,
+			delivered: true,
+		},
+		{
+			name:     "codex session_start abstain, no advice",
+			in:       Input{Engine: vocab.Codex, CanonicalEvent: vocab.SessionStart, NativeEvent: "SessionStart", Verdict: Abstain},
+			enforced: true,
+		},
+		{
+			name:     "codex prompt_submit abstain, no advice",
+			in:       Input{Engine: vocab.Codex, CanonicalEvent: vocab.PromptSubmit, NativeEvent: "UserPromptSubmit", Verdict: Abstain},
+			enforced: true,
+		},
+		{
+			name:      "codex session_start deny with advice renders advice only, unenforced",
+			in:        Input{Engine: vocab.Codex, CanonicalEvent: vocab.SessionStart, NativeEvent: "SessionStart", Verdict: Deny, Reason: "r", Advice: "a"},
+			stdout:    `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"a"}}`,
+			delivered: true,
+		},
+		{
+			name:      "codex prompt_submit deny with advice renders advice only, unenforced",
+			in:        Input{Engine: vocab.Codex, CanonicalEvent: vocab.PromptSubmit, NativeEvent: "UserPromptSubmit", Verdict: Deny, Reason: "r", Advice: "a"},
+			stdout:    `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"a"}}`,
+			delivered: true,
+		},
 	}
 
 	for _, c := range cases {
@@ -638,11 +674,16 @@ func TestCapabilityTable(t *testing.T) {
 			if got := HasDecisionSlot(engine, event, native); got != want {
 				t.Errorf("HasDecisionSlot(%s, %s) = %v, want %v", engine, event, got, want)
 			}
-			// Codex has no advisory slot on any event.
 			wantAdvisory := want && engine != vocab.Codex
 			// Claude Code and Pi both reach the model off the permission path.
 			if engine == vocab.ClaudeCode || engine == vocab.Pi {
 				wantAdvisory = event == vocab.PreTool || event == vocab.SessionStart || event == vocab.PostTool
+			}
+			// Codex delivers additionalContext only on the two events the
+			// 0.154.0 probe confirmed. PreToolUse, PostToolUse, and
+			// SubagentStart stay out.
+			if engine == vocab.Codex {
+				wantAdvisory = event == vocab.SessionStart || event == vocab.PromptSubmit
 			}
 			if got := HasAdvisorySlot(engine, event, native); got != wantAdvisory {
 				t.Errorf("HasAdvisorySlot(%s, %s) = %v, want %v", engine, event, got, wantAdvisory)
