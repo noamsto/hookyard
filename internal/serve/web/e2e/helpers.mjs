@@ -45,6 +45,21 @@ function pageHelpers() {
     node(col, name) {
       return q(`#flow-body [data-col="${CSS.escape(col)}"][data-name="${CSS.escape(name)}"]`);
     },
+    // label: a node's label group (labels sit in their own layer, above the
+    // bands, so they are not children of the node).
+    label(col, name) {
+      return q(`#flow-body .label[data-of="${CSS.escape(JSON.stringify([col, name]))}"]`);
+    },
+    // bandPoint: a point that hit-tests to one of the edge's bands.
+    bandPoint(key) {
+      const g = qa("#flow-body .flow-edge").find((el) => el.dataset.key === key);
+      for (const p of g ? g.querySelectorAll(".band") : []) {
+        const r = p.getBoundingClientRect();
+        const x = r.left + r.width / 2;
+        for (let y = r.top; y <= r.bottom; y++) if (document.elementFromPoint(x, y) === p) return { x, y, ok: true };
+      }
+      return null;
+    },
     nodePoint(col, name) {
       const el = this.node(col, name);
       return el ? this.hit(el) : null;

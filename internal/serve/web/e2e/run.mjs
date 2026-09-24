@@ -178,26 +178,35 @@ async function openAll(page) {
   }
 }
 
+// fitsAt: at one viewport, the graph fits the panel with no horizontal
+// page scroll, and opening every group grows the body without overlaps.
+async function fitsAt(page, env, width, height) {
+  const at = `${width} × ${height}`;
+  await setViewport(page, width, height);
+  await openFlow(page, env.base);
+  const fit = await page.evaluate(`({ h: __e2e.horizontalScroll(), out: __e2e.outside(), body: document.getElementById("flow-body").getBoundingClientRect().width, svg: document.querySelector("#flow-body svg").getBoundingClientRect().width })`);
+  assert(fit.h === 0, `horizontal page scroll of ${fit.h} px at ${at}`);
+  assert(fit.out.length === 0, `nodes outside the flow body at ${at}: ` + fit.out.join(", "));
+  assert(fit.svg <= fit.body + 0.5, `graph ${fit.svg} px wide in a ${fit.body} px panel at ${at}`);
+  const lines = [`${at}: graph ${fit.svg.toFixed(0)} px in a ${fit.body.toFixed(0)} px panel, no horizontal scroll`];
+
+  const h0 = await page.evaluate(`document.getElementById("flow-body").getBoundingClientRect().height`);
+  await openAll(page);
+  const open = await page.evaluate(`({ groups: __e2e.groups(), h: document.getElementById("flow-body").getBoundingClientRect().height,
+    hs: __e2e.horizontalScroll(), out: __e2e.outside(), overlaps: __e2e.overlaps(), page: document.documentElement.scrollHeight })`);
+  assert(open.groups.every((g) => g.expanded), "a group stayed folded: " + JSON.stringify(open.groups));
+  assert(open.h > h0, `the flow body did not grow with every group open at ${at} (${h0} -> ${open.h} px)`);
+  assert(open.hs === 0 && open.out.length === 0, `open groups at ${at}: horizontal scroll ${open.hs}, outside: ${open.out.join(", ")}`);
+  assert(open.overlaps.length === 0, `overlaps with every group open at ${at}: ` + open.overlaps.join(", "));
+  lines.push(`${at}, every group open: the flow body grew ${h0.toFixed(0)} -> ${open.h.toFixed(0)} px (page ${open.page} px tall), no overlaps`);
+  return lines;
+}
+
 async function check2(page, env) {
   const lines = [];
-  await setViewport(page, 1280, 800);
   try {
-    await openFlow(page, env.base);
-    const fit = await page.evaluate(`({ h: __e2e.horizontalScroll(), out: __e2e.outside(), body: document.getElementById("flow-body").getBoundingClientRect().width, svg: document.querySelector("#flow-body svg").getBoundingClientRect().width })`);
-    assert(fit.h === 0, `horizontal page scroll of ${fit.h} px at 1280 × 800`);
-    assert(fit.out.length === 0, "nodes outside the flow body: " + fit.out.join(", "));
-    assert(fit.svg <= fit.body + 0.5, `graph ${fit.svg} px wide in a ${fit.body} px panel`);
-    lines.push(`1280 × 800: graph ${fit.svg.toFixed(0)} px in a ${fit.body.toFixed(0)} px panel, no horizontal scroll`);
-
-    const h0 = await page.evaluate(`document.getElementById("flow-body").getBoundingClientRect().height`);
-    await openAll(page);
-    const open = await page.evaluate(`({ groups: __e2e.groups(), h: document.getElementById("flow-body").getBoundingClientRect().height,
-      hs: __e2e.horizontalScroll(), out: __e2e.outside(), overlaps: __e2e.overlaps(), page: document.documentElement.scrollHeight })`);
-    assert(open.groups.every((g) => g.expanded), "a group stayed folded: " + JSON.stringify(open.groups));
-    assert(open.h > h0, `the flow body did not grow with every group open (${h0} -> ${open.h} px)`);
-    assert(open.hs === 0 && open.out.length === 0, `open groups: horizontal scroll ${open.hs}, outside: ${open.out.join(", ")}`);
-    assert(open.overlaps.length === 0, "overlaps with every group open: " + open.overlaps.join(", "));
-    lines.push(`every group open: the flow body grew ${h0.toFixed(0)} -> ${open.h.toFixed(0)} px (page ${open.page} px tall), no overlaps`);
+    lines.push(...await fitsAt(page, env, 1600, 1000));
+    lines.push(...await fitsAt(page, env, 1280, 800));
 
     const names = await page.evaluate(`__e2e.boxes().map((b) => [b.col, b.name])`);
     const unreachable = [];
@@ -219,6 +228,18 @@ async function check2(page, env) {
     assert(after.w === before.w && after.h === before.h, `wheel changed a node's size: ${JSON.stringify(before)} -> ${JSON.stringify(after)}`);
     assert(after.y > before.y, `wheel over the flow did not scroll the page (scrollY ${before.y} -> ${after.y})`);
     lines.push(`wheel over the flow scrolls the page (scrollY ${before.y} -> ${after.y}); node size unchanged (no zoom)`);
+
+    // A phone-width panel: the graph keeps its minimum width and scrolls
+    // inside the flow body; the page itself never scrolls sideways.
+    await setViewport(page, 400, 800);
+    const errorsAt = page.errors.length;
+    await openFlow(page, env.base);
+    await sleep(300);
+    const narrow = await page.evaluate(`({ h: __e2e.horizontalScroll(), body: document.getElementById("flow-body").clientWidth, inner: document.getElementById("flow-body").scrollWidth })`);
+    const errors = page.errors.slice(errorsAt);
+    assert(errors.length === 0, `${errors.length} console errors at 400 × 800:\n      ` + [...new Set(errors)].join("\n      "));
+    assert(narrow.h === 0, `horizontal page scroll of ${narrow.h} px at 400 × 800`);
+    lines.push(`400 × 800: no console errors, no horizontal page scroll; the graph (${narrow.inner} px) scrolls inside the ${narrow.body} px flow body`);
   } finally {
     await page.send("Emulation.clearDeviceMetricsOverride");
   }
@@ -553,9 +574,83 @@ async function check10(page, env) {
   return lines;
 }
 
+const opacity = (col, name) => `(() => { const el = __e2e.label(${JSON.stringify(col)}, ${JSON.stringify(name)}); return el ? Number(getComputedStyle(el).opacity) : null; })()`;
+
+// Hover: the hovered node's path stays lit, labels included; a band's
+// tooltip survives a live count refresh under a still pointer.
+async function check11(page, env) {
+  await openFlow(page, env.base);
+  const lines = [];
+  const p = await page.evaluate(`__e2e.nodePoint("event", "pre_tool")`);
+  assert(p?.ok, "event pre_tool not hit-testable: " + JSON.stringify(p));
+  await page.move(p.x, p.y);
+  await page.waitFor(`document.getElementById("flow-body").classList.contains("hl")`, 2000, "hover highlight on pre_tool");
+  const o = await page.evaluate(`({ hovered: ${opacity("event", "pre_tool")}, onPath: ${opacity("handler", "notify")}, offPath: ${opacity("event", "post_tool")} })`);
+  assert(o.hovered === 1, `hovered pre_tool's label has opacity ${o.hovered}, want 1`);
+  assert(o.onPath === 1, `on-path handler notify's label has opacity ${o.onPath}, want 1`);
+  assert(o.offPath !== null && o.offPath < 1, `off-path event post_tool's label has opacity ${o.offPath}, want < 1`);
+  lines.push(`hover pre_tool: its label and on-path notify's at opacity 1; off-path post_tool's at ${o.offPath}`);
+
+  const key = JSON.stringify(["engine", "claude-code", "event", "pre_tool"]);
+  const b = await page.evaluate(`__e2e.bandPoint(${JSON.stringify(key)})`);
+  assert(b?.ok, "no hit-testable claude-code -> pre_tool band");
+  await page.move(b.x, b.y);
+  await page.waitFor(`!document.querySelector("#flow-body .flow-tip").hidden`, 2000, "band tooltip");
+  // Record the tooltip's state right after each redraw, before any later
+  // pointer event could re-hover.
+  const calls = (await page.evaluate("__e2e.state()")).calls;
+  await page.evaluate(`(() => {
+    window.__tipAfterDraw = [];
+    new MutationObserver(() => __tipAfterDraw.push(!document.querySelector("#flow-body .flow-tip").hidden))
+      .observe(document.querySelector("#flow-body .l-bands"), { childList: true });
+  })()`);
+  append(env.stateDir, TODAY_PATHS.slice(0, 3).map((t) => record({ ...t, ts: Date.now() })));
+  await page.waitFor(`__e2e.state().calls > ${calls} && __tipAfterDraw.length > 0`, 4000, "a live refresh redraw");
+  const after = await page.evaluate("__tipAfterDraw");
+  assert(after.every(Boolean), `band tooltip hidden after a live redraw (visible per redraw: ${JSON.stringify(after)})`);
+  lines.push(`band claude-code -> pre_tool hovered: tooltip still shown after ${after.length} live redraw(s)`);
+  return lines;
+}
+
+// Every event plate's ×N and its fan-out gate agree (a gate only where
+// handler runs exceed calls); the legend says how widths are drawn.
+async function check12(page, env) {
+  const lines = [];
+  for (const query of ["", "handler=guards.rm"]) {
+    await openFlow(page, env.base, query);
+    const plates = await page.evaluate(`[...document.querySelectorAll('#flow-body [data-col="event"]')].map((el) => ({
+      name: el.dataset.name, gate: !!el.querySelector(".gate"), fan: __e2e.label("event", el.dataset.name)?.querySelector(".fan")?.textContent ?? "" }))`);
+    const bad = plates.filter((p) => p.gate !== (p.fan !== ""));
+    assert(bad.length === 0, `[${query || "no filter"}] gate and ×N disagree: ` + JSON.stringify(bad));
+    lines.push(`[${query || "no filter"}] ${plates.length} event plates: gates on ${plates.filter((p) => p.gate).map((p) => p.name + p.fan).join(", ") || "none"}`);
+  }
+  const legend = await page.evaluate(`document.querySelector("#flow-body .l-legend").textContent`);
+  assert(legend.includes("width ∝ √count · decisions floored"), `legend "${legend}" does not say decision bands are floored`);
+  lines.push(`legend: "${legend}"`);
+  return lines;
+}
+
+// One outcome everywhere (outcome=deny): emphasis follows each band's share
+// of its column's biggest band — a thin, rare band never outshines it.
+async function check13(page, env) {
+  await openFlow(page, env.base, "outcome=deny");
+  const bands = await page.evaluate(`(() => {
+    if (!document.querySelector("#flow-body svg").classList.contains("mono")) return null;
+    return [...document.querySelectorAll("#flow-body .l-bands .band")].map((p) => ({
+      share: Number(p.style.getPropertyValue("--share")), thin: p.classList.contains("thin"), op: Number(getComputedStyle(p).fillOpacity) }));
+  })()`);
+  assert(bands !== null, "outcome=deny is not drawn in single-outcome mode");
+  const thin = bands.filter((b) => b.thin);
+  assert(thin.length > 0, "no thin band under outcome=deny: the check needs one");
+  const top = Math.min(...bands.filter((b) => b.share === 1).map((b) => b.op));
+  const brighter = bands.filter((b) => b.op > top + 1e-6);
+  assert(brighter.length === 0, `bands more opaque than the biggest (${top}): ` + JSON.stringify(brighter));
+  return [`${bands.length} bands (${thin.length} thin): biggest at ${top}, thin ones ${[...new Set(thin.map((b) => b.op))].join(" / ")}`];
+}
+
 const CHECKS = [
   { n: 1, title: "edge totals == /api/flow derivation (4 filter sets)", fn: check1 },
-  { n: 2, title: "fits the panel: no horizontal scroll, open groups grow it, every node reachable, wheel scrolls", fn: check2, fresh: true },
+  { n: 2, title: "fits the panel at 1600 and 1280: no horizontal scroll, open groups grow it, every node reachable, wheel scrolls; 400 degrades", fn: check2, fresh: true },
   { n: 3, title: "node click filters, shift-click adds, re-click and chip × remove", fn: check3 },
   { n: 4, title: "burst of 500 live calls stays bounded", fn: check4 },
   { n: 5, title: "window 1: header click before the coalesced relayout", fn: check5, fresh: true },
@@ -564,6 +659,9 @@ const CHECKS = [
   { n: 8, title: "column headers are not interactive graph nodes", fn: check8 },
   { n: 9, title: "in-flight pulses cancel on a day switch or a view toggle", fn: check9, fresh: true },
   { n: 10, title: "fold: two groups open, fold each, Enter folds, all open without overlap", fn: check10, fresh: true },
+  { n: 11, title: "hover keeps the path's labels lit; a band tooltip survives a live refresh", fn: check11, fresh: true },
+  { n: 12, title: "event plates: the fan-out gate only where ×N shows; legend", fn: check12 },
+  { n: 13, title: "single-outcome emphasis follows share", fn: check13, fresh: true },
 ];
 
 async function main() {

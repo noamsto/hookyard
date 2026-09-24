@@ -15,12 +15,17 @@ import type { GroupRecord, LayoutPlan, PathEntry } from "./state.ts";
 
 export type Counts = Map<string, number>; // outcome -> count
 
+// Handled: calls that ran at least one handler, and their handler runs. A
+// direct verdict or a router error is a branch but runs no handler.
+export interface Handled { calls: number; runs: number; }
+
 export interface Totals {
   calls: number;
   branches: number;
   nodeTotals: Map<string, number>; // display node key -> count (calls for engine/event, else branches)
   nodeCalls: Map<string, number>; // display node key -> calls with >= 1 branch through it
   nodeOutcomes: Map<string, Counts>; // display node key -> branches by outcome
+  handled: Map<string, Handled>; // engine/event display key -> its calls that ran a handler
   edgeTotals: Map<string, number>; // display edge key -> count
   edgeOutcomes: Map<string, Counts>; // display edge key -> count by outcome (engine -> event: by call class)
   buckets: Map<string, number[]>; // display node key -> per-bucket count (live ring only)
@@ -81,7 +86,7 @@ export function unitOf(col: DisplayCol): string {
 
 export function emptyTotals(): Totals {
   return {
-    calls: 0, branches: 0, nodeTotals: new Map(), nodeCalls: new Map(), nodeOutcomes: new Map(),
+    calls: 0, branches: 0, nodeTotals: new Map(), nodeCalls: new Map(), nodeOutcomes: new Map(), handled: new Map(),
     edgeTotals: new Map(), edgeOutcomes: new Map(), buckets: new Map(), members: new Map(),
   };
 }
@@ -132,6 +137,15 @@ export function computeTotals(
     bump(t.nodeTotals, ev, n);
     bump(t.edgeTotals, ee, n);
     bumpIn(t.edgeOutcomes, ee, cls, n);
+    const runs = bs.filter((keys) => keys.length === 4).length;
+    if (runs > 0) {
+      for (const k of [eng, ev]) {
+        const h = t.handled.get(k) ?? { calls: 0, runs: 0 };
+        h.calls += n;
+        h.runs += n * runs;
+        t.handled.set(k, h);
+      }
+    }
     const touched = new Map<string, number>(); // node -> branches through it
     for (const keys of bs) {
       const o = outcomeOf(keys);
@@ -164,11 +178,14 @@ function outcomeRows(c: Counts | undefined): TipRow[] {
   return [...c ?? []].sort((a, b) => bySeverity(a[0], b[0])).map(([o, n]) => ({ label: o, n, o }));
 }
 
-function fanOut(branches: number, calls: number): string {
-  return calls > 0 ? " (×" + (branches / calls).toFixed(1) + ")" : "";
-}
-
 const fmt = (n: number): string => n.toLocaleString("en-US");
+
+// runsFact: "N calls → R handler runs (×F)", F per call that ran a handler.
+function runsFact(calls: number, h: Handled | undefined): string {
+  const fact = fmt(calls) + " calls → " + fmt(h?.runs ?? 0) + " handler runs";
+  if (!h) return fact;
+  return fact + (h.calls < calls ? " on " + fmt(h.calls) : "") + " (×" + (h.runs / h.calls).toFixed(1) + ")";
+}
 
 export class Snapshot {
   readonly gen: number;
@@ -298,9 +315,8 @@ export class Snapshot {
     let kind: string = COL_TITLES[node.col];
 
     if (node.col === "engine" || node.col === "event") {
-      const runs = sum(totals.nodeOutcomes.get(key));
-      facts.push(fmt(n) + " calls → " + fmt(runs) + " handler runs" + fanOut(runs, n));
-      sections.push({ head: "handler outcomes · branches", rows: outcomeRows(totals.nodeOutcomes.get(key)) });
+      facts.push(runsFact(n, totals.handled.get(key)));
+      sections.push({ head: "outcomes · branches", rows: outcomeRows(totals.nodeOutcomes.get(key)) });
     } else if (node.col === "outcome") {
       facts.push(fmt(n) + " branches on " + fmt(totals.nodeCalls.get(key) ?? 0) + " calls");
       const from: TipRow[] = [];

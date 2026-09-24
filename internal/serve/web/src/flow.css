@@ -32,6 +32,7 @@
 [data-o="abstain"] { --oc: var(--c-abstain); }
 
 .flow-body { position: relative; min-height: 420px; }
+.flow-body.wide { overflow-x: auto; overflow-y: hidden; }
 .flow-svg { display: block; font-family: inherit; overflow: visible; }
 .flow-svg text { font-size: 12px; fill: var(--fg); }
 .flow-empty { position: absolute; inset: 45% 0 auto; margin: 0; text-align: center; }
@@ -53,7 +54,8 @@
 .l-over .band.loud { fill-opacity: 1; stroke: var(--bg-panel); stroke-width: .75; }
 /* one outcome everywhere: emphasis by share, the outline keeps the colour */
 .mono .l-bands .band { fill-opacity: calc(.18 + .62 * var(--share, 1)); stroke: var(--oc); stroke-width: .75; stroke-opacity: .9; }
-.mono .l-bands .band.thin { fill-opacity: .9; stroke: none; }
+/* a thin band has no room for the outline: a fill floor keeps it visible */
+.mono .l-bands .band.thin { fill-opacity: max(.5, calc(.18 + .62 * var(--share, 1))); stroke: none; }
 .mono.flow-svg .l-bands .band { transition: none; }
 .flow-body.hl .mono .l-bands .band { fill-opacity: .08; stroke-opacity: .3; }
 

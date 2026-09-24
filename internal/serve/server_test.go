@@ -668,20 +668,30 @@ func TestNoAccessControlAllowOrigin(t *testing.T) {
 }
 
 // TestFlowBundleEmbedded guards the esbuild bundle: the embedded FS carries
-// the built flow/ assets, index.html points at their /static/flow/ path (not
-// the old /static/flow.js), and the server actually serves them.
+// the built flow/ assets and the bundled packages' licence notices,
+// index.html points at their /static/flow/ path (not the old
+// /static/flow.js), and the server actually serves them.
 func TestFlowBundleEmbedded(t *testing.T) {
 	sub, err := staticFS()
 	if err != nil {
 		t.Fatalf("staticFS: %v", err)
 	}
-	for _, name := range []string{"flow/flow.js", "flow/flow.css"} {
+	for _, name := range []string{"flow/flow.js", "flow/flow.css", "flow/flow.LICENSE"} {
 		data, err := fs.ReadFile(sub, name)
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
 		if len(data) == 0 {
 			t.Errorf("%s: embedded but empty", name)
+		}
+	}
+	notice, err := fs.ReadFile(sub, "flow/flow.LICENSE")
+	if err != nil {
+		t.Fatalf("read flow/flow.LICENSE: %v", err)
+	}
+	for _, want := range []string{"d3-sankey", "Redistribution and use in source and binary forms"} {
+		if !strings.Contains(string(notice), want) {
+			t.Errorf("flow/flow.LICENSE does not contain %q", want)
 		}
 	}
 

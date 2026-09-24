@@ -7,7 +7,8 @@ import { COL_INDEX } from "../types.ts";
 import type { Frame } from "../model/controller.ts";
 import { splitEdgeKey, splitKey } from "../model/keys.ts";
 import { bySeverity, isLoud } from "../model/snapshot.ts";
-import type { SnapNode } from "../model/snapshot.ts";
+import type { Handled, SnapNode } from "../model/snapshot.ts";
+import { rankNodes } from "./geometry.ts";
 import type { GeoLinkIn, NodeKind, RankNode } from "./geometry.ts";
 
 // The no-handler slot in the handler column: a call with no handler (a
@@ -22,6 +23,7 @@ export interface SceneNode {
   snap: SnapNode | null; // null for the no-handler slot
   total: number;
   outcomes: Map<string, number>;
+  handled?: Handled; // engine and event nodes
 }
 
 export interface Scene {
@@ -55,6 +57,7 @@ export function buildScene(frame: Frame): Scene {
     nodes.push({
       key: n.key, col: COL_INDEX[n.col], kind: kindOf(n), snap: n,
       total: totals.nodeTotals.get(n.key) ?? 0, outcomes: totals.nodeOutcomes.get(n.key) ?? new Map(),
+      handled: totals.handled.get(n.key),
     });
   }
   const links: GeoLinkIn[] = [];
@@ -86,6 +89,28 @@ export function rankInput(scene: Scene, order: readonly string[]): RankNode[] {
     group: n.snap?.parent ?? null,
     total: n.total, outcomes: n.outcomes, planIdx: idx.get(n.key) ?? order.length,
   }));
+}
+
+// ranksFor: the column order for a frame of a snapshot whose earlier frame
+// was ranked as pinned (undefined on its first frame). A count refresh never
+// reorders: a node it brings in — only the no-handler slot, which exists
+// while it carries traffic — goes last.
+export function ranksFor(scene: Scene, order: readonly string[], pinned?: Map<string, number>): Map<string, number> {
+  if (!pinned) return rankNodes(rankInput(scene, order));
+  const added = scene.nodes.filter((n) => !pinned.has(n.key));
+  if (added.length === 0) return pinned;
+  const rank = new Map(pinned);
+  let next = Math.max(-1, ...pinned.values()) + 1;
+  for (const n of added) rank.set(n.key, next++);
+  return rank;
+}
+
+// fanOut: an event plate's " ×N" — handler runs per call that ran a
+// handler — or "" when no call ran more than one.
+export function fanOut(n: SceneNode): string {
+  const h = n.handled;
+  if (n.kind !== "event" || !h || h.runs === h.calls) return "";
+  return " ×" + (h.runs / h.calls).toFixed(1);
 }
 
 // loudOutcomes: a node's decisions, most consequential first.

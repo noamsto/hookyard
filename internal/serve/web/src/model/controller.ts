@@ -39,7 +39,7 @@ import type { Branch } from "./keys.ts";
 import { bySeverity, emptyTotals, isLoud, Snapshot } from "./snapshot.ts";
 import type { Tip, Totals } from "./snapshot.ts";
 import { FlowModel } from "./state.ts";
-import type { GroupRecord, LayoutPlan } from "./state.ts";
+import type { GroupRecord, LayoutPlan, PathEntry } from "./state.ts";
 
 export interface FlowDeps {
   // Resolves the parsed JSON; rejects on a non-OK response ("<url>: <status>").
@@ -60,7 +60,9 @@ const RING_TICK_MS = 1000;
 
 interface PendingLayout { plan: LayoutPlan; gen: number; }
 
-export interface Frame { snap: Snapshot; totals: Totals; }
+// A frame's paths are copied at refresh: live calls count into the model's
+// paths in place, and hover counts must add up against the drawn totals.
+export interface Frame { snap: Snapshot; totals: Totals; paths: readonly PathEntry[]; }
 
 interface Refresh { frame: Frame | null; calls: number; branches: number; idle: number; }
 
@@ -158,7 +160,8 @@ export class FlowController {
   }
 
   subset(key: string): Totals {
-    return this.drawn.frame?.snap.subset(key, this.model.paths.values()) ?? emptyTotals();
+    const f = this.drawn.frame;
+    return f ? f.snap.subset(key, f.paths) : emptyTotals();
   }
 
   tooltip(key: string, sub: Totals): Tip | null {
@@ -453,8 +456,9 @@ export class FlowController {
     let calls = 0;
     let branches = 0;
     if (snap) {
-      const totals = snap.totals(this.model.paths.values(), this.model.ring !== null);
-      frame = { snap, totals };
+      const paths = Array.from(this.model.paths.values(), (e) => ({ path: e.path, counts: e.counts.slice() }));
+      const totals = snap.totals(paths, this.model.ring !== null);
+      frame = { snap, totals, paths };
       calls = totals.calls;
       branches = totals.branches;
     }

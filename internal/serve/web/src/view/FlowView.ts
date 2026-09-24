@@ -11,10 +11,10 @@ import type { Snapshot, SnapNode, Tip, Totals } from "../model/snapshot.ts";
 import type { Col } from "../types.ts";
 import { fit, fmt, htmlEl, partsLen, svgEl, svgText } from "./dom.ts";
 import type { Part } from "./dom.ts";
-import { bandWidth, GUTTER, HEAD_H, layoutFlow, LH, rankNodes, ribbon } from "./geometry.ts";
+import { bandWidth, GUTTER, HEAD_H, layoutFlow, LH, ribbon } from "./geometry.ts";
 import type { GeoLink, GeoNode, Geometry } from "./geometry.ts";
 import { Pulses } from "./pulses.ts";
-import { buildScene, linkId, loudOutcomes, PSEUDO, rankInput, singleOutcome } from "./scene.ts";
+import { buildScene, fanOut, linkId, loudOutcomes, PSEUDO, ranksFor, singleOutcome } from "./scene.ts";
 import type { Scene, SceneNode } from "./scene.ts";
 
 const HINT = "hover for exact counts · click to filter · shift-click to add";
@@ -55,7 +55,8 @@ export class FlowView {
   private readonly flashTimers = new WeakMap<Element, number>();
   private drawn: Drawn | null = null;
   private rankMemo: { snap: Snapshot; rank: Map<string, number> } | null = null;
-  private hover: string | null = null;
+  private hover: string | null = null; // the hovered node key
+  private hoverEdge: string | null = null; // or the hovered band's edge key
   private charW = 0;
   private width = 0;
   private activeDots = -1;
@@ -171,8 +172,7 @@ export class FlowView {
   private rankFor(frame: Frame, scene: Scene): Map<string, number> {
     // Pinned per committed snapshot: a count refresh never reorders.
     const memo = this.rankMemo;
-    if (memo?.snap === frame.snap && scene.nodes.every((n) => memo.rank.has(n.key))) return memo.rank;
-    const rank = rankNodes(rankInput(scene, frame.snap.order));
+    const rank = ranksFor(scene, frame.snap.order, memo?.snap === frame.snap ? memo.rank : undefined);
     this.rankMemo = { snap: frame.snap, rank };
     return rank;
   }
@@ -185,6 +185,7 @@ export class FlowView {
     const sameSnap = this.drawn?.frame.snap === frame.snap;
     const focused = this.keyAt(document.activeElement);
     const hover = sameSnap ? this.hover : null;
+    const hoverEdge = sameSnap ? this.hoverEdge : null;
     this.clearHover();
 
     const scene = buildScene(frame);
@@ -218,10 +219,13 @@ export class FlowView {
     };
     this.drawn = d;
 
-    this.svg.setAttribute("width", String(width));
+    this.svg.setAttribute("width", String(geo.width));
     this.svg.setAttribute("height", String(geo.height));
-    this.svg.setAttribute("viewBox", `0 0 ${width} ${geo.height}`);
-    this.body.style.height = geo.height + "px";
+    this.svg.setAttribute("viewBox", `0 0 ${geo.width} ${geo.height}`);
+    // Laid out wider than the panel: the body scrolls sideways, not the page.
+    const wide = geo.width > width;
+    this.body.classList.toggle("wide", wide);
+    this.body.style.height = geo.height + (wide ? this.body.offsetHeight - this.body.clientHeight : 0) + "px";
     this.svg.classList.toggle("mono", d.mono);
     for (const k of ["heads", "bands", "over", "nodes", "labels", "legend"] as const) this.layers[k].replaceChildren();
 
@@ -236,6 +240,7 @@ export class FlowView {
     }
 
     if (hover !== null && d.nodeEls.has(hover)) this.hoverNode(hover);
+    if (hoverEdge !== null && d.geo.links.some((l) => l.edge === hoverEdge)) this.hoverBand(hoverEdge);
     if (focused !== undefined) {
       for (const el of this.svg.querySelectorAll("[tabindex]")) {
         if (this.keyOf.get(el) === focused) (el as SVGElement).focus();
@@ -298,7 +303,7 @@ export class FlowView {
       svgEl("rect", { class: "bar", x: g.x0, y: g.y0, width: g.x1 - g.x0, height: Math.max(g.h, 1), "data-o": o }, el);
     } else {
       svgEl("line", { class: "rule", x1: g.x0, x2: g.x1, y1: g.y0 + 0.5, y2: g.y0 + 0.5 }, el);
-      if (n.kind === "event" && g.outH > g.inH + 0.5) {
+      if (fanOut(n) && g.outH > g.inH + 0.5) {
         // The fan-out gate: calls in on the left, handler runs out on the right.
         const yl = g.y0 + (g.h - g.inH) / 2;
         const yr = g.y0 + (g.h - g.outH) / 2;
@@ -318,7 +323,7 @@ export class FlowView {
       y0 = g.y0 + g.h / 2 - room / 2 - 2;
       h = room + 4;
     } else if (n.kind === "outcome") {
-      x1 = Math.min(this.width - GUTTER, d.geo.labelX[1] + this.labelChars(n, d.frame, false) * this.charW);
+      x1 = Math.min(d.geo.width - GUTTER, d.geo.labelX[1] + this.labelChars(n, d.frame, false) * this.charW);
       y0 = g.y0 + g.h / 2 - Math.max(g.h, LH) / 2 - 2;
     }
     const hit = svgEl("rect", { class: "hit", x: x0, y: y0, width: x1 - x0, height: h }, el);
@@ -400,7 +405,7 @@ export class FlowView {
       svgText(this.layers.legend, x + 16, y, [[o, isLoud(o) ? "lg-loud" : "lg", o]]);
       x += 16 + o.length * cw + 14;
     }
-    svgText(this.layers.legend, x + 6, y, [["width ∝ √count", "lg"]]);
+    svgText(this.layers.legend, x + 6, y, [["width ∝ √count · decisions floored", "lg"]]);
   }
 
   // ---------- labels ----------
@@ -417,13 +422,6 @@ export class FlowView {
     return frame.snap.memberLabel(n.key);
   }
 
-  private fanOf(n: SceneNode): string {
-    if (n.kind !== "event" || n.total === 0) return "";
-    let runs = 0;
-    for (const c of n.outcomes.values()) runs += c;
-    return runs === n.total ? "" : " ×" + (runs / n.total).toFixed(1);
-  }
-
   // labelChars: the widest the node's label gets (a hover shows sub / total).
   private labelChars(n: SceneNode, frame: Frame, live: boolean): number {
     const count = fmt(n.total).length;
@@ -432,7 +430,7 @@ export class FlowView {
     switch (n.kind) {
       case "engine": return Math.max(name, hovered);
       case "outcome": return name + 2 + hovered;
-      case "event": return name + 2 + count + this.fanOf(n).length + (live ? 7 : 0);
+      case "event": return name + 2 + count + fanOut(n).length + (live ? 7 : 0);
       default: return name + 2 + count + (live ? 7 : 0);
     }
   }
@@ -449,8 +447,9 @@ export class FlowView {
     if (!g || !n) return;
     const el = svgEl("g", { class: "label k-" + n.kind }, this.layers.labels);
     d.labelEls.set(key, el);
+    if (n.snap) el.dataset.of = JSON.stringify([n.snap.col, n.snap.dataName]);
     const nodeEl = d.nodeEls.get(key);
-    if (nodeEl?.classList.contains("selected")) el.classList.add("selected");
+    for (const c of ["selected", "on"]) if (nodeEl?.classList.contains(c)) el.classList.add(c);
     if (n.total === 0) el.classList.add("idle");
     const subN = sub ? (key === PSEUDO ? this.pseudoSub(d, sub) : sub.nodeTotals.get(key) ?? 0) : undefined;
     const cw = this.charW || 7.2;
@@ -473,7 +472,7 @@ export class FlowView {
     const width = g.x1 - g.x0 - 2 * INSET;
     const y = g.y0 + g.h / 2 - ((lines - 1) * LH) / 2 + 4;
     const right: Part[] = [...this.countParts(n.total, subN)];
-    const fan = this.fanOf(n);
+    const fan = fanOut(n);
     if (fan) right.push([fan, "fan"]);
     const rightChars = partsLen(right);
     const caret = n.snap?.group ? 2 : 0;
@@ -531,6 +530,7 @@ export class FlowView {
   private clearHover(): void {
     const d = this.drawn;
     this.hover = null;
+    this.hoverEdge = null;
     this.layers.over.replaceChildren();
     this.tip.hidden = true;
     this.body.classList.remove("hl");
@@ -570,6 +570,7 @@ export class FlowView {
     const d = this.drawn;
     if (!d) return;
     this.clearHover();
+    this.hoverEdge = edge;
     this.body.classList.add("hl");
     const links = d.geo.links.filter((l) => l.edge === edge);
     for (const l of links) {
@@ -624,6 +625,7 @@ export class FlowView {
 
     const W = this.body.clientWidth;
     const H = this.body.clientHeight;
+    const sx = this.body.scrollLeft;
     const w = t.offsetWidth;
     const th = t.offsetHeight;
     let x = at?.x ?? 0;
@@ -637,9 +639,9 @@ export class FlowView {
       const el = d.nodeEls.get(key)?.querySelector("rect.hit");
       const r = el?.getBoundingClientRect();
       const b = this.body.getBoundingClientRect();
-      if (r) [x, y] = [r.left - b.left, r.bottom - b.top + 6];
+      if (r) [x, y] = [r.left - b.left + sx, r.bottom - b.top + 6];
     }
-    t.style.left = Math.max(4, Math.min(x, W - w - 8)) + "px";
+    t.style.left = Math.max(sx + 4, Math.min(x, sx + W - w - 8)) + "px";
     t.style.top = Math.max(4, Math.min(y, H - th - 8)) + "px";
   }
 

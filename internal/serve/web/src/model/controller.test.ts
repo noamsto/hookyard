@@ -295,3 +295,29 @@ test("the ring tick ages live counts out of the window", async () => {
   assert.equal(h.c.counts().calls, 0);
   h.c.dispose();
 });
+
+test("hover counts read the drawn frame's paths, never live ones: sub never exceeds total", async () => {
+  const h = harness();
+  h.setFlow(live([[{ hops: [["lint", "deny"]] }, 3]]));
+  await visible(h);
+  await loadAndCommit(h);
+  const lint = nodeKey("handler", "lint");
+  const drawnSub = () => h.c.subset(lint).nodeTotals.get(lint);
+  const drawnTotal = () => h.c.frame()?.totals.nodeTotals.get(lint);
+
+  h.c.pressBegin();
+  for (const off of [1001, 1002]) h.c.onCall(entry(off, { hops: [["lint", "deny"]] }, TS));
+  h.clock.advance(RENDER_MS);
+  assert.equal(drawnTotal(), 3, "the press holds the drawn frame");
+  assert.equal(drawnSub(), 3, "held: hover counts the drawn frame's calls");
+  h.c.pressEnd();
+  assert.equal(drawnTotal(), 5);
+  assert.equal(drawnSub(), 5);
+
+  h.clock.advance(RENDER_MS);
+  h.c.onCall(entry(1003, { hops: [["lint", "deny"]] }, TS));
+  assert.equal(drawnTotal(), 5, "the refresh is throttled");
+  assert.equal(drawnSub(), 5, "until the next refresh, hover counts the drawn frame's calls");
+  h.clock.advance(RENDER_MS);
+  assert.equal(drawnSub(), 6);
+});

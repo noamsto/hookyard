@@ -132,3 +132,12 @@ test("ribbon and pointOn follow the band's centre line", () => {
   assert.deepEqual(pointOn(l, 0.5, 2), { x: 50, y: 32 });
   assert.equal(ribbon(l, 4), "M0,8C50,8 50,48 100,48V52C50,52 50,12 0,12Z");
 });
+
+test("layout: a panel too narrow for the columns lays out wider, never with a negative extent", () => {
+  const g = layoutFlow(input({ width: 400 }));
+  for (const c of g.columns) assert.ok(c.x1 > c.x0, `column ${c.x0}..${c.x1}`);
+  assert.ok(g.width > 400, `laid out ${g.width} px wide`);
+  for (const n of g.nodes) assert.ok(n.x1 > n.x0 && n.x1 <= g.width - GUTTER, `${n.key} ${n.x0}..${n.x1} in ${g.width}`);
+  assert.ok(g.labelX[1] < g.width - GUTTER, "outcome labels start inside the graph");
+  assert.equal(layoutFlow(input()).width, 1200, "a wide enough panel keeps its width");
+});

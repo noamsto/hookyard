@@ -182,7 +182,9 @@ export function rankNodes(nodes: readonly RankNode[]): Map<string, number> {
 interface N extends GeoNodeIn { room: number; inH: number; outH: number; plateH: number; }
 interface L extends GeoLinkIn { width: number; }
 
-function columnsFor(width: number, charW: number, chars: GeoInput["chars"]): { x: number[]; w: number[]; labelX: [number, number] } {
+// columnsFor places the columns across width; a panel too narrow for them
+// at their minimum lays out wider (the flow body then scrolls sideways).
+function columnsFor(width: number, charW: number, chars: GeoInput["chars"]): { x: number[]; w: number[]; labelX: [number, number]; width: number } {
   const engineLabel = Math.ceil(chars[0] * charW) + 8;
   const outcomeLabel = Math.ceil(chars[3] * charW) + 8;
   const plate = (c: number) => Math.ceil(c * charW) + 2 * 8;
@@ -198,14 +200,19 @@ function columnsFor(width: number, charW: number, chars: GeoInput["chars"]): { x
     handlerW -= cut / 2;
     free = width - fixed - eventW - handlerW;
   }
-  const weights = [1, 1.6, 1.6];
-  const wsum = weights.reduce((a, b) => a + b, 0);
-  const gaps = weights.map((w) => Math.max(MIN_GAP, (free * w) / wsum));
+  // Gaps share the free width 1 : 1.6 : 1.6; the engine gap, the smallest,
+  // takes at least MIN_GAP from the other two.
+  let gaps = [1, 1.6, 1.6].map((w) => (free * w) / 4.2);
+  if (gaps[0] < MIN_GAP) {
+    const rest = Math.max(MIN_GAP, (free - MIN_GAP) / 2);
+    gaps = [MIN_GAP, rest, rest];
+  }
   const x0 = GUTTER + engineLabel;
   const x1 = x0 + BAR_W + gaps[0];
   const x2 = x1 + eventW + gaps[1];
   const x3 = x2 + handlerW + gaps[2];
-  return { x: [x0, x1, x2, x3], w: [BAR_W, eventW, handlerW, BAR_W], labelX: [GUTTER, x3 + BAR_W + 6] };
+  const need = x3 + BAR_W + outcomeLabel + GUTTER;
+  return { x: [x0, x1, x2, x3], w: [BAR_W, eventW, handlerW, BAR_W], labelX: [GUTTER, x3 + BAR_W + 6], width: need > width + 0.5 ? Math.ceil(need) : width };
 }
 
 // Links into and out of each node, in the band order: every stack sorted by
@@ -292,7 +299,7 @@ function relax(nodes: N[], links: L[], rank: Map<string, number>): Map<string, n
     .nodeWidth(1)
     .nodePadding(PAD)
     .nodeSort((a, b) => (rank.get(a.key) ?? 0) - (rank.get(b.key) ?? 0))
-    .linkSort((a, b) => order(a as unknown as L, b as unknown as L))
+    .linkSort(order)
     .iterations(6)
     .extent([[0, 0], [3, extent]]);
   const out = layout(graph);
@@ -300,7 +307,7 @@ function relax(nodes: N[], links: L[], rank: Map<string, number>): Map<string, n
 }
 
 export function layoutFlow(input: GeoInput): Geometry {
-  const { x, w, labelX } = columnsFor(input.width, input.charW, input.chars);
+  const { x, w, labelX, width } = columnsFor(input.width, input.charW, input.chars);
   const nodes: N[] = input.nodes.map((n) => ({ ...n, room: 0, inH: 0, outH: 0, plateH: 0 }));
   const keys = new Set(nodes.map((n) => n.key));
   const links: L[] = input.links.filter((l) => l.count > 0 && keys.has(l.from) && keys.has(l.to)).map((l) => ({ ...l, width: 0 }));
@@ -378,9 +385,9 @@ export function layoutFlow(input: GeoInput): Geometry {
     { x0: GUTTER, x1: x[0] + BAR_W },
     { x0: x[1], x1: x[1] + w[1] },
     { x0: x[2], x1: x[2] + w[2] },
-    { x0: x[3], x1: input.width - GUTTER },
+    { x0: x[3], x1: width - GUTTER },
   ];
-  return { width: input.width, height, ky, top: TOP, bottom, columns, labelX, nodes: out, links: geoLinks, byKey };
+  return { width, height, ky, top: TOP, bottom, columns, labelX, nodes: out, links: geoLinks, byKey };
 }
 
 // ribbon: the closed outline of a band of width w whose centre runs from
