@@ -1,10 +1,12 @@
 {
   "compilerOptions": {
     "strict": true,
+    "skipLibCheck": true,
     "target": "ES2022",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "preserve",
     "moduleResolution": "bundler",
+    "types": ["node"],
     "jsx": "react-jsx",
     "noEmit": true,
     "allowImportingTsExtensions": true,
