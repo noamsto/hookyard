@@ -119,6 +119,7 @@ function FlowCanvas({ controller }: { controller: FlowController }) {
 
   const onNodeClick = useCallback(
     (ev: ReactMouseEvent, node: RFNode) => {
+      if (!controller.snapshot()?.has(node.id)) return; // headers etc. — not a graph node
       const [col, name] = splitKey(node.id);
       if (col === "group") {
         if (!(ev.target as HTMLElement).closest(".flow-group-header")) return;
@@ -133,10 +134,11 @@ function FlowCanvas({ controller }: { controller: FlowController }) {
   const onNodeMouseEnter = useCallback(
     (ev: ReactMouseEvent, node: RFNode) => {
       if (panningRef.current) return;
+      if (!controller.snapshot()?.has(node.id)) return; // headers etc. — not a graph node
       lastPointerRef.current = { clientX: ev.clientX, clientY: ev.clientY };
       setHoveredKey(node.id);
     },
-    [],
+    [controller],
   );
   const onNodeMouseMove = useCallback((ev: ReactMouseEvent) => {
     lastPointerRef.current = { clientX: ev.clientX, clientY: ev.clientY };

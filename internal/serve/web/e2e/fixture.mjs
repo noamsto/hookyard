@@ -101,6 +101,10 @@ const PAST_PATHS = [
   { n: 2, engine: "codex", event: "post_tool", native: "PostToolUse", tool: "apply_patch", verdict: "allow",
     hops: [["aeye-fmt", "allow"], ["audit", "allow"]] },
   { n: 1, engine: "pi", event: "", native: "turn_end", verdict: "abstain" },
+  // Mirrors TODAY_PATHS' router-error entry so the two days observe the same
+  // "extra" (non-skeleton) topology nodes under show-idle: a day switch with
+  // idle on then keeps the layout's node set — and its plan key — unchanged.
+  { n: 1, engine: "cursor", event: "", native: "beforeReadFile", verdict: "allow", router: "error" },
 ];
 
 function linesOf(paths, tsOf) {

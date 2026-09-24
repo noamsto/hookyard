@@ -95,6 +95,13 @@ export function PulseLayer({ controller, bodyRef }: { controller: FlowController
     }
     function tick(now: number): void {
       rafId = null;
+      // canAnimate may have gone false since this frame was requested (e.g. a
+      // day switch with no relayout to bump layoutGen) — free dots rather
+      // than leave them frozen mid-edge with no one left to reschedule them.
+      if (!canAnimate()) {
+        cancelAll();
+        return;
+      }
       flushQueue(now);
       for (let i = active.length - 1; i >= 0; i--) {
         const st = active[i];
@@ -139,12 +146,18 @@ export function PulseLayer({ controller, bodyRef }: { controller: FlowController
 
     // A relayout commit may unmount the edge <path>s an active dot is
     // sampling; cancel rather than animate onto a stale, detached element.
+    // Also cancel on any other emit once canAnimate() has gone false — a
+    // live -> past day switch can leave layoutGen unchanged (idle nodes make
+    // both days' plan keys equal) and setVisible(false) has no relayout at
+    // all, so layoutGen alone misses both.
     const unsubscribeVersion = controller.subscribe(() => {
       const gen = controller.layoutGen();
       if (gen !== lastGen) {
         lastGen = gen;
         cancelAll();
+        return;
       }
+      if (!canAnimate()) cancelAll();
     });
 
     function onVisibility(): void {

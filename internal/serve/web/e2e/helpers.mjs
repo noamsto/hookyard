@@ -46,6 +46,13 @@ function pageHelpers() {
       const el = q(`#flow-body [data-col="${CSS.escape(col)}"][data-name="${CSS.escape(name)}"]`);
       return el ? this.hit(el) : null;
     },
+    // headerPoint: the i-th column header (engine, event, handler, outcome —
+    // DOM order matches buildNodes' COLUMNS loop). Headers aren't graph
+    // nodes, so unlike nodePoint this can't key off data-col/data-name.
+    headerPoint(i) {
+      const el = qa(".react-flow__node-colHeader")[i];
+      return el ? this.hit(el) : null;
+    },
     groupHeaderPoint(member) {
       const g = groupEls().find((el) => JSON.parse(el.dataset.members).includes(member));
       const h = g?.querySelector(".flow-group-header");
@@ -110,6 +117,11 @@ function pageHelpers() {
     },
     circles() {
       return qa("#flow-body circle").length;
+    },
+    // activeCircles: pulse dots actually drawn (r > 0), vs. the fixed,
+    // mostly-idle MAX_DOTS pool circles() counts.
+    activeCircles() {
+      return qa("#flow-body circle").filter((c) => Number(c.getAttribute("r")) > 0).length;
     },
     appJsLoads() {
       return performance.getEntriesByType("resource").filter((e) => new URL(e.name).pathname === "/static/app.js").length;

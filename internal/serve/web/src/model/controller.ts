@@ -168,7 +168,14 @@ export class FlowController {
 
   setVisible(v: boolean): Promise<void> {
     this.visible = v;
-    if (!v) return Promise.resolve();
+    if (!v) {
+      // No relayout follows hiding the panel; emit anyway so a subscriber
+      // (PulseLayer) sees the visibility change and can cancel in-flight
+      // dots rather than wait for a queued rAF that may run after the tab
+      // has flipped back to visible.
+      this.emit();
+      return Promise.resolve();
+    }
     if (this.stale) {
       this.stale = false;
       return this.load();

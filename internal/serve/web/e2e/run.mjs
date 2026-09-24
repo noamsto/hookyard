@@ -414,6 +414,94 @@ async function check7(page, env) {
   ];
 }
 
+// Column header nodes exist only so ELK sizes/positions them; they must
+// never behave like graph nodes (bridge review: HIGH).
+async function check8(page, env) {
+  await openFlow(page, env.base);
+  const lines = [];
+  const errorsAt = page.errors.length;
+  const searchBefore = await page.evaluate("location.search");
+
+  for (let i = 0; i < 4; i++) {
+    const p = await page.evaluate(`__e2e.headerPoint(${i})`);
+    assert(p, `header ${i} not found`);
+    await page.click(p.x, p.y);
+  }
+  await sleep(200);
+
+  const errors = page.errors.slice(errorsAt);
+  assert(errors.length === 0, `${errors.length} console errors/exceptions after clicking the 4 column headers:\n      ` + errors.join("\n      "));
+  const searchAfter = await page.evaluate("location.search");
+  assert(searchAfter === searchBefore, `URL changed after header clicks: "${searchBefore}" -> "${searchAfter}"`);
+  const chips = await page.evaluate("__e2e.chips()");
+  assert(chips.length === 0, "chips appeared after header clicks: " + JSON.stringify(chips));
+  lines.push("clicked all 4 column headers: no console errors/exceptions, URL unchanged, no chips");
+
+  const hp = await page.evaluate("__e2e.headerPoint(0)");
+  await page.move(hp.x, hp.y);
+  await sleep(200);
+  const hl = await page.evaluate(`document.getElementById("flow-body").classList.contains("hl")`);
+  assert(!hl, "#flow-body has class hl after hovering a header");
+  lines.push("hovered the engine header: #flow-body has no hl class");
+  return lines;
+}
+
+async function switchDay(page, day) {
+  await page.evaluate(`(() => {
+    const sel = document.getElementById("day-select");
+    sel.value = ${JSON.stringify(day)};
+    sel.dispatchEvent(new Event("change", { bubbles: true }));
+  })()`);
+}
+
+async function assertPulsesGone(page, what) {
+  try {
+    await page.waitFor("__e2e.state().dots === 0 && __e2e.activeCircles() === 0", 1000, what);
+  } catch {
+    const s = await page.evaluate("__e2e.state()");
+    const active = await page.evaluate("__e2e.activeCircles()");
+    throw new CheckFailed(`data-active-dots ${s.dots}, ${active} circle(s) with r > 0, 1 s after ${what}`);
+  }
+}
+
+// In-flight pulses must not freeze mid-edge when animation stops without a
+// relayout (bridge review: HIGH).
+async function check9(page, env) {
+  const lines = [];
+
+  // Phase 1: live day, show idle on -- idle nodes come from the (day-
+  // independent) handler table, so the past day's plan key equals today's
+  // unchanged and no relayout bumps layoutGen on the switch.
+  await openFlow(page, env.base);
+  const idle = await page.evaluate(`__e2e.hit(document.querySelector(".flow-idle input"))`);
+  assert(idle.ok, "show-idle checkbox not hit-testable");
+  await page.click(idle.x, idle.y);
+  await page.waitFor("__e2e.settled()", 5000, "relayout after show-idle on");
+  const genAfterIdle = (await page.evaluate("__e2e.state()")).gen;
+
+  append(env.stateDir, TODAY_PATHS.slice(0, 6).map((p) => record({ ...p, ts: Date.now() })));
+  await page.waitFor("__e2e.state().dots > 0", 3000, "live dots active before the day switch");
+  const before = await page.evaluate("__e2e.state()");
+
+  await switchDay(page, env.past);
+  await assertPulsesGone(page, `switching #day-select to ${env.past} (gen stayed ${genAfterIdle} -> ${(await page.evaluate("__e2e.state()")).gen})`);
+  lines.push(`live day, show idle on: ${before.dots} dot(s) in flight -> switched #day-select to ${env.past} -> 0 dots, 0 active circles within 1 s`);
+
+  // Phase 2: dots in flight, tab away and back before any of them finish.
+  await openFlow(page, env.base);
+  append(env.stateDir, TODAY_PATHS.slice(0, 6).map((p) => record({ ...p, ts: Date.now() })));
+  await page.waitFor("__e2e.state().dots > 0", 3000, "live dots active before the tab switch");
+
+  const feedTab = await page.evaluate(`__e2e.hit(document.querySelector('[data-view="feed"]'))`);
+  const flowTab = await page.evaluate(`__e2e.hit(document.querySelector('[data-view="flow"]'))`);
+  assert(feedTab.ok && flowTab.ok, "view-toggle tabs not hit-testable");
+  await page.click(feedTab.x, feedTab.y);
+  await page.click(flowTab.x, flowTab.y);
+  await assertPulsesGone(page, "clicking the feed tab then the flow tab");
+  lines.push("dots in flight -> click feed tab -> click flow tab -> 0 dots, 0 active circles within 1 s");
+  return lines;
+}
+
 const CHECKS = [
   { n: 1, title: "edge totals == /api/flow derivation (4 filter sets)", fn: check1 },
   { n: 2, title: "zoom, pan, fit, minimap", fn: check2 },
@@ -422,6 +510,8 @@ const CHECKS = [
   { n: 5, title: "#96 window 1: header click before the coalesced relayout", fn: check5, fresh: true },
   { n: 6, title: "#96 window 2: relayout ready mid-press is held", fn: check6, fresh: true },
   { n: 7, title: "static past day: no pulses, whole-day meta", fn: check7 },
+  { n: 8, title: "column headers are not interactive graph nodes", fn: check8 },
+  { n: 9, title: "in-flight pulses cancel on a day switch or a view toggle", fn: check9, fresh: true },
 ];
 
 async function main() {
