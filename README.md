@@ -153,31 +153,47 @@ and the rest dimmed. The flow graph draws only the matching branches — same
 rule, same filter.
 
 - **feed** — every call, newest first, live for today and paged for past days.
-- **flow** — the pipeline as a graph, engine → event → handler → outcome.
-  Engine and event count calls; handler and handler outcome count branches
-  (one handler run), and the column headers say so. The last hop is each
-  handler's *own* outcome, not the call's consolidated verdict, so a deny
-  shows which guard denied it. Calls with no handler go straight from event
-  to their verdict (`abstain` or `suppressed`) along a dashed edge. Router
-  errors lead to a `router error` node. A handler that ran but is no longer
-  in the installed table appears dashed. On today, edge thickness is the
-  last 10 minutes of traffic (day files are UTC, so the window starts over
-  at UTC midnight), and each live call pulses along its path. A past day
-  shows static whole-day totals.
+- **flow** — the pipeline as a graph, engine → event → handler → outcome,
+  rendered with React Flow and laid out by ELK. Engine and event count
+  calls; handler and handler outcome count branches (one handler run), and
+  the column headers say so. The last hop is each handler's *own* outcome,
+  not the call's consolidated verdict, so a deny shows which guard denied
+  it. Calls with no handler go straight from event to their verdict
+  (`abstain` or `suppressed`) along a dashed edge. Router errors lead to a
+  `router error` node. A handler that ran but is no longer in the installed
+  table appears dashed. On today, edge thickness is the last 10 minutes of
+  traffic (day files are UTC, so the window starts over at UTC midnight),
+  and each live call pulses along its path. A past day shows static
+  whole-day totals.
 
   Handlers are grouped by id prefix (`guards.*`, `guards.pi.*`, `aeye-*`,
-  `houston.*`); click a group to expand or collapse it. A group holding a
-  filtered handler stays open; under a handler or handler-outcome filter,
-  small groups open on their own. Idle nodes (no traffic in the window) are
-  hidden; "show idle" brings them back. Wheel or pinch zoom around the
-  cursor, drag pans, a fit button and `+`/`-`/`0` do the same from the
-  keyboard. Hovering a node highlights every path through it with a tooltip
-  of counts. Clicking a node filters by it — shift/ctrl-click adds it
-  instead of replacing, and clicking an active node removes it.
+  `houston.*`) into collapsible containers; click a group's header to
+  expand or collapse it. A group holding a filtered handler is forced open
+  — a pin cue on its header, and the click does nothing — and under a
+  handler or handler-outcome filter, small groups open on their own. A
+  group you toggle by hand stays that way across live updates, day
+  switches and other filter changes, but resets to the default (forced or
+  auto) as soon as the handler or handler-outcome filter values change, so
+  switching to a new filter never leaves a group collapsed that filter
+  would otherwise open. Idle nodes (no traffic in the window) are hidden;
+  "show idle" brings them back. Wheel or pinch zoom around the cursor, drag
+  pans, the MiniMap and Controls' fit button and `+`/`-`/`0` do the same
+  from the keyboard. Hovering a node highlights every path through it with
+  a tooltip of counts. Clicking a node filters by it — shift/ctrl-click
+  adds it instead of replacing, and clicking an active node removes it.
 
 ![The default flow view: engines, events, handlers and outcomes, with edge thickness showing the last 10 minutes of traffic](docs/serve-flow.png)
 ![A handler group expanded and zoomed in, hovering a handler to trace its paths](docs/serve-flow-grouped.png)
 ![Filtered to the deny outcome on a past day, showing which guards denied](docs/serve-flow-filtered.png)
+
+**Building the flow view.** Its source lives in `internal/serve/web`
+(React Flow + ELK, esbuild-bundled); the built output under
+`internal/serve/assets/flow/` is a committed generated artefact, and the
+`flow-bundle` nix check fails if it drifts from source. After changing
+`web/src/`, rebuild from `internal/serve/web` with `npm ci && npm run
+build`, and `npm test` for the model unit tests. `npm run e2e` drives a
+real Chromium over CDP — set `CHROME=/path/to/chromium` if it isn't on
+`PATH`.
 
 ### Session lifecycle for dashboards
 

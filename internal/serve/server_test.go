@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -663,6 +664,53 @@ func TestNoAccessControlAllowOrigin(t *testing.T) {
 		if resp.Header.Get("Access-Control-Allow-Origin") != "" {
 			t.Errorf("%s: got CORS header, want none", path)
 		}
+	}
+}
+
+// TestFlowBundleEmbedded guards the #97 esbuild bundle: the embedded FS
+// carries the built flow/ assets, index.html points at their /static/flow/
+// path (not the old /static/flow.js), and the server actually serves them.
+func TestFlowBundleEmbedded(t *testing.T) {
+	sub, err := staticFS()
+	if err != nil {
+		t.Fatalf("staticFS: %v", err)
+	}
+	for _, name := range []string{"flow/flow.js", "flow/flow.css", "flow/elk-worker.js"} {
+		data, err := fs.ReadFile(sub, name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if len(data) == 0 {
+			t.Errorf("%s: embedded but empty", name)
+		}
+	}
+
+	index, err := indexHTML()
+	if err != nil {
+		t.Fatalf("indexHTML: %v", err)
+	}
+	if !strings.Contains(string(index), `/static/flow/flow.js`) {
+		t.Error("index.html does not reference /static/flow/flow.js")
+	}
+	if !strings.Contains(string(index), `/static/flow/flow.css`) {
+		t.Error("index.html does not reference /static/flow/flow.css")
+	}
+	if strings.Contains(string(index), `/static/flow.js`) {
+		t.Error("index.html still references the old /static/flow.js path")
+	}
+
+	stateDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	base := runTestServer(t, ctx, serveOpts(t, stateDir))
+
+	resp := get(t, base+"/static/flow/flow.js")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /static/flow/flow.js: %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "javascript") {
+		t.Errorf("Content-Type: %q, want a javascript type", ct)
 	}
 }
 

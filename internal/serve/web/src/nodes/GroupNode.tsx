@@ -8,7 +8,8 @@ import { fmtCount } from "../format.ts";
 import { HIDDEN_HANDLE_STYLE } from "./handleStyle.ts";
 
 export interface GroupData extends Record<string, unknown> {
-  label: string;
+  dataName: string; // data-name: the bare group label — the harness keys on it
+  tipName: string; // "guards.* (8)" — label with the member count, for display
   members: string[];
   n: number;
   expanded: boolean;
@@ -34,7 +35,7 @@ export function GroupNode({ data }: NodeProps<GroupNodeType>) {
     <div
       className={cls.join(" ")}
       data-col="group"
-      data-name={data.label}
+      data-name={data.dataName}
       data-n={data.n}
       data-members={JSON.stringify(data.members)}
       data-expanded={data.expanded}
@@ -43,7 +44,7 @@ export function GroupNode({ data }: NodeProps<GroupNodeType>) {
       <Handle type="target" position={Position.Left} style={HIDDEN_HANDLE_STYLE} />
       <div className="flow-group-header">
         <span className="flow-group-arrow" aria-hidden="true">{data.expanded ? "▾" : "▸"}</span>
-        <span className="flow-node-label">{data.label}</span>
+        <span className="flow-node-label">{data.tipName}</span>
         <span className="flow-node-count">{fmtCount(data.n)}</span>
         {data.forced && <span className="flow-group-pin" aria-hidden="true" />}
       </div>

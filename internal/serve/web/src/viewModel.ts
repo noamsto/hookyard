@@ -17,26 +17,27 @@ const HEADER_GAP = 40;
 export type FlowNode = CardNodeType | GroupNodeType | HeaderNodeType;
 export interface Highlight { nodes: Set<string>; edges: Set<string>; }
 
-function headerPosition(snap: Snapshot, col: Col): { x: number; y: number } {
-  const c = COL_INDEX[col];
-  const x = snap.columnX[c] ?? 0;
+// All four headers sit on one common row, above the highest top-level node
+// in any column, so they never stagger to their own column's height.
+function topRowY(snap: Snapshot): number {
   let minY: number | undefined;
   for (const n of snap.nodes) {
-    if (n.parent !== undefined || COL_INDEX[n.col] !== c) continue;
+    if (n.parent !== undefined) continue;
     if (minY === undefined || n.box.y < minY) minY = n.box.y;
   }
-  return { x, y: (minY ?? 0) - HEADER_GAP };
+  return (minY ?? 0) - HEADER_GAP;
 }
 
 export function buildNodes(snap: Snapshot | null, totals: Totals, controller: FlowController, hl: Highlight | null): FlowNode[] {
   if (!snap) return [];
   const nodes: FlowNode[] = [];
 
+  const headerY = topRowY(snap);
   for (const col of COLUMNS) {
-    const { x, y } = headerPosition(snap, col);
+    const x = snap.columnX[COL_INDEX[col]] ?? 0;
     const data: HeaderData = { title: COL_HEADERS[col] };
     nodes.push({
-      id: "header\x00" + col, type: "colHeader", position: { x, y }, data,
+      id: "header\x00" + col, type: "colHeader", position: { x, y: headerY }, data,
       draggable: false, selectable: false, focusable: false,
     });
   }
@@ -50,7 +51,7 @@ export function buildNodes(snap: Snapshot | null, totals: Totals, controller: Fl
     const style = { width: n.box.w, height: n.box.h };
     if (n.group) {
       const data: GroupData = {
-        label: n.group.label, members: n.group.members, n: count,
+        dataName: n.group.label, tipName: n.tipName, members: n.group.members, n: count,
         expanded: n.group.expanded, forced: n.group.forced, on,
       };
       const node: GroupNodeType = {
