@@ -27,7 +27,7 @@ func clampWindow(s string) int {
 
 // flowKey groups records by the tuple the flow view draws as one path:
 // engine, canonical_event, native_event, router, verdict, and the pruned
-// hops (D3: only the branches a request's Filter matched) in record order.
+// hops (only the branches a request's Filter matched) in record order.
 // "\x00" separates fields (including within a hop's own name/outcome pair)
 // and "\x01" separates hops, so neither can collide with a field value in
 // practice and the two never nest. Pruning at the key, not just the display
@@ -53,9 +53,9 @@ type flowAgg struct {
 // FlowForDay groups day's records matching f by path tuple (flowKey). When
 // window > 0 each path's Counts is bucketed by minute over the window
 // minutes ending at now's minute; window == 0 collapses everything into one
-// whole-day bucket. Alongside the paths it returns each column's facet
-// (SPEC D3): a facet is counted in the same scan and window, with every
-// filter applied except that column's own field.
+// whole-day bucket. Alongside the paths it returns each column's facet: a
+// facet is counted in the same scan and window, with every filter applied
+// except that column's own field.
 func FlowForDay(stateDir, day string, window int, now time.Time, f Filter) (FlowResponse, error) {
 	resp := FlowResponse{
 		Day:    day,

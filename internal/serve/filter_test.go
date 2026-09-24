@@ -156,8 +156,8 @@ func TestParseFilter(t *testing.T) {
 	}
 }
 
-// TestParseFilterOutcome pins the new "outcome" param (D2), parsed and
-// emptied out the same way as every other repeated field.
+// TestParseFilterOutcome verifies the "outcome" param is parsed and emptied
+// out the same way as every other repeated field.
 func TestParseFilterOutcome(t *testing.T) {
 	q, err := url.ParseQuery("outcome=deny&outcome=&outcome=abstain")
 	if err != nil {
@@ -170,9 +170,8 @@ func TestParseFilterOutcome(t *testing.T) {
 	}
 }
 
-// eightHandlerCall is D1's "N handlers" shape: 8 branches, one denying, the
-// rest abstaining, with a consolidated verdict of "deny" — the "deny in one
-// handler of 8" case (PLAN S1).
+// eightHandlerCall is an "N handlers" shape: 8 branches, one denying, the
+// rest abstaining, with a consolidated verdict of "deny".
 func eightHandlerCall() record.Record {
 	rec := record.Record{
 		Engine: "claude-code", CanonicalEvent: "pre_tool", NativeEvent: "PreToolUse",

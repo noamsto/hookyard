@@ -18,7 +18,7 @@ const VERDICT_OPTIONS = [
 
 // FIELDS is the branch-then-call filter order shared by filterParams, the
 // chip row and the add-selects: engine, event, handler, outcome (branch),
-// verdict (call), then session (SPEC D2/D6).
+// verdict (call), then session.
 const FIELDS = ["engine", "event", "handler", "outcome", "verdict"];
 
 const FILTER_SELECTS = { engine: "f-engine", event: "f-event", handler: "f-handler", outcome: "f-outcome", verdict: "f-verdict" };
@@ -100,8 +100,8 @@ function debounce(fn, ms) {
 
 // ---------- filters ----------
 
-// filterState is the one source of truth for active filters (D6): one array
-// per field plus session, mirrored to the URL and read by filterParams. The
+// filterState is the one source of truth for active filters: one array per
+// field plus session, mirrored to the URL and read by filterParams. The
 // add-selects never carry selection themselves — they only append to this.
 const filterState = { engine: [], event: [], handler: [], outcome: [], verdict: [], session: "" };
 
@@ -126,7 +126,7 @@ export function filterParams() {
 
 // applyFiltersFromParams loads filterState from the URL. A value not among a
 // field's current select options still lands in the state and still shows as
-// a chip — the state is the truth, not the options (D6).
+// a chip — the state is the truth, not the options.
 function applyFiltersFromParams(params) {
   for (const field of FIELDS) filterState[field] = params.getAll(field).filter(Boolean);
   filterState.session = params.get("session") || "";
@@ -150,7 +150,7 @@ function clearFilters() {
 }
 
 // toggleFilter is the one mutator shared by the filter-chip × buttons and
-// flow.js's node clicks (D7): active → remove; else additive → append; else
+// flow.js's node clicks: active → remove; else additive → append; else
 // replace the field's values with just this one.
 export function toggleFilter(field, value, additive) {
   const values = filterState[field];
@@ -516,7 +516,7 @@ function populateFilterOptions(table) {
   fillSelect(el("f-handler"), "handler", (table.handlers || []).map((h) => h.id));
 }
 
-// eventOptions is table.events plus every engine-scoped handler event (D6):
+// eventOptions is table.events plus every engine-scoped handler event, in
 // table order, deduped.
 function eventOptions(table) {
   const seen = new Set();
@@ -538,7 +538,7 @@ function eventOptions(table) {
 
 // fillSelect rebuilds an add-select: a "+ <label>" placeholder (value "")
 // followed by the options. These selects never hold selection themselves —
-// filterState does (D6) — so there is nothing to preserve across a rebuild.
+// filterState does — so there is nothing to preserve across a rebuild.
 function fillSelect(select, label, values) {
   select.textContent = "";
   const placeholder = document.createElement("option");
@@ -676,7 +676,7 @@ document.addEventListener("keydown", (ev) => {
 
 // Each add-select is wired individually, not through a form-level "change"
 // listener: picking a value appends it to filterState and resets the select
-// to its placeholder, which a generic listener can't express (S6).
+// to its placeholder, which a generic listener can't express.
 for (const field of FIELDS) {
   const select = el(FILTER_SELECTS[field]);
   select.addEventListener("change", () => {

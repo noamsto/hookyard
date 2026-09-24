@@ -359,7 +359,7 @@ button:hover { border-color: var(--accent); }
 .chip-ms { color: var(--fg-dim); }
 
 /* chip--dim/chip--hit mark a handler-run chip against an active branch
-   filter (SPEC D5/D3 Entry.Hits): dim = not a hit, hit = matched branch. */
+   filter (Entry.Hits): dim = not a hit, hit = matched branch. */
 .chip--dim { opacity: .35; }
 .chip--hit { outline: 1px solid var(--accent); outline-offset: 1px; }
 

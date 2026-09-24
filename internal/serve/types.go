@@ -41,8 +41,7 @@ type Entry struct {
 	Day    string        `json:"day"`    // YYYY-MM-DD
 	Offset int64         `json:"offset"` // byte offset just past this record
 	// Hits is the branch indices a request's Filter.Hits found in Rec.
-	// Absent (nil) means "no branch filter" — every handler is a hit
-	// (SPEC D3).
+	// Absent (nil) means "no branch filter" — every handler is a hit.
 	Hits []int `json:"hits,omitempty"`
 }
 
@@ -72,9 +71,9 @@ type Snapshot struct {
 	Since     string                  `json:"since"` // ts of the first counted record
 }
 
-// Filter is the branch-aware predicate (SPEC D1/D2). Engine, session, event
-// and verdict are call-level; handler and outcome are branch-level and must
-// hold on the same branch of the call (Filter.Match).
+// Filter is the branch-aware predicate. Engine, session, event and verdict
+// are call-level; handler and outcome are branch-level and must hold on the
+// same branch of the call (Filter.Match).
 type Filter struct {
 	Engines  []string
 	Session  string   // case-insensitive substring
@@ -138,11 +137,11 @@ type FlowResponse struct {
 	Facets      FlowFacets `json:"facets"`
 }
 
-// FlowFacets gives each filterable column its own counts (SPEC D3), so a
-// filtered column can still show the other values the client might add: each
-// field's facet applies every filter *except that field's own*. engine and
-// event facets count calls; handler and outcome facets count branches. Every
-// map is non-nil, even when empty.
+// FlowFacets gives each filterable column its own counts, so a filtered
+// column can still show the other values the client might add: each field's
+// facet applies every filter *except that field's own*. engine and event
+// facets count calls; handler and outcome facets count branches. Every map
+// is non-nil, even when empty.
 type FlowFacets struct {
 	Engine  map[string]int64 `json:"engine"`
 	Event   map[string]int64 `json:"event"`

@@ -61,7 +61,7 @@ func TestScanDayNewestFirstAndLimit(t *testing.T) {
 	}
 }
 
-// TestScanDaySetsHitsUnderABranchFilter pins S3: ScanDay hands each Entry
+// TestScanDaySetsHitsUnderABranchFilter verifies ScanDay hands each Entry
 // the branch indices the request's filter matched.
 func TestScanDaySetsHitsUnderABranchFilter(t *testing.T) {
 	stateDir := t.TempDir()
@@ -87,8 +87,8 @@ func TestScanDaySetsHitsUnderABranchFilter(t *testing.T) {
 	}
 }
 
-// TestScanDayNoFilterOmitsHits pins the "no branch filter" wire shape: Hits
-// is nil, and the omitempty tag drops the key from the JSON entirely.
+// TestScanDayNoFilterOmitsHits verifies the "no branch filter" wire shape:
+// Hits is nil, and the omitempty tag drops the key from the JSON entirely.
 func TestScanDayNoFilterOmitsHits(t *testing.T) {
 	stateDir := t.TempDir()
 	day := "2026-09-10"

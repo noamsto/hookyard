@@ -239,9 +239,9 @@ func (h *Hub) handle(ev TailEvent) {
 }
 
 // fanOut applies the filters server-side, so the client renders what it is
-// sent and the filter semantics live in one tested place (SPEC D2). Each
-// subscriber's frame carries its own Hits — a per-subscriber copy of e, so
-// the shared e is never mutated.
+// sent and the filter semantics live in one tested place. Each subscriber's
+// frame carries its own Hits — a per-subscriber copy of e, so the shared e
+// is never mutated.
 func (h *Hub) fanOut(e Entry) {
 	id := e.Day + ":" + strconv.FormatInt(e.Offset, 10)
 	for s := range h.subs {

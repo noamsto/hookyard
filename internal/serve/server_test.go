@@ -288,7 +288,7 @@ func TestFlowEndpointDefaultsDayAndFilters(t *testing.T) {
 	}
 }
 
-// TestFlowEndpointOutcomeFilter pins S4: the outcome query param reaches
+// TestFlowEndpointOutcomeFilter verifies the outcome query param reaches
 // FlowForDay through ParseFilter, and the response carries pruned paths plus
 // branches and facets.
 func TestFlowEndpointOutcomeFilter(t *testing.T) {
@@ -338,7 +338,7 @@ func TestFlowEndpointOutcomeFilter(t *testing.T) {
 	}
 }
 
-// TestEventsEndpointOutcomeFilterCarriesHits pins S4: /api/events entries
+// TestEventsEndpointOutcomeFilterCarriesHits verifies /api/events entries
 // carry hits under a branch filter, reaching ScanDay through ParseFilter.
 func TestEventsEndpointOutcomeFilterCarriesHits(t *testing.T) {
 	stateDir := t.TempDir()

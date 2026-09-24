@@ -139,7 +139,7 @@ func TestFlowForDayFilterMatchesRecordSubset(t *testing.T) {
 		{Events: []string{"pi:turn_end"}},
 		{Events: []string{"PreToolUse"}},
 		{Handlers: []string{"h2"}},
-		{Verdicts: []string{"deny"}}, // D2: call-level only — the consolidated verdict or router status, never a handler's own outcome
+		{Verdicts: []string{"deny"}}, // call-level only — the consolidated verdict or router status, never a handler's own outcome
 		{Session: "sess-a"},
 	}
 
@@ -282,9 +282,9 @@ func TestFlowForDayNextOffsetExcludesPartialLine(t *testing.T) {
 	}
 }
 
-// TestFlowForDayHandlerFilterPrunesToOneHop covers D3's pruning rule under a
-// branch filter: a matched path keeps only the matching branch's hop, and
-// two calls differing only in a filtered-out handler's outcome merge.
+// TestFlowForDayHandlerFilterPrunesToOneHop covers pruning under a branch
+// filter: a matched path keeps only the matching branch's hop, and two calls
+// differing only in a filtered-out handler's outcome merge.
 func TestFlowForDayHandlerFilterPrunesToOneHop(t *testing.T) {
 	stateDir := t.TempDir()
 	day := "2026-09-10"

@@ -226,7 +226,7 @@ func TestHubFansOutOnlyMatchingCalls(t *testing.T) {
 	}
 }
 
-// TestFanOutHitsPerSubscriber pins S3: fanOut computes each subscriber's
+// TestFanOutHitsPerSubscriber verifies fanOut computes each subscriber's
 // Hits from its own filter, against the one shared Entry, without mutating
 // it for the next subscriber.
 func TestFanOutHitsPerSubscriber(t *testing.T) {

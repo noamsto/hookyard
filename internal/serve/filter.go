@@ -8,14 +8,14 @@ import (
 	"github.com/noamsto/hookyard/internal/record"
 )
 
-// outcomeRouterError is the branch outcome D1 assigns a router-error call's
+// outcomeRouterError is the branch outcome assigned to a router-error call's
 // pseudo-branch: the vocabulary is handler outcomes plus this one call-level
 // value, so a router error can be selected through the same "outcome" field.
 const outcomeRouterError = "router-error"
 
-// ParseFilter reads the six filter params (SPEC D2). Empty strings are
-// dropped so a blank repeated value (e.g. "engine=") does not turn an
-// otherwise-empty field into one that matches nothing.
+// ParseFilter reads the six filter params. Empty strings are dropped so a
+// blank repeated value (e.g. "engine=") does not turn an otherwise-empty
+// field into one that matches nothing.
 func ParseFilter(q url.Values) Filter {
 	return Filter{
 		Engines:  nonEmpty(q["engine"]),
@@ -37,7 +37,7 @@ func nonEmpty(vals []string) []string {
 	return out
 }
 
-// branch is one of a call's branches (SPEC D1): a router-error call gets one
+// branch is one of a call's branches: a router-error call gets one
 // pseudo-branch, a routed call with no handlers gets one direct branch, and
 // a routed call with handlers gets one branch per handler. idx is the index
 // into record.Handlers, or -1 for the pseudo/direct branches, which have no
@@ -47,7 +47,6 @@ type branch struct {
 	idx              int
 }
 
-// branches returns r's branches per D1.
 func branches(r record.Record) []branch {
 	if r.Router == record.RouterError {
 		return []branch{{handler: "", outcome: outcomeRouterError, idx: -1}}
@@ -71,7 +70,7 @@ func (f Filter) outcomeOK(b branch) bool {
 }
 
 // branchMatch reports whether b itself carries a handler and an outcome the
-// filter accepts. Both must hold on the same branch (D2): "handler=X&outcome=Y"
+// filter accepts. Both must hold on the same branch: "handler=X&outcome=Y"
 // means X's own Y branch, not "X ran somewhere and Y happened somewhere".
 func (f Filter) branchMatch(b branch) bool {
 	return f.handlerOK(b) && f.outcomeOK(b)
@@ -89,8 +88,8 @@ func (f Filter) eventOK(r record.Record) bool {
 	return len(f.Events) == 0 || slices.Contains(f.Events, eventLabel(r))
 }
 
-// verdictOK is the call-level "call verdict" check (D2): the consolidated
-// verdict or the router status, never a handler outcome.
+// verdictOK is the call-level "call verdict" check: the consolidated verdict
+// or the router status, never a handler outcome.
 func (f Filter) verdictOK(r record.Record) bool {
 	return len(f.Verdicts) == 0 || slices.Contains(f.Verdicts, r.Verdict) || slices.Contains(f.Verdicts, r.Router)
 }
@@ -100,9 +99,9 @@ func (f Filter) callMatch(r record.Record) bool {
 }
 
 // Match reports whether r passes every call-level field of f, and, if any
-// branch field (handler/outcome) is set, at least one branch of r (D1)
-// satisfies both (D2). Every call has at least one branch, so with no branch
-// field set this reduces to callMatch.
+// branch field (handler/outcome) is set, at least one branch of r satisfies
+// both. Every call has at least one branch, so with no branch field set this
+// reduces to callMatch.
 func (f Filter) Match(r record.Record) bool {
 	if !f.callMatch(r) {
 		return false
@@ -117,9 +116,9 @@ func (f Filter) Match(r record.Record) bool {
 
 // Hits returns the indices into r.Handlers of r's matching branches, in
 // record order, or nil when neither Handlers nor Outcomes is set — the
-// "every handler is a hit" case a caller reads as "no branch filter"
-// (SPEC D3). The pseudo/direct branches have idx -1 and never appear here:
-// there is no handler entry for them to point at.
+// "every handler is a hit" case a caller reads as "no branch filter". The
+// pseudo/direct branches have idx -1 and never appear here: there is no
+// handler entry for them to point at.
 func (f Filter) Hits(r record.Record) []int {
 	if len(f.Handlers) == 0 && len(f.Outcomes) == 0 {
 		return nil
@@ -133,12 +132,12 @@ func (f Filter) Hits(r record.Record) []int {
 	return hits
 }
 
-// eventLabel is the D2/#78 event-shape rule, also used by S2's facet key:
-// a router-error row's canonical event never ran, so it is addressed by its
-// native_event; a routed record with a canonical event by that name only;
-// a routed record with no canonical event (engine-scoped, e.g. pi's
-// per-turn turn_end) by "engine:native_event"; anything else (a truncated
-// record) has no event label at all.
+// eventLabel derives a record's event label: a router-error row's canonical
+// event never ran, so it is addressed by its native_event; a routed record
+// with a canonical event by that name only; a routed record with no
+// canonical event (engine-scoped, e.g. pi's per-turn turn_end) by
+// "engine:native_event"; anything else (a truncated record) has no event
+// label at all.
 func eventLabel(r record.Record) string {
 	if r.Router == record.RouterError {
 		return r.NativeEvent

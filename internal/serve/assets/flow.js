@@ -197,7 +197,7 @@ function pathBranches(p) {
   }));
 }
 
-// ---------- groups (D8.1) ----------
+// ---------- groups ----------
 
 function parentKey(k) {
   const dot = k.lastIndexOf(".");
@@ -391,7 +391,7 @@ async function fetchJSON(url) {
   return resp.json();
 }
 
-// ---------- visibility (D8.2) ----------
+// ---------- visibility ----------
 
 // isBusy: shown without the idle toggle. rawTotals catches nodes whose facet
 // key disagrees with the drawn label (e.g. a router-error record with empty
@@ -434,8 +434,7 @@ function advanceRing(nowMs) {
 }
 
 // showUnlaidOut marks each node of the call's branches that isn't laid out
-// as shown until the next load (D10), and returns the branches that can
-// pulse now.
+// as shown until the next load, and returns the branches that can pulse now.
 function showUnlaidOut(branches) {
   const ready = [];
   for (const b of branches) {
@@ -617,7 +616,7 @@ function setView(v) {
 // ---------- layout (rebuilds the SVG; only when the node/edge set changes) ----------
 
 // requestRelayout coalesces live-driven re-layouts to at most one per
-// RELAYOUT_MS; they keep the existing order (D8.4).
+// RELAYOUT_MS; they keep the existing order.
 function requestRelayout() {
   if (relayoutTimer !== null) return;
   const wait = Math.max(0, RELAYOUT_MS - (performance.now() - lastLayoutAt));
@@ -941,10 +940,10 @@ function computeRawTotals() {
   return totals;
 }
 
-// computeTotals counts the drawn paths onto display nodes and edges (D4):
-// engine and event nodes and the engine->event edge count calls, everything
-// past the event counts branches. Two branches of one call can share a
-// display edge into a collapsed group; both count.
+// computeTotals counts the drawn paths onto display nodes and edges: engine
+// and event nodes and the engine->event edge count calls, everything past
+// the event counts branches. Two branches of one call can share a display
+// edge into a collapsed group; both count.
 function computeTotals() {
   const edgeTotals = new Map();
   const nodeTotals = new Map();
@@ -1021,7 +1020,7 @@ function paint() {
   lastRenderAt = performance.now();
 }
 
-// ---------- zoom / pan (D9) ----------
+// ---------- zoom / pan ----------
 
 function clamp(v, lo, hi) {
   return Math.min(hi, Math.max(lo, v));
@@ -1158,7 +1157,7 @@ function onKey(ev) {
   ev.preventDefault();
 }
 
-// ---------- node interaction (D7) ----------
+// ---------- node interaction ----------
 
 function onNodeClick(g, ev) {
   const key = keyOfEl.get(g);
@@ -1401,5 +1400,5 @@ setInterval(() => {
 }, 1000);
 
 // The first hookyard:sync loads the topology; until then layout() and
-// paint() are no-ops (#95).
+// paint() are no-ops.
 setView(new URLSearchParams(location.search).get("view") === "flow" ? "flow" : "feed");
