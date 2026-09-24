@@ -515,13 +515,26 @@ func TestEndpointsSerializeListsAsArraysOnEmptyStateDir(t *testing.T) {
 		name  string
 		url   string
 		field string
+		setup func(t *testing.T)
 	}{
-		{"days", "/api/days", "days"},
-		{"events missing day", "/api/events?day=2026-01-01", "records"},
-		{"table missing file", "/api/table", "handlers"},
+		{"days", "/api/days", "days", nil},
+		{"events missing day", "/api/events?day=2026-01-01", "records", nil},
+		{"table missing file", "/api/table", "handlers", nil},
+		{"table present with no handlers key", "/api/table", "handlers", func(t *testing.T) {
+			// A present table.json with no handlers key makes ReadTable return
+			// (nil, nil); the handler's own nil guard is what keeps the field
+			// an array. The missing-file case above takes the error branch and
+			// never exercises that guard.
+			if err := os.WriteFile(filepath.Join(stateDir, "table.json"), []byte("{}"), 0o600); err != nil {
+				t.Fatalf("write table: %v", err)
+			}
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.setup != nil {
+				tc.setup(t)
+			}
 			resp := get(t, base+tc.url)
 			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode != http.StatusOK {
