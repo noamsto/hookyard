@@ -75,13 +75,12 @@ func HasGuardSlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bool 
 // string on this event. Claude Code's advisory set is pre_tool, session_start,
 // post_tool — confirmed by aeye's diagram-guidance.sh (session_start) and
 // diagrams.sh (post_tool) running against real Claude Code in production, in
-// addition to pre_tool's additionalContext. Codex's set is UNPROBED, and this
-// false is a current limitation rather than a boundary: what it rests on is an
-// absence of observation, while Codex's own docs specify
-// hookSpecificOutput.additionalContext on SessionStart, UserPromptSubmit,
-// PreToolUse, PostToolUse and SubagentStart. Until
-// docs/design/fixtures/codex-advisory/ has been run (issue #87), no handler may
-// read this false as advice being undeliverable to Codex by nature.
+// addition to pre_tool's additionalContext. Codex's set is session_start and
+// prompt_submit: docs/design/fixtures/codex-advisory/outcome-0.154.0-positive.md
+// shows SessionStart and UserPromptSubmit delivering additionalContext as a
+// developer-role model input that Codex itself labels hooks.additional_context
+// (codex-cli 0.154.0). PreToolUse, PostToolUse, and SubagentStart stay out
+// because a 401'd turn never runs a tool, so the set is partial on purpose.
 // Cursor's is the user_message field of the decision object itself, so its
 // advisory set is exactly its decision set — and advice only rides there
 // alongside a rendered permission, which Render is what enforces. Pi's set is
@@ -105,6 +104,8 @@ func HasAdvisorySlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bo
 		return HasDecisionSlot(engine, canonicalEvent, nativeEvent)
 	case vocab.Pi:
 		return canonicalEvent == vocab.PreTool || canonicalEvent == vocab.SessionStart || canonicalEvent == vocab.PostTool
+	case vocab.Codex:
+		return canonicalEvent == vocab.SessionStart || canonicalEvent == vocab.PromptSubmit
 	}
 	return false
 }

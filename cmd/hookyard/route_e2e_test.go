@@ -199,9 +199,53 @@ func TestRouteAgainstTheRealBinary(t *testing.T) {
 		if len(rec.Handlers) != 3 {
 			t.Fatalf("want 3 handler entries, got %+v", rec.Handlers)
 		}
-		// Codex has no advisory slot at all (§7): the advise handler's own
+		// Codex pre_tool has no advisory slot: the advise handler's own
 		// contribution is still recorded, just never delivered.
 		wantDelivered(t, rec.Handlers[2], false)
+	})
+
+	t.Run("codex session_start delivers advice", func(t *testing.T) {
+		dir := t.TempDir()
+		stateDir := filepath.Join(dir, "state")
+		writeTable(t, stateDir, e2eAdvise(t, dir, "codex", "session_start", "a"))
+
+		printed, code := runRouteBinary(t, bin, nil, codexAdvisorySessionStartPayload(t),
+			routeArgs("codex", "session_start", stateDir)...)
+		if code != 0 {
+			t.Fatalf("want exit 0, got %d", code)
+		}
+		want := `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"a"}}` + "\n"
+		if printed != want {
+			t.Errorf("printed = %q, want %q", printed, want)
+		}
+
+		rec := readRecord(t, stateDir)
+		if len(rec.Handlers) != 1 {
+			t.Fatalf("want 1 handler entry, got %+v", rec.Handlers)
+		}
+		wantDelivered(t, rec.Handlers[0], true)
+	})
+
+	t.Run("codex prompt_submit delivers advice", func(t *testing.T) {
+		dir := t.TempDir()
+		stateDir := filepath.Join(dir, "state")
+		writeTable(t, stateDir, e2eAdvise(t, dir, "codex", "prompt_submit", "a"))
+
+		printed, code := runRouteBinary(t, bin, nil, readFixture(t, "codex-user_prompt_submit-TICK.json"),
+			routeArgs("codex", "prompt_submit", stateDir)...)
+		if code != 0 {
+			t.Fatalf("want exit 0, got %d", code)
+		}
+		want := `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"a"}}` + "\n"
+		if printed != want {
+			t.Errorf("printed = %q, want %q", printed, want)
+		}
+
+		rec := readRecord(t, stateDir)
+		if len(rec.Handlers) != 1 {
+			t.Fatalf("want 1 handler entry, got %+v", rec.Handlers)
+		}
+		wantDelivered(t, rec.Handlers[0], true)
 	})
 
 	t.Run("cursor deny joins reason and advice", func(t *testing.T) {

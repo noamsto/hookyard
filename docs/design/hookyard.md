@@ -1716,7 +1716,7 @@ other outcome's `ms` reports; and an `advise` outcome
 carries the advisory text itself plus a `delivered` flag, so an advisory the
 target engine had no slot for (§7) is visible as *written but not delivered*
 rather than disappearing. In the example above `delivered` is `false` because
-the engine is Codex, which has no advisory slot — the advice happened, the
+the event is Codex `pre_tool`, which has no advisory slot — the advice happened, the
 model never saw it, and the record says both.
 
 `turn_outcome` is the one field in the example above that isn't there: it is
@@ -2017,12 +2017,13 @@ Claude Code — so no other engine's traffic can reach that arm through it. #81
 widens the fallback with a second, narrower arm: an engine-scoped event is
 rescued only when argv's own `--event` names exactly that event for that engine
 (`codex:SessionEnd` plus a payload whose `hook_event_name` is `SessionEnd`),
-which is how Codex 0.154.0's discriminator-less `SessionEnd` routes. Canonical
-`SessionStart`/`Stop` on Codex and Cursor are deliberately not rescued and stay
-open. Build-mode plugin `hooks.json` files can be loaded by other engines (a
-Codex plugin can carry one), so neither arm is extended to build mode, and a
-payload the router *does* detect as another engine keeps today's suppression
-path unchanged.
+which is how Codex 0.154.0's discriminator-less `SessionEnd` routes. Codex's
+canonical `SessionStart` is rescued in yard mode when `--event session_start`
+matches `hook_event_name` `SessionStart`. `Stop` on Codex, and `SessionStart`/`Stop`
+on Cursor, stay open. Build-mode plugin `hooks.json` files can be loaded by
+other engines (a Codex plugin can carry one), so none of these arms is extended
+to build mode, and a payload the router *does* detect as another engine keeps
+today's suppression path unchanged.
 
 **Pi's discriminator is not evidence about Pi — it is a promise hookyard
 makes to itself.** Pi sends no payload of its own at all: it has no
@@ -2331,7 +2332,7 @@ strings it collected have to ride alongside it:
 | Engine | Verdict rendering | Advisory rendering | Confirmed? |
 |---|---|---|---|
 | Claude Code | `hookSpecificOutput.permissionDecision` = `allow`/`deny`/`ask`, `permissionDecisionReason` = reason, on `pre_tool` only. On `turn_end` (native `Stop`) a deny renders top-level `{"decision":"block","reason":"..."}` instead — never `hookSpecificOutput`, which is a `PreToolUse` contract — and nothing once `stop_hook_active` is true — §11.3 | `hookSpecificOutput.additionalContext`, the concatenation of every advisory collected, delivered on `pre_tool`, `session_start`, and `post_tool` — the latter two have no decision slot, only the advisory one | Verdict yes — documented field, tri-state including `ask`. Advisory arm confirmed on `pre_tool` by an existing guard emitting it, and confirmed live in production on `session_start` and `post_tool` by aeye's `diagram-guidance.sh` and `diagrams.sh` respectively |
-| Codex | Unconfirmed. On `turn_end` (native `Stop`) a deny renders top-level `{"decision":"block","reason":"..."}`, and nothing once `stop_hook_active` is true — §11.3 | **Unprobed** — no channel in this package | The deny arm and the undeclared default timeout *are* fixture-verified (`hook-payloads/codex-pre_tool_use-DENY.json` reported `Blocked by hook`; `codex-user_prompt_submit-TICK.json` ran 180 s unkilled), which this cell failed to record until now. The advisory claim is the opposite: unprobed. Codex documents `hookSpecificOutput.additionalContext` on `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse` and `SubagentStart`, so "no advisory channel at all" is an absence of observation rather than a finding. Probe: `fixtures/codex-advisory/`, issue #87 |
+| Codex | Unconfirmed. On `turn_end` (native `Stop`) a deny renders top-level `{"decision":"block","reason":"..."}`, and nothing once `stop_hook_active` is true — §11.3 | `hookSpecificOutput.additionalContext` on `SessionStart` and `UserPromptSubmit` | Confirmed for `SessionStart` and `UserPromptSubmit`: the channel was confirmed by the `fixtures/codex-advisory/outcome-0.154.0-positive.md` probe (codex-cli 0.154.0) — the marker arrives as a `developer`-role model input Codex labels `hooks.additional_context` — and reproduced by `TestLiveCodexDeliversSessionStartAndPromptSubmitAdvice` (codex-cli 0.156.1). `PreToolUse`/`PostToolUse`/`SubagentStart` stay documented and unprobed — a 401'd turn cannot reach them. Separately, the deny-arm and default-timeout clause in this cell was stale for months: both were already fixture-verified (`hook-payloads/codex-pre_tool_use-DENY.json`, `codex-user_prompt_submit-TICK.json`). Issue #87 |
 | Cursor | `permission` field | Unconfirmed | Field name confirmed; exact accepted value set (binary vs. tri-state) not confirmed this pass, and no advisory slot identified |
 | Pi | return `{block: true, reason: string}` from the extension's `tool_call` handler; there is no `allow` wire form — not blocking *is* allow, so an explicit allow renders nothing. On `turn_end` (native `agent_before_settle`) a deny renders the same shape, and the bridge turns it into one continuation carrying the reason — §11.2 | Three channels, one per event, each prefixed `"[hookyard advisory] "`: on `pre_tool`, a deny's advice is joined into the block `reason` (rides with the block, as above); a standalone abstain/allow's advice has no field in the `tool_call` reply pi's agent loop reads, so the bridge stashes it keyed by `toolCallId` and a bridge-owned `tool_result` handler appends it as a text block onto that same call's own tool result — §11.1. On `session_start`, queued advice is flushed as a `before_agent_start` injected message. On `post_tool`, advice is appended to the tool result content | **Confirmed live, twice, including a filesystem side effect**: `touch SIDE-EFFECT.txt` was denied and the file did not exist afterward; a second denied `bash` call produced no `tool_result` event while the reason string still reached the model as the tool's outcome. Decision vocabulary is binary — no `ask` arm was found. The `pre_tool` advisory channels (deny-reason and tool-result-append) are confirmed against `docs/design/fixtures/pi-pre-tool-advisory/` — §11.1 |
 
@@ -3798,14 +3799,15 @@ Per-handler disposition, split along aeye's own event axis:
 |---|---|---|
 | `images.sh` | `post_tool` | **Migratable now**, all three engines. Verdict-lane side effect; append-only, so a transient double-fire is harmless by reader collapse. |
 | `diagrams.sh` | `post_tool` | **Migratable now**, all three. The Cursor copy must adopt `hookSpecificOutput.additionalContext` in place of its native `additional_context`, or its failure advice is silently read as abstain. |
-| `diagram-guidance.sh` | `session_start` | **Migratable, wave 2**, all three. Gated on a SessionStart capture; its Cursor copy needs the same advice-shape fix as `diagrams.sh`; on Codex the advice is recorded, not delivered (§7). |
+| `diagram-guidance.sh` | `session_start` | **Migratable, wave 2**, all three. Gated on a SessionStart capture; its Cursor copy needs the same advice-shape fix as `diagrams.sh`; on Codex the `session_start` advice is delivered (§7). |
 | `session-reset.sh` | `session_start` | **Migratable, wave 2**, all three. Gated on a SessionStart capture; the claude/codex copies also read top-level `.source`, which the envelope does not yet expose. |
 | `session-backfill.sh` | `session_start` | **Migratable, wave 2**, all three. Gated on a SessionStart capture plus promotion of `.source` and `.transcript_path` to the envelope; it then runs in §4's `fire_and_forget` lane (its ~20 s rebuild is the lane's own worked example). |
 
 The wave split is the one real constraint the open questions impose on aeye,
 and it is a scheduling gate, not a new boundary: `post_tool` payloads are
-captured and fixture-backed on Claude Code, while **no `SessionStart` payload
-has been captured for any engine**, so engine detection on that event — and
+captured and fixture-backed on Claude Code, and a Codex `SessionStart` payload
+is captured in [`docs/design/fixtures/codex-advisory/hook-log-both.jsonl`](fixtures/codex-advisory/hook-log-both.jsonl),
+so engine detection on that event — and
 the `.source`/`.transcript_path` fields the resume handlers read — are exactly
 the residuals §12 already names as the prerequisite for issue #9. The three
 `session_start` handlers wait for that capture and that promotion; the two
