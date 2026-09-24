@@ -498,6 +498,63 @@ func TestDaysEndpoint(t *testing.T) {
 	}
 }
 
+// TestEndpointsSerializeListsAsArraysOnEmptyStateDir pins the wire contract
+// that a list-valued response field is always [] and never null. On a state
+// dir with no stream files the web view iterates each of these directly, and a
+// null throws "not iterable" before the feed can load (#94). The check reads
+// the raw JSON so a typed decode into a nil slice cannot mask a null field.
+func TestEndpointsSerializeListsAsArraysOnEmptyStateDir(t *testing.T) {
+	stateDir := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	base := runTestServer(t, ctx, serveOpts(t, stateDir))
+
+	cases := []struct {
+		name  string
+		url   string
+		field string
+		setup func(t *testing.T)
+	}{
+		{"days", "/api/days", "days", nil},
+		{"events missing day", "/api/events?day=2026-01-01", "records", nil},
+		{"table missing file", "/api/table", "handlers", nil},
+		{"table present with no handlers key", "/api/table", "handlers", func(t *testing.T) {
+			// A present table.json with no handlers key makes ReadTable return
+			// (nil, nil); the handler's own nil guard is what keeps the field
+			// an array. The missing-file case above takes the error branch and
+			// never exercises that guard.
+			if err := os.WriteFile(filepath.Join(stateDir, "table.json"), []byte("{}"), 0o600); err != nil {
+				t.Fatalf("write table: %v", err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.setup != nil {
+				tc.setup(t)
+			}
+			resp := get(t, base+tc.url)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status %d", resp.StatusCode)
+			}
+			var body map[string]json.RawMessage
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			raw, ok := body[tc.field]
+			if !ok {
+				t.Fatalf("%s response has no %q field", tc.url, tc.field)
+			}
+			if got := strings.TrimSpace(string(raw)); got != "[]" {
+				t.Errorf("%s = %s, want []", tc.field, got)
+			}
+		})
+	}
+}
+
 func TestTableEndpoint(t *testing.T) {
 	stateDir := t.TempDir()
 

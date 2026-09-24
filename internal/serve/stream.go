@@ -30,16 +30,18 @@ var dayFilePattern = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})\.jsonl$`)
 var validDayPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
 // Days lists the days with a stream file, newest first. A missing stream
-// directory is the normal state of a fresh machine, not an error.
+// directory is the normal state of a fresh machine, not an error. The result
+// is never nil: a day list is a wire-contract list, so callers and the JSON
+// encoder see [] rather than null when there are no days.
 func Days(stateDir string) ([]string, error) {
 	entries, err := os.ReadDir(record.StreamDir(stateDir))
 	if os.IsNotExist(err) {
-		return nil, nil
+		return []string{}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	var days []string
+	days := []string{}
 	for _, e := range entries {
 		if m := dayFilePattern.FindStringSubmatch(e.Name()); m != nil {
 			days = append(days, m[1])
@@ -74,10 +76,11 @@ func clampLimit(limit int) int {
 // (end <= 0 means the file size), keeps the last `limit` entries matching f,
 // and returns them newest-first. A missing day file is not an error: it
 // yields an empty, unwindowed result, the normal state before any call has
-// landed that day.
+// landed that day. Records is initialized to an empty slice so that empty
+// result serializes as [] — a wire-contract list is never null.
 func ScanDay(stateDir, day string, end int64, limit int, f Filter) (EventsResponse, error) {
 	limit = clampLimit(limit)
-	resp := EventsResponse{Day: day}
+	resp := EventsResponse{Day: day, Records: []Entry{}}
 
 	if !validDayPattern.MatchString(day) {
 		return resp, nil
