@@ -93,10 +93,10 @@ func HasGuardSlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bool 
 // before the agent starts) and on post_tool (appended to the tool result),
 // neither of which can carry a decision. On turn_end, a deny's advice does
 // reach Codex, joined into the block reason Codex uses as its continuation
-// prompt (§11.3). turn_end itself has a decision slot on pi, Claude Code and Codex
-// (above) but no advisory slot on any engine here — Claude Code's Stop has no
-// additionalContext either, and a standalone (non-deny) verdict on turn_end
-// is never delivered; a deny's advice rides its block reason instead.
+// prompt (§11.3). turn_end itself has a decision slot on pi, Claude Code and
+// Codex (above) but no advisory slot on any engine here — Claude Code's Stop
+// has no additionalContext either, and a standalone (non-deny) verdict on
+// turn_end is never delivered; a deny's advice rides its block reason instead.
 func HasAdvisorySlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bool {
 	switch engine {
 	case vocab.ClaudeCode:
