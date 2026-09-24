@@ -424,7 +424,7 @@ async function check8(page, env) {
 
   for (let i = 0; i < 4; i++) {
     const p = await page.evaluate(`__e2e.headerPoint(${i})`);
-    assert(p, `header ${i} not found`);
+    assert(p?.ok, `header ${i} not hit-testable: ` + JSON.stringify(p));
     await page.click(p.x, p.y);
   }
   await sleep(200);
@@ -484,7 +484,9 @@ async function check9(page, env) {
   const before = await page.evaluate("__e2e.state()");
 
   await switchDay(page, env.past);
-  await assertPulsesGone(page, `switching #day-select to ${env.past} (gen stayed ${genAfterIdle} -> ${(await page.evaluate("__e2e.state()")).gen})`);
+  await assertPulsesGone(page, `switching #day-select to ${env.past}`);
+  const genAfterSwitch = (await page.evaluate("__e2e.state()")).gen;
+  assert(genAfterSwitch === genAfterIdle, `layout gen moved ${genAfterIdle} -> ${genAfterSwitch} on the day switch; phase 1 no longer tests the no-relayout path`);
   lines.push(`live day, show idle on: ${before.dots} dot(s) in flight -> switched #day-select to ${env.past} -> 0 dots, 0 active circles within 1 s`);
 
   // Phase 2: dots in flight, tab away and back before any of them finish.
