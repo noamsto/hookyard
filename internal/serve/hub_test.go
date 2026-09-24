@@ -3,6 +3,7 @@ package serve
 import (
 	"context"
 	"os"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -340,14 +341,116 @@ func TestHubRestartRebuildsFromTheFileThatIsActuallyThere(t *testing.T) {
 	}
 	waitCalls(t, h, day, 2)
 
-	// A third record proves the tailer has moved past its re-read of the
-	// rebuilt file: a leftover cursor or a double count would show up here.
+	// The hub rescans the truncated file while the tailer re-reads it from 0,
+	// and the test's own rewrite races both, so n0 and n1 reach the subscriber
+	// either inside the reset's snapshot or as live call frames. Which one is
+	// scheduling, not a contract; the contract is that each is delivered
+	// exactly once and that a record appended afterwards follows them.
 	hubLine(t, stateDir, day, "n2")
-	if got := nextCall(t, sub).Rec.SessionID; got != "n2" {
-		t.Fatalf("call after the rebuild is for %q, want n2", got)
+	var before []string
+	for {
+		id := nextCall(t, sub).Rec.SessionID
+		if id == "n2" {
+			break
+		}
+		before = append(before, id)
 	}
-	if got := snapshotCalls(t, h, day); got != 3 {
-		t.Fatalf("calls after the rebuild = %d, want 3", got)
+	if want := []string{"n0", "n1"}; !isSuffix(before, want) {
+		t.Fatalf("live calls before n2 = %v, want a suffix of %v", before, want)
+	}
+	waitCalls(t, h, day, 3)
+}
+
+func isSuffix(got, of []string) bool {
+	if len(got) > len(of) {
+		return false
+	}
+	for i := range got {
+		if got[i] != of[len(of)-len(got)+i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestHubRestartDeliversEveryRebuiltRecordOnceWhereverTheRescanLands drives the
+// two interleavings of a truncate-and-rewrite that the live test cannot pin:
+// the hub's rescan lands before the rewrite (n0 and n1 then arrive as live
+// calls), between its records, or after it (the reset already counts them and
+// the tailer's re-read is deduped). Either way the subscriber ends up with n0, n1, n2 exactly once.
+func TestHubRestartDeliversEveryRebuiltRecordOnceWhereverTheRescanLands(t *testing.T) {
+	const day = "2026-09-10"
+	line := func(id string) string {
+		return recLine(t, record.Record{Engine: "codex", SessionID: id})
+	}
+	n0, n1, n2 := line("n0"), line("n1"), line("n2")
+	entry := func(id string, offset int) Entry {
+		return Entry{Rec: record.Record{Engine: "codex", SessionID: id}, Day: day, Offset: int64(offset)}
+	}
+	rebuilt := []Entry{entry("n0", len(n0)), entry("n1", len(n0)+len(n1)), entry("n2", len(n0)+len(n1)+len(n2))}
+
+	cases := []struct {
+		name         string
+		onDiskAtScan string
+		wantInReset  int64
+		wantLive     []string
+	}{
+		{"rescan before the rewrite finishes", "", 0, []string{"n0", "n1", "n2"}},
+		{"rescan between the two records", n0, 1, []string{"n1", "n2"}},
+		{"rescan after the rewrite finishes", n0 + n1, 2, []string{"n2"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			clock := newTailClock(t, "2026-09-10T12:00:00Z")
+			for _, id := range []string{"s0", "s1", "s2", "s3"} {
+				hubLine(t, stateDir, day, id)
+			}
+			h := seededHub(t, stateDir, clock)
+
+			ch := make(chan Frame, 64)
+			h.subs[&Sub{C: ch, ch: ch}] = struct{}{}
+
+			if err := os.WriteFile(tailPath(stateDir, day), []byte(tc.onDiskAtScan), 0o600); err != nil {
+				t.Fatalf("truncate: %v", err)
+			}
+			h.handle(TailEvent{Restart: "stream file truncated"})
+			for _, e := range rebuilt {
+				h.handle(TailEvent{Entry: &e})
+			}
+			close(ch)
+
+			var resetSeen, statsSeen bool
+			var inReset int64
+			var live []string
+			for f := range ch {
+				switch f.Event {
+				case "reset":
+					resetSeen = true
+				case "stats":
+					if !resetSeen {
+						t.Fatal("stats frame before the reset")
+					}
+					if !statsSeen {
+						statsSeen, inReset = true, f.Data.(Snapshot).Calls
+					}
+				case "call":
+					live = append(live, f.Data.(Entry).Rec.SessionID)
+				}
+			}
+			if !resetSeen {
+				t.Fatal("no reset frame after the restart")
+			}
+			if inReset != tc.wantInReset {
+				t.Errorf("reset snapshot counted %d calls, want %d", inReset, tc.wantInReset)
+			}
+			if !slices.Equal(live, tc.wantLive) {
+				t.Errorf("live calls = %v, want %v", live, tc.wantLive)
+			}
+			if got := snapshotCalls(t, h, day); got != 3 {
+				t.Errorf("calls after the rebuild = %d, want 3", got)
+			}
+		})
 	}
 }
 
