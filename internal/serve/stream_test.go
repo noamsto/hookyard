@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/noamsto/hookyard/internal/record"
@@ -57,6 +58,62 @@ func TestScanDayNewestFirstAndLimit(t *testing.T) {
 		if got := resp.Records[i].Rec.SessionID; got != w {
 			t.Errorf("Records[%d].SessionID = %q, want %q", i, got, w)
 		}
+	}
+}
+
+// TestScanDaySetsHitsUnderABranchFilter pins S3: ScanDay hands each Entry
+// the branch indices the request's filter matched.
+func TestScanDaySetsHitsUnderABranchFilter(t *testing.T) {
+	stateDir := t.TempDir()
+	day := "2026-09-10"
+	rec := record.Record{
+		Engine: "codex", Router: record.RouterOK, Verdict: "deny",
+		Handlers: []record.RecordHandler{
+			{Name: "h0", Outcome: "abstain"},
+			{Name: "h1", Outcome: "deny"},
+		},
+	}
+	writeDayFile(t, stateDir, day, []string{recLine(t, rec)})
+
+	resp, err := ScanDay(stateDir, day, 0, 10, Filter{Outcomes: []string{"deny"}})
+	if err != nil {
+		t.Fatalf("ScanDay: %v", err)
+	}
+	if len(resp.Records) != 1 {
+		t.Fatalf("got %d records, want 1", len(resp.Records))
+	}
+	if got := resp.Records[0].Hits; len(got) != 1 || got[0] != 1 {
+		t.Errorf("Hits = %v, want [1]", got)
+	}
+}
+
+// TestScanDayNoFilterOmitsHits pins the "no branch filter" wire shape: Hits
+// is nil, and the omitempty tag drops the key from the JSON entirely.
+func TestScanDayNoFilterOmitsHits(t *testing.T) {
+	stateDir := t.TempDir()
+	day := "2026-09-10"
+	rec := record.Record{
+		Engine: "codex", Router: record.RouterOK, Verdict: "allow",
+		Handlers: []record.RecordHandler{{Name: "h0", Outcome: "allow"}},
+	}
+	writeDayFile(t, stateDir, day, []string{recLine(t, rec)})
+
+	resp, err := ScanDay(stateDir, day, 0, 10, Filter{})
+	if err != nil {
+		t.Fatalf("ScanDay: %v", err)
+	}
+	if len(resp.Records) != 1 {
+		t.Fatalf("got %d records, want 1", len(resp.Records))
+	}
+	if got := resp.Records[0].Hits; got != nil {
+		t.Errorf("Hits = %v, want nil", got)
+	}
+	b, err := json.Marshal(resp.Records[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), `"hits"`) {
+		t.Errorf("json = %s, want no \"hits\" key (omitempty)", b)
 	}
 }
 

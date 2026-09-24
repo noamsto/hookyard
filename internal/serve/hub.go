@@ -239,13 +239,18 @@ func (h *Hub) handle(ev TailEvent) {
 }
 
 // fanOut applies the filters server-side, so the client renders what it is
-// sent and the five-filter semantics live in one tested place (SPEC 4.6).
+// sent and the filter semantics live in one tested place (SPEC D2). Each
+// subscriber's frame carries its own Hits — a per-subscriber copy of e, so
+// the shared e is never mutated.
 func (h *Hub) fanOut(e Entry) {
-	f := Frame{Event: "call", ID: e.Day + ":" + strconv.FormatInt(e.Offset, 10), Data: e}
+	id := e.Day + ":" + strconv.FormatInt(e.Offset, 10)
 	for s := range h.subs {
-		if s.filter.Match(e.Rec) {
-			h.send(s, f)
+		if !s.filter.Match(e.Rec) {
+			continue
 		}
+		c := e
+		c.Hits = s.filter.Hits(e.Rec)
+		h.send(s, Frame{Event: "call", ID: id, Data: c})
 	}
 }
 

@@ -139,7 +139,7 @@ func TestFlowForDayFilterMatchesRecordSubset(t *testing.T) {
 		{Events: []string{"pi:turn_end"}},
 		{Events: []string{"PreToolUse"}},
 		{Handlers: []string{"h2"}},
-		{Verdicts: []string{"deny"}}, // handler-outcome superset
+		{Verdicts: []string{"deny"}}, // D2: call-level only — the consolidated verdict or router status, never a handler's own outcome
 		{Session: "sess-a"},
 	}
 
@@ -279,6 +279,291 @@ func TestFlowForDayNextOffsetExcludesPartialLine(t *testing.T) {
 	}
 	if resp2.NextOffset != int64(len(line)) {
 		t.Errorf("next_offset = %d, want %d (file size, ends with newline)", resp2.NextOffset, len(line))
+	}
+}
+
+// TestFlowForDayHandlerFilterPrunesToOneHop covers D3's pruning rule under a
+// branch filter: a matched path keeps only the matching branch's hop, and
+// two calls differing only in a filtered-out handler's outcome merge.
+func TestFlowForDayHandlerFilterPrunesToOneHop(t *testing.T) {
+	stateDir := t.TempDir()
+	day := "2026-09-10"
+	mk := func(deslop, other string) record.Record {
+		return record.Record{
+			Engine: "claude-code", CanonicalEvent: "pre_tool", NativeEvent: "PreToolUse", Router: "ok", Verdict: "abstain",
+			Handlers: []record.RecordHandler{
+				{Name: "guards.deslop", Outcome: deslop},
+				{Name: "guards.other", Outcome: other},
+			},
+		}
+	}
+	lines := []string{
+		recLine(t, mk("abstain", "allow")),
+		recLine(t, mk("abstain", "deny")), // differs only in guards.other's (filtered-out) outcome
+		recLine(t, mk("deny", "allow")),
+	}
+	writeDayFile(t, stateDir, day, lines)
+
+	resp, err := FlowForDay(stateDir, day, 0, time.Now(), Filter{Handlers: []string{"guards.deslop"}})
+	if err != nil {
+		t.Fatalf("FlowForDay: %v", err)
+	}
+	for _, p := range resp.Paths {
+		if len(p.Handlers) != 1 || p.Handlers[0].Name != "guards.deslop" {
+			t.Errorf("path %+v, want exactly one hop for guards.deslop", p)
+		}
+	}
+	if resp.Calls != 3 {
+		t.Errorf("calls = %d, want 3", resp.Calls)
+	}
+	if resp.Branches != resp.Calls {
+		t.Errorf("branches = %d, calls = %d, want equal (one matched branch per call)", resp.Branches, resp.Calls)
+	}
+	if len(resp.Paths) != 2 {
+		t.Fatalf("got %d paths, want 2 (the two abstain-deslop records merge): %+v", len(resp.Paths), resp.Paths)
+	}
+}
+
+func TestFlowForDayOutcomeFilterPrunesToOneHop(t *testing.T) {
+	stateDir := t.TempDir()
+	day := "2026-09-10"
+	rec := record.Record{
+		Engine: "claude-code", CanonicalEvent: "pre_tool", NativeEvent: "PreToolUse", Router: "ok", Verdict: "deny",
+		Handlers: []record.RecordHandler{
+			{Name: "guards.a", Outcome: "abstain"},
+			{Name: "guards.deny", Outcome: "deny"},
+			{Name: "guards.c", Outcome: "abstain"},
+		},
+	}
+	writeDayFile(t, stateDir, day, []string{recLine(t, rec)})
+
+	resp, err := FlowForDay(stateDir, day, 0, time.Now(), Filter{Outcomes: []string{"deny"}})
+	if err != nil {
+		t.Fatalf("FlowForDay: %v", err)
+	}
+	if len(resp.Paths) != 1 {
+		t.Fatalf("got %d paths, want 1", len(resp.Paths))
+	}
+	got := resp.Paths[0].Handlers
+	if len(got) != 1 || got[0] != (FlowHop{Name: "guards.deny", Outcome: "deny"}) {
+		t.Errorf("handlers = %+v, want exactly [{guards.deny deny}] (the denier only)", got)
+	}
+	if resp.Branches != 1 || resp.Calls != 1 {
+		t.Errorf("branches = %d, calls = %d, want 1 and 1", resp.Branches, resp.Calls)
+	}
+}
+
+func TestFlowForDayPseudoAndDirectBranchesCountAsOne(t *testing.T) {
+	stateDir := t.TempDir()
+	day := "2026-09-10"
+	routerErr := record.Record{Engine: "codex", NativeEvent: "PreToolUse", Router: record.RouterError, Verdict: "abstain"}
+	noHandler := record.Record{Engine: "pi", NativeEvent: "turn_end", Router: "ok", Verdict: "allow"}
+	writeDayFile(t, stateDir, day, []string{recLine(t, routerErr), recLine(t, noHandler)})
+
+	resp, err := FlowForDay(stateDir, day, 0, time.Now(), Filter{})
+	if err != nil {
+		t.Fatalf("FlowForDay: %v", err)
+	}
+	if resp.Branches != 2 {
+		t.Errorf("branches = %d, want 2 (each pseudo/direct branch counts as 1)", resp.Branches)
+	}
+	for _, p := range resp.Paths {
+		if len(p.Handlers) != 0 {
+			t.Errorf("path %+v, want empty hops", p)
+		}
+	}
+}
+
+func TestFlowForDayFacetsHandlerFilterIgnoresOwnField(t *testing.T) {
+	stateDir := t.TempDir()
+	day := "2026-09-10"
+	rec := record.Record{
+		Engine: "claude-code", CanonicalEvent: "pre_tool", NativeEvent: "PreToolUse", Router: "ok", Verdict: "abstain",
+		Handlers: []record.RecordHandler{
+			{Name: "guards.deslop", Outcome: "deny"},
+			{Name: "guards.other", Outcome: "allow"},
+		},
+	}
+	writeDayFile(t, stateDir, day, []string{recLine(t, rec)})
+
+	resp, err := FlowForDay(stateDir, day, 0, time.Now(), Filter{Handlers: []string{"guards.deslop"}})
+	if err != nil {
+		t.Fatalf("FlowForDay: %v", err)
+	}
+	if resp.Facets.Handler["guards.other"] != 1 {
+		t.Errorf("handler facet[guards.other] = %d, want 1 (the handler facet ignores its own field)", resp.Facets.Handler["guards.other"])
+	}
+	if resp.Facets.Handler["guards.deslop"] != 1 {
+		t.Errorf("handler facet[guards.deslop] = %d, want 1", resp.Facets.Handler["guards.deslop"])
+	}
+	// Same-branch semantics: the outcome facet stays restricted to
+	// guards.deslop's own branches, so guards.other's "allow" never appears.
+	if resp.Facets.Outcome["deny"] != 1 {
+		t.Errorf("outcome facet[deny] = %d, want 1", resp.Facets.Outcome["deny"])
+	}
+	if _, ok := resp.Facets.Outcome["allow"]; ok {
+		t.Error("outcome facet has \"allow\", want absent (only guards.deslop's own branches count)")
+	}
+}
+
+func TestFlowForDayFacetsOutcomeFilterIgnoresOwnField(t *testing.T) {
+	stateDir := t.TempDir()
+	day := "2026-09-10"
+	rec := record.Record{
+		Engine: "claude-code", CanonicalEvent: "pre_tool", NativeEvent: "PreToolUse", Router: "ok", Verdict: "deny",
+		Handlers: []record.RecordHandler{
+			{Name: "guards.a", Outcome: "abstain"},
+			{Name: "guards.deny", Outcome: "deny"},
+		},
+	}
+	writeDayFile(t, stateDir, day, []string{recLine(t, rec)})
+
+	resp, err := FlowForDay(stateDir, day, 0, time.Now(), Filter{Outcomes: []string{"deny"}})
+	if err != nil {
+		t.Fatalf("FlowForDay: %v", err)
+	}
+	// Same-branch semantics: the handler facet stays restricted to deny
+	// branches, so guards.a (abstain) never appears.
+	if resp.Facets.Handler["guards.deny"] != 1 {
+		t.Errorf("handler facet[guards.deny] = %d, want 1", resp.Facets.Handler["guards.deny"])
+	}
+	if _, ok := resp.Facets.Handler["guards.a"]; ok {
+		t.Error("handler facet has guards.a, want absent (only deny branches count)")
+	}
+	// The outcome facet ignores its own field, so abstain still shows.
+	if resp.Facets.Outcome["abstain"] != 1 {
+		t.Errorf("outcome facet[abstain] = %d, want 1 (the outcome facet ignores its own field)", resp.Facets.Outcome["abstain"])
+	}
+	if resp.Facets.Outcome["deny"] != 1 {
+		t.Errorf("outcome facet[deny] = %d, want 1", resp.Facets.Outcome["deny"])
+	}
+}
+
+func TestFlowForDayFacetsEngineFilterAppliesToEventNotEngine(t *testing.T) {
+	stateDir := t.TempDir()
+	day := "2026-09-10"
+	lines := []string{
+		recLine(t, record.Record{Engine: "pi", NativeEvent: "turn_end", Router: "ok", Verdict: "allow"}),
+		recLine(t, record.Record{Engine: "claude-code", CanonicalEvent: "pre_tool", NativeEvent: "PreToolUse", Router: "ok", Verdict: "allow"}),
+	}
+	writeDayFile(t, stateDir, day, lines)
+
+	resp, err := FlowForDay(stateDir, day, 0, time.Now(), Filter{Engines: []string{"pi"}})
+	if err != nil {
+		t.Fatalf("FlowForDay: %v", err)
+	}
+	// The engine facet ignores its own field, so claude-code still shows.
+	if resp.Facets.Engine["claude-code"] != 1 {
+		t.Errorf("engine facet[claude-code] = %d, want 1 (the engine facet ignores its own field)", resp.Facets.Engine["claude-code"])
+	}
+	if resp.Facets.Engine["pi"] != 1 {
+		t.Errorf("engine facet[pi] = %d, want 1", resp.Facets.Engine["pi"])
+	}
+	// ...but the event facet still applies the engine filter (not its own
+	// field), so only pi's events appear.
+	if resp.Facets.Event["pi:turn_end"] != 1 {
+		t.Errorf("event facet[pi:turn_end] = %d, want 1", resp.Facets.Event["pi:turn_end"])
+	}
+	if _, ok := resp.Facets.Event["pre_tool"]; ok {
+		t.Error("event facet has pre_tool, want absent (engine=pi excludes claude-code's event)")
+	}
+}
+
+func TestFlowForDayFacetsRespectWindow(t *testing.T) {
+	stateDir := t.TempDir()
+	day := "2026-09-10"
+	now := time.Date(2026, 9, 10, 12, 5, 30, 0, time.UTC)
+	mk := func(ts, engine string) record.Record {
+		return record.Record{TS: ts, Engine: engine, Verdict: "allow", Router: "ok"}
+	}
+	lines := []string{
+		recLine(t, mk("2026-09-10T12:02:59.000000Z", "codex")), // before window -> excluded
+		recLine(t, mk("2026-09-10T12:04:00.000000Z", "pi")),    // in window
+	}
+	writeDayFile(t, stateDir, day, lines)
+
+	resp, err := FlowForDay(stateDir, day, 3, now, Filter{})
+	if err != nil {
+		t.Fatalf("FlowForDay: %v", err)
+	}
+	if resp.Facets.Engine["codex"] != 0 {
+		t.Errorf("engine facet[codex] = %d, want 0 (outside the window)", resp.Facets.Engine["codex"])
+	}
+	if resp.Facets.Engine["pi"] != 1 {
+		t.Errorf("engine facet[pi] = %d, want 1", resp.Facets.Engine["pi"])
+	}
+}
+
+// TestFlowForDayFacetsMatchDrawnTotalsWithNoFilter is the no-filter sanity
+// check: with nothing to ignore, every facet equals the totals the paths
+// themselves draw (engine/event per call, handler/outcome per branch).
+func TestFlowForDayFacetsMatchDrawnTotalsWithNoFilter(t *testing.T) {
+	stateDir := t.TempDir()
+	day := "2026-09-10"
+	lines := []string{
+		recLine(t, record.Record{Engine: "codex", CanonicalEvent: "pre_tool", NativeEvent: "PreToolUse", Router: "ok", Verdict: "allow",
+			Handlers: []record.RecordHandler{{Name: "h1", Outcome: "allow"}, {Name: "h2", Outcome: "deny"}}}),
+		recLine(t, record.Record{Engine: "pi", NativeEvent: "turn_end", Router: "ok", Verdict: "abstain"}),
+		recLine(t, record.Record{Engine: "codex", NativeEvent: "PreToolUse", Router: record.RouterError, Verdict: "abstain"}),
+	}
+	writeDayFile(t, stateDir, day, lines)
+
+	resp, err := FlowForDay(stateDir, day, 0, time.Now(), Filter{})
+	if err != nil {
+		t.Fatalf("FlowForDay: %v", err)
+	}
+
+	gotEngine, gotEvent := map[string]int64{}, map[string]int64{}
+	gotHandler, gotOutcome := map[string]int64{}, map[string]int64{}
+	for _, p := range resp.Paths {
+		var n int64
+		for _, c := range p.Counts {
+			n += c
+		}
+		gotEngine[p.Engine] += n
+
+		label := p.CanonicalEvent
+		switch {
+		case p.Router == record.RouterError:
+			label = p.NativeEvent
+		case label == "" && p.Engine != "" && p.NativeEvent != "":
+			label = p.Engine + ":" + p.NativeEvent
+		}
+		gotEvent[label] += n
+
+		if len(p.Handlers) == 0 {
+			outcome := p.Verdict
+			if p.Router == record.RouterError {
+				outcome = outcomeRouterError
+			}
+			gotOutcome[outcome] += n
+			continue
+		}
+		for _, h := range p.Handlers {
+			gotHandler[h.Name] += n
+			gotOutcome[h.Outcome] += n
+		}
+	}
+
+	for k, v := range gotEngine {
+		if resp.Facets.Engine[k] != v {
+			t.Errorf("engine facet[%s] = %d, want %d", k, resp.Facets.Engine[k], v)
+		}
+	}
+	for k, v := range gotEvent {
+		if resp.Facets.Event[k] != v {
+			t.Errorf("event facet[%s] = %d, want %d", k, resp.Facets.Event[k], v)
+		}
+	}
+	for k, v := range gotHandler {
+		if resp.Facets.Handler[k] != v {
+			t.Errorf("handler facet[%s] = %d, want %d", k, resp.Facets.Handler[k], v)
+		}
+	}
+	for k, v := range gotOutcome {
+		if resp.Facets.Outcome[k] != v {
+			t.Errorf("outcome facet[%s] = %d, want %d", k, resp.Facets.Outcome[k], v)
+		}
 	}
 }
 

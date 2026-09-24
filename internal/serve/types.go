@@ -40,6 +40,10 @@ type Entry struct {
 	Rec    record.Record `json:"rec"`
 	Day    string        `json:"day"`    // YYYY-MM-DD
 	Offset int64         `json:"offset"` // byte offset just past this record
+	// Hits is the branch indices a request's Filter.Hits found in Rec.
+	// Absent (nil) means "no branch filter" — every handler is a hit
+	// (SPEC D3).
+	Hits []int `json:"hits,omitempty"`
 }
 
 // VerdictCount is the verdict mix's joint distribution: SPEC 4.5 wants the
@@ -68,13 +72,16 @@ type Snapshot struct {
 	Since     string                  `json:"since"` // ts of the first counted record
 }
 
-// Filter is the five-filter predicate (SPEC 4.6).
+// Filter is the branch-aware predicate (SPEC D1/D2). Engine, session, event
+// and verdict are call-level; handler and outcome are branch-level and must
+// hold on the same branch of the call (Filter.Match).
 type Filter struct {
 	Engines  []string
 	Session  string   // case-insensitive substring
 	Events   []string // canonical_event, engine:native_event, or native_event on a router error (SPEC 4.6)
-	Handlers []string // any handlers[].name
-	Verdicts []string // verdict OR router OR any handlers[].outcome
+	Handlers []string // branch: a branch's handler name (never "", so it excludes handler-less branches)
+	Outcomes []string // branch: a branch's outcome (handler outcomes, plus "router-error")
+	Verdicts []string // call verdict: the consolidated verdict OR the router status — never a handler outcome
 }
 
 type EventsResponse struct {
@@ -125,8 +132,22 @@ type FlowResponse struct {
 	BucketStart int64      `json:"bucket_start"` // unix ms of bucket 0; 0 when Window == 0
 	BucketMS    int64      `json:"bucket_ms"`    // 60000; 0 when Window == 0
 	Calls       int64      `json:"calls"`        // records counted into Counts
+	Branches    int64      `json:"branches"`     // matched branches counted; pseudo/direct branches count as 1
 	NextOffset  int64      `json:"next_offset"`  // ScanAll's end: offset past the last complete record
 	Paths       []FlowPath `json:"paths"`        // never null; sorted by total desc, then key asc
+	Facets      FlowFacets `json:"facets"`
+}
+
+// FlowFacets gives each filterable column its own counts (SPEC D3), so a
+// filtered column can still show the other values the client might add: each
+// field's facet applies every filter *except that field's own*. engine and
+// event facets count calls; handler and outcome facets count branches. Every
+// map is non-nil, even when empty.
+type FlowFacets struct {
+	Engine  map[string]int64 `json:"engine"`
+	Event   map[string]int64 `json:"event"`
+	Handler map[string]int64 `json:"handler"`
+	Outcome map[string]int64 `json:"outcome"`
 }
 
 // Frame is one SSE message.
