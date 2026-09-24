@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>hookyard serve</title>
 <link rel="stylesheet" href="/static/style.css">
-<link rel="stylesheet" href="/static/flow.css">
+<link rel="stylesheet" href="/static/flow/flow.css">
 </head>
 <body>
 <header class="topbar">
@@ -68,17 +68,7 @@
     </div>
   </section>
 
-  <section class="panel flow-panel" id="flow-panel" hidden>
-    <div class="panel-header">
-      <h2>flow</h2>
-      <span id="flow-meta" class="dim"></span>
-      <span id="flow-error" class="flow-error"></span>
-      <label class="flow-idle"><input type="checkbox" id="flow-idle" autocomplete="off"> <span>show idle (<span id="flow-idle-count">0</span>)</span></label>
-      <button type="button" id="flow-fit" title="fit the graph to the panel (0)">fit</button>
-    </div>
-    <p class="hint flow-hint">engine and event count calls; handler and outcome count branches (one handler run). Click a node to filter, shift-click to add, drag to pan, wheel to zoom, 0 to fit</p>
-    <div id="flow-body" class="flow-body"></div>
-  </section>
+  <section class="panel flow-panel" id="flow-panel" hidden></section>
 
   <aside class="side">
     <section class="panel stats-panel">
@@ -154,6 +144,6 @@
 </template>
 
 <script type="module" src="/static/app.js"></script>
-<script type="module" src="/static/flow.js"></script>
+<script type="module" src="/static/flow/flow.js"></script>
 </body>
 </html>
