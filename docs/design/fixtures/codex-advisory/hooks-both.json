@@ -1,0 +1,4 @@
+{"hooks":{
+ "SessionStart":[{"matcher":"startup|resume|clear","hooks":[{"type":"command","command":"/home/noams/Data/git/.worktrees/git/hookyard/docs-87-codex-advisory-probe/docs/design/fixtures/codex-advisory/emit-advisory.sh SS-MARKER /home/noams/.cache/codex-probe2/hook-log.jsonl","timeout":10}]}],
+ "UserPromptSubmit":[{"hooks":[{"type":"command","command":"/home/noams/Data/git/.worktrees/git/hookyard/docs-87-codex-advisory-probe/docs/design/fixtures/codex-advisory/emit-advisory.sh UPS-MARKER /home/noams/.cache/codex-probe2/hook-log.jsonl","timeout":10}]}]
+}}

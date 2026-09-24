@@ -1,92 +1,86 @@
 #!/usr/bin/env bash
-# Prepare the Codex advisory probe — issue #87.
+# Codex advisory probe — issue #87.
 #
-#   docs/design/fixtures/codex-advisory/run.sh
+#   docs/design/fixtures/codex-advisory/run.sh ["prompt"]
 #
-# Builds a throwaway CODEX_HOME so nothing here touches ~/.codex, writes the
-# hooks.json that answers SessionStart and UserPromptSubmit with
-# additionalContext, and prints the launch line. It does NOT launch Codex: the
-# only Codex invocation this fleet has proven is interactive in a tmux pane
-# (`codex --profile worker ...`, adapters/core/dispatch.sh:443), this fixture's
-# author had no Codex host to run it on, and inventing a headless form here
-# would make an unrun probe look like a tested one.
+# Headless, and needs no credentials: both hooks run before the turn reaches the
+# API, so a 401'd turn still produces the evidence. The result of the first run
+# is in outcome-0.154.0-positive.md; this script is how to reproduce it against a
+# future Codex.
 #
-# UNRUN, deliberately. See README.md for what to observe and where the result
-# belongs. Read-only against the repo; the only writes are under a temp dir.
+# Sets up a throwaway CODEX_HOME, runs one exec, then reports which events fired
+# and which markers reached the model-visible input. It does not judge the
+# result beyond printing the counts.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-scratch=$(mktemp -d)
-home=$scratch/codex-home
-log=$scratch/hook-log.jsonl
-marker="PROBE-ADVISORY-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+codex_bin=${CODEX_BIN:-codex}
+prompt=${1:-say hi}
 
-mkdir -p "$home"
+if ! command -v "$codex_bin" >/dev/null 2>&1; then
+  echo "run.sh: '$codex_bin' not on PATH. Set CODEX_BIN to the binary, e.g." >&2
+  echo "  CODEX_BIN=\$(ls -d /nix/store/*-codex-*/bin/codex | tail -1) $0" >&2
+  exit 1
+fi
 
-# One handler per event, both routed at the same script. Absolute paths: Codex
-# runs a hook command with the session cwd, not this one. Matchers are omitted
-# on UserPromptSubmit on purpose — Codex documents that event as not supporting
-# them, and a matcher there would be ignored rather than honoured.
-cat >"$home/hooks.json" <<JSON
+# Deliberately not under /tmp: Codex refuses to create its helper binaries in a
+# temporary directory ("Refusing to create helper binaries under temporary dir")
+# and continues degraded, which is noise unrelated to what is measured.
+scratch=${XDG_CACHE_HOME:-$HOME/.cache}/codex-advisory-probe
+rm -rf "$scratch"
+mkdir -p "$scratch"
+
+# One marker per event, so a marker in the rollout can be attributed to the
+# event that produced it. Absolute paths: Codex runs a hook command with the
+# session cwd, not this one. UserPromptSubmit carries no matcher on purpose —
+# Codex documents that event as not supporting them.
+cat >"$scratch/hooks.json" <<JSON
 {
   "hooks": {
     "SessionStart": [
       {
         "matcher": "startup|resume|clear",
-        "hooks": [{"type": "command", "command": "$here/emit-advisory.sh $marker $log", "timeout": 10}]
+        "hooks": [{"type": "command", "command": "$here/emit-advisory.sh SS-MARKER $scratch/hook-log.jsonl", "timeout": 10}]
       }
     ],
     "UserPromptSubmit": [
       {
-        "hooks": [{"type": "command", "command": "$here/emit-advisory.sh $marker $log", "timeout": 10}]
+        "hooks": [{"type": "command", "command": "$here/emit-advisory.sh UPS-MARKER $scratch/hook-log.jsonl", "timeout": 10}]
       }
     ]
   }
 }
 JSON
 
-cat <<BANNER
-Codex advisory probe (issue #87) — prepared, not run.
+echo "codex: $("$codex_bin" --version 2>&1 | head -1)"
+echo "scratch: $scratch"
+echo "--- running (exit 1 without credentials is expected and harmless)"
+CODEX_HOME=$scratch timeout 120 "$codex_bin" --dangerously-bypass-hook-trust exec "$prompt" \
+  >"$scratch/exec.out" 2>"$scratch/exec.err" || true
 
-  CODEX_HOME  $home
-  marker      $marker
-  hook log    $log
-
-Marker text for the model to look for:
-  $marker
-
-Launch Codex against the probe home. The profile is the fleet's own, so this
-matches how a worker gets started rather than a shape invented for the probe:
-
-  CODEX_HOME=$home codex --profile worker --dangerously-bypass-hook-trust
-
-Then, at the first prompt, ask for the marker by name only — never paste it:
-
-  Reply with the PROBE-ADVISORY marker from your context, or NO-MARKER if you
-  have none.
-
---dangerously-bypass-hook-trust is Codex's documented path for one-off
-automation whose hook sources are already vetted. Without it Codex skips an
-unreviewed hook, and the probe would measure nothing while looking like a
-negative result.
-
-BANNER
-
-read -r -p "press enter once that Codex turn is done > " _ || true
-
-echo
-echo "--- hook log ($log) ---"
-if [[ -s $log ]]; then
-  jq -r '"fired: \(.hook_event_name)  session: \(.session_id // "-")"' <"$log" || cat "$log"
+echo "--- events that fired"
+if [[ -s $scratch/hook-log.jsonl ]]; then
+  jq -r '.hook_event_name' "$scratch/hook-log.jsonl" | sort | uniq -c
 else
-  echo "EMPTY — no hook fired. Not an answer to the advisory question: check"
-  echo "trust and CODEX_HOME before reading anything into it."
+  echo "NONE — no hook fired. That is not an answer about the advisory channel:"
+  echo "check trust and CODEX_HOME before reading anything into it."
 fi
+
+echo "--- hook lifecycle (a rejection would appear here)"
+grep -E "^hook: " "$scratch/exec.err" || echo "  (none)"
+
+echo "--- markers in the model-visible input"
+rollout=$(find "$scratch/sessions" -name '*.jsonl' 2>/dev/null | head -1)
+if [[ -n $rollout ]]; then
+  grep -o 'SS-MARKER\|UPS-MARKER' "$rollout" | sort | uniq -c || echo "  none reached"
+  echo "--- how Codex labelled them"
+  jq -c 'select(tostring | contains("MARKER")) | .payload.internal_chat_message_metadata_passthrough.content_item_kinds' \
+    "$rollout" | sort -u
+else
+  echo "  no session rollout written"
+fi
+
 echo
-echo "Now read the transcript: did the reply contain the marker?"
-echo "  yes -> Codex delivers additionalContext; capability.go:71 and the"
-echo "         hookyard.md:2334 table must both be corrected, from this run."
-echo "  no  -> record the negative in README.md beside the marker and the"
-echo "         Codex version. The boundary finally rests on a measurement."
-echo
-echo "Scratch dir kept for the record: $scratch"
+echo "Expected on a working channel: each marker present once, each labelled"
+echo "[\"hooks.additional_context\"]. Record the outcome beside this fixture as"
+echo "outcome-<version>-<positive|negative>.md."
