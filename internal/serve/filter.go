@@ -40,7 +40,7 @@ func (f Filter) Match(r record.Record) bool {
 	if f.Session != "" && !strings.Contains(strings.ToLower(r.SessionID), strings.ToLower(f.Session)) {
 		return false
 	}
-	if len(f.Events) > 0 && !slices.Contains(f.Events, r.CanonicalEvent) && !slices.Contains(f.Events, r.NativeEvent) {
+	if len(f.Events) > 0 && !matchesEvent(f.Events, r) {
 		return false
 	}
 	if len(f.Handlers) > 0 && !matchesHandler(f.Handlers, r) {
@@ -50,6 +50,29 @@ func (f Filter) Match(r record.Record) bool {
 		return false
 	}
 	return true
+}
+
+// matchesEvent reports whether want addresses r's event (§4.6). Each record
+// shape is addressed by exactly one value, so the canonical turn_end filter no
+// longer re-mixes pi's per-turn pi:turn_end records into the settle frequency:
+//   - a router-error row (no canonical event, the manifest's canonical name in
+//     native_event) matches on native_event, so filtering pre_tool during an
+//     outage still shows the failed calls;
+//   - a routed record with a canonical event matches on canonical_event only;
+//   - a routed record with no canonical event matches on its engine-scoped
+//     label, engine + ":" + native_event (pi:turn_end) — the same string the
+//     web view shows for the row.
+func matchesEvent(want []string, r record.Record) bool {
+	if r.Router == record.RouterError {
+		return slices.Contains(want, r.NativeEvent)
+	}
+	if r.CanonicalEvent != "" {
+		return slices.Contains(want, r.CanonicalEvent)
+	}
+	if r.Engine == "" || r.NativeEvent == "" {
+		return false
+	}
+	return slices.Contains(want, r.Engine+":"+r.NativeEvent)
 }
 
 func matchesHandler(want []string, r record.Record) bool {

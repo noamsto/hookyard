@@ -4205,14 +4205,17 @@ Consequences of the remap, accepted rather than hidden:
   change read `native_event: "turn_end", canonical_event: "turn_end"`;
   records written after read `native_event: "agent_before_settle"` for the
   canonical firing and `native_event: "turn_end", canonical_event: ""` for
-  the per-turn one. `internal/serve`'s filter matches on `canonical_event OR
-  native_event`, so its `turn_end` filter still catches the pre-amendment
-  records. It also catches the post-amendment per-turn ones, and the web view
-  labels those rows `turn_end` too. That mixes the per-settle and per-turn
-  frequencies back together in the view, though not in the stream. Narrowing
-  it takes more care than making a canonical value match `canonical_event`
-  only: router-error records carry the manifest's canonical event name in
-  `native_event`, and that rule would hide them. Tracked as issue #78.
+  the per-turn one. `internal/serve` addresses each of those shapes distinctly
+  (issue #78). A routed record matches a filter value on `canonical_event`
+  only, so the `turn_end` filter catches the pre-amendment records and the
+  post-amendment canonical firing, but not the per-turn ones. A routed record
+  with no canonical event — pi's per-turn `turn_end`, claude-code's
+  `Notification` — is addressed by its engine-scoped label,
+  `engine + ":" + native_event` (`pi:turn_end`), the same string the web view
+  shows for the row. Router-error records carry the manifest's canonical event
+  name in `native_event` and no canonical event, so they keep matching on
+  `native_event` alone and are labelled by it as-is; a canonical-only rule
+  would have hidden them during an outage.
 - **The `pendingToolAdvice` sweep is unaffected.** It is registered by the
   bridge directly on pi's *native* `turn_end`, not through the canonical
   mapping (§11.1), so the remap does not move it.
@@ -4346,7 +4349,7 @@ The handler saw `stop_hook_active` false, then true. The two canonical
 | §7, concept table, "turn end" row, Pi cell | Amended | `turn_end` → `agent_before_settle`: pi's per-response settle boundary now fills the cell every other engine's once-per-response `Stop`/`stop` already fills; pi's own per-turn `turn_end` survives as the engine-scoped `pi:turn_end` (D1, issue #76) |
 | §7, engine field table, "second id" row, Pi cell | Amended | `turn_index` no longer rides canonical `turn_end`; it rides `pi:turn_end` instead, and both `turn_end` and `agent_before_settle` gained `outcome` on 0.87.0 (D1–D2, issue #76) |
 | §7, outbound rendering table (Pi row) and the ask-degrades-to-deny rule | Amended | pi `turn_end` renders a deny as a continuation, and an `ask` there renders nothing, unenforced: the rule protects a call, and a turn end holds back none (D3, issue #76) |
-| `internal/serve` event filter and row label | Carried, known gap | A `turn_end` filter and label still mix pi's per-turn `pi:turn_end` records in with canonical ones; the narrowing must not hide router-error rows. Issue #78 |
+| `internal/serve` event filter and row label | Amended | Each record shape is addressed by exactly one value: a routed record by `canonical_event`, a routed record with none by `engine:native_event`, a router-error row by `native_event` — so the `turn_end` filter no longer mixes in pi's per-turn `pi:turn_end` records and the label matches (issue #78) |
 | §6, the record | Amended | `turn_outcome` is a new optional, pi-only field, additive under the `v` schema's grow-only rule (D2, issue #76) |
 | `internal/verdict/capability.go`, `HasDecisionSlot`/`HasAdvisorySlot` | Amended | pi `turn_end` gains a decision slot, pi-only; no advisory slot anywhere (D3, issue #76) |
 | `internal/manifest/manifest.go`, `validateLane` | Amended | Now calls the new `HasGuardSlot`, not `HasDecisionSlot`, so a fire-and-forget `turn_end` handler on pi stays legal (D3, issue #76) |

@@ -72,7 +72,7 @@ type Snapshot struct {
 type Filter struct {
 	Engines  []string
 	Session  string   // case-insensitive substring
-	Events   []string // canonical_event OR native_event
+	Events   []string // canonical_event, engine:native_event, or native_event on a router error (SPEC 4.6)
 	Handlers []string // any handlers[].name
 	Verdicts []string // verdict OR router OR any handlers[].outcome
 }
