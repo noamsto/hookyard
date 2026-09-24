@@ -72,7 +72,7 @@
 .flow-node.selected .rule { stroke: var(--accent); stroke-width: 2; }
 /* a pulse's arrival: the event gate and the outcome bar flash, then decay */
 @keyframes flow-flash-rule { from { stroke: var(--accent); stroke-width: 2.5px; } to { stroke: var(--border); stroke-width: 1px; } }
-@keyframes flow-flash-gate { from { fill: color-mix(in oklab, var(--accent) 30%, transparent); } to { fill: color-mix(in oklab, var(--fg-dim) 9%, transparent); } }
+@keyframes flow-flash-gate { from { fill: color-mix(in oklab, var(--accent) 18%, transparent); } to { fill: color-mix(in oklab, var(--fg-dim) 9%, transparent); } }
 @keyframes flow-flash-bar { from { stroke-width: 6px; stroke-opacity: .8; } to { stroke-width: 0; stroke-opacity: 0; } }
 .flow-node.flash .rule { animation: flow-flash-rule 1.5s ease-out; }
 .flow-node.flash .gate { animation: flow-flash-gate 1.5s ease-out; }
