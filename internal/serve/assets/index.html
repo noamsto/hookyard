@@ -28,7 +28,7 @@
 <form id="filters" class="filterbar" autocomplete="off">
   <div class="filter-group">
     <label for="f-engine">engine</label>
-    <select id="f-engine" name="engine" multiple size="4"></select>
+    <select id="f-engine" data-field="engine"><option value="">+ engine</option></select>
   </div>
   <div class="filter-group filter-group--wide">
     <label for="f-session">session <kbd>/</kbd></label>
@@ -36,18 +36,24 @@
   </div>
   <div class="filter-group">
     <label for="f-event">event</label>
-    <select id="f-event" name="event" multiple size="4"></select>
+    <select id="f-event" data-field="event"><option value="">+ event</option></select>
   </div>
   <div class="filter-group">
     <label for="f-handler">handler</label>
-    <select id="f-handler" name="handler" multiple size="4"></select>
+    <select id="f-handler" data-field="handler"><option value="">+ handler</option></select>
   </div>
   <div class="filter-group">
-    <label for="f-verdict">verdict / outcome</label>
-    <select id="f-verdict" name="verdict" multiple size="4"></select>
+    <label for="f-outcome">handler outcome</label>
+    <select id="f-outcome" data-field="outcome"><option value="">+ handler outcome</option></select>
+  </div>
+  <div class="filter-group">
+    <label for="f-verdict">call verdict</label>
+    <select id="f-verdict" data-field="verdict"><option value="">+ call verdict</option></select>
   </div>
   <button type="button" id="clear-filters"><kbd>Esc</kbd> clear</button>
 </form>
+<div id="filter-chips" class="filter-chips" aria-live="polite"></div>
+<p class="filter-hint dim">a row is a call with &ge;1 matching branch; handler and outcome filters match one handler run, and its chip is highlighted; call verdict keeps whole calls &mdash; use handler outcome for the deny branches</p>
 
 <main class="body">
   <section class="panel feed-panel">
@@ -67,7 +73,10 @@
       <h2>flow</h2>
       <span id="flow-meta" class="dim"></span>
       <span id="flow-error" class="flow-error"></span>
+      <label class="flow-idle"><input type="checkbox" id="flow-idle"> <span>show idle (<span id="flow-idle-count">0</span>)</span></label>
+      <button type="button" id="flow-fit" title="fit the graph to the panel (0)">fit</button>
     </div>
+    <p class="hint flow-hint">engine and event count calls; handler and outcome count branches (one handler run). Click a node to filter, shift-click to add, drag to pan, wheel to zoom, 0 to fit</p>
     <div id="flow-body" class="flow-body"></div>
   </section>
 

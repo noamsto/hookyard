@@ -27,16 +27,41 @@
   color: var(--c-error);
 }
 
+.flow-idle {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+
 .flow-body {
-  max-height: 80vh;
-  overflow: auto;
-  padding: 8px 12px;
+  position: relative;
+  height: 70vh;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  cursor: grab;
+}
+
+.flow-body.dragging {
+  cursor: grabbing;
 }
 
 .flow-body svg {
-  width: 100%;
-  height: auto;
   display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.col-header {
+  fill: var(--fg-dim);
+  dominant-baseline: middle;
+}
+
+.node {
+  cursor: pointer;
 }
 
 .node rect {
@@ -46,16 +71,29 @@
 
 .node text {
   fill: var(--fg);
-  font-size: 11px;
   dominant-baseline: middle;
+}
+
+.node .count {
+  fill: var(--fg-dim);
+  text-anchor: end;
+}
+
+.group rect {
+  fill: var(--bg-panel);
+  stroke: var(--fg-dim);
 }
 
 .ghost rect {
   stroke-dasharray: 3 2;
 }
 
-.ghost text {
+.ghost .label {
   fill: var(--fg-dim);
+}
+
+.node.dim {
+  opacity: .4;
 }
 
 .edge {
@@ -83,10 +121,41 @@
 .v-error rect { stroke: var(--c-error); }
 .v-router-error rect { stroke: var(--c-error); }
 
+/* after the outcome strokes so an active filter value always shows */
+.selected rect {
+  stroke: var(--accent);
+  stroke-width: 2px;
+}
+
+.hl .edge:not(.on),
+.hl .node:not(.on) {
+  opacity: .12;
+}
+
+.hl .edge.on {
+  stroke: var(--accent);
+  opacity: .9;
+}
+
 .dot {
   fill: var(--accent);
 }
 
-.idle {
-  opacity: .45;
+.flow-tip {
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+  max-width: 420px;
+  padding: 6px 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  font-size: 12px;
+  white-space: pre;
+  overflow: hidden;
+}
+
+.flow-tip-title {
+  font-weight: 600;
 }
