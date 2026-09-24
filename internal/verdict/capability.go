@@ -67,9 +67,13 @@ func HasGuardSlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bool 
 // string on this event. Claude Code's advisory set is pre_tool, session_start,
 // post_tool — confirmed by aeye's diagram-guidance.sh (session_start) and
 // diagrams.sh (post_tool) running against real Claude Code in production, in
-// addition to pre_tool's additionalContext. Codex has no advisory channel on
-// any event, full stop: this is a settled boundary, not a gap to fill later —
-// no handler can get advice to Codex by any means this package offers.
+// addition to pre_tool's additionalContext. Codex's set is UNPROBED, and this
+// false is a current limitation rather than a boundary: what it rests on is an
+// absence of observation, while Codex's own docs specify
+// hookSpecificOutput.additionalContext on SessionStart, UserPromptSubmit,
+// PreToolUse, PostToolUse and SubagentStart. Until
+// docs/design/fixtures/codex-advisory/ has been run (issue #87), no handler may
+// read this false as advice being undeliverable to Codex by nature.
 // Cursor's is the user_message field of the decision object itself, so its
 // advisory set is exactly its decision set — and advice only rides there
 // alongside a rendered permission, which Render is what enforces. Pi's set is
