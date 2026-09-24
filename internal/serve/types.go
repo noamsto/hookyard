@@ -80,7 +80,7 @@ type Filter struct {
 	Session  string   // case-insensitive substring
 	Events   []string // canonical_event, engine:native_event, or native_event on a router error (SPEC 4.6)
 	Handlers []string // branch: a branch's handler name (never "", so it excludes handler-less branches)
-	Outcomes []string // branch: a branch's outcome (handler outcomes, plus "router-error")
+	Outcomes []string // branch: a branch's outcome (handler outcomes; "router-error"; or, for a handler-less call, its own verdict, e.g. "abstain"/"suppressed")
 	Verdicts []string // call verdict: the consolidated verdict OR the router status — never a handler outcome
 }
 

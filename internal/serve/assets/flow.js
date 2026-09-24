@@ -102,10 +102,18 @@ let active = { engine: [], event: [], handler: [], outcome: [], verdict: [], ses
 let facets = null;
 let stickyShown = emptyColumnSets();
 let showIdle = false;
+// rawTotals: per-node drawn counts from paths, keyed by the node's own (col,
+// name) rather than the display node — refreshed once per layout(), read by
+// isBusy so a node carrying traffic is never hidden by a facet-key mismatch.
+let rawTotals = new Map();
 
 let groups = { groupOf: new Map(), members: new Map() };
 const userExpanded = new Map(); // group key -> explicit user toggle, overrides auto-expand
 let forced = new Set(); // group keys holding an active handler filter value
+// expandedAtLayout: which groups were expanded as of the last layout() call.
+// isExpanded() is live (tracks isShown/stickyShown), but the SVG only
+// changes on layout(); display mapping must stay pinned to what's drawn.
+let expandedAtLayout = new Set();
 let order = { engine: [], event: [], handler: [], outcome: [] }; // handler: unit keys
 let memberOrder = new Map(); // expanded group node key -> member node keys
 let orderDirty = true;
@@ -254,11 +262,12 @@ function isExpanded(key) {
 }
 
 // displayNode maps a raw branch node to the node that draws it: a handler
-// inside a collapsed group lands on the group.
+// inside a collapsed group lands on the group. Reads expandedAtLayout (not
+// the live isExpanded) so counting/pulses/hover stay pinned to the drawn SVG.
 function displayNode(col, name) {
   if (col === "handler") {
     const key = groups.groupOf.get(name);
-    if (key !== undefined && !isExpanded(key)) return ["group", key];
+    if (key !== undefined && !expandedAtLayout.has(key)) return ["group", key];
   }
   return [col, name];
 }
@@ -384,9 +393,12 @@ async function fetchJSON(url) {
 
 // ---------- visibility (D8.2) ----------
 
-// isBusy: shown without the idle toggle.
+// isBusy: shown without the idle toggle. rawTotals catches nodes whose facet
+// key disagrees with the drawn label (e.g. a router-error record with empty
+// native_event: Go's event facet skips the "" label, app.js draws it as "—").
 function isBusy(col, name) {
-  return (facets[col][name] || 0) > 0 || active[col].includes(name) || stickyShown[col].has(name);
+  return (facets[col][name] || 0) > 0 || active[col].includes(name) || stickyShown[col].has(name)
+    || (rawTotals.get(nodeKey(col, name)) || 0) > 0;
 }
 
 function isShown(col, name) {
@@ -570,7 +582,7 @@ async function load() {
   layoutDirty = true;
   orderDirty = true;
   layout();
-  render();
+  paint();
 }
 
 // ---------- view toggle ----------
@@ -669,6 +681,7 @@ function layout() {
   clearHover();
   clearTimeout(relayoutTimer);
   relayoutTimer = null;
+  rawTotals = computeRawTotals();
 
   const handlerIds = columnNames("handler");
   groups = computeGroups(handlerIds);
@@ -676,6 +689,10 @@ function layout() {
   for (const id of active.handler) {
     const key = groups.groupOf.get(id);
     if (key !== undefined) forced.add(key);
+  }
+  expandedAtLayout = new Set();
+  for (const key of groups.members.keys()) {
+    if (isExpanded(key)) expandedAtLayout.add(key);
   }
 
   const units = { engine: [], event: [], handler: [], outcome: [] };
@@ -694,7 +711,7 @@ function layout() {
     const shownMembers = groups.members.get(key).filter((m) => isShown("handler", m));
     if (shownMembers.length === 0) continue;
     units.handler.push(gk);
-    if (isExpanded(key)) blocks.set(gk, shownMembers.map((m) => nodeKey("handler", m)));
+    if (expandedAtLayout.has(key)) blocks.set(gk, shownMembers.map((m) => nodeKey("handler", m)));
   }
 
   const totals = computeTotals();
@@ -845,7 +862,7 @@ function makeNode(key, x, y, w, memberKeys) {
     members = groups.members.get(name);
     dataName = groupLabel(name);
     tipName = dataName + " (" + members.length + ")";
-    label = (isExpanded(name) ? "▾ " : "▸ ") + tipName;
+    label = (expandedAtLayout.has(name) ? "▾ " : "▸ ") + tipName;
     cls.push("group");
     g.setAttribute("data-members", String(members.length));
   } else {
@@ -904,6 +921,24 @@ function render() {
 
 function pathTotal(entry) {
   return entry.counts.reduce((a, b) => a + b, 0);
+}
+
+// computeRawTotals counts drawn paths onto their own (col, name), not the
+// display node — feeds isBusy, so it can't depend on expandedAtLayout (which
+// itself depends on isShown/isBusy for group members) without a cycle.
+function computeRawTotals() {
+  const totals = new Map();
+  for (const entry of paths.values()) {
+    const n = pathTotal(entry);
+    if (n === 0) continue;
+    for (const b of pathBranches(entry.path)) {
+      for (const [col, name] of b.nodes) {
+        const k = nodeKey(col, name);
+        totals.set(k, (totals.get(k) || 0) + n);
+      }
+    }
+  }
+  return totals;
 }
 
 // computeTotals counts the drawn paths onto display nodes and edges (D4):
@@ -1132,7 +1167,7 @@ function onNodeClick(g, ev) {
     userExpanded.set(name, !isExpanded(name));
     orderDirty = true;
     layout();
-    render();
+    paint();
     return;
   }
   toggleFilter(col, name, ev.shiftKey || ev.ctrlKey || ev.metaKey);
@@ -1342,7 +1377,7 @@ flowIdleEl.addEventListener("change", () => {
   showIdle = flowIdleEl.checked;
   orderDirty = true;
   layout();
-  render();
+  paint();
 });
 flowFitEl.addEventListener("click", () => fit());
 

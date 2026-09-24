@@ -128,7 +128,7 @@ export function filterParams() {
 // field's current select options still lands in the state and still shows as
 // a chip — the state is the truth, not the options (D6).
 function applyFiltersFromParams(params) {
-  for (const field of FIELDS) filterState[field] = params.getAll(field);
+  for (const field of FIELDS) filterState[field] = params.getAll(field).filter(Boolean);
   filterState.session = params.get("session") || "";
   sessionInput.value = filterState.session;
 }
