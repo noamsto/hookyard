@@ -34,7 +34,7 @@
 import { PENDING_CAP, PRESS_HOLD_MAX_MS, RELAYOUT_MS, RENDER_MS, WINDOW_MIN } from "../constants.ts";
 import type { Col, Entry, Filters, FlowResponse, PathLike, TableResponse } from "../types.ts";
 import type { EventLabel } from "./branches.ts";
-import { nodeKey, splitKey } from "./keys.ts";
+import { splitKey } from "./keys.ts";
 import type { Branch } from "./keys.ts";
 import { bySeverity, emptyTotals, isLoud, Snapshot } from "./snapshot.ts";
 import type { Tip, Totals } from "./snapshot.ts";

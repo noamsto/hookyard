@@ -675,7 +675,7 @@ func TestFlowBundleEmbedded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("staticFS: %v", err)
 	}
-	for _, name := range []string{"flow/flow.js", "flow/flow.css", "flow/elk-worker.js"} {
+	for _, name := range []string{"flow/flow.js", "flow/flow.css"} {
 		data, err := fs.ReadFile(sub, name)
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)

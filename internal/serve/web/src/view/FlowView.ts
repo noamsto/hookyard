@@ -5,7 +5,7 @@
 
 import { toggleFilter } from "../bridge.ts";
 import type { Frame, FlowController } from "../model/controller.ts";
-import { splitKey } from "../model/keys.ts";
+import { splitEdgeKey, splitKey } from "../model/keys.ts";
 import { bySeverity, isLoud, knownOutcome } from "../model/snapshot.ts";
 import type { Snapshot, SnapNode, Tip, Totals } from "../model/snapshot.ts";
 import type { Col } from "../types.ts";
@@ -234,7 +234,7 @@ export class FlowView {
       this.drawLegend(d);
     }
 
-    if (hover !== null && (d.nodeEls.has(hover) || frame.snap.node(hover)?.group?.expanded)) this.hoverNode(hover);
+    if (hover !== null && d.nodeEls.has(hover)) this.hoverNode(hover);
     if (focused !== undefined) {
       for (const el of this.svg.querySelectorAll("[tabindex]")) {
         if (this.keyOf.get(el) === focused) (el as SVGElement).focus();
@@ -263,7 +263,7 @@ export class FlowView {
       let g = byEdge.get(l.edge);
       if (!g) {
         g = svgEl("g", { class: "flow-edge" }, this.layers.bands);
-        const [a, b] = [l.edge.slice(0, l.edge.indexOf("\x01")), l.edge.slice(l.edge.indexOf("\x01") + 1)];
+        const [a, b] = splitEdgeKey(l.edge);
         const na = d.frame.snap.node(a);
         const nb = d.frame.snap.node(b);
         g.dataset.key = JSON.stringify([na?.col, na?.dataName, nb?.col, nb?.dataName]);
@@ -367,14 +367,21 @@ export class FlowView {
     const x0 = members[0].x0;
     const x1 = members[0].x1;
     const total = d.frame.totals.nodeTotals.get(grp.key) ?? 0;
+    const room = Math.floor((x1 - x0 - 2) / (this.charW || 7.2));
     const el = svgEl("g", { class: "flow-node flow-group-open" }, this.layers.nodes);
     this.tagNode(el, grp, total);
     d.nodeEls.set(grp.key, el);
     svgEl("path", { class: "bracket", d: `M${x0 - 3},${top - HEAD_H + 10}H${x0 - 7}V${bottom}H${x0 - 3}` }, el);
     const hit = svgEl("rect", { class: "hit flow-group-header", x: x0, y: top - HEAD_H, width: x1 - x0, height: HEAD_H - 2 }, el);
     const y = top - 7;
-    svgText(el, x0 + 2, y, [["▾ ", "caret"], [grp.group.label, "nm"], [" (" + grp.group.members.length + ")", "cnt"]], { class: "grouphead" });
-    svgText(el, x1, y, [[fmt(total) + "  ", "cnt"], grp.group.forced ? ["pinned", "cnt"] : ["fold", "fold"]], { class: "grouphead", "text-anchor": "end" });
+    const left: Part[] = [["▾ ", "caret"], [grp.group.label, "nm"], [" (" + grp.group.members.length + ")", "cnt"]];
+    const right: Part[] = [[fmt(total) + "  ", "cnt"], grp.group.forced ? ["pinned", "cnt"] : ["fold", "fold"]];
+    // Narrow plates drop the count first (the tooltip has it), then shorten the name.
+    if (partsLen(left) + partsLen(right) + 1 > room) right.shift();
+    const over = partsLen(left) + partsLen(right) + 1 - room;
+    if (over > 0) left[1] = [fit(grp.group.label, grp.group.label.length - over), "nm"];
+    svgText(el, x0 + 2, y, left, { class: "grouphead" });
+    svgText(el, x1, y, right, { class: "grouphead", "text-anchor": "end" });
     this.keyOf.set(hit, grp.key);
     hit.addEventListener("mouseenter", () => this.hoverNode(grp.key));
     hit.addEventListener("mouseleave", () => this.clearHover());
@@ -468,10 +475,14 @@ export class FlowView {
     const fan = this.fanOf(n);
     if (fan) right.push([fan, "fan"]);
     const rightChars = partsLen(right);
-    const live = d.frame.totals.buckets.get(key);
-    const sparkW = live ? live.length * (SPARK.w + SPARK.gap) : 0;
-    const nameRoom = Math.floor((width - rightChars * cw - (sparkW ? sparkW + 8 : 0)) / cw) - 1;
-    const left: Part[] = n.snap?.group ? [["▸ ", "caret"], [fit(name, Math.max(nameRoom - 2, 4)), "nm"]] : [[fit(name, Math.max(nameRoom, 4)), n.snap ? "nm" : "nm quiet"]];
+    const caret = n.snap?.group ? 2 : 0;
+    const nameRoom = Math.floor((width - rightChars * cw) / cw) - 1 - caret;
+    // The sparkline only takes room the name does not need.
+    const buckets = d.frame.totals.buckets.get(key);
+    const sparkW = buckets ? buckets.length * (SPARK.w + SPARK.gap) : 0;
+    const live = sparkW > 0 && (name.length + caret + 2 + rightChars) * cw + sparkW + 8 <= width ? buckets : undefined;
+    const left: Part[] = [[fit(name, Math.max(nameRoom, 4)), n.snap ? "nm" : "nm quiet"]];
+    if (caret) left.unshift(["▸ ", "caret"]);
     svgText(el, g.x0 + INSET, y, left);
     svgText(el, g.x1 - INSET, y, right, { "text-anchor": "end" });
     if (live && sparkW) this.sparkline(el, live, g.x1 - INSET - rightChars * cw - 8 - sparkW, y);
@@ -564,7 +575,7 @@ export class FlowView {
       const o = knownOutcome(l.outcome);
       svgEl("path", { class: "band" + (isLoud(o) ? " loud" : ""), d: ribbon(l, l.width), "data-o": o }, this.layers.over);
     }
-    const [a, b] = [edge.slice(0, edge.indexOf("\x01")), edge.slice(edge.indexOf("\x01") + 1)];
+    const [a, b] = splitEdgeKey(edge);
     const na = d.frame.snap.node(a);
     const nb = d.frame.snap.node(b);
     const calls = na?.col === "engine";

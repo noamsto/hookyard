@@ -59,7 +59,7 @@
 
 /* nodes: bars for engines and outcomes; light plates for events and handlers */
 .bar { fill: color-mix(in oklab, var(--fg-dim) 80%, var(--bg-panel)); }
-.bar[data-o="loud"] { fill: var(--fg); }
+.bar[data-o="loud"] { fill: color-mix(in oklab, var(--fg) 75%, var(--bg-panel)); }
 .k-outcome .bar { fill: var(--oc); }
 .k-outcome .bar:is([data-o="abstain"], [data-o="dispatched"], [data-o="suppressed"]) { fill: color-mix(in oklab, var(--oc) 70%, var(--bg-panel)); }
 .rule { stroke: var(--border); stroke-width: 1; }
@@ -70,7 +70,6 @@
 .flow-node .hit { fill: transparent; cursor: pointer; }
 .k-pseudo .hit { cursor: default; }
 .flow-node.selected .rule { stroke: var(--accent); stroke-width: 2; }
-.flow-node.selected .bar { stroke: var(--accent); stroke-width: 2; }
 .flow-node.flash .rule { stroke: var(--accent); stroke-width: 2; }
 .flow-node.flash .gate { fill: color-mix(in oklab, var(--accent) 22%, transparent); }
 .flow-body.hl .flow-node:not(.on) { opacity: .35; }
@@ -84,7 +83,8 @@
 .label .nm.quiet { fill: var(--fg-dim); }
 .label .nm.loud { fill: var(--oc); font-weight: 700; }
 .label.idle .nm { fill: var(--fg-dim); font-weight: 400; }
-.label.selected .nm { fill: var(--accent); }
+.label.selected .nm { text-decoration: underline; text-decoration-color: var(--accent); text-decoration-thickness: 2px; }
+.label.selected:not(.k-outcome) .nm { fill: var(--accent); }
 .label .cnt, .label .caret, .label .fan { fill: var(--fg-dim); font-size: 11px; font-variant-numeric: tabular-nums; }
 .label .cnt.hl { fill: var(--accent); font-weight: 600; }
 .label .dec-o { fill: var(--oc); font-weight: 700; font-size: 11px; }
@@ -99,7 +99,7 @@
 .flow-group-open .bracket { fill: none; stroke: var(--fg-dim); stroke-width: 1; }
 .flow-group-open .hit { cursor: pointer; }
 .flow-group-open[data-forced="true"] .hit { cursor: default; }
-.grouphead { font-size: 11px; }
+.grouphead { font-size: 11px; pointer-events: none; }
 .grouphead .nm { fill: var(--fg); font-weight: 600; }
 .grouphead .cnt, .grouphead .caret { fill: var(--fg-dim); }
 .grouphead .fold { fill: var(--accent); }

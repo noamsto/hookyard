@@ -1,9 +1,9 @@
 // DOM/SVG builders. Operator strings (handler, event, engine names) only
 // ever reach the page through textContent or data-* attributes.
 
-export const SVGNS = "http://www.w3.org/2000/svg";
+const SVGNS = "http://www.w3.org/2000/svg";
 
-export type Attrs = Record<string, string | number>;
+type Attrs = Record<string, string | number>;
 
 export function svgEl<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Attrs = {}, parent?: Element): SVGElementTagNameMap[K] {
   const e = document.createElementNS(SVGNS, tag);

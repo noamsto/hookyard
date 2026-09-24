@@ -12,7 +12,7 @@
 // its scale is exactly 1, then a collision pass settles the final positions.
 
 import { sankey } from "d3-sankey";
-import type { SankeyGraph, SankeyLink, SankeyNode } from "d3-sankey";
+import type { SankeyGraph, SankeyNode } from "d3-sankey";
 import { bySeverity, isLoud, severityRank } from "../model/snapshot.ts";
 
 export type NodeKind = "engine" | "event" | "handler" | "group" | "outcome" | "pseudo";
@@ -68,7 +68,7 @@ export interface GeoLink {
   y1: number;
 }
 
-export interface GeoColumn { x0: number; x1: number; }
+interface GeoColumn { x0: number; x1: number; }
 
 export interface Geometry {
   width: number;
@@ -86,9 +86,9 @@ export interface Geometry {
 export const GUTTER = 12; // matches the panel header's side padding
 export const TOP = 40; // header row
 export const BOTTOM = 30; // legend row
-export const BAR_W = 8;
+const BAR_W = 8;
 export const LH = 14;
-export const GAP = 5;
+const GAP = 5;
 export const HEAD_H = 20;
 const PAD = 14; // d3-sankey's node padding while it relaxes
 const PLATE_PAD = 6;
@@ -99,7 +99,7 @@ const PLATE_MAX = 280;
 
 // floorPx: a decision band is at least 2 + log2(n) px, so a single deny is
 // visible and decisions still rank against each other; a no-op band 1 px.
-export function floorPx(count: number, outcome: string): number {
+function floorPx(count: number, outcome: string): number {
   return isLoud(outcome) ? 2 + Math.log2(count) : 1;
 }
 
@@ -275,7 +275,6 @@ function fitKy(nodes: N[], links: L[], avail: number): number {
 }
 
 type DN = SankeyNode<N, L>;
-type DL = SankeyLink<N, L>;
 
 // relax runs d3-sankey over px-valued nodes and links so it keeps each
 // node's height and nudges the column positions along the bands.

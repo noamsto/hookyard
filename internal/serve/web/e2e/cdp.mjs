@@ -314,6 +314,6 @@ export class Page {
 }
 
 export const KEYS = {
-  zero: { key: "0", code: "Digit0", keyCode: 48, text: "0" },
+  enter: { key: "Enter", code: "Enter", keyCode: 13, text: "\r" },
   shift: { key: "Shift", code: "ShiftLeft", keyCode: 16 },
 };
