@@ -267,10 +267,10 @@ func piAskDegradedReason(handlerReason string) string {
 // renderTurnEnd renders the turn_end decision slot (pi D3, Claude Code and
 // Codex §11.3). Deny means "do not stop yet — continue with this reason",
 // rendered through the engine's own block wire shape (renderPiDeny for pi,
-// renderStopBlock for Claude Code/Codex). Unlike
-// pre_tool's renderPi/renderCodex, Ask is not degraded to deny, because there
-// is no safe direction to degrade to here — a forced continuation is not
-// "safer" than stopping. Allow and Abstain print nothing; Abstain alone is
+// renderStopBlock for Claude Code/Codex). Unlike pre_tool's
+// renderPi/renderCodex, Ask is not degraded to deny, because there is no safe
+// direction to degrade to here — a forced continuation is not "safer" than
+// stopping. Allow and Abstain print nothing; Abstain alone is
 // enforced, since it is the only verdict here that matches what the engine
 // would have done anyway. A standalone (non-deny) advisory is never
 // rendered: HasAdvisorySlot excludes TurnEnd on every engine — Claude Code's

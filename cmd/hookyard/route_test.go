@@ -735,10 +735,8 @@ func TestRunRouteCodexStopDenyAndStopHookActive(t *testing.T) {
 }
 
 // A deny handler that gives neither reason nor advice must still render a
-// non-empty block reason: Codex's validator treats a block with an empty
-// reason as invalid and rejects the whole response, unlike pi's bridge whose
-// own fallback ("Blocked by hookyard") only kicks in client-side. Mirrors
-// TestRunRoutePiTurnEndDenyWithNoReasonFallsBackToFixedReason.
+// non-empty block reason: Codex's stop parser treats a block with a blank
+// reason as invalid and does not block at all.
 func TestRunRouteCodexStopDenyWithNoReasonFallsBackToFixedReason(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
@@ -759,9 +757,8 @@ func TestRunRouteCodexStopDenyWithNoReasonFallsBackToFixedReason(t *testing.T) {
 	}
 }
 
-// Regression pin, expected to pass already: an abstaining handler on Claude
-// Code's Stop prints nothing and is recorded enforced (abstain is enforced),
-// the same as every other canonical event's abstain path.
+// An abstaining handler on Claude Code's Stop prints nothing and is recorded
+// enforced, the same as every other canonical event's abstain path.
 func TestRunRouteClaudeCodeStopObserverPrintsNothing(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")

@@ -2091,14 +2091,11 @@ func liveWriteClaudeStopManifest(t *testing.T, dir, handlerPath string) string {
 
 // TestLiveClaudeCodeStopDenyForcesExactlyOneContinuation is
 // TestLivePiTurnEndDenyForcesExactlyOneContinuation's Claude Code twin
-// (§11.3 amendment, issue #77), driven against a real claude binary rather
-// than a scripted one: a handler that always denies canonical turn_end
-// (native Stop) must render the top-level {"decision":"block","reason":...}
-// shape and force exactly one more continuation, bounded by Claude Code's own
-// native stop_hook_active rather than any hookyard-side counter — the deny
-// handler must see stop_hook_active false on the first Stop and true on the
-// second, never a third invocation, and hookyard's own record of the second
-// Stop must be an unenforced deny (docs/design/hookyard.md §11.3).
+// (docs/design/hookyard.md §11.3), against a real claude binary: a handler
+// that always denies canonical turn_end forces exactly one continuation, and
+// Claude Code's own stop_hook_active is the only bound — the handler sees it
+// false then true, never a third Stop, and hookyard records the second deny
+// unenforced.
 //
 // Gated identically to TestLiveClaudeCodeRefusesTheDeniedToolCall, for the
 // same reasons: HOOKYARD_E2E=1 (no credentials in the repo gate) and claude
@@ -2197,12 +2194,8 @@ func TestLiveClaudeCodeStopDenyForcesExactlyOneContinuation(t *testing.T) {
 			turnEndRecords[1].Verdict, turnEndRecords[1].Enforced, output)
 	}
 
-	// Secondary: the reason token should surface somewhere in a session
-	// transcript under CLAUDE_CONFIG_DIR/projects/*/*.jsonl, since it becomes
-	// the model's literal continuation prompt. Best-effort — the two
-	// load-bearing assertions above already prove the render and the bound;
-	// this only checks that the token actually reached the transcript claude
-	// writes, whose exact shape this test does not otherwise depend on.
+	// Best-effort: the transcript's shape is claude's own and unpinned, so a
+	// missing token is logged rather than failed.
 	matches, globErr := filepath.Glob(filepath.Join(claudeConfigDir, "projects", "*", "*.jsonl"))
 	if globErr != nil {
 		t.Fatalf("glob session transcripts: %v", globErr)
