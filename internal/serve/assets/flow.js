@@ -1,12 +1,8 @@
-// hookyard serve flow view. A separate ES module from app.js — it imports
-// only filterParams/eventLabel (the one filter serialization and the one
-// event-label rule) and listens for app.js's hookyard:sync/hookyard:call
-// CustomEvents. Same safety rule as app.js: every piece of record-derived
-// text (engine, event, handler, outcome names are operator-controlled) goes
-// through textContent, never innerHTML. Class names derived from an outcome
-// are restricted to the known outcome list (verdictClass) rather than
-// sanitized by regex, so an unrecognised value never reaches a class
-// attribute at all.
+// hookyard serve flow view. It imports app.js's one filter serialization and
+// event-label rule, and listens for app.js's hookyard:sync/hookyard:call
+// events. Same safety rule as app.js: engine, event, handler and outcome names
+// are operator-controlled and reach the DOM only through textContent, and a
+// class name derived from an outcome comes only from the known outcome list.
 
 import { filterParams, eventLabel } from "./app.js";
 
@@ -100,11 +96,8 @@ function consecutivePairs(nodes) {
   return pairs;
 }
 
-// pathKey groups a path/record the same way the server does: engine,
-// canonical_event, native_event, router, verdict, then each handler's
-// name+outcome in record order. Used only to merge the server's aggregate
-// with live calls client-side — it need not match the server's own key
-// format, only be internally consistent.
+// pathKey groups a path or live record by the same tuple /api/flow groups by,
+// so live calls merge into the aggregate they belong to.
 function pathKey(p) {
   const hh = (p.handlers || []).map((h) => h.name + "\x02" + h.outcome).join("\x03");
   return [p.engine, p.canonical_event, p.native_event, p.router, p.verdict, hh].join("\x01");
@@ -348,7 +341,6 @@ async function load() {
   params.set("day", day);
   if (live) params.set("window", String(WINDOW_MIN));
 
-  // /api/table and /api/flow are independent — fetch them concurrently.
   let table, resp;
   try {
     [table, resp] = await Promise.all([fetchTable(), fetchJSON("/api/flow?" + params.toString())]);
@@ -376,7 +368,7 @@ async function load() {
 
   paths = new Map();
   for (const p of resp.paths) {
-    paths.set(pathKey(p), { path: p, counts: (p.counts || []).slice() });
+    paths.set(pathKey(p), { path: p, counts: p.counts.slice() });
     observePath(p);
   }
   cursor = resp.next_offset;
