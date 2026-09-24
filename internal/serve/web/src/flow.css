@@ -70,8 +70,13 @@
 .flow-node .hit { fill: transparent; cursor: pointer; }
 .k-pseudo .hit { cursor: default; }
 .flow-node.selected .rule { stroke: var(--accent); stroke-width: 2; }
-.flow-node.flash .rule { stroke: var(--accent); stroke-width: 2; }
-.flow-node.flash .gate { fill: color-mix(in oklab, var(--accent) 22%, transparent); }
+/* a pulse's arrival: the event gate and the outcome bar flash, then decay */
+@keyframes flow-flash-rule { from { stroke: var(--accent); stroke-width: 2.5px; } to { stroke: var(--border); stroke-width: 1px; } }
+@keyframes flow-flash-gate { from { fill: color-mix(in oklab, var(--accent) 30%, transparent); } to { fill: color-mix(in oklab, var(--fg-dim) 9%, transparent); } }
+@keyframes flow-flash-bar { from { stroke-width: 6px; stroke-opacity: .8; } to { stroke-width: 0; stroke-opacity: 0; } }
+.flow-node.flash .rule { animation: flow-flash-rule 1.5s ease-out; }
+.flow-node.flash .gate { animation: flow-flash-gate 1.5s ease-out; }
+.k-outcome.flash .bar { stroke: var(--oc); animation: flow-flash-bar 1.5s ease-out; }
 .flow-body.hl .flow-node:not(.on) { opacity: .35; }
 .flow-body.hl .flow-node.on .rule { stroke: var(--fg-dim); }
 .flow-node .hit:focus { outline: none; }
@@ -112,10 +117,15 @@
 .l-legend .swatch { fill: var(--oc); }
 .l-legend .swatch:is([data-o="abstain"], [data-o="dispatched"], [data-o="suppressed"]) { fill-opacity: .6; }
 
-/* live pulses */
-.flow-dot { fill: var(--fg); fill-opacity: .85; stroke: var(--bg-panel); stroke-width: 1; pointer-events: none; }
+/* live pulses: a dot and its short fading trail */
+.flow-dot { fill: var(--fg); fill-opacity: .9; stroke: var(--bg-panel); stroke-width: 1; pointer-events: none; }
+.flow-trail { fill: none; stroke: var(--fg); stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+.flow-trail.near { stroke-opacity: .35; }
+.flow-trail.far { stroke-opacity: .12; }
 .flow-dot[data-o="dispatched"] { fill: var(--c-dispatched); }
-.flow-dot:is([data-o="deny"], [data-o="ask"], [data-o="advise"], [data-o="allow"], [data-o="timeout"], [data-o="error"], [data-o="router-error"]) { fill: var(--oc); fill-opacity: 1; }
+.flow-trail[data-o="dispatched"] { stroke: var(--c-dispatched); }
+.flow-dot:is([data-o="deny"], [data-o="ask"], [data-o="advise"], [data-o="allow"], [data-o="timeout"], [data-o="error"], [data-o="router-error"]) { fill: color-mix(in oklab, var(--oc) 65%, var(--fg)); fill-opacity: 1; }
+.flow-trail:is([data-o="deny"], [data-o="ask"], [data-o="advise"], [data-o="allow"], [data-o="timeout"], [data-o="error"], [data-o="router-error"]) { stroke: var(--oc); }
 
 /* tooltip */
 .flow-tip {

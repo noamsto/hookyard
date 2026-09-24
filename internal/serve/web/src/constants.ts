@@ -1,7 +1,7 @@
 import type { DisplayCol } from "./types.ts";
 
 export const WINDOW_MIN = 10;
-export const MAX_DOTS = 96;
+export const MAX_DOTS = 128;
 export const RENDER_MS = 500;
 export const PENDING_CAP = 5000;
 export const RELAYOUT_MS = 5000;

@@ -19,7 +19,7 @@ const REPO = resolve(WEB, "../../..");
 // Mirrors src/constants.ts; checks 5 and 6 time themselves against these.
 const RELAYOUT_MS = 5000;
 const PRESS_HOLD_MAX_MS = 10000;
-const MAX_DOTS = 96;
+const MAX_DOTS = 128;
 const BURST_CALLS = 500;
 const BURST_MS = 5000;
 const BURST_ELEMENT_SLACK = 20;

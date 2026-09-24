@@ -52,6 +52,7 @@ export class FlowView {
   private readonly idleText: HTMLSpanElement;
   private readonly pulses: Pulses;
   private readonly keyOf = new WeakMap<Element, string>();
+  private readonly flashTimers = new WeakMap<Element, number>();
   private drawn: Drawn | null = null;
   private rankMemo: { snap: Snapshot; rank: Map<string, number> } | null = null;
   private hover: string | null = null;
@@ -661,10 +662,14 @@ export class FlowView {
     toggleFilter(col, name, ev.shiftKey || ev.ctrlKey || ev.metaKey);
   }
 
+  // flash restarts the node's arrival animation (1.5 s decay, in CSS).
   private flash(key: string): void {
     const el = this.drawn?.nodeEls.get(key);
     if (!el) return;
+    el.classList.remove("flash");
+    void el.getBoundingClientRect();
     el.classList.add("flash");
-    window.setTimeout(() => el.classList.remove("flash"), 500);
+    window.clearTimeout(this.flashTimers.get(el));
+    this.flashTimers.set(el, window.setTimeout(() => el.classList.remove("flash"), 1500));
   }
 }
