@@ -88,7 +88,7 @@ var inboundEvents = map[Engine]map[string]string{
 		"PreToolUse":       PreTool,      // observed: codex-pre_tool_use.json
 		"PostToolUse":      PostTool,     // assumed
 		"PreCompact":       PreCompact,   // assumed
-		"Stop":             TurnEnd,      // assumed
+		"Stop":             TurnEnd,      // code-read: stop.command.input.schema.json @ rust-v0.156.1
 	},
 	Cursor: {
 		"sessionStart":       SessionStart, // assumed

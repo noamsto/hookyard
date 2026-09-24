@@ -164,12 +164,16 @@ through a destination option at all (#29).
   a handler with no verdict to give (design doc §4). A fire-and-forget handler
   can never guard, so `validate` refuses one declared on a guard event — an
   event whose verdict actually gates a call, such as `pre_tool` — or carrying
-  a non-zero `timeout_ms`. `turn_end` on pi is a decision slot too (design doc
-  §11.2, issue #76) but not a guard slot: a deny there asks pi to keep going
-  rather than blocking anything, so a fire-and-forget `turn_end` observer
-  stays legal. Using `lane` at all needs the hookyard version that introduced
-  it — an older binary silently drops the field and runs the entry in the
-  verdict lane instead.
+  a non-zero `timeout_ms`. `turn_end` is a decision slot too, on pi, Claude
+  Code and Codex (design doc §11.2, §11.3, issues #76, #77) — but not a
+  guard slot: a deny there asks the agent to keep going, one continuation per
+  turn, bounded by `stop_hook_active` (per run on pi), rather than blocking
+  anything, so a fire-and-forget `turn_end` observer stays legal on all three
+  engines. A verdict-lane `turn_end` handler that returns deny on
+  `claude-code` or `codex` now forces that continuation — it used to be
+  recorded and ignored. Using `lane` at all needs the hookyard version that
+  introduced it — an older binary silently drops the field and runs the
+  entry in the verdict lane instead.
 - `match` filters by normalized tool name; an empty list matches every tool. A
   tool with no equivalent on a claimed engine — Codex has no `Grep` or `Glob`,
   Cursor has no `Glob` — fails validation rather than installing a handler that

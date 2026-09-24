@@ -2330,8 +2330,8 @@ strings it collected have to ride alongside it:
 
 | Engine | Verdict rendering | Advisory rendering | Confirmed? |
 |---|---|---|---|
-| Claude Code | `hookSpecificOutput.permissionDecision` = `allow`/`deny`/`ask`, `permissionDecisionReason` = reason, on `pre_tool` only | `hookSpecificOutput.additionalContext`, the concatenation of every advisory collected, delivered on `pre_tool`, `session_start`, and `post_tool` — the latter two have no decision slot, only the advisory one | Verdict yes — documented field, tri-state including `ask`. Advisory arm confirmed on `pre_tool` by an existing guard emitting it, and confirmed live in production on `session_start` and `post_tool` by aeye's `diagram-guidance.sh` and `diagrams.sh` respectively |
-| Codex | Unconfirmed | **Unprobed** — no channel in this package | The deny arm and the undeclared default timeout *are* fixture-verified (`hook-payloads/codex-pre_tool_use-DENY.json` reported `Blocked by hook`; `codex-user_prompt_submit-TICK.json` ran 180 s unkilled), which this cell failed to record until now. The advisory claim is the opposite: unprobed. Codex documents `hookSpecificOutput.additionalContext` on `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse` and `SubagentStart`, so "no advisory channel at all" is an absence of observation rather than a finding. Probe: `fixtures/codex-advisory/`, issue #87 |
+| Claude Code | `hookSpecificOutput.permissionDecision` = `allow`/`deny`/`ask`, `permissionDecisionReason` = reason, on `pre_tool` only. On `turn_end` (native `Stop`) a deny renders top-level `{"decision":"block","reason":"..."}` instead — never `hookSpecificOutput`, which is a `PreToolUse` contract — and nothing once `stop_hook_active` is true — §11.3 | `hookSpecificOutput.additionalContext`, the concatenation of every advisory collected, delivered on `pre_tool`, `session_start`, and `post_tool` — the latter two have no decision slot, only the advisory one | Verdict yes — documented field, tri-state including `ask`. Advisory arm confirmed on `pre_tool` by an existing guard emitting it, and confirmed live in production on `session_start` and `post_tool` by aeye's `diagram-guidance.sh` and `diagrams.sh` respectively |
+| Codex | Unconfirmed. On `turn_end` (native `Stop`) a deny renders top-level `{"decision":"block","reason":"..."}`, and nothing once `stop_hook_active` is true — §11.3 | **Unprobed** — no channel in this package | The deny arm and the undeclared default timeout *are* fixture-verified (`hook-payloads/codex-pre_tool_use-DENY.json` reported `Blocked by hook`; `codex-user_prompt_submit-TICK.json` ran 180 s unkilled), which this cell failed to record until now. The advisory claim is the opposite: unprobed. Codex documents `hookSpecificOutput.additionalContext` on `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse` and `SubagentStart`, so "no advisory channel at all" is an absence of observation rather than a finding. Probe: `fixtures/codex-advisory/`, issue #87 |
 | Cursor | `permission` field | Unconfirmed | Field name confirmed; exact accepted value set (binary vs. tri-state) not confirmed this pass, and no advisory slot identified |
 | Pi | return `{block: true, reason: string}` from the extension's `tool_call` handler; there is no `allow` wire form — not blocking *is* allow, so an explicit allow renders nothing. On `turn_end` (native `agent_before_settle`) a deny renders the same shape, and the bridge turns it into one continuation carrying the reason — §11.2 | Three channels, one per event, each prefixed `"[hookyard advisory] "`: on `pre_tool`, a deny's advice is joined into the block `reason` (rides with the block, as above); a standalone abstain/allow's advice has no field in the `tool_call` reply pi's agent loop reads, so the bridge stashes it keyed by `toolCallId` and a bridge-owned `tool_result` handler appends it as a text block onto that same call's own tool result — §11.1. On `session_start`, queued advice is flushed as a `before_agent_start` injected message. On `post_tool`, advice is appended to the tool result content | **Confirmed live, twice, including a filesystem side effect**: `touch SIDE-EFFECT.txt` was denied and the file did not exist afterward; a second denied `bash` call produced no `tool_result` event while the reason string still reached the model as the tool's outcome. Decision vocabulary is binary — no `ask` arm was found. The `pre_tool` advisory channels (deny-reason and tool-result-append) are confirmed against `docs/design/fixtures/pi-pre-tool-advisory/` — §11.1 |
 
@@ -2359,11 +2359,11 @@ binary shape is read off its own validation rejecting every other value,
 where Pi's was watched directly — block or nothing, twice, with no third
 return value found anywhere in the extension API's types. A consolidated
 `ask` targeting Pi renders as a deny with `enforced: true`, the same rule,
-for the same reason. Pi's `turn_end` is the one exception (§11.2). There an
-`ask` renders nothing and is recorded unenforced. The rule exists to keep a
-call from proceeding without the review a guard asked for, and a turn end
-holds back no call: degrading to deny would force a continuation, and that
-is not the conservative direction.
+for the same reason. Every engine's `turn_end` is the exception: pi (§11.2), and Claude Code and
+Codex (§11.3). There an `ask` renders nothing and is recorded unenforced. The
+rule exists to keep a call from proceeding without the review a guard asked
+for, and a turn end holds back no call: degrading to deny would force a
+continuation, and that is not the conservative direction.
 
 **This is not §5's fail-open case, and the two must not be conflated.** §5
 covers hookyard *failing* to produce an opinion at all — the router
@@ -4355,6 +4355,187 @@ The handler saw `stop_hook_active` false, then true. The two canonical
 | `internal/manifest/manifest.go`, `validateLane` | Amended | Now calls the new `HasGuardSlot`, not `HasDecisionSlot`, so a fire-and-forget `turn_end` handler on pi stays legal (D3, issue #76) |
 | Cross-engine `Stop` decision slots (Claude Code, Codex) | Deferred | Filed as issue #77; the loop-bound mechanism here (native `stop_hook_active`, `HasGuardSlot` already generalized) is the template it would reuse |
 
+## 11.3 Amendment: Claude Code and Codex `Stop` decision slots (issue #77)
+
+D3 above gave pi's `turn_end` a decision slot and deferred the same move for
+Claude Code and Codex, on the grounds that both engines' native `Stop`
+exposes the identical shape — a deny that asks for one more continuation,
+bounded by a native `stop_hook_active` flag — and filed it as issue #77
+rather than reusing #76 to widen scope mid-amendment. This amendment makes
+that move: canonical `turn_end` gets a decision slot on Claude Code and
+Codex, reusing D3's lattice mapping and stand-in-reason machinery rather than
+inventing either fresh, and generalizes the loop bound to a shape that fits
+two engines whose own `Stop` semantics differ from pi's and from each other.
+
+**The slot, and why the wire shape is top-level, not `hookSpecificOutput`.**
+`HasDecisionSlot(engine, TurnEnd, native)` is now `true` for `claude-code`
+and `codex`, beside pi (`internal/verdict/capability.go`); Cursor is
+unchanged — its `stop`/`followup_message` shape is out of scope here, same
+as it was out of scope for #76. On Claude Code, the universal hook-output
+schema (read off the installed `claude-code-2.1.281` bundle) carries a
+top-level `decision: "approve" | "block"` and `reason`, while
+`hookSpecificOutput.permissionDecision` is specifically a `PreToolUse`
+contract; the same bundle's Stop input schema is `{hook_event_name: "Stop",
+stop_hook_active: boolean (required), last_assistant_message?,
+background_tasks?}`. A `turn_end` deny
+therefore renders `{"decision":"block","reason":"..."}` at the top level,
+never nested. Codex's Stop output schema
+(`stop.command.output.schema.json`, `additionalProperties: false`) is
+already top-level-only — `decision` (enum `["block"]`), `reason`,
+`stopReason`, `suppressOutput`, `systemMessage` — so there was never a nested
+form to choose between there.
+
+**Render semantics reuse D3's lattice mapping wholesale.** `renderTurnEnd`
+(`internal/verdict/render.go`), now shared by pi and the new
+`renderStopBlock`, dispatches the same way `renderPiTurnEnd` did: `Deny`
+renders the block shape — enforced true; `Ask` prints nothing and is **not**
+degraded to deny, unenforced, for the same reason D3 gave — a forced
+continuation is not the conservative direction for a channel that holds back
+no call (§7); `Allow` prints nothing, unenforced; `Abstain` prints nothing,
+enforced. No standalone advisory renders on `turn_end` on either engine —
+`HasAdvisorySlot` still excludes `TurnEnd` everywhere, unchanged by this
+amendment. Reason and advice join into the one `reason` field with a blank
+line between them, the same join `renderPiDeny` already does, because on
+both engines the `reason` string becomes the model's literal continuation
+prompt — advice riding on it is advice actually delivered, not a channel
+being repurposed. A deny with neither reason nor advice gets a fixed
+stand-in — `turnEndEmptyDenyReason`, renamed from the pi-scoped constant D3
+introduced and now shared: "a hookyard handler asked you to keep working
+before finishing." On Claude Code this is a courtesy; on Codex it is
+mandatory — `output_parser.rs`'s `stop_output` rejects a `block` decision
+whose `reason` is empty or whitespace-only ("Stop hook returned
+decision:block without a non-empty reason") and does not block, so an
+empty-reason deny would silently degrade to a no-op if the stand-in weren't
+supplied.
+
+**The loop bound is native `stop_hook_active`, read per engine, not a
+bridge-tracked flag.** Unlike pi, where hookyard authors the bridge's own
+payload and the one-continuation cap lives in `pi_bridge.ts`, Claude Code and
+Codex supply `stop_hook_active` themselves, and `Envelope.StopHookActive()`
+(renamed from `PiStopHookActive`, `internal/envelope`) reads it directly off
+the native payload — no bridge-side state to track, because there is no
+bridge on either engine. `renderTurnEnd` checks it first, ahead of the
+verdict, exactly as `renderPiTurnEnd` did: when true, nothing is
+printed and `Enforced` is `Verdict == Abstain`: this `Stop` is already a
+continuation some Stop hook forced, and neither engine would stop a second
+block from forcing another — the flag is the bound, so hookyard honours it
+rather than claiming an enforcement it has chosen not to make.
+
+Parsing the flag's absence differs by engine, deliberately. On pi, absent or
+non-bool reads false: the bridge's own per-run cap is the real bound there,
+and hookyard authors pi's payload, so an unreadable value can safely default
+toward "not yet capped" without risking an unbounded loop. On Claude Code and
+Codex, canonical `turn_end` only, the default flips: a literal JSON `false`
+reads false, and absent, `true`, or non-bool all read **true** — no block.
+Both engines declare `stop_hook_active` required in their Stop input schema,
+so an unreadable value there is a contract violation, not an expected gap,
+and on these two engines hookyard's own render check is the *only* real
+bound — there is no bridge-side cap standing behind it the way pi's is. An
+unreadable required field has to fail toward settling, never toward an
+unbounded forced continuation. Off `turn_end`, and on Cursor, the flag reads
+false unconditionally — it is not a decision input anywhere else.
+
+**The bound is per turn and shared across every one of the engine's Stop
+hooks, not per hookyard entry.** Both engines set `stop_hook_active` after a
+block from *any* Stop hook — hookyard's own or a user's unrelated
+`settings.json` entry — and re-run every registered Stop hook, hookyard's
+included, on the next pass. So if a user's own Stop hook blocks first,
+hookyard's deny on the following pass sees `stop_hook_active: true`, renders
+nothing, and records unenforced — hookyard never forces a second
+continuation in one turn regardless of how many Stop hooks fired before it.
+This also means N hookyard manifest entries on `turn_end` do not multiply
+continuations on Claude Code or Codex the way N installed pi bridges would
+each get their own continuation (D3): every router invocation on these two
+engines reads the same engine-supplied flag, so the first deny that fires
+spends the turn's one continuation for all of them.
+
+Both engines carry their own backstop behind hookyard's bound, and the two
+differ in a way worth stating rather than assuming symmetric. Claude Code
+2.1.281 caps consecutive blocks itself — past N, it logs "A hook blocked the
+turn from ending N consecutive times — overriding and ending turn. For
+Stop/SubagentStop hooks, check stop_hook_active in the input and return
+success while it's true. Set CLAUDE_CODE_STOP_HOOK_BLOCK_CAP to raise this
+limit." (read off the installed bundle) and ends the turn regardless of what
+any hook returns — a warn-and-override safety net, not the mechanism
+hookyard relies on for its own one-continuation rule. Codex has **no**
+engine-side cap at all: `codex-rs/core/src/session/turn.rs` (~L645-680) sets
+`stop_hook_active = true; continue;` on a block and re-runs Stop hooks with
+no limit — if hookyard's own bound were wrong on Codex, nothing else in the
+engine would stop the loop.
+
+**The lane rule needs no change.** `HasGuardSlot(engine, canonical, native)
+= HasDecisionSlot(...) && canonical != vocab.TurnEnd`, generalized by D3 to
+cover any engine, already produces the right answer for Claude Code and
+Codex without touching `validateLane` again: `turn_end` still guards no call
+on either engine, so a fire-and-forget observer — houston's turn-boundary
+logging, for instance — stays legal on Claude Code and Codex exactly as it
+does on pi, and still records `dispatched` rather than an enforcement it
+never had.
+
+**Behavior change for existing handlers.** A manifest entry already
+subscribed to verdict-lane `turn_end` on `claude-code` or `codex` that
+returns a consolidated deny used to be a no-op: nothing rendered, recorded
+`enforced: false`. After this amendment the same entry forces one
+continuation per turn, bounded as above. No manifest change is required to
+pick this up — the behavior is a consequence of `HasDecisionSlot` flipping,
+not a new opt-in field.
+
+**Evidence, Claude Code.** Payload shape:
+`docs/design/fixtures/hook-payloads/claude-Stop.json`, a live 2.1.272
+capture carrying `"stop_hook_active": false` and `prompt_id` — the same
+discriminator §12's engine-detection item already credits for this event.
+Output and input schemas read off the installed `claude-code-2.1.281`
+bundle, cited above. Live: `TestLiveClaudeCodeStopDenyForcesExactlyOneContinuation`
+(`HOOKYARD_E2E=1`) runs a real `claude -p` process against an emitted
+overlay with a handler that denies every `turn_end`, and asserts: the
+handler sees `stop_hook_active` exactly false, then true; two canonical
+`turn_end` records, deny/enforced then deny/unenforced; and the reason
+string appears in the session transcript. Run against `claude-code 2.1.281`
+on 2026-09-24, it passed on the first attempt: the handler saw
+`stop_hook_active` `[false true]`, the two `turn_end` records read
+deny/enforced then deny/unenforced with the handler's own reason, and the
+reason reached the session transcript — Claude Code continued exactly once
+and then stopped, with nothing but hookyard's render rule declining the
+second block.
+
+**Evidence, Codex — code-reading grade; `codex-cli` is not installed on this
+host, so no live capture backs this engine yet.** openai/codex tag
+`rust-v0.156.1`, commit `b412ff32c417f855c2b2d1581b77058eed87c84b` (latest
+release, 2026-09-23), cross-checked byte-identical at `rust-v0.153.4` (the
+version §4 already cites) for both Stop schemas. Output schema
+(`stop.command.output.schema.json`) and its `reason` field description are
+above; `codex-rs/hooks/src/engine/output_parser.rs`'s `stop_output` rejects
+an empty-reason block, as noted. `codex-rs/hooks/src/events/stop.rs`'s
+`parse_completed` turns a valid block's `reason` into the continuation
+prompt; its `aggregate_results` blocks if any hook blocks and joins the
+blocking hooks' reasons. `codex-rs/core/src/session/turn.rs` (~L645-680) is
+the `should_block` → `stop_hook_active = true; continue;` site cited above.
+Input schema (`stop.command.input.schema.json`) requires both
+`stop_hook_active` and `turn_id` — so a Codex Stop payload carries Detect's
+own `turn_id` discriminator, which is what resolves §12's engine-detection
+item for Codex `Stop` at code-reading grade below.
+`codex-rs/core/tests/suite/hooks.rs` is Codex's own integration coverage: it
+emits exactly `{"decision": "block", "reason": ...}` from a Stop hook and
+branches on `payload["stop_hook_active"]`, matching the shape above rather
+than a variant of it. This is the same evidence grade §4 used to lift
+Codex's `pre_tool` observe-only ruling (§12 item 3); the live capture and a
+live continuation run are follow-up issue **#89**.
+
+### What this amends
+
+| Section | Disposition | Reason |
+|---|---|---|
+| §7, outbound rendering table, Claude Code and Codex rows | Amended | Both rows gain the `turn_end` deny/`stop_hook_active` sentence; Codex's pre-existing "Unconfirmed" pre_tool wording is untouched, out of scope here |
+| §7, ask-degrades-to-deny rule | Amended | The `turn_end` exception now names pi, Claude Code and Codex, not pi alone |
+| `internal/verdict/capability.go`, `HasDecisionSlot`/`HasAdvisorySlot` | Amended | `HasDecisionSlot` is now true for `claude-code` and `codex` on `turn_end`, beside pi; `HasAdvisorySlot`'s answers are unchanged, and its comment now says a `turn_end` deny's advice rides the block reason — the one route advice reaches Codex (issue #87 separately probes Codex's advisory channel) |
+| `internal/verdict/render.go`, `renderTurnEnd`/`renderStopBlock` | Amended | `renderPiTurnEnd`'s lattice mapping and stand-in reason are shared, not duplicated, across pi and the new Claude Code/Codex path |
+| `internal/envelope`, `StopHookActive` | Amended | Renamed from `PiStopHookActive`; now engine-general, with a per-engine absent/non-bool default (false on pi, true on Claude Code and Codex `turn_end`, false elsewhere) |
+| `envelope.Detect` residual comment; `internal/vocab/inbound.go` Codex `"Stop"` tag | Amended | Codex `Stop` detection moves from `// assumed` to code-reading grade, on `turn_id`'s required presence in `stop.command.input.schema.json` |
+| §11.2's "What this amends" table, "Cross-engine `Stop` decision slots" row | Resolved here | For Claude Code and Codex; Cursor's `stop`/`followup_message` remains out of scope |
+| §12, engine-detection item | Amended | Codex `Stop` is resolved at code-reading grade; Codex `SessionStart` and Cursor `SessionStart`/`Stop` stay open |
+| §12, new residual | Added | Codex `Stop` block not yet watched live — code-reading evidence only, live capture and continuation run filed as issue #89 |
+| `docs/yard-mode.md`, `lane` bullet | Amended | Generalized from pi-only to pi, Claude Code and Codex, and notes the behavior change for existing deny-returning `turn_end` handlers |
+
 ## 12. Open questions
 
 The prior document's seven open questions are carried forward, each with an
@@ -4783,8 +4964,9 @@ being more capable than this document assumed rather than less.
 because the captures don't reach them yet, not because they were missed.**
 
 - **Engine detection is unverified for `SessionStart` and `Stop` payloads —
-  resolved for yard-mode Claude Code (#58), still open for Codex and
-  Cursor.** The three discriminators the router uses (`cursor_version`;
+  resolved for yard-mode Claude Code (#58) and for Codex `Stop` (§11.3,
+  issue #77), still open for Codex `SessionStart` and for Cursor.** The three
+  discriminators the router uses (`cursor_version`;
   `prompt_id` / `effort`; `turn_id`) are observed only on `PreToolUse`,
   `PostToolUse`, `UserPromptSubmit` and `beforeShellExecution` payloads. When
   this item was first raised, no `SessionStart` or `Stop` payload had been
@@ -4808,9 +4990,20 @@ because the captures don't reach them yet, not because they were missed.**
   sees that detection, not observation, put the record there. #81 adds a
   narrower fallback for one engine-scoped Codex event — `codex:SessionEnd`,
   whose shipped schema lacks `turn_id` — keyed on argv's exact `--event`.
-  Codex and Cursor canonical `SessionStart`/`Stop`, and Claude Code's build
-  mode, are unchanged: this item stays open for those events, since no
-  equivalent capture or fallback exists for them.
+  Codex `SessionStart`, Cursor canonical `SessionStart`/`Stop`, and Claude
+  Code's build mode, are unchanged: this item stays open for those events,
+  since no equivalent capture or fallback exists for them. Codex `Stop` is
+  the one entry that resolves without a capture at all: its shipped schema
+  requires `turn_id` (`stop.command.input.schema.json`, §11.3), the same
+  discriminator the router already reads, so detection there rests on
+  code-reading grade rather than the DOC/inferred grade the rest of this
+  item is stuck at.
+- **Codex `Stop` block not yet watched live (§11.3, issue #77).** The
+  decision slot itself ships on code-reading evidence — Codex's own output
+  parser, event handler, and integration tests, cited in §11.3 — because
+  `codex-cli` is not installed on this host. A live capture of a real Codex
+  `Stop` payload, and a live run watching a deny actually force one bounded
+  continuation, are issue **#89**.
 - **Payload-level `hook_event_name` spellings are unverified for twelve of the
   table's eighteen rows.** Only `PreToolUse`/`PostToolUse` (Claude Code),
   `PreToolUse`/`UserPromptSubmit` (Codex) and `preToolUse`/`postToolUse`
@@ -5006,7 +5199,9 @@ beyond what was already known, and couldn't try Codex at all, for want of the
 binary on this host; Codex's `apply_patch` sub-tool mapping; whether
 fail-open should be conditional for security-classed handlers; the exact
 preimage of Codex's trust hash; the
-prior pass's drift-count arithmetic; and HookBus's carried facts. Moved from
+prior pass's drift-count arithmetic; HookBus's carried facts; and Codex's
+`Stop` decision slot, shipped on code-reading evidence and not yet watched
+live (§11.3, issue #89). Moved from
 fully open to resting on the middle evidence grade, one short of a live
 capture: whether Claude Code honours `projectSettings` hooks at all (detailed
 above, under the gate-list item). None of these blocks starting the

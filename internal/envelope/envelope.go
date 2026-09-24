@@ -64,8 +64,11 @@ var ErrUnknownEngine = errors.New("envelope: unknown engine")
 // event. The live 2.1.272 SessionStart capture carries neither, so Detect
 // returns ErrUnknownEngine for it; cmd/hookyard's router recovers the engine
 // from --registered-for in yard mode only, and records that it did (§12).
-// Codex and Cursor SessionStart/Stop payloads remain uncaptured, so detection
-// on those event kinds is unverified.
+// Codex Stop is resolved at code-reading grade despite the missing capture:
+// turn_id is required in Codex's own stop.command.input.schema.json at
+// rust-v0.156.1 (§11.3). Codex SessionStart and Cursor SessionStart/Stop
+// payloads remain uncaptured, so detection on those event kinds is
+// unverified.
 func Detect(native map[string]json.RawMessage) (vocab.Engine, error) {
 	if present(native, "cursor_version") {
 		return vocab.Cursor, nil
@@ -204,24 +207,35 @@ func (e *Envelope) PiOutcome() string {
 	return stringField(e.Native, "outcome")
 }
 
-// PiStopHookActive reads pi's agent_before_settle (canonical turn_end)
-// payload's stop_hook_active (D3, docs/design/hookyard.md §11.2): true iff
-// the bridge already spent this run's one continuation. pi's native per-turn
-// turn_end payload never carries this field. Pi-only for the same reason
-// PiOutcome is; a non-bool value (including absent) reads as false, since
-// "the bridge has not forced a continuation" is the safe default for a field
-// it never sent.
-func (e *Envelope) PiStopHookActive() bool {
-	if e.Engine != vocab.Pi {
+// StopHookActive reads the native payload's stop_hook_active on turn_end
+// (D3, docs/design/hookyard.md §11.2, §11.3), with an engine-dependent
+// default: pi's bridge caps its own continuations and hookyard authors pi's
+// payload, so a missing field safely reads "not yet continued" (false). On
+// Claude Code and Codex, hookyard's own rule is the only bound on the loop —
+// Codex has no engine-side cap at all, and Claude Code only a
+// warn-and-override backstop (CLAUDE_CODE_STOP_HOOK_BLOCK_CAP) — and both
+// engines' Stop schemas make the field required, so an unreadable value must
+// fail toward settling (true) rather than toward an unbounded forced
+// continuation. pi's native per-turn turn_end payload never carries this
+// field. Every other engine and event reads false: no decision there
+// consults it.
+func (e *Envelope) StopHookActive() bool {
+	var unreadable bool
+	switch {
+	case e.Engine == vocab.Pi:
+		unreadable = false
+	case (e.Engine == vocab.ClaudeCode || e.Engine == vocab.Codex) && e.CanonicalEvent == vocab.TurnEnd:
+		unreadable = true
+	default:
 		return false
 	}
 	raw, ok := e.Native["stop_hook_active"]
 	if !ok {
-		return false
+		return unreadable
 	}
 	var b bool
 	if err := json.Unmarshal(raw, &b); err != nil {
-		return false
+		return unreadable
 	}
 	return b
 }

@@ -2065,3 +2065,164 @@ func TestLivePiTurnEndDenyForcesExactlyOneContinuation(t *testing.T) {
 
 	t.Logf("recorded requests:\n%s\n--- pi output ---\n%s", capture.dump(), output)
 }
+
+// liveWriteClaudeStopManifest registers a single verdict-lane handler on
+// canonical turn_end (native Stop) scoped to claude-code, reusing
+// livePiWriteTurnEndDenyHandler's stdin-capturing deny script. No Match: Stop
+// carries no tool name to scope on, unlike pre_tool.
+func liveWriteClaudeStopManifest(t *testing.T, dir, handlerPath string) string {
+	t.Helper()
+	m := manifest.Manifest{Handlers: []manifest.Handler{{
+		ID:      "e2e-claude-stop-deny",
+		Exec:    handlerPath,
+		Events:  []string{"turn_end"},
+		Engines: []string{"claude-code"},
+	}}}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	path := filepath.Join(dir, "hookyard-claude-stop.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	return path
+}
+
+// TestLiveClaudeCodeStopDenyForcesExactlyOneContinuation is
+// TestLivePiTurnEndDenyForcesExactlyOneContinuation's Claude Code twin
+// (§11.3 amendment, issue #77), driven against a real claude binary rather
+// than a scripted one: a handler that always denies canonical turn_end
+// (native Stop) must render the top-level {"decision":"block","reason":...}
+// shape and force exactly one more continuation, bounded by Claude Code's own
+// native stop_hook_active rather than any hookyard-side counter — the deny
+// handler must see stop_hook_active false on the first Stop and true on the
+// second, never a third invocation, and hookyard's own record of the second
+// Stop must be an unenforced deny (docs/design/hookyard.md §11.3).
+//
+// Gated identically to TestLiveClaudeCodeRefusesTheDeniedToolCall, for the
+// same reasons: HOOKYARD_E2E=1 (no credentials in the repo gate) and claude
+// on PATH (the engine is not a build dependency).
+func TestLiveClaudeCodeStopDenyForcesExactlyOneContinuation(t *testing.T) {
+	if os.Getenv("HOOKYARD_E2E") != "1" {
+		t.Skip("set HOOKYARD_E2E=1 to run this test against a live claude binary")
+	}
+	claudeBin, err := exec.LookPath("claude")
+	if err != nil {
+		t.Skip("claude binary not found on PATH")
+	}
+
+	hookyardBin := liveBuildHookyard(t)
+	root := t.TempDir()
+
+	claudeConfigDir := filepath.Join(root, "claude-config")
+	projectDir := filepath.Join(root, "project")
+	stateDir := filepath.Join(root, "state")
+	if err := os.MkdirAll(claudeConfigDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", claudeConfigDir, err)
+	}
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", projectDir, err)
+	}
+	projectDir, err = filepath.EvalSymlinks(projectDir)
+	if err != nil {
+		t.Fatalf("resolve project dir: %v", err)
+	}
+
+	liveSeedClaudeTrust(t, claudeConfigDir, projectDir)
+	liveLinkClaudeAuth(t, claudeConfigDir)
+
+	reasonTok := fmt.Sprintf("hookyard-e2e-claude-stop-%d", time.Now().UnixNano())
+	firedMarker := filepath.Join(root, "stop-handler-fired")
+	stdinCapture := filepath.Join(root, "stop-handler-stdin.jsonl")
+	handlerPath := livePiWriteTurnEndDenyHandler(t, root, firedMarker, stdinCapture, reasonTok)
+	manifestPath := liveWriteClaudeStopManifest(t, root, handlerPath)
+
+	install := exec.Command(hookyardBin, "install",
+		"--manifest", manifestPath,
+		"--router-path", hookyardBin,
+		"--state-dir", stateDir,
+		"--codex-config", filepath.Join(root, "unused-codex", "config.toml"),
+		"--cursor-hooks", filepath.Join(root, "unused-cursor", "hooks.json"),
+		"--pi-settings", filepath.Join(root, "unused-pi", "settings.json"),
+	)
+	if out, err := install.CombinedOutput(); err != nil {
+		t.Fatalf("hookyard install: %v\n%s", err, out)
+	}
+
+	basePath := liveWriteClaudeBaseWithOwnHook(t, root, filepath.Join(root, "base-hook-fired"))
+	overlayPath := liveEmitClaudeOverlay(t, hookyardBin, root, hookyardBin, stateDir, basePath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), liveE2EBudget)
+	defer cancel()
+	probe := exec.CommandContext(ctx, claudeBin, "-p", "--model", "claude-haiku-4-5-20251001",
+		"--settings", overlayPath, "Reply with exactly: ok")
+	probe.Dir = projectDir
+	probe.Env = append(os.Environ(), "CLAUDE_CONFIG_DIR="+claudeConfigDir)
+	output, runErr := probe.CombinedOutput()
+
+	if _, statErr := os.Stat(firedMarker); os.IsNotExist(statErr) {
+		t.Fatalf("the turn_end deny handler was never invoked: claude never fired the Stop hook at all "+
+			"(claude run error: %v)\n--- claude output ---\n%s", runErr, output)
+	}
+
+	stopHookActiveSeen := livePiReadHandlerStdinCaptures(t, stdinCapture)
+	t.Logf("captured native.stop_hook_active across Stop invocations: %v", stopHookActiveSeen)
+	if len(stopHookActiveSeen) != 2 || stopHookActiveSeen[0] || !stopHookActiveSeen[1] {
+		t.Fatalf("expected the Stop handler to see native.stop_hook_active false then true across exactly "+
+			"2 invocations, got %v (claude run error: %v)\n--- claude output ---\n%s",
+			stopHookActiveSeen, runErr, output)
+	}
+
+	records := liveReadAllRecords(t, stateDir)
+	var turnEndRecords []record.Record
+	for _, rec := range records {
+		if rec.CanonicalEvent == "turn_end" && rec.Engine == "claude-code" {
+			turnEndRecords = append(turnEndRecords, rec)
+		}
+	}
+	t.Logf("canonical turn_end records: %+v", turnEndRecords)
+	if len(turnEndRecords) != 2 {
+		t.Fatalf("expected exactly 2 canonical turn_end records for claude-code (one per Stop invocation), got "+
+			"%d: %+v\n--- claude output ---\n%s", len(turnEndRecords), turnEndRecords, output)
+	}
+	if turnEndRecords[0].Verdict != record.OutcomeDeny || !turnEndRecords[0].Enforced {
+		t.Fatalf("the first canonical turn_end record must be an enforced deny (the continuation claude "+
+			"granted), got verdict=%q enforced=%v\n--- claude output ---\n%s",
+			turnEndRecords[0].Verdict, turnEndRecords[0].Enforced, output)
+	}
+	if turnEndRecords[1].Verdict != record.OutcomeDeny || turnEndRecords[1].Enforced {
+		t.Fatalf("the second canonical turn_end record must be an unenforced deny (stop_hook_active already "+
+			"true, the loop already bounded), got verdict=%q enforced=%v\n--- claude output ---\n%s",
+			turnEndRecords[1].Verdict, turnEndRecords[1].Enforced, output)
+	}
+
+	// Secondary: the reason token should surface somewhere in a session
+	// transcript under CLAUDE_CONFIG_DIR/projects/*/*.jsonl, since it becomes
+	// the model's literal continuation prompt. Best-effort — the two
+	// load-bearing assertions above already prove the render and the bound;
+	// this only checks that the token actually reached the transcript claude
+	// writes, whose exact shape this test does not otherwise depend on.
+	matches, globErr := filepath.Glob(filepath.Join(claudeConfigDir, "projects", "*", "*.jsonl"))
+	if globErr != nil {
+		t.Fatalf("glob session transcripts: %v", globErr)
+	}
+	found := false
+	for _, p := range matches {
+		raw, readErr := os.ReadFile(p)
+		if readErr != nil {
+			continue
+		}
+		if strings.Contains(string(raw), reasonTok) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Logf("secondary check did not hold: reason token %q not found in any session transcript under %s "+
+			"(transcripts checked: %v) — the load-bearing assertions above already passed, so this is logged "+
+			"rather than failed", reasonTok, filepath.Join(claudeConfigDir, "projects"), matches)
+	}
+
+	t.Logf("claude forced exactly one continuation on the turn_end deny; full output:\n%s", output)
+}

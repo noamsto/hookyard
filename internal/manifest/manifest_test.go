@@ -249,6 +249,52 @@ func TestLoadAcceptsVerdictLaneOnPiTurnEnd(t *testing.T) {
 	}
 }
 
+// §11.3: Claude Code and Codex's turn_end (canonical, or their own native
+// Stop) is a decision slot but not a guard slot — same as pi's, above — so a
+// fire-and-forget handler stays legal there too. This would fail if
+// validateLane asked HasDecisionSlot instead of HasGuardSlot now that
+// claude-code/codex have a turn_end decision slot.
+func TestLoadAcceptsFireAndForgetOnClaudeAndCodexTurnEnd(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "canonical turn_end claiming claude-code and codex",
+			body: `{"handlers":[{"id":"a","exec":"EXEC","events":["turn_end"],
+			  "engines":["claude-code","codex"],"lane":"fire_and_forget"}]}`,
+		}, {
+			name: "claude-code:Stop (the native)",
+			body: `{"handlers":[{"id":"a","exec":"EXEC","events":["claude-code:Stop"],
+			  "engines":["claude-code"],"lane":"fire_and_forget"}]}`,
+		}, {
+			name: "codex:Stop (the native)",
+			body: `{"handlers":[{"id":"a","exec":"EXEC","events":["codex:Stop"],
+			  "engines":["codex"],"lane":"fire_and_forget"}]}`,
+		}, {
+			name: "houston-like observer on turn_end claiming all four engines",
+			body: `{"handlers":[{"id":"a","exec":"EXEC","events":["turn_end"],
+			  "engines":["claude-code","codex","cursor","pi"],"lane":"fire_and_forget"}]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Load(writeManifest(t, tc.body)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// A verdict-lane handler on claude-code/codex turn_end is accepted, the same
+// as pi's turn_end above.
+func TestLoadAcceptsVerdictLaneOnClaudeAndCodexTurnEnd(t *testing.T) {
+	path := writeManifest(t, `{"handlers":[
+	  {"id":"a","exec":"EXEC","events":["turn_end"],"engines":["claude-code","codex"]}]}`)
+	if _, err := Load(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // An event scoped to an engine the handler does not declare is skipped by the
 // lane check, exactly as validateCoverage already skips it: the handler here
 // declares only cursor, so claude-code:PreToolUse is not this handler's
