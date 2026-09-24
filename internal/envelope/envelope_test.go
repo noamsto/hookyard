@@ -511,6 +511,11 @@ func TestStopHookActive(t *testing.T) {
 		t.Error("pi StopHookActive with a non-bool value = true, want false")
 	}
 
+	env = From(vocab.Pi, map[string]json.RawMessage{"stop_hook_active": json.RawMessage(`null`)})
+	if env.StopHookActive() {
+		t.Error("pi StopHookActive with stop_hook_active: null = true, want false")
+	}
+
 	env = decodeFixture(t, "claude-Stop.json")
 	if env.StopHookActive() {
 		t.Error("StopHookActive on the claude-Stop fixture (stop_hook_active: false) = true, want false")
@@ -535,6 +540,13 @@ func TestStopHookActive(t *testing.T) {
 		t.Error("claude-code turn_end StopHookActive with a non-bool value = false, want true (fail toward settling)")
 	}
 
+	env = From(vocab.ClaudeCode, map[string]json.RawMessage{
+		"hook_event_name": json.RawMessage(`"Stop"`), "stop_hook_active": json.RawMessage(`null`),
+	})
+	if !env.StopHookActive() {
+		t.Error("claude-code turn_end StopHookActive with stop_hook_active: null = false, want true (fail toward settling)")
+	}
+
 	env = From(vocab.Codex, map[string]json.RawMessage{
 		"hook_event_name": json.RawMessage(`"Stop"`), "stop_hook_active": json.RawMessage(`false`),
 	})
@@ -545,6 +557,13 @@ func TestStopHookActive(t *testing.T) {
 	env = From(vocab.Codex, map[string]json.RawMessage{"hook_event_name": json.RawMessage(`"Stop"`)})
 	if !env.StopHookActive() {
 		t.Error("codex turn_end StopHookActive with no stop_hook_active key = false, want true (fail toward settling)")
+	}
+
+	env = From(vocab.Codex, map[string]json.RawMessage{
+		"hook_event_name": json.RawMessage(`"Stop"`), "stop_hook_active": json.RawMessage(`null`),
+	})
+	if !env.StopHookActive() {
+		t.Error("codex turn_end StopHookActive with stop_hook_active: null = false, want true (fail toward settling)")
 	}
 
 	// Claude Code's own PreToolUse payload never carries this key, and off

@@ -4488,15 +4488,16 @@ Output and input schemas read off the installed `claude-code-2.1.281`
 bundle, cited above. Live: `TestLiveClaudeCodeStopDenyForcesExactlyOneContinuation`
 (`HOOKYARD_E2E=1`) runs a real `claude -p` process against an emitted
 overlay with a handler that denies every `turn_end`, and asserts: the
-handler sees `stop_hook_active` exactly false, then true; two canonical
-`turn_end` records, deny/enforced then deny/unenforced; and the reason
-string appears in the session transcript. Run against `claude-code 2.1.281`
-on 2026-09-24, it passed on the first attempt: the handler saw
-`stop_hook_active` `[false true]`, the two `turn_end` records read
-deny/enforced then deny/unenforced with the handler's own reason, and the
-reason reached the session transcript — Claude Code continued exactly once
-and then stopped, with nothing but hookyard's render rule declining the
-second block.
+handler sees `stop_hook_active` exactly false, then true; and two canonical
+`turn_end` records, deny/enforced then deny/unenforced. Whether the reason
+string reaches the session transcript is checked best-effort and only
+logged, not asserted — the two load-bearing assertions above already prove
+the render and the bound. Run against `claude-code 2.1.281` on 2026-09-24,
+it passed on the first attempt: the handler saw `stop_hook_active`
+`[false true]`, the two `turn_end` records read deny/enforced then
+deny/unenforced with the handler's own reason, and the reason did reach the
+session transcript — Claude Code continued exactly once and then stopped,
+with nothing but hookyard's render rule declining the second block.
 
 **Evidence, Codex — code-reading grade; `codex-cli` is not installed on this
 host, so no live capture backs this engine yet.** openai/codex tag

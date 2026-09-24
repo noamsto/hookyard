@@ -582,7 +582,7 @@ func TestRunRouteAgentBeforeSettleDenyOutcomeAndStopHookActive(t *testing.T) {
 }
 
 // A deny handler that gives neither reason nor advice must still render a
-// non-empty block reason (verdict.piTurnEndEmptyDenyReason): without one,
+// non-empty block reason (verdict.turnEndEmptyDenyReason): without one,
 // the bridge's own decision() falls back to "Blocked by hookyard" for the
 // continuation message it injects, which reads as a rejection rather than
 // the "keep going" instruction a turn_end deny is meant to carry.
@@ -666,9 +666,7 @@ func stopDenyHandler(t *testing.T, dir, id, reason string, engines []string) man
 // hookSpecificOutput, which is PreToolUse's own wire shape — and be recorded
 // enforced; once the native payload's stop_hook_active is true (the loop is
 // already bounded) the same deny must render nothing and be recorded
-// unenforced, the same posture as pi's settle boundary (D2/D3). Currently
-// RED: HasDecisionSlot (internal/verdict/capability.go) has no turn_end case
-// for claude-code yet, so the router never treats this as a decision slot.
+// unenforced, the same posture as pi's settle boundary (D2/D3).
 func TestRunRouteClaudeCodeStopDenyAndStopHookActive(t *testing.T) {
 	dir := t.TempDir()
 
@@ -704,8 +702,6 @@ func TestRunRouteClaudeCodeStopDenyAndStopHookActive(t *testing.T) {
 // Same two halves as above, on Codex's Stop. Codex's validator is stricter
 // than Claude Code's about unknown/malformed top-level fields (§4), but the
 // consolidated block shape is the same {"decision":"block","reason":...}.
-// Currently RED for the same reason: HasDecisionSlot has no turn_end case
-// for codex yet.
 func TestRunRouteCodexStopDenyAndStopHookActive(t *testing.T) {
 	dir := t.TempDir()
 

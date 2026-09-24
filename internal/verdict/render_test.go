@@ -445,6 +445,15 @@ func TestRenderPiTurnEnd(t *testing.T) {
 			verdict: Deny, reason: "", advice: "",
 			stdout: `{"block":true,"reason":"` + turnEndEmptyDenyReason + `"}`, enforced: true,
 		},
+		{
+			name:    "deny with whitespace-only reason and no advice falls back to the fixed continuation reason",
+			verdict: Deny, reason: "  ", advice: "",
+			stdout: `{"block":true,"reason":"` + turnEndEmptyDenyReason + `"}`, enforced: true,
+		},
+		{
+			name: "deny with whitespace-only reason and advice uses advice alone", verdict: Deny, reason: " ", advice: "adv",
+			stdout: `{"block":true,"reason":"adv"}`, enforced: true, delivered: true,
+		},
 		{name: "ask prints nothing, unenforced", verdict: Ask, reason: "r"},
 		{name: "allow prints nothing, unenforced", verdict: Allow, reason: "r"},
 		{name: "abstain prints nothing, enforced", verdict: Abstain, reason: "r", enforced: true},
@@ -501,6 +510,15 @@ func TestRenderStopTurnEnd(t *testing.T) {
 			},
 			{
 				name: "deny with empty reason and advice uses advice alone, no stand-in", verdict: Deny, reason: "", advice: "adv",
+				stdout: `{"decision":"block","reason":"adv"}`, enforced: true, delivered: true,
+			},
+			{
+				name:    "deny with whitespace-only reason and no advice falls back to the fixed continuation reason",
+				verdict: Deny, reason: "  ", advice: "",
+				stdout: `{"decision":"block","reason":"` + turnEndEmptyDenyReason + `"}`, enforced: true,
+			},
+			{
+				name: "deny with whitespace-only reason and advice uses advice alone", verdict: Deny, reason: " ", advice: "adv",
 				stdout: `{"decision":"block","reason":"adv"}`, enforced: true, delivered: true,
 			},
 			{name: "ask prints nothing, unenforced", verdict: Ask, reason: "r"},

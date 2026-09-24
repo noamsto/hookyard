@@ -4,6 +4,7 @@
 package envelope
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -230,7 +231,7 @@ func (e *Envelope) StopHookActive() bool {
 		return false
 	}
 	raw, ok := e.Native["stop_hook_active"]
-	if !ok {
+	if !ok || string(bytes.TrimSpace(raw)) == "null" {
 		return unreadable
 	}
 	var b bool

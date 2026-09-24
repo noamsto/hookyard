@@ -42,8 +42,9 @@ type Rendered struct {
 // a deny that carries none — and a rejected deny is an allowed tool call.
 const codexEmptyDenyReason = "denied by hookyard handler"
 
-// turnEndEmptyDenyReason stands in for a turn_end deny with no reason and no
-// advice. Without it, Codex rejects a block whose reason is empty — so the
+// turnEndEmptyDenyReason stands in for a turn_end deny with a blank reason
+// and no advice. Without it, Codex's stop parser trims the reason and
+// rejects a block whose reason is blank (whitespace-only counts) — so the
 // deny would not block at all — and on pi, renderPiDeny would print bare
 // "{"block":true}", leaving the bridge's own decision() to fall back to
 // "Blocked by hookyard" for the continuation message, the opposite of what a
@@ -289,8 +290,12 @@ func renderTurnEnd(in Input, block func(reason, advice string) Rendered) Rendere
 	switch in.Verdict {
 	case Deny:
 		reason := in.Reason
-		if reason == "" && in.Advice == "" {
-			reason = turnEndEmptyDenyReason
+		if strings.TrimSpace(reason) == "" {
+			// A blank reason is dropped rather than joined in front of the advice.
+			reason = ""
+			if strings.TrimSpace(in.Advice) == "" {
+				reason = turnEndEmptyDenyReason
+			}
 		}
 		return block(reason, in.Advice)
 	case Abstain:
