@@ -9,3 +9,4 @@ export declare function filterParams(): URLSearchParams;
 export declare function eventLabel(rec: PathLike): string;
 export declare function toggleFilter(field: string, value: string, additive?: boolean): void;
 export declare function activeFilters(): Filters;
+export declare function syncState(): { day: string; live: boolean } | null;

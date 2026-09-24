@@ -3,7 +3,7 @@
 // through React state. Branches resolve to display edges through the
 // CURRENT rendered snapshot, so a grouped handler's pulse lands on the
 // collapsed group (same invariant as hover/tooltip).
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 import { ViewportPortal } from "@xyflow/react";
 import { DOT_MS, MAX_DOTS } from "./constants.ts";
@@ -19,12 +19,14 @@ interface ActiveDot { dot: Dot; edges: SVGPathElement[]; start: number; perEdgeM
 interface QueueItem { branch: Branch; n: number; }
 
 export function PulseLayer({ controller, bodyRef }: { controller: FlowController; bodyRef: RefObject<HTMLDivElement | null> }) {
-  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [svg, setSvg] = useState<SVGSVGElement | null>(null);
   const dotsRef = useRef<Dot[]>([]);
 
-  // The fixed pool: created once, never resized.
+  // The fixed pool: created once per svg element, never resized. `svg` comes
+  // from a callback ref rather than a plain useRef because ViewportPortal
+  // mounts the <svg> only after the first render — a mount-effect reading
+  // a ref would fire before that portal target exists and never re-run.
   useEffect(() => {
-    const svg = svgRef.current;
     if (!svg) return;
     const dots: Dot[] = [];
     for (let i = 0; i < MAX_DOTS; i++) {
@@ -39,7 +41,7 @@ export function PulseLayer({ controller, bodyRef }: { controller: FlowController
       for (const d of dots) d.el.remove();
       dotsRef.current = [];
     };
-  }, []);
+  }, [svg]);
 
   useEffect(() => {
     const queue = new Map<string, QueueItem>();
@@ -61,7 +63,7 @@ export function PulseLayer({ controller, bodyRef }: { controller: FlowController
       if (rafId !== null || !canAnimate()) return;
       rafId = requestAnimationFrame(tick);
     }
-    function flushQueue(): void {
+    function flushQueue(now: number): void {
       if (queue.size === 0) return;
       const items = Array.from(queue.values());
       queue.clear();
@@ -87,13 +89,13 @@ export function PulseLayer({ controller, bodyRef }: { controller: FlowController
         dot.busy = true;
         const radius = 3 + Math.min(4, Math.log2(Math.max(1, item.n)));
         dot.el.setAttribute("r", String(radius));
-        active.push({ dot, edges, start: performance.now(), perEdgeMs: DOT_MS / edges.length });
+        active.push({ dot, edges, start: now, perEdgeMs: DOT_MS / edges.length });
       }
       if (dropped > 0) controller.addDropped(dropped);
     }
     function tick(now: number): void {
       rafId = null;
-      flushQueue();
+      flushQueue(now);
       for (let i = active.length - 1; i >= 0; i--) {
         const st = active[i];
         const elapsed = now - st.start;
@@ -160,7 +162,7 @@ export function PulseLayer({ controller, bodyRef }: { controller: FlowController
 
   return (
     <ViewportPortal>
-      <svg ref={svgRef} className="flow-pulse-layer" style={{ overflow: "visible", position: "absolute", width: 0, height: 0 }} />
+      <svg ref={setSvg} className="flow-pulse-layer" style={{ overflow: "visible", position: "absolute", width: 0, height: 0 }} />
     </ViewportPortal>
   );
 }

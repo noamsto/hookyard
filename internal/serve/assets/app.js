@@ -90,6 +90,20 @@ function emit(name, detail) {
   document.dispatchEvent(new CustomEvent(name, { detail }));
 }
 
+// lastSyncDetail is the most recent hookyard:sync payload, so a late listener
+// (the flow bundle can still be evaluating when a past day's sync fires) can
+// ask for the state it missed instead of waiting for the next event.
+let lastSyncDetail = null;
+
+function emitSync(detail) {
+  lastSyncDetail = detail;
+  emit("hookyard:sync", detail);
+}
+
+export function syncState() {
+  return lastSyncDetail;
+}
+
 function debounce(fn, ms) {
   let t;
   return (...args) => {
@@ -415,7 +429,7 @@ async function loadEvents(day) {
   windowedFlag = resp.windowed;
   updateFeedMeta();
   setLoadOlder(oldestOffset === null ? "bottom" : "ready");
-  emit("hookyard:sync", { day, live: day === state.today });
+  emitSync({ day, live: day === state.today });
 }
 
 function renderStats(snap) {
@@ -650,7 +664,7 @@ function handleStatsFrame(snap) {
 function handleDayFrame(data) {
   insertDivider(data.day);
   state.day = data.day;
-  emit("hookyard:sync", { day: data.day, live: true });
+  emitSync({ day: data.day, live: true });
   backfillDay = data.day;
   nextOffset = 0;
   pendingCalls = [];

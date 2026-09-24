@@ -6,7 +6,7 @@
 import "@xyflow/react/dist/style.css";
 import "./flow.css";
 import { createRoot } from "react-dom/client";
-import { activeFilters, eventLabel, filterParams } from "./bridge.ts";
+import { activeFilters, eventLabel, filterParams, syncState } from "./bridge.ts";
 import { createLayout } from "./layout/elkClient.ts";
 import { FlowController } from "./model/controller.ts";
 import type { SyncDetail } from "./model/controller.ts";
@@ -59,5 +59,13 @@ document.addEventListener("hookyard:sync", (ev) => {
 document.addEventListener("hookyard:call", (ev) => {
   controller.onCall((ev as CustomEvent<Entry>).detail);
 });
+
+// app.js can finish its init chain and emit hookyard:sync before this
+// (larger) bundle has evaluated far enough to have added the listener above
+// — reliably so on a past day, whose init has no SSE round trip to wait on.
+// flow.js always imports app.js, so by the time we get here app.js has
+// already run and remembers its last sync; catch up on it directly.
+const missedSync = syncState();
+if (missedSync) void controller.sync(missedSync);
 
 setView(new URLSearchParams(location.search).get("view") === "flow" ? "flow" : "feed");
