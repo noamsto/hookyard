@@ -156,7 +156,6 @@ button:hover { border-color: var(--accent); }
   flex-wrap: wrap;
   gap: 12px;
   padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
   align-items: flex-end;
 }
@@ -174,8 +173,8 @@ button:hover { border-color: var(--accent); }
   letter-spacing: 0.03em;
 }
 
-.filter-group select[multiple] {
-  min-width: 120px;
+.filter-group select {
+  min-width: 130px;
 }
 
 .filter-group--wide input {
@@ -184,6 +183,48 @@ button:hover { border-color: var(--accent); }
 
 #clear-filters {
   align-self: flex-end;
+}
+
+.filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 12px 8px;
+  background: var(--bg-panel);
+}
+
+.fchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 4px 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-raised);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.fchip-remove {
+  border: none;
+  background: none;
+  color: var(--fg-dim);
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.fchip-remove:hover {
+  color: var(--accent);
+  border-color: transparent;
+}
+
+.filter-hint {
+  margin: 0;
+  padding: 0 12px 8px;
+  font-size: 11px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
 }
 
 /* ---------- body layout ---------- */
@@ -316,6 +357,11 @@ button:hover { border-color: var(--accent); }
 }
 
 .chip-ms { color: var(--fg-dim); }
+
+/* chip--dim/chip--hit mark a handler-run chip against an active branch
+   filter (Entry.Hits): dim = not a hit, hit = matched branch. */
+.chip--dim { opacity: .35; }
+.chip--hit { outline: 1px solid var(--accent); outline-offset: 1px; }
 
 .row-detail {
   padding: 8px 12px 12px 96px;

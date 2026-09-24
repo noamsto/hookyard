@@ -112,6 +112,7 @@ func middleware(h *serveMux) http.Handler {
 	mux.HandleFunc("/static/", h.handleStatic)
 	mux.HandleFunc("/api/days", h.handleDays)
 	mux.HandleFunc("/api/events", h.handleEvents)
+	mux.HandleFunc("/api/flow", h.handleFlow)
 	mux.HandleFunc("/api/stats", h.handleStats)
 	mux.HandleFunc("/api/stream", h.handleStream)
 	mux.HandleFunc("/api/table", h.handleTable)
@@ -195,6 +196,27 @@ func (h *serveMux) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	f := ParseFilter(q)
 	resp, err := ScanDay(h.stateDir, day, before, limit, f)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, resp)
+}
+
+func (h *serveMux) handleFlow(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	day := q.Get("day")
+	if day == "" {
+		day = h.hub.Day()
+	}
+
+	window := clampWindow(q.Get("window"))
+	if day != h.hub.Day() {
+		// A past day has no "last N minutes"; only the live day anchors to now.
+		window = 0
+	}
+	f := ParseFilter(q)
+	resp, err := FlowForDay(h.stateDir, day, window, h.hub.Now(), f)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

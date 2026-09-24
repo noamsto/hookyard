@@ -144,7 +144,7 @@ func ScanDay(stateDir, day string, end int64, limit int, f Filter) (EventsRespon
 		if !f.Match(rec) {
 			continue
 		}
-		ring[count%ringSize] = Entry{Rec: rec, Day: day, Offset: offset}
+		ring[count%ringSize] = Entry{Rec: rec, Day: day, Offset: offset, Hits: f.Hits(rec)}
 		count++
 	}
 	if err := scanner.Err(); err != nil {

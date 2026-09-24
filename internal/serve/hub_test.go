@@ -226,6 +226,42 @@ func TestHubFansOutOnlyMatchingCalls(t *testing.T) {
 	}
 }
 
+// TestFanOutHitsPerSubscriber verifies fanOut computes each subscriber's
+// Hits from its own filter, against the one shared Entry, without mutating
+// it for the next subscriber.
+func TestFanOutHitsPerSubscriber(t *testing.T) {
+	stateDir := t.TempDir()
+	day := "2026-09-10"
+	clock := newTailClock(t, "2026-09-10T12:00:00Z")
+	h := seededHub(t, stateDir, clock)
+	startHub(t, h)
+
+	subA := h.Subscribe(Filter{Handlers: []string{"a"}}, 32)
+	subB := h.Subscribe(Filter{Handlers: []string{"b"}}, 32)
+	subNone := h.Subscribe(Filter{}, 32)
+	handshake(t, subA)
+	handshake(t, subB)
+	handshake(t, subNone)
+
+	tailAppend(t, stateDir, day, recLine(t, record.Record{
+		Engine: "codex", Router: record.RouterOK, Verdict: "allow",
+		Handlers: []record.RecordHandler{
+			{Name: "a", Outcome: "allow"},
+			{Name: "b", Outcome: "allow"},
+		},
+	}))
+
+	if got := nextCall(t, subA).Hits; len(got) != 1 || got[0] != 0 {
+		t.Errorf("subA Hits = %v, want [0]", got)
+	}
+	if got := nextCall(t, subB).Hits; len(got) != 1 || got[0] != 1 {
+		t.Errorf("subB Hits = %v, want [1]", got)
+	}
+	if got := nextCall(t, subNone).Hits; got != nil {
+		t.Errorf("subNone Hits = %v, want nil (no branch filter)", got)
+	}
+}
+
 func TestHubRolloverSendsDayBeforeTheNewDaysCalls(t *testing.T) {
 	stateDir := t.TempDir()
 	day, next := "2026-09-10", "2026-09-11"

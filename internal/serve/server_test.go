@@ -171,7 +171,7 @@ func TestMethodNotAllowed(t *testing.T) {
 
 	base := runTestServer(t, ctx, serveOpts(t, stateDir))
 
-	for _, path := range []string{"/api/events", "/api/days", "/api/stats", "/api/table", "/api/stream"} {
+	for _, path := range []string{"/api/events", "/api/flow", "/api/days", "/api/stats", "/api/table", "/api/stream"} {
 		req, _ := http.NewRequest(http.MethodPost, base+path, nil)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -235,6 +235,186 @@ func TestEventsHonorsLimitAndFilter(t *testing.T) {
 	for _, rec := range eventsResp.Records {
 		if rec.Rec.Engine != "codex" {
 			t.Errorf("filtered record has engine %q, want codex", rec.Rec.Engine)
+		}
+	}
+}
+
+func TestFlowEndpointDefaultsDayAndFilters(t *testing.T) {
+	stateDir := t.TempDir()
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	day := DayString(now)
+	ts := now.Format("2006-01-02T15:04:05.000000Z")
+
+	lines := []string{
+		recLine(t, record.Record{TS: ts, Engine: "codex", Verdict: "allow", Router: "ok"}),
+		recLine(t, record.Record{TS: ts, Engine: "claude-code", Verdict: "deny", Router: "ok"}),
+	}
+	writeDayFile(t, stateDir, day, lines)
+
+	opts := serveOpts(t, stateDir)
+	opts.Now = func() time.Time { return now }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	base := runTestServer(t, ctx, opts)
+
+	resp := get(t, base+"/api/flow")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	var flowResp FlowResponse
+	if err := json.NewDecoder(resp.Body).Decode(&flowResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if flowResp.Day != day {
+		t.Errorf("day = %q, want hub day %q", flowResp.Day, day)
+	}
+	if len(flowResp.Paths) != 2 {
+		t.Fatalf("got %d paths, want 2", len(flowResp.Paths))
+	}
+
+	resp2 := get(t, base+"/api/flow?day="+day+"&window=5&engine=codex")
+	defer func() { _ = resp2.Body.Close() }()
+	var filtered FlowResponse
+	if err := json.NewDecoder(resp2.Body).Decode(&filtered); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if filtered.Window != 5 {
+		t.Errorf("window = %d, want 5", filtered.Window)
+	}
+	if len(filtered.Paths) != 1 || filtered.Paths[0].Engine != "codex" {
+		t.Fatalf("filtered paths = %+v, want one codex path", filtered.Paths)
+	}
+}
+
+// TestFlowEndpointOutcomeFilter verifies the outcome query param reaches
+// FlowForDay through ParseFilter, and the response carries pruned paths plus
+// branches and facets.
+func TestFlowEndpointOutcomeFilter(t *testing.T) {
+	stateDir := t.TempDir()
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	day := DayString(now)
+	ts := now.Format("2006-01-02T15:04:05.000000Z")
+
+	lines := []string{
+		recLine(t, record.Record{
+			TS: ts, Engine: "codex", CanonicalEvent: "pre_tool", NativeEvent: "PreToolUse", Router: "ok", Verdict: "deny",
+			Handlers: []record.RecordHandler{
+				{Name: "guards.a", Outcome: "abstain"},
+				{Name: "guards.deny", Outcome: "deny"},
+			},
+		}),
+	}
+	writeDayFile(t, stateDir, day, lines)
+
+	opts := serveOpts(t, stateDir)
+	opts.Now = func() time.Time { return now }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	base := runTestServer(t, ctx, opts)
+
+	resp := get(t, base+"/api/flow?outcome=deny&day="+day)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	var flowResp FlowResponse
+	if err := json.NewDecoder(resp.Body).Decode(&flowResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(flowResp.Paths) != 1 {
+		t.Fatalf("got %d paths, want 1", len(flowResp.Paths))
+	}
+	if got := flowResp.Paths[0].Handlers; len(got) != 1 || got[0].Name != "guards.deny" {
+		t.Errorf("handlers = %+v, want exactly [guards.deny] (pruned)", got)
+	}
+	if flowResp.Branches != 1 {
+		t.Errorf("branches = %d, want 1", flowResp.Branches)
+	}
+	if flowResp.Facets.Handler["guards.deny"] != 1 {
+		t.Errorf("facets.handler[guards.deny] = %d, want 1", flowResp.Facets.Handler["guards.deny"])
+	}
+}
+
+// TestEventsEndpointOutcomeFilterCarriesHits verifies /api/events entries
+// carry hits under a branch filter, reaching ScanDay through ParseFilter.
+func TestEventsEndpointOutcomeFilterCarriesHits(t *testing.T) {
+	stateDir := t.TempDir()
+	day := "2026-09-10"
+	lines := []string{
+		recLine(t, record.Record{
+			Engine: "codex", Router: record.RouterOK, Verdict: "deny",
+			Handlers: []record.RecordHandler{
+				{Name: "guards.a", Outcome: "abstain"},
+				{Name: "guards.deny", Outcome: "deny"},
+			},
+		}),
+	}
+	writeDayFile(t, stateDir, day, lines)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	base := runTestServer(t, ctx, serveOpts(t, stateDir))
+
+	resp := get(t, fmt.Sprintf("%s/api/events?day=%s&outcome=deny", base, day))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	var eventsResp EventsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&eventsResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(eventsResp.Records) != 1 {
+		t.Fatalf("got %d records, want 1", len(eventsResp.Records))
+	}
+	if got := eventsResp.Records[0].Hits; len(got) != 1 || got[0] != 1 {
+		t.Errorf("hits = %v, want [1]", got)
+	}
+}
+
+func TestFlowEndpointIgnoresWindowForPastDay(t *testing.T) {
+	stateDir := t.TempDir()
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	pastDay := "2026-09-09"
+	pastTS := time.Date(2026, 9, 9, 8, 0, 0, 0, time.UTC).Format("2006-01-02T15:04:05.000000Z")
+
+	lines := []string{
+		recLine(t, record.Record{TS: pastTS, Engine: "codex", Verdict: "allow", Router: "ok"}),
+		recLine(t, record.Record{TS: pastTS, Engine: "claude-code", Verdict: "deny", Router: "ok"}),
+	}
+	writeDayFile(t, stateDir, pastDay, lines)
+
+	opts := serveOpts(t, stateDir)
+	opts.Now = func() time.Time { return now }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	base := runTestServer(t, ctx, opts)
+
+	resp := get(t, base+"/api/flow?day="+pastDay+"&window=10")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	var flowResp FlowResponse
+	if err := json.NewDecoder(resp.Body).Decode(&flowResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if flowResp.Window != 0 {
+		t.Errorf("window = %d, want 0 (whole-day aggregate for a past day)", flowResp.Window)
+	}
+	if flowResp.Calls != 2 {
+		t.Errorf("calls = %d, want 2", flowResp.Calls)
+	}
+	if len(flowResp.Paths) != 2 {
+		t.Fatalf("got %d paths, want 2", len(flowResp.Paths))
+	}
+	for _, p := range flowResp.Paths {
+		if len(p.Counts) != 1 {
+			t.Errorf("path %+v counts len = %d, want 1", p, len(p.Counts))
 		}
 	}
 }
@@ -420,7 +600,7 @@ func TestNoAccessControlAllowOrigin(t *testing.T) {
 
 	base := runTestServer(t, ctx, serveOpts(t, stateDir))
 
-	for _, path := range []string{"/", "/api/days", "/api/events", "/api/stats", "/api/table", "/api/stream"} {
+	for _, path := range []string{"/", "/api/days", "/api/events", "/api/flow", "/api/stats", "/api/table", "/api/stream"} {
 		resp := get(t, base+path)
 		_ = resp.Body.Close()
 		if resp.Header.Get("Access-Control-Allow-Origin") != "" {

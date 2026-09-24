@@ -40,6 +40,9 @@ type Entry struct {
 	Rec    record.Record `json:"rec"`
 	Day    string        `json:"day"`    // YYYY-MM-DD
 	Offset int64         `json:"offset"` // byte offset just past this record
+	// Hits is the branch indices a request's Filter.Hits found in Rec.
+	// Absent (nil) means "no branch filter" — every handler is a hit.
+	Hits []int `json:"hits,omitempty"`
 }
 
 // VerdictCount is the verdict mix's joint distribution: SPEC 4.5 wants the
@@ -68,13 +71,16 @@ type Snapshot struct {
 	Since     string                  `json:"since"` // ts of the first counted record
 }
 
-// Filter is the five-filter predicate (SPEC 4.6).
+// Filter is the branch-aware predicate. Engine, session, event and verdict
+// are call-level; handler and outcome are branch-level and must hold on the
+// same branch of the call (Filter.Match).
 type Filter struct {
 	Engines  []string
 	Session  string   // case-insensitive substring
 	Events   []string // canonical_event, engine:native_event, or native_event on a router error (SPEC 4.6)
-	Handlers []string // any handlers[].name
-	Verdicts []string // verdict OR router OR any handlers[].outcome
+	Handlers []string // branch: a branch's handler name (never "", so it excludes handler-less branches)
+	Outcomes []string // branch: a branch's outcome (handler outcomes; "router-error"; or, for a handler-less call, its own verdict, e.g. "abstain"/"suppressed")
+	Verdicts []string // call verdict: the consolidated verdict OR the router status — never a handler outcome
 }
 
 type EventsResponse struct {
@@ -99,6 +105,48 @@ type TableResponse struct {
 	Events   []string           `json:"events"`  // vocab.CanonicalEvents
 	Error    string             `json:"error,omitempty"`
 	Path     string             `json:"path"`
+}
+
+// FlowHop is one handler's contribution to a FlowPath's chain: its name and
+// its own outcome, not the record's consolidated verdict.
+type FlowHop struct {
+	Name    string `json:"name"`
+	Outcome string `json:"outcome"`
+}
+
+// FlowPath is one distinct route a call took, with its count per bucket.
+type FlowPath struct {
+	Engine         string    `json:"engine"`
+	CanonicalEvent string    `json:"canonical_event"`
+	NativeEvent    string    `json:"native_event"`
+	Router         string    `json:"router"`
+	Verdict        string    `json:"verdict"`
+	Handlers       []FlowHop `json:"handlers"` // never null; record order
+	Counts         []int64   `json:"counts"`   // len == max(window,1), oldest first
+}
+
+type FlowResponse struct {
+	Day         string     `json:"day"`
+	Window      int        `json:"window"`       // minutes; 0 = whole day
+	BucketStart int64      `json:"bucket_start"` // unix ms of bucket 0; 0 when Window == 0
+	BucketMS    int64      `json:"bucket_ms"`    // 60000; 0 when Window == 0
+	Calls       int64      `json:"calls"`        // records counted into Counts
+	Branches    int64      `json:"branches"`     // matched branches counted; pseudo/direct branches count as 1
+	NextOffset  int64      `json:"next_offset"`  // ScanAll's end: offset past the last complete record
+	Paths       []FlowPath `json:"paths"`        // never null; sorted by total desc, then key asc
+	Facets      FlowFacets `json:"facets"`
+}
+
+// FlowFacets gives each filterable column its own counts, so a filtered
+// column can still show the other values the client might add: each field's
+// facet applies every filter *except that field's own*. engine and event
+// facets count calls; handler and outcome facets count branches. Every map
+// is non-nil, even when empty.
+type FlowFacets struct {
+	Engine  map[string]int64 `json:"engine"`
+	Event   map[string]int64 `json:"event"`
+	Handler map[string]int64 `json:"handler"`
+	Outcome map[string]int64 `json:"outcome"`
 }
 
 // Frame is one SSE message.

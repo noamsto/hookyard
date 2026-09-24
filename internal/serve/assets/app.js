@@ -7,12 +7,22 @@
 // DOM row cap (PLAN step 8): a JS constant because no Go code can see it.
 const MAX_ROWS = 2000;
 
-const VERDICT_OPTIONS = [
+const OUTCOME_OPTIONS = [
   "allow", "deny", "ask", "advise", "abstain",
-  "error", "timeout", "suppressed", "dispatched", "ok",
+  "dispatched", "suppressed", "timeout", "error", "router-error",
 ];
 
-const FILTER_SELECTS = { engine: "f-engine", event: "f-event", handler: "f-handler", verdict: "f-verdict" };
+const VERDICT_OPTIONS = [
+  "allow", "deny", "ask", "abstain", "suppressed", "ok", "error", "timeout",
+];
+
+// FIELDS is the branch-then-call filter order shared by filterParams, the
+// chip row and the add-selects: engine, event, handler, outcome (branch),
+// verdict (call), then session.
+const FIELDS = ["engine", "event", "handler", "outcome", "verdict"];
+
+const FILTER_SELECTS = { engine: "f-engine", event: "f-event", handler: "f-handler", outcome: "f-outcome", verdict: "f-verdict" };
+const FIELD_LABELS = { engine: "engine", event: "event", handler: "handler", outcome: "handler outcome", verdict: "call verdict" };
 
 const el = (id) => document.getElementById(id);
 const feedEl = el("feed");
@@ -26,7 +36,7 @@ const statsDayEl = el("stats-day");
 const statsBodyEl = el("stats-body");
 const tableBodyEl = el("table-body");
 const sessionInput = el("f-session");
-const filtersForm = el("filters");
+const filterChipsEl = el("filter-chips");
 
 const rowTemplate = el("row-template");
 const chipTemplate = el("handler-chip-template");
@@ -74,6 +84,12 @@ async function fetchJSON(url) {
   return resp.json();
 }
 
+// emit is how app.js hands flow.js what it needs (sync points, live calls)
+// without either module reaching into the other's state.
+function emit(name, detail) {
+  document.dispatchEvent(new CustomEvent(name, { detail }));
+}
+
 function debounce(fn, ms) {
   let t;
   return (...args) => {
@@ -84,50 +100,90 @@ function debounce(fn, ms) {
 
 // ---------- filters ----------
 
-function currentFilters() {
-  const f = { engine: [], event: [], handler: [], verdict: [], session: sessionInput.value.trim() };
-  for (const [key, id] of Object.entries(FILTER_SELECTS)) {
-    f[key] = Array.from(el(id).selectedOptions).map((o) => o.value);
-  }
+// filterState is the one source of truth for active filters: one array per
+// field plus session, mirrored to the URL and read by filterParams. The
+// add-selects never carry selection themselves — they only append to this.
+const filterState = { engine: [], event: [], handler: [], outcome: [], verdict: [], session: "" };
+
+// activeFilters returns a deep copy for callers outside this module (the
+// flow view reads it to know which nodes are already filtered-in).
+export function activeFilters() {
+  const f = { session: filterState.session };
+  for (const field of FIELDS) f[field] = filterState[field].slice();
   return f;
 }
 
-// filterParams is the one place a Filter becomes a query string, shared by
-// the SSE URL, the events fetch and the URL bar mirror.
-function filterParams() {
-  const f = currentFilters();
+// filterParams is the one place filterState becomes a query string, shared
+// by the SSE URL, the events fetch and the URL bar mirror.
+export function filterParams() {
   const params = new URLSearchParams();
-  for (const key of ["engine", "event", "handler", "verdict"]) {
-    for (const v of f[key]) params.append(key, v);
+  for (const field of FIELDS) {
+    for (const v of filterState[field]) params.append(field, v);
   }
-  if (f.session) params.set("session", f.session);
+  if (filterState.session) params.set("session", filterState.session);
   return params;
 }
 
+// applyFiltersFromParams loads filterState from the URL. A value not among a
+// field's current select options still lands in the state and still shows as
+// a chip — the state is the truth, not the options.
 function applyFiltersFromParams(params) {
-  for (const [key, id] of Object.entries(FILTER_SELECTS)) {
-    const wanted = new Set(params.getAll(key));
-    for (const opt of el(id).options) opt.selected = wanted.has(opt.value);
-  }
-  sessionInput.value = params.get("session") || "";
+  for (const field of FIELDS) filterState[field] = params.getAll(field).filter(Boolean);
+  filterState.session = params.get("session") || "";
+  sessionInput.value = filterState.session;
 }
 
 function updateURL() {
   const params = filterParams();
   if (state.day) params.set("day", state.day);
+  const view = new URLSearchParams(location.search).get("view");
+  if (view) params.set("view", view);
   const qs = params.toString();
   history.replaceState(null, "", qs ? "?" + qs : location.pathname);
 }
 
 function clearFilters() {
-  for (const id of Object.values(FILTER_SELECTS)) {
-    for (const opt of el(id).options) opt.selected = false;
-  }
+  for (const field of FIELDS) filterState[field] = [];
+  filterState.session = "";
   sessionInput.value = "";
   onFiltersChanged();
 }
 
+// toggleFilter is the one mutator shared by the filter-chip × buttons and
+// flow.js's node clicks: active → remove; else additive → append; else
+// replace the field's values with just this one.
+export function toggleFilter(field, value, additive) {
+  const values = filterState[field];
+  const idx = values.indexOf(value);
+  if (idx !== -1) values.splice(idx, 1);
+  else if (additive) values.push(value);
+  else filterState[field] = [value];
+  onFiltersChanged();
+}
+
+function renderChips() {
+  filterChipsEl.textContent = "";
+  for (const field of FIELDS) {
+    for (const value of filterState[field]) {
+      const chip = document.createElement("span");
+      chip.className = "fchip";
+      const label = document.createElement("span");
+      label.textContent = FIELD_LABELS[field] + ": " + value;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "fchip-remove";
+      remove.textContent = "×";
+      remove.setAttribute("aria-label", "remove " + FIELD_LABELS[field] + ": " + value);
+      remove.addEventListener("click", () => toggleFilter(field, value));
+      chip.appendChild(label);
+      chip.appendChild(remove);
+      filterChipsEl.appendChild(chip);
+    }
+  }
+}
+
 function onFiltersChanged() {
+  renderChips();
   updateURL();
   if (state.day === state.today) {
     // Reopening the stream runs the one connect sequence (reset -> backfill),
@@ -195,7 +251,7 @@ function toggleRow(li) {
 // it reads by native_event as-is. A routed record with no canonical event
 // (pi's engine-scoped per-turn turn_end) reads as engine:native_event — the
 // same string its filter value uses. A canonical row reads by canonical_event.
-function eventLabel(rec) {
+export function eventLabel(rec) {
   if (rec.router === "error") return rec.native_event || "—";
   if (rec.canonical_event) return rec.canonical_event;
   if (rec.native_event) return rec.engine + ":" + rec.native_event;
@@ -227,7 +283,12 @@ function buildRow(entry) {
 
   const handlers = rec.handlers || [];
   const chips = node.querySelector(".c-handlers");
-  for (const h of handlers) chips.appendChild(buildChip(h));
+  const hits = entry.hits;
+  handlers.forEach((h, i) => {
+    const chipNode = buildChip(h);
+    if (hits) chipNode.querySelector(".chip").classList.add(hits.includes(i) ? "chip--hit" : "chip--dim");
+    chips.appendChild(chipNode);
+  });
 
   node.querySelector(".d-session").textContent = rec.session_id || "—";
   node.querySelector(".d-cwd").textContent = rec.cwd || "—";
@@ -354,6 +415,7 @@ async function loadEvents(day) {
   windowedFlag = resp.windowed;
   updateFeedMeta();
   setLoadOlder(oldestOffset === null ? "bottom" : "ready");
+  emit("hookyard:sync", { day, live: day === state.today });
 }
 
 function renderStats(snap) {
@@ -449,19 +511,44 @@ async function loadTable() {
 }
 
 function populateFilterOptions(table) {
-  fillSelect(el("f-engine"), table.engines || []);
-  fillSelect(el("f-event"), table.events || []);
-  fillSelect(el("f-handler"), (table.handlers || []).map((h) => h.id));
+  fillSelect(el("f-engine"), "engine", table.engines || []);
+  fillSelect(el("f-event"), "event", eventOptions(table));
+  fillSelect(el("f-handler"), "handler", (table.handlers || []).map((h) => h.id));
 }
 
-function fillSelect(select, values) {
-  const selected = new Set(Array.from(select.selectedOptions).map((o) => o.value));
+// eventOptions is table.events plus every engine-scoped handler event, in
+// table order, deduped.
+function eventOptions(table) {
+  const seen = new Set();
+  const out = [];
+  for (const v of table.events || []) {
+    if (seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  for (const h of table.handlers || []) {
+    for (const v of h.events || []) {
+      if (!v.includes(":") || seen.has(v)) continue;
+      seen.add(v);
+      out.push(v);
+    }
+  }
+  return out;
+}
+
+// fillSelect rebuilds an add-select: a "+ <label>" placeholder (value "")
+// followed by the options. These selects never hold selection themselves —
+// filterState does — so there is nothing to preserve across a rebuild.
+function fillSelect(select, label, values) {
   select.textContent = "";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "+ " + label;
+  select.appendChild(placeholder);
   for (const v of values) {
     const opt = document.createElement("option");
     opt.value = v;
     opt.textContent = v;
-    opt.selected = selected.has(v);
     select.appendChild(opt);
   }
 }
@@ -553,6 +640,7 @@ function applyCallFrame(entry) {
   if (entry.day !== state.day) return; // stale — a day frame has since moved us on
   if (entry.day === backfillDay && entry.offset <= nextOffset) return; // already rendered by backfill
   prependRow(entry);
+  emit("hookyard:call", entry);
 }
 
 function handleStatsFrame(snap) {
@@ -562,6 +650,7 @@ function handleStatsFrame(snap) {
 function handleDayFrame(data) {
   insertDivider(data.day);
   state.day = data.day;
+  emit("hookyard:sync", { day: data.day, live: true });
   backfillDay = data.day;
   nextOffset = 0;
   pendingCalls = [];
@@ -585,8 +674,23 @@ document.addEventListener("keydown", (ev) => {
 
 // ---------- wiring ----------
 
-filtersForm.addEventListener("change", onFiltersChanged);
-sessionInput.addEventListener("input", debounce(onFiltersChanged, 150));
+// Each add-select is wired individually, not through a form-level "change"
+// listener: picking a value appends it to filterState and resets the select
+// to its placeholder, which a generic listener can't express.
+for (const field of FIELDS) {
+  const select = el(FILTER_SELECTS[field]);
+  select.addEventListener("change", () => {
+    const value = select.value;
+    select.value = "";
+    if (!value) return;
+    if (!filterState[field].includes(value)) filterState[field].push(value);
+    onFiltersChanged();
+  });
+}
+sessionInput.addEventListener("input", debounce(() => {
+  filterState.session = sessionInput.value.trim();
+  onFiltersChanged();
+}, 150));
 el("clear-filters").addEventListener("click", clearFilters);
 daySelect.addEventListener("change", () => selectDay(daySelect.value));
 loadOlderBtn.addEventListener("click", loadOlder);
@@ -596,11 +700,11 @@ async function init() {
   applyFiltersFromParams(params);
   state.day = params.get("day") || null;
 
-  fillSelect(el("f-verdict"), VERDICT_OPTIONS);
-  applyFiltersFromParams(params); // re-apply now that verdict options exist
+  fillSelect(el("f-outcome"), FIELD_LABELS.outcome, OUTCOME_OPTIONS);
+  fillSelect(el("f-verdict"), FIELD_LABELS.verdict, VERDICT_OPTIONS);
+  renderChips();
 
-  await loadTable();
-  applyFiltersFromParams(params); // re-apply again: engine/event/handler options exist only now
+  await loadTable(); // populates engine/event/handler options
   const days = await loadDays();
   if (!state.day) state.day = days.today;
 

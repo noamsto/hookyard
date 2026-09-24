@@ -54,7 +54,7 @@ func TestFilterMatch(t *testing.T) {
 		{"handler mismatch", Filter{Handlers: []string{"guard-z"}}, fullRecord(), false},
 		{"verdict matches consolidated verdict", Filter{Verdicts: []string{"abstain"}}, fullRecord(), true},
 		{"verdict matches router only", Filter{Verdicts: []string{record.RouterTimeout}}, record.Record{Router: record.RouterTimeout, Verdict: "allow"}, true},
-		{"verdict matches handler outcome only", Filter{Verdicts: []string{"deny"}}, fullRecord(), true},
+		{"verdict no longer matches a handler outcome (D2: call-level only)", Filter{Verdicts: []string{"deny"}}, fullRecord(), false},
 		{"verdict mismatch", Filter{Verdicts: []string{"ask"}}, fullRecord(), false},
 		{
 			"AND across fields",
@@ -154,4 +154,134 @@ func TestParseFilter(t *testing.T) {
 	if got.Session != want.Session {
 		t.Errorf("Session = %q, want %q", got.Session, want.Session)
 	}
+}
+
+// TestParseFilterOutcome verifies the "outcome" param is parsed and emptied
+// out the same way as every other repeated field.
+func TestParseFilterOutcome(t *testing.T) {
+	q, err := url.ParseQuery("outcome=deny&outcome=&outcome=abstain")
+	if err != nil {
+		t.Fatalf("ParseQuery: %v", err)
+	}
+	got := ParseFilter(q).Outcomes
+	want := []string{"deny", "abstain"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("Outcomes = %v, want %v (empty value must be dropped)", got, want)
+	}
+}
+
+// eightHandlerCall is an "N handlers" shape: 8 branches, one denying, the
+// rest abstaining, with a consolidated verdict of "deny".
+func eightHandlerCall() record.Record {
+	rec := record.Record{
+		Engine: "claude-code", CanonicalEvent: "pre_tool", NativeEvent: "PreToolUse",
+		Router: record.RouterOK, Verdict: "deny", SessionID: "SESS-abc123",
+	}
+	for _, name := range []string{"guards.a", "guards.b", "guards.c", "guards.deny", "guards.e", "guards.f", "guards.g", "guards.h"} {
+		outcome := "abstain"
+		if name == "guards.deny" {
+			outcome = "deny"
+		}
+		rec.Handlers = append(rec.Handlers, record.RecordHandler{Name: name, Outcome: outcome})
+	}
+	return rec
+}
+
+func TestFilterBranchSemantics(t *testing.T) {
+	t.Run("handler filter keeps the call and Hits is only that handler's idx", func(t *testing.T) {
+		rec := eightHandlerCall()
+		f := Filter{Handlers: []string{"guards.deny"}}
+		if !f.Match(rec) {
+			t.Fatal("Match() = false, want true")
+		}
+		if got := f.Hits(rec); len(got) != 1 || got[0] != 3 {
+			t.Errorf("Hits() = %v, want [3]", got)
+		}
+	})
+
+	t.Run("outcome filter", func(t *testing.T) {
+		rec := eightHandlerCall()
+		f := Filter{Outcomes: []string{"deny"}}
+		if !f.Match(rec) {
+			t.Fatal("Match() = false, want true")
+		}
+		if got := f.Hits(rec); len(got) != 1 || got[0] != 3 {
+			t.Errorf("Hits() = %v, want [3]", got)
+		}
+	})
+
+	t.Run("handler+outcome must hold on the same branch", func(t *testing.T) {
+		rec := record.Record{
+			Engine: "claude-code", Router: record.RouterOK, Verdict: "deny",
+			Handlers: []record.RecordHandler{
+				{Name: "deslop", Outcome: "abstain"},
+				{Name: "read-skeleton", Outcome: "deny"},
+			},
+		}
+		f := Filter{Handlers: []string{"deslop"}, Outcomes: []string{"deny"}}
+		if f.Match(rec) {
+			t.Error("Match() = true, want false (deslop's own branch is abstain, not deny)")
+		}
+	})
+
+	t.Run("deny in one handler of 8", func(t *testing.T) {
+		rec := eightHandlerCall()
+		if got := (Filter{Outcomes: []string{"deny"}}).Hits(rec); len(got) != 1 || got[0] != 3 {
+			t.Errorf("outcome=deny Hits() = %v, want [3]", got)
+		}
+		vf := Filter{Verdicts: []string{"deny"}}
+		if !vf.Match(rec) {
+			t.Fatal("verdict=deny Match() = false, want true")
+		}
+		if got := vf.Hits(rec); got != nil {
+			t.Errorf("verdict=deny Hits() = %v, want nil (verdict sets no branch field)", got)
+		}
+	})
+
+	t.Run("router error", func(t *testing.T) {
+		rec := record.Record{Engine: "claude-code", NativeEvent: "PreToolUse", Router: record.RouterError, Verdict: "abstain"}
+		if !(Filter{Outcomes: []string{outcomeRouterError}}).Match(rec) {
+			t.Error("outcome=router-error Match() = false, want true")
+		}
+		if (Filter{Handlers: []string{"x"}}).Match(rec) {
+			t.Error("handler=x Match() = true, want false (router-error's branch has no handler)")
+		}
+		if !(Filter{Verdicts: []string{record.RouterError}}).Match(rec) {
+			t.Error("verdict=error Match() = false, want true")
+		}
+	})
+
+	t.Run("pi turn_end with no handlers", func(t *testing.T) {
+		rec := record.Record{Engine: "pi", NativeEvent: "turn_end", Router: record.RouterOK, Verdict: "abstain"}
+		if !(Filter{Events: []string{"pi:turn_end"}}).Match(rec) {
+			t.Error("event=pi:turn_end Match() = false, want true")
+		}
+		if (Filter{Handlers: []string{"x"}}).Match(rec) {
+			t.Error("handler=x Match() = true, want false (no-handler call's direct branch has no handler)")
+		}
+		of := Filter{Outcomes: []string{"abstain"}}
+		if !of.Match(rec) {
+			t.Error("outcome=abstain Match() = false, want true (the direct branch's outcome is the call verdict)")
+		}
+		if got := of.Hits(rec); got != nil {
+			t.Errorf("outcome=abstain Hits() = %v, want nil (the direct branch has no handler idx)", got)
+		}
+	})
+
+	t.Run("suppressed handler-less call", func(t *testing.T) {
+		rec := record.Record{Engine: "claude-code", Router: record.RouterOK, Verdict: "suppressed"}
+		if !(Filter{Outcomes: []string{"suppressed"}}).Match(rec) {
+			t.Error("outcome=suppressed Match() = false, want true")
+		}
+	})
+
+	t.Run("narrowed verdict excludes a handler-only outcome", func(t *testing.T) {
+		rec := record.Record{
+			Engine: "claude-code", Router: record.RouterOK, Verdict: "abstain",
+			Handlers: []record.RecordHandler{{Name: "h1", Outcome: "dispatched"}},
+		}
+		if (Filter{Verdicts: []string{"dispatched"}}).Match(rec) {
+			t.Error("verdict=dispatched Match() = true, want false (no call's consolidated verdict is \"dispatched\")")
+		}
+	})
 }
