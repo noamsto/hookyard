@@ -211,6 +211,10 @@ func (h *serveMux) handleFlow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	window := clampWindow(q.Get("window"))
+	if day != h.hub.Day() {
+		// A past day has no "last N minutes"; only the live day anchors to now.
+		window = 0
+	}
 	f := ParseFilter(q)
 	resp, err := FlowForDay(h.stateDir, day, window, h.hub.Now(), f)
 	if err != nil {

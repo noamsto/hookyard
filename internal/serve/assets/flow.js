@@ -134,13 +134,23 @@ function pathBranches(p) {
 
 // ---------- topology ----------
 
-async function refreshTable() {
+async function fetchTable() {
   try {
-    tableCache = await fetchJSON("/api/table");
+    return await fetchJSON("/api/table");
   } catch (err) {
-    tableCache = { handlers: [], engines: [], events: [], error: String(err && err.message || err) };
+    return { handlers: [], engines: [], events: [], error: String(err && err.message || err) };
   }
-  tableError = tableCache.error || "";
+}
+
+// refreshTable is init()'s one-shot table load, before any load() has run.
+// Guarded by gen so a late response can't clobber a load() that started (and
+// fetched its own, newer table) while this was in flight.
+async function refreshTable() {
+  const startGen = gen;
+  const table = await fetchTable();
+  if (gen !== startGen) return;
+  tableCache = table;
+  tableError = table.error || "";
   buildTopology();
   updateErrorBanner();
 }
@@ -332,28 +342,34 @@ async function load() {
   gen += 1;
   const g = gen;
   inflight = true;
-
-  await refreshTable();
+  pending = []; // every call buffered before this load's fetch is already inside its scan
 
   const params = filterParams();
   params.set("day", day);
   if (live) params.set("window", String(WINDOW_MIN));
 
-  let resp;
+  // /api/table and /api/flow are independent — fetch them concurrently.
+  let table, resp;
   try {
-    resp = await fetchJSON("/api/flow?" + params.toString());
+    [table, resp] = await Promise.all([fetchTable(), fetchJSON("/api/flow?" + params.toString())]);
   } catch (err) {
     if (g === gen) {
       fetchError = "flow: " + (err && err.message ? err.message : String(err));
       updateErrorBanner();
       inflight = false;
-      const buffered = pending;
+      paths = new Map();
+      ring = null;
       pending = [];
-      for (const buffEntry of buffered) addCall(buffEntry);
+      stale = true; // next show/sync refetches; don't replay into stale state
+      render();
     }
     return;
   }
   if (g !== gen) return; // a newer load() superseded this one — discard
+
+  tableCache = table;
+  tableError = table.error || "";
+  buildTopology();
 
   fetchError = "";
   updateErrorBanner();
@@ -370,7 +386,9 @@ async function load() {
 
   const buffered = pending;
   pending = [];
-  for (const entry of buffered) addCall(entry);
+  for (const entry of buffered) {
+    if (entry.day === day && live) addCall(entry);
+  }
 
   if (stale && visible) {
     stale = false;

@@ -288,6 +288,50 @@ func TestFlowEndpointDefaultsDayAndFilters(t *testing.T) {
 	}
 }
 
+func TestFlowEndpointIgnoresWindowForPastDay(t *testing.T) {
+	stateDir := t.TempDir()
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	pastDay := "2026-09-09"
+	pastTS := time.Date(2026, 9, 9, 8, 0, 0, 0, time.UTC).Format("2006-01-02T15:04:05.000000Z")
+
+	lines := []string{
+		recLine(t, record.Record{TS: pastTS, Engine: "codex", Verdict: "allow", Router: "ok"}),
+		recLine(t, record.Record{TS: pastTS, Engine: "claude-code", Verdict: "deny", Router: "ok"}),
+	}
+	writeDayFile(t, stateDir, pastDay, lines)
+
+	opts := serveOpts(t, stateDir)
+	opts.Now = func() time.Time { return now }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	base := runTestServer(t, ctx, opts)
+
+	resp := get(t, base+"/api/flow?day="+pastDay+"&window=10")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	var flowResp FlowResponse
+	if err := json.NewDecoder(resp.Body).Decode(&flowResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if flowResp.Window != 0 {
+		t.Errorf("window = %d, want 0 (whole-day aggregate for a past day)", flowResp.Window)
+	}
+	if flowResp.Calls != 2 {
+		t.Errorf("calls = %d, want 2", flowResp.Calls)
+	}
+	if len(flowResp.Paths) != 2 {
+		t.Fatalf("got %d paths, want 2", len(flowResp.Paths))
+	}
+	for _, p := range flowResp.Paths {
+		if len(p.Counts) != 1 {
+			t.Errorf("path %+v counts len = %d, want 1", p, len(p.Counts))
+		}
+	}
+}
+
 func TestEventsBeforeParamPagesOlderRecords(t *testing.T) {
 	stateDir := t.TempDir()
 	day := "2026-09-10"
