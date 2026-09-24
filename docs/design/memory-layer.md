@@ -137,6 +137,9 @@ and the iterative read path (index → grep → read → grep again) truncated o
 **20 of 144** answers against the structured arm's 3, because it asks the model
 to generate more, across more rounds, with more chances to be cut off.
 
+Both of those numbers belong to *LLM-curated* files specifically: §2.3 shows the
+write-side cost is a property of who sits on the write path, not of markdown.
+
 ### 2.2 The systems, and what each is actually betting on
 
 | system | shape | what it gives you | why it is not the answer here |
@@ -168,6 +171,55 @@ door open to that capability *without* adopting an embedder today.
 MCP servers are invisible to crew workers; embeddings need a service; graphs
 need a database. The delivery constraint (§3) is more binding than the recall
 constraint, and it points the same way the measurements do.
+
+### 2.3 `recall` (raiyanyahya) — the closest shipped tool, and a different half
+
+An earlier revision of this document named the tool specified in §4 `recall`.
+That name is taken, by a project worth reading on its own merits. `recall`
+(MIT, ~750★, v0.4.0) is fully-local project memory for Claude Code with opt-in
+opencode support. Verified from source rather than its README:
+
+| | |
+| --- | --- |
+| capture | Claude Code `Stop` / `SessionEnd` hooks append new turns to `.recall/history.md`, incrementally |
+| digest | `scripts/summarizer.py` — **TF-IDF + TextRank extractive summarization**, vendored, stdlib-only, numpy as an optional accelerator |
+| surface | a `SessionStart` hook (matcher `startup\|resume\|clear`) prints `.recall/context.md`: goal, files touched, commands run, where we left off, `git diff --stat` |
+| scope | **per project**, in-repo `.recall/`, commit or gitignore |
+| safety | best-effort secret redaction before writing; injected context explicitly **fenced as untrusted reference data** |
+| engines | Claude Code first-class, opencode opt-in via a generated plugin; Codex, Cursor and Pi unsupported |
+
+Three things it changes about this document, and one it does not.
+
+**It is a counterweight to §2.1's write-cost claim.** That section reports
+file-based memory paying ~246k model tokens and ~35 minutes per history to
+curate. Recall shows the cost is an artifact of *who is on the write path*, not
+of files: a classical extractive summarizer produces a usable digest for **zero
+model tokens**, offline, with no key and no network. The measured penalty
+applies to LLM-curated capture, not to file-based memory as such.
+
+**It independently validates §4.4's attribution rule.** Recall fences recalled
+content as data and tells the reader to disregard instructions inside it — the
+same conclusion the Pi bridge reached from the other direction, where an
+unattributed block made a probe model call it *"exactly the shape of an
+injection attempt"* (`docs/design/fixtures/pi-pre-tool-advisory/`). Two
+independent implementations agreeing that recalled text is an injection surface
+is about as strong as this evidence gets. Recall's opencode path notably *omits*
+the fencing — its README says so — which is the failure mode rather than the
+design.
+
+**Its packaging is hookyard build-mode's target**, and its adapter seam is one
+module from another engine: `.claude-plugin/plugin.json` plus a four-hook
+`hooks/hooks.json`, and a `--harness {claude,opencode}` flag dispatching to a
+per-harness `collect_events` module. That is the cheap path to session continuity
+on Pi or Codex, and it is not what §4 specifies.
+
+**What it does not do is the thing §1 is about.** Recall holds a digest of what
+a session did, keyed to one project directory. It does not hold curated, durable,
+cross-repo facts; it has no retrieval over them (the digest is loaded whole); it
+has no staleness or supersession model; and its corpus is per-project by
+construction, so *"claude haiku workers stall on prompts"* — true of dispatcher,
+applicable to any crew — has no home in it. Recall answers *"where were we?"*;
+§4 answers *"what is true about this tooling, and should we act on it?"*
 
 ---
 
@@ -284,12 +336,12 @@ Two writers, one corpus. Neither is "every turn".
 operations, not a new tool surface:
 
 ```
-recall add  --type lesson --scope repo --repo dispatcher --stdin
-recall list [--repo R] [--type T] [--stale]
-recall show <name>
+priors add  --type lesson --scope repo --repo dispatcher --stdin
+priors list [--repo R] [--type T] [--stale]
+priors show <name>
 ```
 
-`recall add` validates frontmatter, refuses a duplicate `name`, regenerates the
+`priors add` validates frontmatter, refuses a duplicate `name`, regenerates the
 index, and exits non-zero on a lint failure. It is a *writer's* convenience over
 `$EDITOR`, not a separate store: an agent may equally write the file directly,
 and the lint will accept it. This is deliberate — a store that can only be
@@ -319,8 +371,8 @@ lowest priority upward.
 | tier | trigger | source | budget | truncation |
 | --- | --- | --- | --- | --- |
 | **1** | `session_start` | `MEMORY.md` pointer index (repo + global) | 4 K chars | from the middle |
-| **2** | `prompt_submit` | ranked `recall search "<prompt>"` → top 3 | 2.5 K chars | from the start |
-| **3** | any time | agent runs `recall search` / `rg` / reads a file | unbounded | — |
+| **2** | `prompt_submit` | ranked `priors search "<prompt>"` → top 3 | 2.5 K chars | from the start |
+| **3** | any time | agent runs `priors search` / `rg` / reads a file | unbounded | — |
 | | | **total injected** | **8 K chars** | |
 
 Tier 1 is cheap and unconditional, and it is what makes the system work when
@@ -378,7 +430,7 @@ injected with the same confidence as a fresh one. Three mechanical rules:
    time, and a full tri-temporal database is not warranted for a corpus this
    size.
 2. **`verified` decays.** A fact whose `verified` date exceeds a threshold (v0:
-   90 days) is flagged by `recall list --stale`, and tier 2 down-ranks it rather
+   90 days) is flagged by `priors list --stale`, and tier 2 down-ranks it rather
    than hiding it. Staleness is visible, not silently enforced.
 3. **The lint** rejects: unknown `type`, missing `name`/`description`, a
    duplicate `name`, a `superseded_by` pointing nowhere, a `repos` entry naming
@@ -402,8 +454,8 @@ wiring story as every other handler, with the per-engine render already written
 and tested.
 
 ```
-session_start   → recall index      → advisory → tier 1
-prompt_submit   → recall search     → advisory → tier 2
+session_start   → priors index      → advisory → tier 1
+prompt_submit   → priors search     → advisory → tier 2
 (pre_tool / post_tool reserved for future targeted recall)
 ```
 
@@ -483,16 +535,22 @@ only if agent-written content is what fills it.
 
 The store needs no per-engine registration. This is worth stating plainly,
 because it is the reason the component count stays at one: hookyard is the only
-thing registered with each engine, and it already is. `recall` is invoked *by*
+thing registered with each engine, and it already is. `priors` is invoked *by*
 hookyard and by the agent's own shell.
+
+`priors` is a working name, chosen only because `recall` was taken by the
+project evaluated in §2.3. It is unclaimed in this problem space — the `priors`
+packages on npm and PyPI are unrelated, and the top GitHub matches are NeRF and
+diffusion research — but the name carries no design weight and is a one-line
+change.
 
 | repo | change | why |
 | --- | --- | --- |
 | **hookyard** | `prompt_submit` added to `HasAdvisorySlot` for Claude and Pi; Pi bridge's `input` reply delivered (not discarded); `before_agent_start` registration made a real per-prompt handler | the only hookyard changes required; tier 2 is impossible without them (R2, §4.7) |
 | **hookyard** | captured `prompt_submit` advisory payload fixtures per engine, per its own evidentiary convention | a claimed-advisory engine with no fixture is a claim, not a capability |
-| **`recall`** (new binary, own repo) | `add` / `list` / `show` / `search` / `lint` / `index`; store path from config; v0 `rg` backend | the store needs a release cadence independent of the router; §4.4's fail-open contract lives here |
-| **nix-config** | install `recall`; a `hookyard.json` manifest entry wiring `session_start` + `prompt_submit` to it; clone the store repo on every host incl. `halo` and `mbp`; `AGENTS.md` include line for Codex/Cursor/Pi; optional Obsidian `programs.obsidian.vaults` entry | one manifest, four engines — the pattern `programs.hookyard.manifests` already exists for |
-| **dispatcher** | `crew reap` → distillation proposals (§4.3b); the judge consults `recall search` before choosing tier/engine/model | closes failure mode 2 — the judge currently decides from a static table while `ratings.jsonl` holds the evidence |
+| **`priors`** (new binary, own repo) | `add` / `list` / `show` / `search` / `lint` / `index`; store path from config; v0 `rg` backend | the store needs a release cadence independent of the router; §4.4's fail-open contract lives here |
+| **nix-config** | install `priors`; a `hookyard.json` manifest entry wiring `session_start` + `prompt_submit` to it; clone the store repo on every host incl. `halo` and `mbp`; `AGENTS.md` include line for Codex/Cursor/Pi; optional Obsidian `programs.obsidian.vaults` entry | one manifest, four engines — the pattern `programs.hookyard.manifests` already exists for |
+| **dispatcher** | `crew reap` → distillation proposals (§4.3b); the judge consults `priors search` before choosing tier/engine/model | closes failure mode 2 — the judge currently decides from a static table while `ratings.jsonl` holds the evidence |
 | **nix-config** | worker MCP profile unchanged (zero servers) | memory must not be the reason a worker grows an MCP dependency (R1) |
 
 Ordering matters: the hookyard gaps are prerequisites for tier 2, but the store
@@ -522,7 +580,7 @@ Stated so the design can be falsified rather than defended:
 **Deterministic** (no LLM, no network, temp directories):
 
 - frontmatter round-trip: every field survives write → read → write;
-- `recall search` filters: `scope`/`repos`/`type`/`superseded_by`, and that a
+- `priors search` filters: `scope`/`repos`/`type`/`superseded_by`, and that a
   superseded fact is absent from tier 1 and 2 output;
 - index generation is idempotent, and the lint catches each rejected class in
   §4.6 (one test per rule);
@@ -536,7 +594,7 @@ without instructing the agent to search. If it answers, tier 2 worked. Repeated
 per engine that has an advisory slot, with the Codex case asserted as a
 **negative** test — the fact is reachable by file read, and *not* injected.
 
-**Cost and latency**, because §4.4 has a deadline: p50/p95 of `recall search` at
+**Cost and latency**, because §4.4 has a deadline: p50/p95 of `priors search` at
 10, 100 and 1000 facts, against the 800 ms budget, so the v0→v1 trigger is a
 number rather than a feeling.
 
@@ -556,8 +614,10 @@ only thing that would justify tier 2's complexity.
 - no background consolidation / "dreaming" (§4.6 defers it on measured grounds);
 - no Obsidian Sync, no vault-as-store;
 - no MCP server — explicitly, because a worker cannot see one;
-- no conversation-transcript recall (that is Pi's `/resume` and Claude's
-  sessions, and it already works).
+- no conversation-transcript digest. That is §2.3's territory, and `recall`
+  already does it for Claude Code and opencode at zero model tokens; the cheaper
+  move for the other two engines is an adapter on its `--harness` seam, not a
+  second implementation here.
 
 ---
 
@@ -577,10 +637,17 @@ These block implementation and are the author's calls, not the design's:
    auto-memory, or accept the fork and consolidate at reap time. **This is the
    one with a real cost either way** and it should be decided before any file
    moves.
-4. **`recall` as its own repo, or a `hookyard recall` subcommand.** The design
+4. **`priors` as its own repo, or a `hookyard priors` subcommand.** The design
    argues for a separate binary (§5) — hookyard's thin router is a stated
    property and the store has a different schema cadence — but a subcommand
    would mean one binary installed machine-wide instead of two.
+5. **Whether to adopt `recall` at all (§2.3).** Three shapes: use it as-is for
+   session continuity and build §4 only for durable facts (recommended);
+   contribute a `pi`/`codex` adapter to it and skip §4 entirely — much cheaper,
+   but it does not close failure mode 2, because the dispatcher still never
+   learns from its own outcomes; or both. Note the collision if both ship: they
+   want the same `session_start` budget, so §4.4's tier 1 and recall's
+   `context.md` would compete for it, and the index should shrink or be dropped.
 
 ---
 
@@ -588,11 +655,11 @@ These block implementation and are the author's calls, not the design's:
 
 | # | workstream | repo | delivers |
 | --- | --- | --- | --- |
-| 1 | store layout, `recall` v0 (`add`/`list`/`search`/`lint`), git repo, index generation | `recall` | tier 1 + tier 3 on all four engines |
+| 1 | store layout, `priors` v0 (`add`/`list`/`search`/`lint`), git repo, index generation | `priors` | tier 1 + tier 3 on all four engines |
 | 2 | nix-config wiring: install, clone on every host, `AGENTS.md` include line | nix-config | reach without any hookyard change |
 | 3 | migrate or seed the corpus (decision 2/3) | — | content to actually retrieve |
 | 4 | hookyard: `prompt_submit` advisory slot + Pi bridge `input` reply + fixtures | hookyard | tier 2 on Claude and Pi |
-| 5 | dispatcher: judge consults `recall`; `crew reap` distillation proposals | dispatcher | closes failure mode 2 |
+| 5 | dispatcher: judge consults `priors`; `crew reap` distillation proposals | dispatcher | closes failure mode 2 |
 | 6 | optional: Obsidian as a viewer over the checkout; Bases table for the stale sweep | nix-config | §4.6 curation, if it earns it |
 
 Workstreams 1–3 are worth doing regardless of how the rest lands, and 4 is
