@@ -4398,14 +4398,16 @@ amendment. Reason and advice join into the one `reason` field with a blank
 line between them, the same join `renderPiDeny` already does, because on
 both engines the `reason` string becomes the model's literal continuation
 prompt — advice riding on it is advice actually delivered, not a channel
-being repurposed. A deny with neither reason nor advice gets a fixed
-stand-in — `turnEndEmptyDenyReason`, renamed from the pi-scoped constant D3
-introduced and now shared: "a hookyard handler asked you to keep working
+being repurposed. A deny whose reason and advice are both blank (empty or
+whitespace-only) gets a fixed stand-in, and a blank reason beside non-blank
+advice is dropped so the advice stands alone. The stand-in is
+`turnEndEmptyDenyReason`, renamed from the pi-scoped constant D3 introduced
+and now shared: "a hookyard handler asked you to keep working
 before finishing." On Claude Code this is a courtesy; on Codex it is
 mandatory — `output_parser.rs`'s `stop_output` rejects a `block` decision
 whose `reason` is empty or whitespace-only ("Stop hook returned
-decision:block without a non-empty reason") and does not block, so an
-empty-reason deny would silently degrade to a no-op if the stand-in weren't
+decision:block without a non-empty reason") and does not block, so a
+blank-reason deny would silently degrade to a no-op if the stand-in weren't
 supplied.
 
 **The loop bound is native `stop_hook_active`, read per engine, not a
