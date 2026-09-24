@@ -101,6 +101,34 @@ type TableResponse struct {
 	Path     string             `json:"path"`
 }
 
+// FlowHop is one handler's contribution to a FlowPath's chain: its name and
+// its own outcome, not the record's consolidated verdict.
+type FlowHop struct {
+	Name    string `json:"name"`
+	Outcome string `json:"outcome"`
+}
+
+// FlowPath is one distinct route a call took, with its count per bucket.
+type FlowPath struct {
+	Engine         string    `json:"engine"`
+	CanonicalEvent string    `json:"canonical_event"`
+	NativeEvent    string    `json:"native_event"`
+	Router         string    `json:"router"`
+	Verdict        string    `json:"verdict"`
+	Handlers       []FlowHop `json:"handlers"` // never null; record order
+	Counts         []int64   `json:"counts"`   // len == max(window,1), oldest first
+}
+
+type FlowResponse struct {
+	Day         string     `json:"day"`
+	Window      int        `json:"window"`       // minutes; 0 = whole day
+	BucketStart int64      `json:"bucket_start"` // unix ms of bucket 0; 0 when Window == 0
+	BucketMS    int64      `json:"bucket_ms"`    // 60000; 0 when Window == 0
+	Calls       int64      `json:"calls"`        // records counted into Counts
+	NextOffset  int64      `json:"next_offset"`  // ScanAll's end: offset past the last complete record
+	Paths       []FlowPath `json:"paths"`        // never null; sorted by total desc, then key asc
+}
+
 // Frame is one SSE message.
 type Frame struct {
 	Event string // "call" | "stats" | "day" | "reset"

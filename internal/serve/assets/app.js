@@ -74,6 +74,12 @@ async function fetchJSON(url) {
   return resp.json();
 }
 
+// emit is how app.js hands flow.js what it needs (sync points, live calls)
+// without either module reaching into the other's state.
+function emit(name, detail) {
+  document.dispatchEvent(new CustomEvent(name, { detail }));
+}
+
 function debounce(fn, ms) {
   let t;
   return (...args) => {
@@ -94,7 +100,7 @@ function currentFilters() {
 
 // filterParams is the one place a Filter becomes a query string, shared by
 // the SSE URL, the events fetch and the URL bar mirror.
-function filterParams() {
+export function filterParams() {
   const f = currentFilters();
   const params = new URLSearchParams();
   for (const key of ["engine", "event", "handler", "verdict"]) {
@@ -115,6 +121,8 @@ function applyFiltersFromParams(params) {
 function updateURL() {
   const params = filterParams();
   if (state.day) params.set("day", state.day);
+  const view = new URLSearchParams(location.search).get("view");
+  if (view) params.set("view", view);
   const qs = params.toString();
   history.replaceState(null, "", qs ? "?" + qs : location.pathname);
 }
@@ -195,7 +203,7 @@ function toggleRow(li) {
 // it reads by native_event as-is. A routed record with no canonical event
 // (pi's engine-scoped per-turn turn_end) reads as engine:native_event — the
 // same string its filter value uses. A canonical row reads by canonical_event.
-function eventLabel(rec) {
+export function eventLabel(rec) {
   if (rec.router === "error") return rec.native_event || "—";
   if (rec.canonical_event) return rec.canonical_event;
   if (rec.native_event) return rec.engine + ":" + rec.native_event;
@@ -354,6 +362,7 @@ async function loadEvents(day) {
   windowedFlag = resp.windowed;
   updateFeedMeta();
   setLoadOlder(oldestOffset === null ? "bottom" : "ready");
+  emit("hookyard:sync", { day, live: day === state.today });
 }
 
 function renderStats(snap) {
@@ -553,6 +562,7 @@ function applyCallFrame(entry) {
   if (entry.day !== state.day) return; // stale — a day frame has since moved us on
   if (entry.day === backfillDay && entry.offset <= nextOffset) return; // already rendered by backfill
   prependRow(entry);
+  emit("hookyard:call", entry);
 }
 
 function handleStatsFrame(snap) {
@@ -562,6 +572,7 @@ function handleStatsFrame(snap) {
 function handleDayFrame(data) {
   insertDivider(data.day);
   state.day = data.day;
+  emit("hookyard:sync", { day: data.day, live: true });
   backfillDay = data.day;
   nextOffset = 0;
   pendingCalls = [];

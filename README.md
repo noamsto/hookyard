@@ -124,6 +124,25 @@ Every call through `hookyard route` appends one JSON line to
 `doctor` tells you whether hooks are wired up right now; the record tells you
 what actually happened.
 
+### Watching it live
+
+`hookyard serve [--port 7757]` opens a read-only view of the record on
+`http://127.0.0.1:7757`. It binds loopback only and loads nothing from the
+network. It has two views, and the filter bar (engine, session, event,
+handler, verdict) applies to both:
+
+- **feed** — every call, newest first, live for today and paged for past days.
+- **flow** — the pipeline as a graph, engine → event → handler → outcome.
+  The last hop is each handler's *own* outcome, not the call's consolidated
+  verdict, so a deny shows which guard denied it. Most traffic is `abstain`
+  or `dispatched`, so an unlit `allow` is expected. Router errors lead to a
+  `router error` node, and calls that no handler subscribed to go straight
+  from event to verdict along a dashed edge. A handler that ran but is no
+  longer in the installed table appears dashed. On today, edge thickness is
+  the last 10 minutes of traffic (day files are UTC, so the window starts
+  over at UTC midnight), and each live call pulses along its path. A past
+  day shows static whole-day totals.
+
 ### Session lifecycle for dashboards
 
 The six canonical events carry no "the agent finished and is idle" concept, so

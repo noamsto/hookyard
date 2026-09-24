@@ -1,0 +1,92 @@
+/* flow view — reuses style.css's CSS variables only, no new colour literals,
+   so the dark default and the prefers-color-scheme: light override both apply. */
+
+.view-toggle {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.view-toggle button {
+  border: none;
+  border-radius: 0;
+  background: var(--bg-panel);
+}
+
+.view-toggle button + button {
+  border-left: 1px solid var(--border);
+}
+
+.view-toggle button[aria-selected="true"] {
+  background: var(--bg-raised);
+  color: var(--accent);
+}
+
+.flow-error {
+  color: var(--c-error);
+}
+
+.flow-body {
+  max-height: 80vh;
+  overflow: auto;
+  padding: 8px 12px;
+}
+
+.flow-body svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.node rect {
+  fill: var(--bg-raised);
+  stroke: var(--border);
+}
+
+.node text {
+  fill: var(--fg);
+  font-size: 11px;
+  dominant-baseline: middle;
+}
+
+.ghost rect {
+  stroke-dasharray: 3 2;
+}
+
+.ghost text {
+  fill: var(--fg-dim);
+}
+
+.edge {
+  stroke: var(--fg-dim);
+  fill: none;
+  opacity: .55;
+}
+
+.faint {
+  opacity: .15;
+}
+
+.direct {
+  stroke-dasharray: 4 3;
+}
+
+.v-allow rect { stroke: var(--c-allow); }
+.v-deny rect { stroke: var(--c-deny); }
+.v-ask rect { stroke: var(--c-ask); }
+.v-advise rect { stroke: var(--c-advise); }
+.v-abstain rect { stroke: var(--c-abstain); }
+.v-dispatched rect { stroke: var(--c-dispatched); }
+.v-suppressed rect { stroke: var(--c-suppressed); }
+.v-timeout rect { stroke: var(--c-timeout); }
+.v-error rect { stroke: var(--c-error); }
+.v-router-error rect { stroke: var(--c-error); }
+
+.dot {
+  fill: var(--accent);
+}
+
+.idle {
+  opacity: .45;
+}

@@ -5,12 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>hookyard serve</title>
 <link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/flow.css">
 </head>
 <body>
 <header class="topbar">
   <div class="brand">hookyard <span class="dim">serve</span></div>
   <div id="state-dir" class="state-dir dim"></div>
   <div class="spacer"></div>
+  <div class="view-toggle" role="tablist" aria-label="view">
+    <button type="button" role="tab" data-view="feed" aria-selected="true">feed</button>
+    <button type="button" role="tab" data-view="flow" aria-selected="false">flow</button>
+  </div>
   <label class="day-picker">
     <span class="dim">day</span>
     <select id="day-select"></select>
@@ -55,6 +60,15 @@
     <div class="feed-footer">
       <button type="button" id="load-older">load older</button>
     </div>
+  </section>
+
+  <section class="panel flow-panel" id="flow-panel" hidden>
+    <div class="panel-header">
+      <h2>flow</h2>
+      <span id="flow-meta" class="dim"></span>
+      <span id="flow-error" class="flow-error"></span>
+    </div>
+    <div id="flow-body" class="flow-body"></div>
   </section>
 
   <aside class="side">
@@ -131,5 +145,6 @@
 </template>
 
 <script type="module" src="/static/app.js"></script>
+<script type="module" src="/static/flow.js"></script>
 </body>
 </html>

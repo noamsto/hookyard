@@ -171,7 +171,7 @@ func TestMethodNotAllowed(t *testing.T) {
 
 	base := runTestServer(t, ctx, serveOpts(t, stateDir))
 
-	for _, path := range []string{"/api/events", "/api/days", "/api/stats", "/api/table", "/api/stream"} {
+	for _, path := range []string{"/api/events", "/api/flow", "/api/days", "/api/stats", "/api/table", "/api/stream"} {
 		req, _ := http.NewRequest(http.MethodPost, base+path, nil)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -236,6 +236,55 @@ func TestEventsHonorsLimitAndFilter(t *testing.T) {
 		if rec.Rec.Engine != "codex" {
 			t.Errorf("filtered record has engine %q, want codex", rec.Rec.Engine)
 		}
+	}
+}
+
+func TestFlowEndpointDefaultsDayAndFilters(t *testing.T) {
+	stateDir := t.TempDir()
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	day := DayString(now)
+	ts := now.Format("2006-01-02T15:04:05.000000Z")
+
+	lines := []string{
+		recLine(t, record.Record{TS: ts, Engine: "codex", Verdict: "allow", Router: "ok"}),
+		recLine(t, record.Record{TS: ts, Engine: "claude-code", Verdict: "deny", Router: "ok"}),
+	}
+	writeDayFile(t, stateDir, day, lines)
+
+	opts := serveOpts(t, stateDir)
+	opts.Now = func() time.Time { return now }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	base := runTestServer(t, ctx, opts)
+
+	resp := get(t, base+"/api/flow")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	var flowResp FlowResponse
+	if err := json.NewDecoder(resp.Body).Decode(&flowResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if flowResp.Day != day {
+		t.Errorf("day = %q, want hub day %q", flowResp.Day, day)
+	}
+	if len(flowResp.Paths) != 2 {
+		t.Fatalf("got %d paths, want 2", len(flowResp.Paths))
+	}
+
+	resp2 := get(t, base+"/api/flow?day="+day+"&window=5&engine=codex")
+	defer func() { _ = resp2.Body.Close() }()
+	var filtered FlowResponse
+	if err := json.NewDecoder(resp2.Body).Decode(&filtered); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if filtered.Window != 5 {
+		t.Errorf("window = %d, want 5", filtered.Window)
+	}
+	if len(filtered.Paths) != 1 || filtered.Paths[0].Engine != "codex" {
+		t.Fatalf("filtered paths = %+v, want one codex path", filtered.Paths)
 	}
 }
 
@@ -420,7 +469,7 @@ func TestNoAccessControlAllowOrigin(t *testing.T) {
 
 	base := runTestServer(t, ctx, serveOpts(t, stateDir))
 
-	for _, path := range []string{"/", "/api/days", "/api/events", "/api/stats", "/api/table", "/api/stream"} {
+	for _, path := range []string{"/", "/api/days", "/api/events", "/api/flow", "/api/stats", "/api/table", "/api/stream"} {
 		resp := get(t, base+path)
 		_ = resp.Body.Close()
 		if resp.Header.Get("Access-Control-Allow-Origin") != "" {
