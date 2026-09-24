@@ -688,3 +688,89 @@ These block implementation and are the author's calls, not the design's:
 
 Workstreams 1–3 are worth doing regardless of how the rest lands, and 4 is
 independent of 5.
+
+---
+
+## 11. Product-direction review (2026-09-24)
+
+A review of this proposal against hookyard's roadmap ([roadmap.md](../roadmap.md)):
+public hook distribution, team mode and running without Nix. It adds nothing
+to §4's mechanics. It sharpens three open decisions and corrects one
+statement that is now stale.
+
+### 11.1 Keep memory out of the router
+
+§5 and decision 4 already lean toward a separate `priors` binary. This review
+makes that a firm recommendation. hookyard's pitch to a security team is a
+small, auditable router that sees every tool call. A memory store inside it
+would enlarge the thing that team must trust, and it would tie the router's
+release cadence to the store's schema. Keep the split §4.7 describes:
+`priors` is an `exec` handler with its own manifest. hookyard's only changes
+are the advisory slots listed there. That also makes `priors` the first
+major handler built on hookyard's public contract, which shows the contract
+is enough for someone else to build on.
+
+The router also makes memory safer. A `pre_tool` guard can check writes into
+the store, and the event record shows which memory was injected into which
+session. Both work only if memory stays a handler the router observes.
+
+### 11.2 The trust model (§4.4) is the gate for anything shared
+
+Injected memory reaches the model as instructions. On one machine, a bad fact
+misleads one person's sessions. Once the store is shared, whether through the
+§4.8 git sync across hosts or a team repo in hookyard's team mode, one bad or
+tampered fact is injected into every session, on every engine, for everyone
+who pulls. Shared memory is a prompt-injection channel with a fan-out.
+
+So the trust decision has to settle at least these before a store is shared
+beyond one person:
+
+- **Fencing.** Every injected block is attributed and framed as untrusted
+  reference data, the way §2.3 reads `recall` and the Pi bridge's
+  `[hookyard advisory]` prefix already do. §4.4 requires attribution. This
+  review asks for untrusted-data framing too.
+- **Provenance.** Each fact records who or what wrote it (which engine, which
+  session, which host). The index can then be filtered by author and a
+  compromised writer can be purged.
+- **A review gate on shared writes.** Agent-written facts land on one machine
+  unreviewed. A fact reaches a shared store only through a reviewed commit,
+  the same way the roadmap's team policy repo works. §4.3's write path should
+  say which path a fact takes.
+
+### 11.3 The secrets and work/personal boundary (§4.8) blocks team use
+
+A fact learned in a work repo must not surface in a personal session, and a
+fact containing a secret must not be written at all. That makes redaction at
+write time a requirement, not best-effort. Scope enforced at read time
+(`scope`/`repos`, §4.2) is the second line of defence, not the only one.
+hookyard's roadmap puts the same redaction requirement on `hookyard export`.
+One shared redaction rule set would serve both.
+
+### 11.4 Generalise before it is public
+
+The proposal is written around one fleet: `crew`, `dispatcher`,
+`ratings.jsonl`, named hosts. That is a strength as evidence and a barrier
+for an outside reader. Before the memory layer appears on hookyard's public
+roadmap as more than a pointer, it needs a general version: the store, the
+tiers and the advisory wiring, described for any single developer, with this
+fleet kept as the worked example. Workstreams 2 and 5 in §10 are specific to
+this fleet and stay that way.
+
+### 11.5 Stale in §4.7: Codex now has advisory slots
+
+§4.7's reach matrix says Codex's channel "exists upstream, hookyard denies it."
+Since #101, `internal/verdict/capability.go` gives Codex an advisory slot on
+`session_start` and `prompt_submit`, with the delivery probe in
+`fixtures/codex-advisory/`. Codex now has the tier 2 slot that Claude Code and
+Pi still lack. §4.7's "file-only" framing for Codex was already flagged as
+possibly wrong, and is now wrong. The first hookyard gap in §4.7 narrows to
+Claude Code and Pi.
+
+### 11.6 Order
+
+1. hookyard runs without Nix (roadmap stage 1). Without it, a memory layer
+   delivered through hookyard reaches only Nix users.
+2. Settle §4.4 (with 11.2) and §4.8 (with 11.3).
+3. `priors` v0 on one machine: §10 workstreams 1 and 3, then 4.
+4. Sharing, whether across hosts or across a team, only after the trust
+   model holds on one machine.

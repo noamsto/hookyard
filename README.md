@@ -24,7 +24,8 @@ answers each engine in the format it expects.
 for guards that need machine-wide enforcement. It runs with or without Nix.
 **Build mode**, generating per-engine plugin hooks so end users never see
 hookyard, is the planned open-source default and not yet implemented
-([design §3.1](docs/design/hookyard.md)).
+([design §3.1](docs/design/hookyard.md)). What comes next is in the
+[roadmap](docs/roadmap.md).
 
 ## How it works
 
