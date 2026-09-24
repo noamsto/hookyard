@@ -4254,7 +4254,8 @@ The semantics are pre_tool's block protocol, reused rather than reinvented: a
 consolidated **deny** on pi `turn_end` means "do not settle yet — continue
 with this reason," the same `permissionDecision: "deny"` + reason contract a
 handler already speaks for pre_tool. The verdict lattice needed no new value.
-Render (`renderPiTurnEnd`, `internal/verdict/render.go`) dispatches on
+Render (`renderTurnEnd` with `renderPiDeny`, `internal/verdict/render.go`,
+shared with Claude Code and Codex since §11.3) dispatches on
 `CanonicalEvent == vocab.TurnEnd` for pi: `Deny` renders the same
 `{"block":true,"reason":"..."}` shape `pre_tool` uses, via `renderPiDeny`,
 which joins reason and advice into that one field the same way `pre_tool`'s
@@ -4291,7 +4292,7 @@ N continuations in one run, one each. `stop_hook_active` — same field name
 and meaning as Claude Code's own `Stop` payload field (`claude-Stop.json`) —
 is how the bridge tells the router it has already spent this run's
 continuation: `true` iff `continuedThisRun` was already set when
-`agent_before_settle` fired again. `renderPiTurnEnd` checks it first, ahead
+`agent_before_settle` fired again. `renderTurnEnd` checks it first, ahead
 of the verdict: when true, nothing is printed and `Enforced` is `Verdict ==
 Abstain`, because a block printed here would be silently ignored by the
 bridge, and the record must say so rather than claim an enforcement that
