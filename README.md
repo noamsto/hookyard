@@ -128,22 +128,56 @@ what actually happened.
 
 `hookyard serve [--port 7757]` opens a read-only view of the record on
 `http://127.0.0.1:7757`. It binds loopback only and loads nothing from the
-network. It has two views, and the filter bar (engine, session, event,
-handler, verdict) applies to both:
+network. It has two views, and one filter bar applies to both.
+
+**Filters.** Six fields: engine, session, event, handler, handler outcome,
+call verdict. Engine, event, handler, handler outcome and call verdict each
+have an "add" picker; session is a free-text input. Every active value shows
+as a chip (`field: value ×`) in the bar; values within a field OR, different
+fields AND. Esc or "clear" drops everything. The bar mirrors to the URL, so a
+filtered view is a shareable link.
+
+Engine, session, event and call verdict filter whole calls. Call verdict is
+the call's consolidated verdict (`allow`/`ask`/`deny`/`abstain`/`suppressed`)
+or its router status (`ok`/`error`/`timeout`) — never a handler's own
+outcome. Handler and handler outcome instead filter one handler *run* within
+a call (a "branch"): set together, they must hold on the same run, so
+`handler=guards.deslop&outcome=deny` means deslop's own deny, not "deslop ran
+and something else denied". `outcome=router-error` selects calls that never
+reached fan-out. Handler outcomes used to also match `verdict=`; they no
+longer do — use `outcome=` instead (e.g. `outcome=dispatched`).
+
+A feed row is a call with at least one matching handler run. Under a handler
+or handler-outcome filter, the row's matching handler chips are highlighted
+and the rest dimmed. The flow graph draws only the matching branches — same
+rule, same filter.
 
 - **feed** — every call, newest first, live for today and paged for past days.
 - **flow** — the pipeline as a graph, engine → event → handler → outcome.
-  The last hop is each handler's *own* outcome, not the call's consolidated
-  verdict, so a deny shows which guard denied it. Most traffic is `abstain`
-  or `dispatched`, so an unlit `allow` is expected. Router errors lead to a
-  `router error` node, and calls that no handler subscribed to go straight
-  from event to verdict along a dashed edge. A handler that ran but is no
-  longer in the installed table appears dashed. On today, edge thickness is
-  the last 10 minutes of traffic (day files are UTC, so the window starts
-  over at UTC midnight), and each live call pulses along its path. A past
-  day shows static whole-day totals.
+  Engine and event count calls; handler and handler outcome count branches
+  (one handler run), and the column headers say so. The last hop is each
+  handler's *own* outcome, not the call's consolidated verdict, so a deny
+  shows which guard denied it. Calls with no handler go straight from event
+  to their verdict (`abstain` or `suppressed`) along a dashed edge. Router
+  errors lead to a `router error` node. A handler that ran but is no longer
+  in the installed table appears dashed. On today, edge thickness is the
+  last 10 minutes of traffic (day files are UTC, so the window starts over
+  at UTC midnight), and each live call pulses along its path. A past day
+  shows static whole-day totals.
 
-![The flow view: engines, events, handlers and outcomes, with edge thickness showing the last 10 minutes of traffic](docs/serve-flow.png)
+  Handlers are grouped by id prefix (`guards.*`, `guards.pi.*`, `aeye-*`,
+  `houston.*`); click a group to expand or collapse it. A group holding a
+  filtered handler stays open; under a handler or handler-outcome filter,
+  small groups open on their own. Idle nodes (no traffic in the window) are
+  hidden; "show idle" brings them back. Wheel or pinch zoom around the
+  cursor, drag pans, a fit button and `+`/`-`/`0` do the same from the
+  keyboard. Hovering a node highlights every path through it with a tooltip
+  of counts. Clicking a node filters by it — shift/ctrl-click adds it
+  instead of replacing, and clicking an active node removes it.
+
+![The default flow view: engines, events, handlers and outcomes, with edge thickness showing the last 10 minutes of traffic](docs/serve-flow.png)
+![A handler group expanded and zoomed in, hovering a handler to trace its paths](docs/serve-flow-grouped.png)
+![Filtered to the deny outcome on a past day, showing which guards denied](docs/serve-flow-filtered.png)
 
 ### Session lifecycle for dashboards
 
