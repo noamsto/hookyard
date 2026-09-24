@@ -52,9 +52,9 @@ async function main() {
       await page.wheel(at.x, at.y, -250);
       await sleep(150);
     }
-    // Hover is ignored while a zoom is in flight, so re-enter once it ends.
-    await page.move(2, 2);
-    await sleep(400);
+    // Wheel zoom no longer drops the hover, so the node hovered into before
+    // zooming is still hovered; move to its (possibly shifted) screen point
+    // to settle the tooltip position.
     const hover = await hitOrFail(page, `__e2e.nodePoint("handler", ${JSON.stringify(shown)})`, "member " + shown);
     await page.move(hover.x, hover.y);
     await page.waitFor(`!!document.querySelector("#flow-body .flow-tip")`, 3000, "tooltip");

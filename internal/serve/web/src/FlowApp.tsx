@@ -2,7 +2,7 @@
 // Flow canvas. useReactFlow (for keyboard shortcuts and the initial fitView)
 // only works inside a ReactFlowProvider subtree, so FlowCanvas — not
 // FlowApp — is the provider's child.
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { Controls, MiniMap, ReactFlow, ReactFlowProvider, useOnViewportChange, useReactFlow } from "@xyflow/react";
 import type { Node as RFNode } from "@xyflow/react";
@@ -54,6 +54,7 @@ function FlowCanvas({ controller }: { controller: FlowController }) {
   const tipRef = useRef<HTMLDivElement | null>(null);
   const fittedRef = useRef(false);
   const panningRef = useRef(false);
+  const lastPointerRef = useRef<{ clientX: number; clientY: number } | null>(null);
   const [hoveredKey, setHoveredKey] = useState<string | undefined>(undefined);
 
   const snap = controller.snapshot();
@@ -132,14 +133,18 @@ function FlowCanvas({ controller }: { controller: FlowController }) {
   const onNodeMouseEnter = useCallback(
     (ev: ReactMouseEvent, node: RFNode) => {
       if (panningRef.current) return;
+      lastPointerRef.current = { clientX: ev.clientX, clientY: ev.clientY };
       setHoveredKey(node.id);
-      positionTip(bodyRef.current, tipRef.current, ev);
     },
     [],
   );
-  const onNodeMouseMove = useCallback((ev: ReactMouseEvent) => positionTip(bodyRef.current, tipRef.current, ev), []);
+  const onNodeMouseMove = useCallback((ev: ReactMouseEvent) => {
+    lastPointerRef.current = { clientX: ev.clientX, clientY: ev.clientY };
+    positionTip(bodyRef.current, tipRef.current, ev);
+  }, []);
   const onNodeMouseLeave = useCallback(() => setHoveredKey(undefined), []);
-  const onMoveStart = useCallback(() => {
+  const onMoveStart = useCallback((ev: MouseEvent | TouchEvent | null) => {
+    if (ev?.type === "wheel") return; // wheel zoom, not a drag pan — keep the hover
     panningRef.current = true;
     setHoveredKey(undefined);
   }, []);
@@ -148,6 +153,16 @@ function FlowCanvas({ controller }: { controller: FlowController }) {
   }, []);
 
   const tipLines = hoveredKey !== undefined ? controller.tooltip(hoveredKey) : null;
+
+  // The tooltip div only mounts once hoveredKey is set, so it can't be
+  // positioned from onNodeMouseEnter (tipRef.current is still null there).
+  // Position it here, after render, from the last known pointer position;
+  // mousemove keeps that position fresh and repositions directly.
+  useLayoutEffect(() => {
+    if (hoveredKey !== undefined && lastPointerRef.current) {
+      positionTip(bodyRef.current, tipRef.current, lastPointerRef.current);
+    }
+  }, [hoveredKey, tipLines]);
 
   return (
     <div

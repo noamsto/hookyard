@@ -81,6 +81,12 @@ export function toElkGraph(input: LayoutInput): ElkNode {
       "elk.layered.considerModelOrder.strategy": "NODES_AND_EDGES",
       "elk.layered.spacing.nodeNodeBetweenLayers": String(NODE_NODE_BETWEEN_LAYERS),
       "elk.spacing.nodeNode": String(NODE_NODE),
+      // Without this, ELK's default placement leaves sparse columns (e.g. a
+      // couple of engines under a filter) pinned near the top/bottom of a
+      // much taller column instead of centred against it. BALANCED spreads
+      // each column's nodes around the shared vertical middle.
+      "elk.layered.nodePlacement.strategy": "BRANDES_KOEPF",
+      "elk.layered.nodePlacement.bk.fixedAlignment": "BALANCED",
     },
     // All edges declared at the root: INCLUDE_CHILDREN lets them cross into
     // (or between) compound group nodes without re-declaring per container.
