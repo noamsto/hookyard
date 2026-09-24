@@ -74,10 +74,18 @@ answer and the probe would then measure the wrong thing.
 - **`codex features list` reports `hooks stable true`** — hooks are on by
   default, so a silent no-op is never the feature flag.
 
-## Still unproven
+## Probing the remaining three events
 
-`PreToolUse`, `PostToolUse` and `SubagentStart` — not registered here, and not
-reachable without credentials, since a 401'd turn never executes a tool. The
-docs specify the same channel on all three; that is documentation, not a probe.
-And nothing here says an advisory *changes behaviour* on Codex, only that it
-arrives.
+`PreToolUse`, `PostToolUse` and `SubagentStart` are **unproven as of 0.154.0**.
+All three are registered in `run.sh`, but none can fire unauthenticated: a 401'd
+turn never executes a tool, so `PreToolUse`/`PostToolUse` need a completed turn
+and `SubagentStart` needs a subagent. `run.sh` is written so that one command
+covers all five — run it unauthenticated and you get the two that do not need a
+turn, run it logged in and you get the rest. The prompt asks for one trivial
+shell command, which is what makes the tool events reachable, and `-C` keeps the
+turn inside a throwaway directory.
+
+The docs specify the same channel on all three. That is documentation, not a
+probe — which is the entire lesson of this directory.
+
+Nothing here says an advisory *changes behaviour* on Codex, only that it arrives.

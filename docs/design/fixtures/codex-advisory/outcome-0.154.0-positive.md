@@ -67,10 +67,12 @@ index-at-session-start and ranked-retrieval-at-prompt tiers, and both work.
 
 ## What it does not settle
 
-- **`PreToolUse` / `PostToolUse` / `SubagentStart`.** Not registered here, and
-  they cannot be reached without credentials — a 401'd turn never executes a
-  tool. The docs specify the same channel on all three; that is documentation,
-  not a probe.
+- **`PreToolUse` / `PostToolUse` / `SubagentStart`.** Registered in `run.sh`,
+  and did not fire — a 401'd turn never executes a tool, so the first two need a
+  completed turn and `SubagentStart` needs a subagent. Their absence here is a
+  limit of this run, not a negative result, and they stay registered so the same
+  command answers them once Codex is authenticated. The docs specify the same
+  channel on all three; that is documentation, not a probe.
 - **What the model does with it.** Delivery is not comprehension. Nothing here
   says an advisory *changes behaviour* on Codex, only that it arrives.
 - **Anything about hookyard's render arm**, which does not emit for Codex at
