@@ -28,10 +28,10 @@ memory-startup category sells.
 | --- | --- | --- | --- |
 | Claude Code | auto memory (model-written) | `~/.claude/projects/<project>/memory/` | no |
 | Pi | none | — | — |
-| Codex | none[*] | — | — |
+| Codex | none | — | — |
 | Cursor | none | — | — |
 
-[*] Codex does not ship a native memory store, but its hookyard advisory slot now carries `session_start` and `prompt_submit` (PR #101), making the advisory contract reachable for injection on Codex.
+Codex does not ship a native memory store, but since PR #101 its hookyard advisory slot carries `session_start` and `prompt_submit`.
 
 Claude Code's auto memory is a real layer, not a stub. Verified on this machine:
 52 topic files across 11 project directories plus 11 `MEMORY.md` indexes — 63 files
@@ -605,10 +605,9 @@ Stated so the design can be falsified rather than defended:
 **Injection end-to-end** (the test that actually matters, adapted from
 Pi-memory's test 8): write a fact, start a *new* session, and ask the question
 without instructing the agent to search. If it answers, tier 2 worked. Repeated
-per engine that has an advisory slot, with Codex delivery confirmed by the live test
+per engine that has an advisory slot — with Codex run the same way now that
+PR #101 gives it a slot whose delivery is confirmed by the live test
 `TestLiveCodexDeliversSessionStartAndPromptSubmitAdvice` (`cmd/hookyard/live_e2e_test.go`).
-
-**Cost and latency**, because §4.4 has a deadline: p50/p95 of `priors search` at
 10, 100 and 1000 facts, against the 800 ms budget, so the v0→v1 trigger is a
 number rather than a feeling.
 
