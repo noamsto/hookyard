@@ -71,12 +71,49 @@ function pageHelpers() {
       const el = qa("#flow-body .flow-colhead")[i];
       return el ? this.hit(el) : null;
     },
+    // headerBoxes: every column header's rendered extent (rect + text, so
+    // header text overflowing its background box is caught), in page
+    // coordinates, left to right.
+    headerBoxes() {
+      return qa("#flow-body .flow-colhead").map((el) => {
+        const r = el.getBoundingClientRect();
+        return { left: r.left + scrollX, right: r.right + scrollX, top: r.top + scrollY, bottom: r.bottom + scrollY };
+      }).sort((a, b) => a.left - b.left);
+    },
+    // tipFit: whether the open tooltip sits fully inside the flow body's
+    // visible area, or — when taller than that — scrolls inside it instead
+    // of being clipped.
+    tipFit() {
+      const t = q("#flow-body .flow-tip");
+      const b = body();
+      if (!t || !b) return null;
+      const tr = t.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      // b.clientHeight excludes a horizontal scrollbar's own strip (present
+      // when .wide scrolls sideways); that strip is not visible content, so
+      // the tooltip must fit above it, not just inside the full box.
+      const visibleBottom = br.top + b.clientHeight;
+      const overflowY = getComputedStyle(t).overflowY;
+      return {
+        tipH: tr.height, bodyH: b.clientHeight,
+        fits: tr.top >= br.top - 0.5 && tr.bottom <= visibleBottom + 0.5,
+        scrolls: t.scrollHeight > t.clientHeight && overflowY === "auto",
+        scrollHeight: t.scrollHeight, clientHeight: t.clientHeight, overflowY,
+      };
+    },
     // groupHeaderPoint: what toggles the member's group — a collapsed
     // group's plate, or an open group's fold header.
     groupHeaderPoint(member) {
       const g = groupEls().find((el) => JSON.parse(el.dataset.members).includes(member));
       const h = g?.querySelector(".flow-group-header");
       return h ? this.hit(h) : null;
+    },
+    // scrollGroupIntoView: bring a member's group element into view — the
+    // flow body scrolls horizontally at narrow widths, not just the page.
+    scrollGroupIntoView(member) {
+      const g = groupEls().find((el) => JSON.parse(el.dataset.members).includes(member));
+      g?.scrollIntoView({ block: "center", inline: "center" });
+      return !!g;
     },
     selected(col, name) {
       return !!this.node(col, name)?.classList.contains("selected");

@@ -229,17 +229,47 @@ async function check2(page, env) {
     assert(after.y > before.y, `wheel over the flow did not scroll the page (scrollY ${before.y} -> ${after.y})`);
     lines.push(`wheel over the flow scrolls the page (scrollY ${before.y} -> ${after.y}); node size unchanged (no zoom)`);
 
-    // A phone-width panel: the graph keeps its minimum width and scrolls
-    // inside the flow body; the page itself never scrolls sideways.
-    await setViewport(page, 400, 800);
-    const errorsAt = page.errors.length;
-    await openFlow(page, env.base);
-    await sleep(300);
-    const narrow = await page.evaluate(`({ h: __e2e.horizontalScroll(), body: document.getElementById("flow-body").clientWidth, inner: document.getElementById("flow-body").scrollWidth })`);
-    const errors = page.errors.slice(errorsAt);
-    assert(errors.length === 0, `${errors.length} console errors at 400 × 800:\n      ` + [...new Set(errors)].join("\n      "));
-    assert(narrow.h === 0, `horizontal page scroll of ${narrow.h} px at 400 × 800`);
-    lines.push(`400 × 800: no console errors, no horizontal page scroll; the graph (${narrow.inner} px) scrolls inside the ${narrow.body} px flow body`);
+    // Phone- and tablet-width panels: the graph keeps its minimum width and
+    // scrolls inside the flow body, the page itself never scrolls sideways,
+    // and the column headers (whose plates give way first) never overlap.
+    for (const [w, h] of [[400, 800], [700, 800]]) {
+      const at = `${w} × ${h}`;
+      await setViewport(page, w, h);
+      const errorsAt = page.errors.length;
+      await openFlow(page, env.base);
+      await sleep(300);
+      const narrow = await page.evaluate(`({ h: __e2e.horizontalScroll(), body: document.getElementById("flow-body").clientWidth, inner: document.getElementById("flow-body").scrollWidth })`);
+      const errors = page.errors.slice(errorsAt);
+      assert(errors.length === 0, `${errors.length} console errors at ${at}:\n      ` + [...new Set(errors)].join("\n      "));
+      assert(narrow.h === 0, `horizontal page scroll of ${narrow.h} px at ${at}`);
+      lines.push(`${at}: no console errors, no horizontal page scroll; the graph (${narrow.inner} px) scrolls inside the ${narrow.body} px flow body`);
+
+      const heads = await page.evaluate(`__e2e.headerBoxes()`);
+      const overlap = [];
+      for (let i = 1; i < heads.length; i++) {
+        if (heads[i].left < heads[i - 1].right - 0.5) {
+          overlap.push(`header ${i - 1} ends at ${heads[i - 1].right.toFixed(0)}, header ${i} starts at ${heads[i].left.toFixed(0)}`);
+        }
+      }
+      assert(overlap.length === 0, `column headers overlap at ${at}: ` + overlap.join("; "));
+      lines.push(`${at}: ${heads.length} column header boxes do not overlap`);
+
+      if (w === 400) {
+        // The tallest group tooltip (guards.pi.*, 8 members) must fit the
+        // flow body's visible area, or scroll inside it — never clip.
+        const piMember = JSON.stringify(GUARDS_PI[0]);
+        await page.evaluate(`__e2e.scrollGroupIntoView(${piMember})`);
+        const hp = await page.evaluate(`__e2e.groupHeaderPoint(${piMember})`);
+        assert(hp?.ok, `guards.pi.* group header not hit-testable at ${at}: ` + JSON.stringify(hp));
+        await page.move(hp.x, hp.y);
+        await page.waitFor(`!document.querySelector("#flow-body .flow-tip").hidden`, 2000, "guards.pi.* group tooltip");
+        const tip = await page.evaluate(`__e2e.tipFit()`);
+        assert(tip.fits || tip.scrolls,
+          `guards.pi.* tooltip (${tip.tipH.toFixed(0)} px) neither fits the ${tip.bodyH.toFixed(0)} px flow body nor scrolls ` +
+          `(scrollHeight ${tip.scrollHeight}, clientHeight ${tip.clientHeight}, overflow-y ${tip.overflowY})`);
+        lines.push(`${at}: guards.pi.* group tooltip (${tip.tipH.toFixed(0)} px) ${tip.fits ? "fits" : "scrolls"} inside the ${tip.bodyH.toFixed(0)} px flow body`);
+      }
+    }
   } finally {
     await page.send("Emulation.clearDeviceMetricsOverride");
   }

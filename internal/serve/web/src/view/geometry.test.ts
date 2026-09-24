@@ -26,7 +26,7 @@ function input(over: Partial<GeoInput> = {}): GeoInput {
     E("h:c", "o:allow", "allow", 400),
   ];
   const rank = new Map(nodes.map((n, i) => [n.key, i]));
-  return { width: 1200, minHeight: 600, charW: 7.2, chars: [12, 20, 20, 16], nodes, links, rank, ...over };
+  return { width: 1200, minHeight: 600, charW: 7.2, chars: [12, 20, 20, 16], headerChars: [14, 36, 18, 18], nodes, links, rank, ...over };
 }
 
 function assertNoOverlap(g: Geometry, what: string): void {

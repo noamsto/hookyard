@@ -38,6 +38,7 @@ export interface GeoInput {
   minHeight: number;
   charW: number; // px per monospace character
   chars: [number, number, number, number]; // widest label per column, in characters
+  headerChars: [number, number, number, number]; // column header text length ("name · unit"), in characters
   nodes: GeoNodeIn[];
   links: GeoLinkIn[];
   rank: Map<string, number>; // node key -> order within its column
@@ -184,8 +185,12 @@ interface L extends GeoLinkIn { width: number; }
 
 // columnsFor places the columns across width; a panel too narrow for them
 // at their minimum lays out wider (the flow body then scrolls sideways).
-function columnsFor(width: number, charW: number, chars: GeoInput["chars"]): { x: number[]; w: number[]; labelX: [number, number]; width: number } {
-  const engineLabel = Math.ceil(chars[0] * charW) + 8;
+function columnsFor(width: number, charW: number, chars: GeoInput["chars"], headerChars: GeoInput["headerChars"]): { x: number[]; w: number[]; labelX: [number, number]; width: number } {
+  // Every gap the layout produces is at least MIN_GAP (see below), so a
+  // column's header text fits without touching the next header as long as
+  // the column is at least headerW - MIN_GAP wide.
+  const headerW = headerChars.map((c) => Math.ceil(c * charW) + 6);
+  const engineLabel = Math.max(Math.ceil(chars[0] * charW) + 8, headerW[0] - BAR_W - MIN_GAP);
   const outcomeLabel = Math.ceil(chars[3] * charW) + 8;
   const plate = (c: number) => Math.ceil(c * charW) + 2 * 8;
   const plateMin = Math.min(PLATE_MAX, Math.max(170, width * 0.16));
@@ -198,8 +203,11 @@ function columnsFor(width: number, charW: number, chars: GeoInput["chars"]): { x
     const cut = Math.min(MIN_GAP * 3 - free, eventW + handlerW - 2 * 130);
     eventW -= cut / 2;
     handlerW -= cut / 2;
-    free = width - fixed - eventW - handlerW;
   }
+  // ...but never past their own header text.
+  eventW = Math.max(eventW, headerW[1] - MIN_GAP);
+  handlerW = Math.max(handlerW, headerW[2] - MIN_GAP);
+  free = width - fixed - eventW - handlerW;
   // Gaps share the free width 1 : 1.6 : 1.6; the engine gap, the smallest,
   // takes at least MIN_GAP from the other two.
   let gaps = [1, 1.6, 1.6].map((w) => (free * w) / 4.2);
@@ -307,7 +315,7 @@ function relax(nodes: N[], links: L[], rank: Map<string, number>): Map<string, n
 }
 
 export function layoutFlow(input: GeoInput): Geometry {
-  const { x, w, labelX, width } = columnsFor(input.width, input.charW, input.chars);
+  const { x, w, labelX, width } = columnsFor(input.width, input.charW, input.chars, input.headerChars);
   const nodes: N[] = input.nodes.map((n) => ({ ...n, room: 0, inH: 0, outH: 0, plateH: 0 }));
   const keys = new Set(nodes.map((n) => n.key));
   const links: L[] = input.links.filter((l) => l.count > 0 && keys.has(l.from) && keys.has(l.to)).map((l) => ({ ...l, width: 0 }));

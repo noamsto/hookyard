@@ -22,8 +22,9 @@ const MIN_H = 420;
 const INSET = 8; // plate text inset
 const SPARK = { w: 3, gap: 1, h: 10 };
 const HEADERS: [string, string][] = [
-  ["engine", "calls"], ["event", "calls ×runs per call"], ["handler", "branches"], ["outcome", "branches"],
+  ["engine", "calls"], ["event", "calls ×runs per handled call"], ["handler", "branches"], ["outcome", "branches"],
 ];
+const HEADER_CHARS = HEADERS.map(([name, unit]) => name.length + 3 + unit.length) as [number, number, number, number];
 
 type LayerName = "heads" | "bands" | "over" | "nodes" | "labels" | "dots" | "legend";
 
@@ -205,7 +206,7 @@ export class FlowView {
 
     const top = this.body.getBoundingClientRect().top + window.scrollY;
     const geo = layoutFlow({
-      width, minHeight: Math.max(MIN_H, Math.floor(window.innerHeight - top - 14)), charW, chars,
+      width, minHeight: Math.max(MIN_H, Math.floor(window.innerHeight - top - 14)), charW, chars, headerChars: HEADER_CHARS,
       nodes: scene.nodes.map((n) => ({ key: n.key, col: n.col, kind: n.kind, lines: this.lines(n), head: heads.has(n.key) })),
       links: scene.links, rank,
     });
