@@ -59,6 +59,7 @@
           };
           diagrams = import ./nix/checks/diagrams.nix {inherit pkgs;};
           pi-bridge = import ./nix/checks/pi_bridge.nix {inherit pkgs;};
+          flow-bundle = import ./nix/checks/flow-bundle.nix {inherit pkgs;};
         };
 
         treefmt = {
@@ -108,7 +109,11 @@
           alejandra.enable = true;
           typos.enable = true;
           check-merge-conflicts.enable = true;
-          trim-trailing-whitespace.enable = true;
+          trim-trailing-whitespace = {
+            enable = true;
+            # Committed esbuild output, not hand-edited prose.
+            excludes = ["^internal/serve/assets/flow/"];
+          };
         };
 
         devShells.default = pkgs.mkShell {

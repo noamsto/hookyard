@@ -1,0 +1,239 @@
+/* Flow view (React Flow + ELK). Every colour comes from style.css's
+   variables — React Flow's --xy-* variables are mapped here once, on
+   .flow-body, so both the dark default and the prefers-color-scheme: light
+   override apply without a single new colour literal. */
+
+.flow-error {
+  color: var(--c-error);
+}
+
+.flow-idle {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+
+.flow-body {
+  position: relative;
+  height: 70vh;
+
+  --xy-background-color: var(--bg-panel);
+  --xy-node-background-color: var(--bg-raised);
+  --xy-node-border: 1px solid var(--border);
+  --xy-node-color: var(--fg);
+  --xy-node-border-radius: 8px;
+  --xy-node-boxshadow-hover: 0 1px 6px 0 rgba(0, 0, 0, 0.25);
+  --xy-node-boxshadow-selected: 0 0 0 2px var(--accent);
+  --xy-node-group-background-color: color-mix(in srgb, var(--bg-panel) 60%, transparent);
+  --xy-edge-stroke: var(--fg-dim);
+  --xy-edge-stroke-width: 1.5;
+  --xy-edge-stroke-selected: var(--accent);
+  --xy-edge-label-background-color: var(--bg-raised);
+  --xy-edge-label-color: var(--fg);
+  --xy-handle-background-color: var(--fg-dim);
+  --xy-handle-border-color: var(--bg-raised);
+  --xy-minimap-background-color: var(--bg-panel);
+  --xy-minimap-mask-background-color: color-mix(in srgb, var(--bg) 60%, transparent);
+  --xy-minimap-mask-stroke-color: var(--border);
+  --xy-minimap-node-background-color: var(--fg-dim);
+  --xy-minimap-node-stroke-color: transparent;
+  --xy-controls-button-background-color: var(--bg-raised);
+  --xy-controls-button-background-color-hover: var(--row-hover);
+  --xy-controls-button-border-color: var(--border);
+  --xy-controls-button-color: var(--fg);
+  --xy-controls-button-color-hover: var(--accent);
+  --xy-selection-background-color: color-mix(in srgb, var(--accent) 10%, transparent);
+  --xy-selection-border: 1px dotted var(--accent);
+  --xy-connectionline-stroke: var(--fg-dim);
+  --xy-attribution-background-color: transparent;
+}
+
+.flow-body .react-flow__pane {
+  cursor: grab;
+}
+
+.flow-body .react-flow__pane.dragging {
+  cursor: grabbing;
+}
+
+/* ---------- column headers ---------- */
+
+.flow-col-header {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+
+/* ---------- cards ---------- */
+
+.flow-node {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  box-sizing: border-box;
+  border-radius: var(--xy-node-border-radius);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  font-size: var(--flow-label-font, 12px);
+  cursor: pointer;
+  transition: opacity 120ms ease, border-color 120ms ease;
+}
+
+.flow-node-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-node-count {
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.flow-node.ghost {
+  border-style: dashed;
+}
+
+.flow-node.ghost .flow-node-label {
+  color: var(--fg-dim);
+}
+
+.flow-node.dim {
+  opacity: 0.45;
+}
+
+.flow-node.on {
+  border-color: var(--accent);
+}
+
+.flow-node.selected {
+  border-left-color: var(--accent);
+  box-shadow: var(--xy-node-boxshadow-selected);
+}
+
+.flow-node.v-allow { border-left-color: var(--c-allow); }
+.flow-node.v-deny { border-left-color: var(--c-deny); }
+.flow-node.v-ask { border-left-color: var(--c-ask); }
+.flow-node.v-advise { border-left-color: var(--c-advise); }
+.flow-node.v-abstain { border-left-color: var(--c-abstain); }
+.flow-node.v-dispatched { border-left-color: var(--c-dispatched); }
+.flow-node.v-suppressed { border-left-color: var(--c-suppressed); }
+.flow-node.v-timeout { border-left-color: var(--c-timeout); }
+.flow-node.v-error { border-left-color: var(--c-error); }
+.flow-node.v-router-error { border-left-color: var(--c-error); }
+
+/* ---------- groups ---------- */
+
+.flow-group {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  border-radius: var(--xy-node-border-radius);
+  background: var(--xy-node-group-background-color);
+  border: 1px dashed var(--fg-dim);
+  cursor: default;
+}
+
+.flow-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 10px;
+  box-sizing: border-box;
+  cursor: pointer;
+  font-size: var(--flow-label-font, 12px);
+}
+
+.flow-group-arrow {
+  color: var(--fg-dim);
+}
+
+.flow-group.forced .flow-group-header {
+  cursor: default;
+}
+
+.flow-group-pin {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+}
+
+.flow-group.dim {
+  opacity: 0.45;
+}
+
+.flow-group.on {
+  border-color: var(--accent);
+}
+
+/* ---------- edges ---------- */
+
+.flow-edge.faint {
+  opacity: 0.15;
+}
+
+.flow-edge.direct {
+  stroke-dasharray: 4 3;
+}
+
+.flow-edge.on {
+  stroke: var(--accent);
+  opacity: 0.9;
+}
+
+.flow-body.hl .flow-node:not(.on),
+.flow-body.hl .flow-group:not(.on),
+.flow-body.hl .flow-edge:not(.on) {
+  opacity: 0.12;
+}
+
+/* ---------- pulses ---------- */
+
+.flow-dot {
+  fill: var(--accent);
+}
+
+/* ---------- tooltip ---------- */
+
+.flow-tip {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  max-width: 420px;
+  padding: 6px 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  font-size: 12px;
+  white-space: pre;
+  overflow: hidden;
+}
+
+.flow-tip .title {
+  font-weight: 600;
+}
+
+.flow-tip .dim {
+  color: var(--fg-dim);
+}
+
+/* ---------- minimap ---------- */
+
+.flow-minimap-hidden {
+  display: none;
+}

@@ -10,4 +10,10 @@ Notifcation = "Notifcation"
 [files]
 # d2-rendered SVGs: mixed-case hex color fragments in generated CSS class
 # names (e.g. "f38BA8") aren't prose and aren't worth hand-tuning regexes for.
-extend-exclude = ["docs/diagrams/*.svg"]
+# internal/serve/assets/flow/*: committed esbuild output, not prose.
+# internal/serve/web/package-lock.json: npm-generated, not hand-edited.
+extend-exclude = [
+  "docs/diagrams/*.svg",
+  "internal/serve/assets/flow/*",
+  "internal/serve/web/package-lock.json",
+]

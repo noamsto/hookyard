@@ -101,6 +101,28 @@ kbd {
 
 .spacer { flex: 1; }
 
+.view-toggle {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.view-toggle button {
+  border: none;
+  border-radius: 0;
+  background: var(--bg-panel);
+}
+
+.view-toggle button + button {
+  border-left: 1px solid var(--border);
+}
+
+.view-toggle button[aria-selected="true"] {
+  background: var(--bg-raised);
+  color: var(--accent);
+}
+
 .day-picker {
   display: flex;
   align-items: center;
