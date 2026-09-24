@@ -143,6 +143,8 @@ handler, verdict) applies to both:
   over at UTC midnight), and each live call pulses along its path. A past
   day shows static whole-day totals.
 
+![The flow view: engines, events, handlers and outcomes, with edge thickness showing the last 10 minutes of traffic](docs/serve-flow.png)
+
 ### Session lifecycle for dashboards
 
 The six canonical events carry no "the agent finished and is idle" concept, so
