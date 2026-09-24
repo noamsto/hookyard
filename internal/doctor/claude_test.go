@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/noamsto/hookyard/internal/installstate"
 	"github.com/noamsto/hookyard/internal/render"
 	"github.com/noamsto/hookyard/internal/vocab"
 )
@@ -470,4 +471,98 @@ func TestClaudeLauncherSettingsNamesWhyItFoundNothing(t *testing.T) {
 			t.Errorf("values = %q, want the one --settings path", values)
 		}
 	})
+}
+
+// ownedSources resolves Claude's sources the way Run does on a host where
+// install wrote settings.json itself: the receipt in stateDir names it.
+func ownedSources(t *testing.T, p Paths, stateDir string) claudeSources {
+	t.Helper()
+	c := resolveClaudeSources(p, t.TempDir())
+	if err := installstate.WriteReceipt(stateDir, installstate.Receipt{
+		Complete: true,
+		Identity: installstate.Identity{StateDir: stateDir, ClaudeSettings: c.settingsPath},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c.owned = installWroteClaudeSettings(stateDir, c.settingsPath)
+	if !c.owned {
+		t.Fatalf("a receipt naming %s must mark it owned", c.settingsPath)
+	}
+	return c
+}
+
+// Without Nix, install --claude-settings writes the catalog into settings.json,
+// and the receipt saying so turns the marker there from stale into live.
+func TestClaudeRegistrationPassesOnSettingsJSONInstallWrote(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	router := writeRouterBinary(t, root, true)
+	configDir := filepath.Join(root, "claude")
+	settings := claudeConfig(t, configDir, routedCommand(router, vocab.ClaudeCode, stateDir))
+
+	c := ownedSources(t, Paths{ClaudeConfigDir: configDir}, stateDir)
+	f := claudeRegistration(c)
+	if f.Status != Pass {
+		t.Fatalf("status = %v, want Pass; detail=%q", f.Status, f.Detail)
+	}
+	if !strings.Contains(f.Detail, settings) || !strings.Contains(f.Detail, "--claude-settings") {
+		t.Errorf("detail = %q, want it to name %s and --claude-settings", f.Detail, settings)
+	}
+	if src, ok := c.markerSource(); !ok || src.name != settings {
+		t.Errorf("markerSource = %q, %v; want %s", src.name, ok, settings)
+	}
+}
+
+// Owned or not, a marker in both settings.json and the overlay registers
+// every handler twice (§8 unions hook sources).
+func TestClaudeRegistrationFailsWhenInstallAndOverlayBothRegister(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	router := writeRouterBinary(t, root, true)
+	command := routedCommand(router, vocab.ClaudeCode, stateDir)
+	configDir := filepath.Join(root, "claude")
+	claudeConfig(t, configDir, command)
+	overlay := writeFile(t, filepath.Join(root, "overlay.json"), claudeOverlayJSON(t, command))
+
+	f := claudeRegistration(ownedSources(t, Paths{ClaudeConfigDir: configDir, ClaudeSettingsFlags: []string{overlay}}, stateDir))
+	if f.Status != Fail {
+		t.Fatalf("status = %v, want Fail; detail=%q", f.Status, f.Detail)
+	}
+	if !strings.Contains(f.Detail, "twice") || !strings.Contains(f.Detail, overlay) {
+		t.Errorf("detail = %q, want the double-fire and the overlay named", f.Detail)
+	}
+}
+
+// The receipt says install wrote settings.json, but the entry is gone: some
+// other writer stripped it, and nothing routes Claude Code any more.
+func TestClaudeRegistrationFailsWhenInstallWroteSettingsJSONButItIsGone(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	configDir := filepath.Join(root, "claude")
+	writeFile(t, filepath.Join(configDir, "settings.json"), []byte(`{"model":"x"}`))
+
+	f := claudeRegistration(ownedSources(t, Paths{ClaudeConfigDir: configDir}, stateDir))
+	if f.Status != Fail {
+		t.Fatalf("status = %v, want Fail; detail=%q", f.Status, f.Detail)
+	}
+	if !strings.Contains(f.Fix, "--claude-settings") {
+		t.Errorf("fix = %q, want the install --claude-settings repair", f.Fix)
+	}
+}
+
+// A receipt naming some other file does not claim this one.
+func TestInstallWroteClaudeSettingsIgnoresAnotherPath(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := installstate.WriteReceipt(stateDir, installstate.Receipt{
+		Complete: true,
+		Identity: installstate.Identity{ClaudeSettings: "/elsewhere/settings.json"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if installWroteClaudeSettings(stateDir, "/home/u/.claude/settings.json") {
+		t.Fatal("a receipt naming another path must not mark this one owned")
+	}
+	if installWroteClaudeSettings("", "/home/u/.claude/settings.json") {
+		t.Fatal("no state dir must not mark anything owned")
+	}
 }

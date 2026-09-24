@@ -36,6 +36,7 @@ const usage = `hookyard — register agent hooks once, route them to every codin
 
   hookyard install   render every manifest into every engine's native config
   hookyard emit      print Claude Code's overlay to stdout for Nix to place
+                     (without Nix: install --claude-settings writes it instead)
   hookyard build     generate a native plugin that bundles hookyard (Claude Code and pi)
   hookyard validate  check manifests without writing anything
   hookyard doctor    report whether each engine will actually run the hooks
@@ -146,6 +147,7 @@ func install(args []string) error {
 	stateDir := fs.String("state-dir", defaultStateDir, "directory the router reads its table from and writes records to")
 	codex := fs.String("codex-config", defaults.codex, "Codex config.toml to write")
 	cursor := fs.String("cursor-hooks", defaults.cursor, "Cursor hooks.json to write")
+	claude := fs.String("claude-settings", "", "Claude Code settings.json to write the event catalog into (e.g. ~/.claude/settings.json); off by default, since under Nix the overlay from emit carries it instead")
 	var pi piSettingsPaths
 	fs.Var(&pi, "pi-settings", "path to a Pi settings.json to write (repeatable); the bridge lands in bin/ beside each")
 	dryRun := fs.Bool("dry-run", false, "print what would be written and exit")
@@ -169,12 +171,15 @@ func install(args []string) error {
 	if len(paths) == 0 && !*allowEmpty {
 		return fmt.Errorf("no --manifest given")
 	}
-	return runInstall(os.Stdout, paths, *routerPath, *stateDir, *codex, *cursor, pi, *dryRun)
+	return runInstall(os.Stdout, paths, *routerPath, *stateDir, *codex, *cursor, *claude, pi, *dryRun)
 }
 
 // runInstall is install's pipeline, split out so tests can drive it with
 // explicit paths instead of os.Args.
-func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex, cursor string, pi []string, dryRun bool) error {
+//
+// claude is the Claude Code settings.json to write, or empty to leave Claude
+// Code to the Nix overlay emit renders, which is every Nix install.
+func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex, cursor, claude string, pi []string, dryRun bool) error {
 	router := routerPath
 	if router == "" {
 		router = filepath.Join(stateDir, "bin", "hookyard")
@@ -205,13 +210,14 @@ func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex,
 		hookyardBin = resolved
 	}
 	id := installstate.Identity{
-		Manifests:   []string(paths),
-		RouterPath:  router,
-		StateDir:    stateDir,
-		CodexConfig: codex,
-		CursorHooks: cursor,
-		PiSettings:  pi,
-		Hookyard:    hookyardBin,
+		Manifests:      []string(paths),
+		RouterPath:     router,
+		StateDir:       stateDir,
+		CodexConfig:    codex,
+		CursorHooks:    cursor,
+		PiSettings:     pi,
+		Hookyard:       hookyardBin,
+		ClaudeSettings: claude,
 	}
 	// Written before anything else touches disk, and again at the very end:
 	// if install aborts anywhere in between, doctor finds Complete=false
@@ -240,16 +246,24 @@ func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex,
 	if err != nil {
 		return err
 	}
-	// install never writes Claude Code's config (R-B): what the Nix overlay
-	// routes is the fixed catalog, whatever the handlers above name.
+	// Claude Code gets the fixed catalog whatever the handlers above name
+	// (R-B): the table decides which handlers run on each event. Under Nix
+	// the overlay carries it and install writes nothing for Claude Code;
+	// with --claude-settings, install writes the same catalog itself.
 	claudeEntries, err := render.ClaudeCatalogPlan(router, stateDir)
 	if err != nil {
 		return err
 	}
+	// An empty install is how hookyard is turned off, so it strips its
+	// catalog from the settings file rather than leaving eight routes to a
+	// table with nothing in it.
+	if claude != "" && len(paths) == 0 {
+		claudeEntries = nil
+	}
 	plan[vocab.ClaudeCode] = claudeEntries
 
 	if dryRun {
-		printPlan(out, plan, pi)
+		printPlan(out, plan, claude, pi)
 		return nil
 	}
 	// Checked here, over every path at once, rather than inside each writer:
@@ -259,6 +273,9 @@ func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex,
 	destinations := []render.Destination{
 		{Flag: "--codex-config", Path: codex},
 		{Flag: "--cursor-hooks", Path: cursor},
+	}
+	if claude != "" {
+		destinations = append(destinations, render.Destination{Flag: "--claude-settings", Path: claude})
 	}
 	for _, p := range pi {
 		// The bridge's location follows --pi-settings, so that is still the
@@ -305,6 +322,11 @@ func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex,
 			return err
 		}
 	}
+	if claude != "" {
+		if err := render.WriteClaude(claude, plan[vocab.ClaudeCode]); err != nil {
+			return err
+		}
+	}
 	if err := render.WriteCodex(codex, plan[vocab.Codex]); err != nil {
 		return err
 	}
@@ -312,6 +334,11 @@ func runInstall(out io.Writer, paths manifestPaths, routerPath, stateDir, codex,
 		return err
 	}
 	for _, engine := range vocab.Engines {
+		if engine == vocab.ClaudeCode && claude != "" {
+			_, _ = fmt.Fprintf(out, "%-12s %d catalog events written to %s; table holds %d claude-code handlers\n",
+				engine, len(plan[engine]), claude, claudeCodeHandlerCount(handlers))
+			continue
+		}
 		if engine == vocab.ClaudeCode {
 			// install never reaches settings.json, and the catalog registers
 			// every event whatever the table holds; a bare "N entries" would
@@ -1155,11 +1182,15 @@ func loadAllWith(paths []string, load func(string) (*manifest.Manifest, error)) 
 	return manifest.Merge(manifests)
 }
 
-func printPlan(out io.Writer, plan render.Plan, piSettings []string) {
+func printPlan(out io.Writer, plan render.Plan, claudeSettings string, piSettings []string) {
 	for _, engine := range vocab.Engines {
 		_, _ = fmt.Fprintf(out, "%s\n", engine)
 		if engine == vocab.ClaudeCode {
-			_, _ = fmt.Fprintln(out, "  (emitted for Nix to place, not written by install)")
+			if claudeSettings != "" {
+				_, _ = fmt.Fprintf(out, "  (written to %s)\n", claudeSettings)
+			} else {
+				_, _ = fmt.Fprintln(out, "  (emitted for Nix to place, not written by install)")
+			}
 		}
 		if len(plan[engine]) == 0 {
 			_, _ = fmt.Fprintln(out, "  (nothing)")

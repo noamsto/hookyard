@@ -37,6 +37,12 @@ type Identity struct {
 	CursorHooks string   `json:"cursorHooks"`
 	PiSettings  []string `json:"piSettings"`
 	Hookyard    string   `json:"hookyard"`
+	// ClaudeSettings is the settings.json install wrote Claude Code's catalog
+	// into, empty when it wrote none — always the case under Nix, where the
+	// overlay carries it instead. omitempty keeps a Nix witness and receipt,
+	// which never set it, byte-identical to the schema-2 contract they
+	// already share, so adding it needed no schema bump.
+	ClaudeSettings string `json:"claudeSettings,omitempty"`
 }
 
 // Receipt is what `hookyard install` writes after a run: the identity it
@@ -135,6 +141,9 @@ func Diff(w Witness, r Receipt) []string {
 	}
 	if w.Hookyard != r.Hookyard {
 		diffs = append(diffs, "hookyard binary")
+	}
+	if w.ClaudeSettings != r.ClaudeSettings {
+		diffs = append(diffs, "claude settings")
 	}
 	return diffs
 }

@@ -64,6 +64,44 @@ which handlers actually run on each of those events.
 entirely in a directory the user has not trusted, and a handler that never runs
 cannot report that it didn't.
 
+## Without Nix
+
+Everything above the Nix wiring is one static binary, so a host with no Nix
+takes a release binary (or `go install github.com/noamsto/hookyard/cmd/hookyard@latest`)
+and runs `install` itself. The one engine that needs something extra is
+Claude Code: under Nix its catalog rides the `--settings` overlay `emit`
+renders, and without Nix there is no overlay, so `install` writes the same
+catalog into a settings file instead:
+
+```
+hookyard install --manifest ~/hooks/hookyard.json --claude-settings ~/.claude/settings.json
+```
+
+`--claude-settings` is opt-in and never a default. Under Nix
+`~/.claude/settings.json` is a home-manager link, `install` refuses every
+symlinked destination (below), and a default pointing there would abort every
+Nix install. The write is the same marker-scoped merge as Cursor's: every
+hook and key some other writer put there is kept, only hookyard's own rows are
+replaced, and a re-run never stacks a second copy. The receipt `install`
+leaves in the state dir records the path, which is how `doctor` tells a live
+registration in `settings.json` apart from the stale one it reports under
+Nix. Registering in both `settings.json` and an overlay runs every handler
+twice, and `doctor` fails it.
+
+Run every manifest through one `install` call, exactly as under Nix — its
+strip does not record which manifest produced a row, so a second call with a
+different list replaces the first one's rows (see Consumer repos below).
+To turn hookyard off, run `install --allow-empty` with the same
+`--claude-settings` and no `--manifest`: it strips hookyard's rows from all
+four engines' files while the binary is still there, and only then remove
+the binary.
+
+What a non-Nix host gives up is the atomic swap. Under Nix, a handler moving
+between a native entry and a manifest lands in one generation; here those are
+two separate edits, so follow the design doc's ordering rule for them
+(§3.1): remove the old entry first for side-effecting handlers, and add and
+trust the new registration first for guards on Codex.
+
 ## Consumer repos
 
 `manifests` is the whole of a consumer's contribution, and it is a shared list:

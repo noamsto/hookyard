@@ -21,7 +21,7 @@ answers each engine in the format it expects.
 ## Status
 
 **Yard mode** ships today: machine-wide install, routing and the event record,
-aimed at Nix users and at guards that need machine-wide enforcement.
+for guards that need machine-wide enforcement. It runs with or without Nix.
 **Build mode**, generating per-engine plugin hooks so end users never see
 hookyard, is the planned open-source default and not yet implemented
 ([design §3.1](docs/design/hookyard.md)).
@@ -51,8 +51,12 @@ handlers, folds their verdicts and renders the answer for the calling engine:
 
 ## Quick start
 
+Take a binary from the [releases](https://github.com/noamsto/hookyard/releases),
+or build one:
+
 ```
-nix build .#default   # -> result/bin/hookyard
+go install github.com/noamsto/hookyard/cmd/hookyard@latest
+nix build .#default   # the same binary through Nix -> result/bin/hookyard
 nix develop            # devShell with the Go toolchain and formatters
 ```
 
@@ -79,10 +83,14 @@ under `.native`, and, to object, prints a `hookSpecificOutput` with a
 
 ```
 hookyard validate --manifest hookyard.json
-hookyard install  --manifest hookyard.json [--manifest ...]
-hookyard emit     --engine claude-code --router-path <path> --state-dir <path> [--base <file>]
+hookyard install  --manifest hookyard.json [--manifest ...] --claude-settings ~/.claude/settings.json
 hookyard doctor
 ```
+
+`install` writes Codex's, Cursor's and Pi's config, and with
+`--claude-settings`, Claude Code's. Pass every manifest to one `install` call.
+Under Nix, leave `--claude-settings` off: Claude Code's hooks ride the overlay
+below instead ([without Nix](docs/yard-mode.md#without-nix) has the details).
 
 ## With Nix
 

@@ -1,0 +1,34 @@
+# Release binaries for hosts without Nix. Nix users keep taking hookyard as a
+# flake input; this is the same static binary for everyone else.
+version: 2
+
+project_name: hookyard
+
+builds:
+  - id: hookyard
+    main: ./cmd/hookyard
+    binary: hookyard
+    env:
+      # One static binary with no libc to match: engines exec it from hook
+      # configs, where a missing shared library would read as a silent abstain.
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - docs/yard-mode.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc

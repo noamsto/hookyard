@@ -149,6 +149,7 @@ func Run(p Paths, dir string) []Finding {
 			disagreement = recovered
 		}
 	}
+	claude.owned = installWroteClaudeSettings(stateDir, claude.settingsPath)
 	var findings []Finding
 	findings = append(findings, claudeFindings(p, dir, claude)...)
 	findings = append(findings, codexFindings(p, dir)...)
@@ -207,6 +208,25 @@ type claudeSources struct {
 	// under "not read" would send an operator hunting for a permissions
 	// problem on a file that was never named.
 	unresolved []string
+	// owned is true when the last install's receipt says it wrote Claude
+	// Code's catalog into settingsPath itself (install --claude-settings, a
+	// host with no Nix overlay). A marker in settings.json is then the live
+	// registration, not the stale one it is under emit.
+	owned bool
+}
+
+// installWroteClaudeSettings reads the receipt install leaves in stateDir.
+// Any failure to read it answers false: with no receipt to say otherwise, a
+// marker in settings.json keeps being read the way emit reads it.
+func installWroteClaudeSettings(stateDir, settingsPath string) bool {
+	if stateDir == "" {
+		return false
+	}
+	r, err := installstate.ReadReceipt(stateDir)
+	if err != nil || r.ClaudeSettings == "" {
+		return false
+	}
+	return filepath.Clean(r.ClaudeSettings) == filepath.Clean(settingsPath)
 }
 
 func resolveClaudeSources(p Paths, dir string) claudeSources {
@@ -263,6 +283,11 @@ func (c claudeSources) all() []claudeSource {
 // row's router path and --state-dir would describe a registration that is no
 // longer the live one.
 func (c claudeSources) markerSource() (claudeSource, bool) {
+	// Unless install wrote settings.json itself, in which case it is the
+	// live registration.
+	if c.owned && bytes.Contains(c.settings, []byte(render.Marker)) {
+		return claudeSource{name: c.settingsPath, raw: c.settings}, true
+	}
 	for _, o := range c.overlays {
 		if bytes.Contains(o.raw, []byte(render.Marker)) {
 			return o, true
@@ -353,10 +378,30 @@ func claudeRegistration(c claudeSources) Finding {
 	// masked by it: §8 unions hooks across sources, so registered in both
 	// means every handler runs twice.
 	if bytes.Contains(c.settings, []byte(render.Marker)) {
+		if c.owned {
+			for _, o := range c.overlays {
+				if bytes.Contains(o.raw, []byte(render.Marker)) {
+					f.Status = Fail
+					f.Detail = "hookyard is registered in both " + c.settingsPath + " (install --claude-settings) and the --settings overlay " +
+						o.name + ", so every handler runs twice; keep one"
+					f.Fix = "Drop --claude-settings from hookyard install, or stop passing the overlay."
+					return f
+				}
+			}
+			f.Status = Pass
+			f.Detail = "present in " + c.settingsPath + ", written by hookyard install --claude-settings"
+			return f
+		}
 		f.Status = Fail
 		f.Detail = "stale hookyard entry in " + c.settingsPath +
-			"; remove it — hookyard no longer writes that file, and an entry in both it and the --settings overlay runs every handler twice"
-		f.Fix = "Remove the stale hookyard entry from " + c.settingsPath + "."
+			"; remove it — hookyard's last install did not write that file, and an entry in both it and the --settings overlay runs every handler twice"
+		f.Fix = "Remove the stale hookyard entry from " + c.settingsPath + ", or re-run hookyard install with --claude-settings " + c.settingsPath + " if that is where it belongs."
+		return f
+	}
+	if c.owned {
+		f.Status = Fail
+		f.Detail = "no hookyard entry in " + c.settingsPath + ", which the last install says it wrote; run hookyard install --claude-settings " + c.settingsPath
+		f.Fix = "Run hookyard install --claude-settings " + c.settingsPath + "."
 		return f
 	}
 

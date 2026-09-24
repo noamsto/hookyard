@@ -3,7 +3,10 @@ package render
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
+
+	"github.com/noamsto/hookyard/internal/atomicfile"
 )
 
 // Claude Code nests one level deeper than the other two: a matcher group owns
@@ -67,8 +70,8 @@ func claudeGroupKeeping(group json.RawMessage, hooks []json.RawMessage) (json.Ra
 }
 
 // ClaudeSettings merges entries into base and returns the document Nix places
-// as Claude Code's --settings overlay. It is a pure function and not a writer:
-// hookyard has no code path that can name ~/.claude/settings.json for writing.
+// as Claude Code's --settings overlay. It is a pure function and not a writer;
+// WriteClaude is the one writer built on it, for hosts with no Nix overlay.
 //
 // Claude Code unions hooks across its user, local and flag settings sources
 // rather than letting one override another (§8), so this merge neither needs
@@ -164,4 +167,37 @@ func ClaudeSettings(base []byte, entries []Entry) ([]byte, error) {
 		}
 	}
 	return root.marshalIndent()
+}
+
+// WriteClaude renders entries into a Claude Code settings.json in place, for a
+// host with no Nix-placed --settings overlay to carry them. It is ClaudeSettings
+// with the file as its base, so the same marker-scoped strip keeps every
+// entry some other writer owns and replaces only hookyard's own.
+//
+// It is opt-in (install --claude-settings), never a default: under Nix that
+// file is a home-manager link, CheckDestinations refuses it, and a default
+// pointing there would abort every Nix install. A marker in this file while
+// the overlay also carries one registers every handler twice, which doctor
+// reports as a Fail.
+func WriteClaude(path string, entries []Entry) error {
+	raw, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if os.IsNotExist(err) && len(entries) == 0 {
+		// Nothing to strip and nothing to add: leave the file absent rather
+		// than creating an empty one Claude Code never asked for.
+		return nil
+	}
+	out, err := ClaudeSettings(raw, entries)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	// Claude Code's own file, so a pre-existing one keeps its perm bits, as
+	// WriteCursor does; one hookyard creates starts at 0600.
+	mode := os.FileMode(0o600)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	return atomicfile.Write(path, out, mode)
 }

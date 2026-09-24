@@ -132,6 +132,7 @@ func TestDiffPerField(t *testing.T) {
 		{"cursorHooks", func(id *Identity) { id.CursorHooks = "/other/hooks.json" }, "cursor hooks"},
 		{"piSettings", func(id *Identity) { id.PiSettings = []string{"/other/pi.json"} }, "pi settings"},
 		{"hookyard", func(id *Identity) { id.Hookyard = "/other/hookyard" }, "hookyard binary"},
+		{"claudeSettings", func(id *Identity) { id.ClaudeSettings = "/home/u/.claude/settings.json" }, "claude settings"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -144,6 +145,23 @@ func TestDiffPerField(t *testing.T) {
 				t.Fatalf("got %v, want [%q]", got, tc.want)
 			}
 		})
+	}
+}
+
+// A receipt from an install that wrote no Claude settings must marshal
+// without the key at all, so a Nix witness — which has never heard of it —
+// and the receipt stay the same schema-2 document they were before it existed.
+func TestReceiptOmitsUnsetClaudeSettings(t *testing.T) {
+	raw, err := json.Marshal(Receipt{Schema: Schema, Identity: sampleIdentity()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := obj["claudeSettings"]; ok {
+		t.Fatalf("receipt carries claudeSettings with no Claude settings written: %s", raw)
 	}
 }
 
