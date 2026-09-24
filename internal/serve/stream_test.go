@@ -167,6 +167,9 @@ func TestScanDayMissingFile(t *testing.T) {
 	if len(resp.Records) != 0 {
 		t.Errorf("got %d records, want 0", len(resp.Records))
 	}
+	if resp.Records == nil {
+		t.Error("Records = nil, want an empty non-nil slice so the wire encoding is [] not null")
+	}
 	if resp.Windowed {
 		t.Errorf("Windowed = true, want false for a missing file")
 	}
@@ -206,8 +209,11 @@ func TestDaysMissingStreamDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Days: %v", err)
 	}
-	if days != nil {
-		t.Errorf("Days = %v, want nil for a missing stream dir", days)
+	if days == nil {
+		t.Error("Days = nil, want an empty non-nil slice so the wire encoding is [] not null")
+	}
+	if len(days) != 0 {
+		t.Errorf("Days = %v, want empty for a missing stream dir", days)
 	}
 }
 

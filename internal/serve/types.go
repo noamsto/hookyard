@@ -84,14 +84,14 @@ type Filter struct {
 }
 
 type EventsResponse struct {
-	Records    []Entry `json:"records"` // newest first
+	Records    []Entry `json:"records"` // newest first; never null
 	NextOffset int64   `json:"next_offset"`
 	Windowed   bool    `json:"windowed"`
 	Day        string  `json:"day"`
 }
 
 type DaysResponse struct {
-	Days  []string `json:"days"` // newest first
+	Days  []string `json:"days"` // newest first; never null
 	Today string   `json:"today"`
 }
 
@@ -100,9 +100,9 @@ type DaysResponse struct {
 // says internal/vocab supplies the engine and canonical-event lists; this is
 // the endpoint that actually carries them to the page.
 type TableResponse struct {
-	Handlers []manifest.Handler `json:"handlers"`
-	Engines  []string           `json:"engines"` // vocab.Engines
-	Events   []string           `json:"events"`  // vocab.CanonicalEvents
+	Handlers []manifest.Handler `json:"handlers"` // never null
+	Engines  []string           `json:"engines"`  // vocab.Engines
+	Events   []string           `json:"events"`   // vocab.CanonicalEvents
 	Error    string             `json:"error,omitempty"`
 	Path     string             `json:"path"`
 }

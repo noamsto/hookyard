@@ -331,7 +331,12 @@ func (h *serveMux) handleTable(w http.ResponseWriter, _ *http.Request) {
 	}
 	if readErr != nil {
 		resp.Error = readErr.Error()
-		resp.Handlers = nil
+		resp.Handlers = []manifest.Handler{}
+	}
+	if resp.Handlers == nil {
+		// A table with no handlers is still a list on the wire, never null:
+		// the page iterates it unconditionally.
+		resp.Handlers = []manifest.Handler{}
 	}
 	writeJSON(w, resp)
 }

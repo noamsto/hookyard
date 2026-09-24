@@ -498,6 +498,50 @@ func TestDaysEndpoint(t *testing.T) {
 	}
 }
 
+// TestEndpointsSerializeListsAsArraysOnEmptyStateDir pins the wire contract
+// that a list-valued response field is always [] and never null. On a state
+// dir with no stream files the web view iterates each of these directly, and a
+// null throws "not iterable" before the feed can load (#94). The check reads
+// the raw JSON so a typed decode into a nil slice cannot mask a null field.
+func TestEndpointsSerializeListsAsArraysOnEmptyStateDir(t *testing.T) {
+	stateDir := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	base := runTestServer(t, ctx, serveOpts(t, stateDir))
+
+	cases := []struct {
+		name  string
+		url   string
+		field string
+	}{
+		{"days", "/api/days", "days"},
+		{"events missing day", "/api/events?day=2026-01-01", "records"},
+		{"table missing file", "/api/table", "handlers"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := get(t, base+tc.url)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status %d", resp.StatusCode)
+			}
+			var body map[string]json.RawMessage
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			raw, ok := body[tc.field]
+			if !ok {
+				t.Fatalf("%s response has no %q field", tc.url, tc.field)
+			}
+			if got := strings.TrimSpace(string(raw)); got != "[]" {
+				t.Errorf("%s = %s, want []", tc.field, got)
+			}
+		})
+	}
+}
+
 func TestTableEndpoint(t *testing.T) {
 	stateDir := t.TempDir()
 
