@@ -1,12 +1,14 @@
-/* Flow view (React Flow + ELK). Every colour comes from style.css's
-   variables — React Flow's --xy-* variables are mapped here once, on
-   .flow-body, so both the dark default and the prefers-color-scheme: light
-   override apply without a single new colour literal. */
+/* Flow view: a decision Sankey. Every colour is a style.css variable or a
+   color-mix() of them, so the dark default and the prefers-color-scheme:
+   light override both apply without a colour literal of its own. */
 
-.flow-error {
-  color: var(--c-error);
-}
-
+.flow-panel .panel-header { flex-wrap: wrap; }
+.flow-meta { font-variant-numeric: tabular-nums; }
+.flow-decisions { display: inline-flex; gap: 12px; margin-left: 4px; }
+.flow-decisions .dec { color: var(--oc); }
+.flow-decisions .dec b { font-weight: 700; }
+.flow-error { color: var(--c-error); }
+.flow-error:empty { display: none; }
 .flow-idle {
   margin-left: auto;
   display: flex;
@@ -15,225 +17,129 @@
   color: var(--fg-dim);
   white-space: nowrap;
 }
+.flow-hint { margin: 6px 12px 0; }
 
-.flow-body {
-  position: relative;
-  height: 70vh;
+/* outcome -> colour, from the known outcome list only */
+[data-o] { --oc: var(--fg-dim); }
+[data-o="deny"] { --oc: var(--c-deny); }
+[data-o="ask"] { --oc: var(--c-ask); }
+[data-o="advise"] { --oc: var(--c-advise); }
+[data-o="allow"] { --oc: var(--c-allow); }
+[data-o="timeout"] { --oc: var(--c-timeout); }
+[data-o="error"], [data-o="router-error"] { --oc: var(--c-error); }
+[data-o="suppressed"] { --oc: color-mix(in oklab, var(--c-suppressed) 35%, var(--c-abstain)); }
+[data-o="dispatched"] { --oc: color-mix(in oklab, var(--c-dispatched) 30%, var(--c-abstain)); }
+[data-o="abstain"] { --oc: var(--c-abstain); }
 
-  --xy-background-color: var(--bg-panel);
-  --xy-node-background-color: var(--bg-raised);
-  --xy-node-border: 1px solid var(--border);
-  --xy-node-color: var(--fg);
-  --xy-node-border-radius: 8px;
-  --xy-node-boxshadow-hover: 0 1px 6px 0 rgba(0, 0, 0, 0.25);
-  --xy-node-boxshadow-selected: 0 0 0 2px var(--accent);
-  --xy-node-group-background-color: color-mix(in srgb, var(--bg-panel) 60%, transparent);
-  --xy-edge-stroke: var(--fg-dim);
-  --xy-edge-stroke-width: 1.5;
-  --xy-edge-stroke-selected: var(--accent);
-  --xy-edge-label-background-color: var(--bg-raised);
-  --xy-edge-label-color: var(--fg);
-  --xy-handle-background-color: var(--fg-dim);
-  --xy-handle-border-color: var(--bg-raised);
-  --xy-minimap-background-color: var(--bg-panel);
-  --xy-minimap-mask-background-color: color-mix(in srgb, var(--bg) 60%, transparent);
-  --xy-minimap-mask-stroke-color: var(--border);
-  --xy-minimap-node-background-color: var(--fg-dim);
-  --xy-minimap-node-stroke-color: transparent;
-  --xy-controls-button-background-color: var(--bg-raised);
-  --xy-controls-button-background-color-hover: var(--row-hover);
-  --xy-controls-button-border-color: var(--border);
-  --xy-controls-button-color: var(--fg);
-  --xy-controls-button-color-hover: var(--accent);
-  --xy-selection-background-color: color-mix(in srgb, var(--accent) 10%, transparent);
-  --xy-selection-border: 1px dotted var(--accent);
-  --xy-connectionline-stroke: var(--fg-dim);
-  --xy-attribution-background-color: transparent;
-}
+.flow-body { position: relative; min-height: 420px; }
+.flow-svg { display: block; font-family: inherit; overflow: visible; }
+.flow-svg text { font-size: 12px; fill: var(--fg); }
+.flow-empty { position: absolute; inset: 45% 0 auto; margin: 0; text-align: center; }
 
-.flow-body .react-flow__pane {
-  cursor: grab;
-}
+/* column headers: one shared row, each over its own column */
+.flow-colhead text { font-size: 11px; }
+.flow-colhead .h-name { fill: var(--fg); font-weight: 600; }
+.flow-colhead .h-what { fill: var(--fg-dim); }
+.colhead-bg { fill: transparent; }
+.colrule { stroke: var(--border); }
 
-.flow-body .react-flow__pane.dragging {
-  cursor: grabbing;
-}
+/* bands: the quiet braid, and the one bold thing */
+.band { fill: var(--oc); fill-opacity: .2; stroke: none; transition: fill-opacity .12s; }
+.band.loud { fill-opacity: .88; }
+.flow-body.hl .l-bands .band { fill-opacity: .06; }
+.flow-body.hl .l-bands .band.loud { fill-opacity: .22; }
+.l-over { pointer-events: none; }
+.l-over .band { fill-opacity: .6; }
+.l-over .band.loud { fill-opacity: 1; stroke: var(--bg-panel); stroke-width: .75; }
+/* one outcome everywhere: emphasis by share, the outline keeps the colour */
+.mono .l-bands .band { fill-opacity: calc(.18 + .62 * var(--share, 1)); stroke: var(--oc); stroke-width: .75; stroke-opacity: .9; }
+.mono .l-bands .band.thin { fill-opacity: .9; stroke: none; }
+.mono.flow-svg .l-bands .band { transition: none; }
+.flow-body.hl .mono .l-bands .band { fill-opacity: .08; stroke-opacity: .3; }
 
-/* ---------- column headers ---------- */
+/* nodes: bars for engines and outcomes; light plates for events and handlers */
+.bar { fill: color-mix(in oklab, var(--fg-dim) 80%, var(--bg-panel)); }
+.bar[data-o="loud"] { fill: var(--fg); }
+.k-outcome .bar { fill: var(--oc); }
+.k-outcome .bar:is([data-o="abstain"], [data-o="dispatched"], [data-o="suppressed"]) { fill: color-mix(in oklab, var(--oc) 70%, var(--bg-panel)); }
+.rule { stroke: var(--border); stroke-width: 1; }
+.k-pseudo .rule { stroke-dasharray: 3 3; }
+.ghost .rule { stroke-dasharray: 2 2; }
+.gate { fill: color-mix(in oklab, var(--fg-dim) 9%, transparent); }
+.port { fill: color-mix(in oklab, var(--fg-dim) 75%, var(--bg-panel)); }
+.flow-node .hit { fill: transparent; cursor: pointer; }
+.k-pseudo .hit { cursor: default; }
+.flow-node.selected .rule { stroke: var(--accent); stroke-width: 2; }
+.flow-node.selected .bar { stroke: var(--accent); stroke-width: 2; }
+.flow-node.flash .rule { stroke: var(--accent); stroke-width: 2; }
+.flow-node.flash .gate { fill: color-mix(in oklab, var(--accent) 22%, transparent); }
+.flow-body.hl .flow-node:not(.on) { opacity: .35; }
+.flow-body.hl .flow-node.on .rule { stroke: var(--fg-dim); }
+.flow-node .hit:focus { outline: none; }
+.flow-node .hit:focus-visible { stroke: var(--accent); stroke-width: 1; }
 
-.flow-col-header {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--fg-dim);
-  white-space: nowrap;
-}
+/* labels */
+.l-labels { pointer-events: none; }
+.label .nm { fill: var(--fg); }
+.label .nm.quiet { fill: var(--fg-dim); }
+.label .nm.loud { fill: var(--oc); font-weight: 700; }
+.label.idle .nm { fill: var(--fg-dim); font-weight: 400; }
+.label.selected .nm { fill: var(--accent); }
+.label .cnt, .label .caret, .label .fan { fill: var(--fg-dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+.label .cnt.hl { fill: var(--accent); font-weight: 600; }
+.label .dec-o { fill: var(--oc); font-weight: 700; font-size: 11px; }
+.label .dec-who { fill: color-mix(in oklab, var(--oc) 55%, var(--fg)); font-size: 11px; }
+.flow-body.hl .label:not(.on) { opacity: .35; }
+.k-engine.label .nm, .k-outcome.label .nm, .k-outcome.label .cnt,
+.k-engine.label .cnt { paint-order: stroke; stroke: var(--bg-panel); stroke-width: 3px; stroke-linejoin: round; }
+.spark { fill: color-mix(in oklab, var(--fg-dim) 80%, var(--bg-panel)); }
+.spark.zero { fill: var(--border); }
 
-/* ---------- cards ---------- */
+/* an open group: a fold header over its members */
+.flow-group-open .bracket { fill: none; stroke: var(--fg-dim); stroke-width: 1; }
+.flow-group-open .hit { cursor: pointer; }
+.flow-group-open[data-forced="true"] .hit { cursor: default; }
+.grouphead { font-size: 11px; }
+.grouphead .nm { fill: var(--fg); font-weight: 600; }
+.grouphead .cnt, .grouphead .caret { fill: var(--fg-dim); }
+.grouphead .fold { fill: var(--accent); }
+.flow-group-open:hover .fold { text-decoration: underline; }
 
-.flow-node {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 10px;
-  box-sizing: border-box;
-  border-radius: var(--xy-node-border-radius);
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--border);
-  font-size: var(--flow-label-font, 12px);
-  cursor: pointer;
-  transition: opacity 120ms ease, border-color 120ms ease;
-}
+/* legend */
+.l-legend text { font-size: 11px; }
+.l-legend .lg { fill: var(--fg-dim); }
+.l-legend .lg-loud { fill: var(--oc); font-weight: 600; }
+.l-legend .swatch { fill: var(--oc); }
+.l-legend .swatch:is([data-o="abstain"], [data-o="dispatched"], [data-o="suppressed"]) { fill-opacity: .6; }
 
-.flow-node-label {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* live pulses */
+.flow-dot { fill: var(--fg); fill-opacity: .85; stroke: var(--bg-panel); stroke-width: 1; pointer-events: none; }
+.flow-dot[data-o="dispatched"] { fill: var(--c-dispatched); }
+.flow-dot:is([data-o="deny"], [data-o="ask"], [data-o="advise"], [data-o="allow"], [data-o="timeout"], [data-o="error"], [data-o="router-error"]) { fill: var(--oc); fill-opacity: 1; }
 
-.flow-node-count {
-  color: var(--fg-dim);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.flow-node.ghost {
-  border-style: dashed;
-}
-
-.flow-node.ghost .flow-node-label {
-  color: var(--fg-dim);
-}
-
-.flow-node.dim {
-  opacity: 0.45;
-}
-
-.flow-node.on {
-  border-color: var(--accent);
-}
-
-.flow-node.selected {
-  border-left-color: var(--accent);
-  box-shadow: var(--xy-node-boxshadow-selected);
-}
-
-.flow-node.v-allow { border-left-color: var(--c-allow); }
-.flow-node.v-deny { border-left-color: var(--c-deny); }
-.flow-node.v-ask { border-left-color: var(--c-ask); }
-.flow-node.v-advise { border-left-color: var(--c-advise); }
-.flow-node.v-abstain { border-left-color: var(--c-abstain); }
-.flow-node.v-dispatched { border-left-color: var(--c-dispatched); }
-.flow-node.v-suppressed { border-left-color: var(--c-suppressed); }
-.flow-node.v-timeout { border-left-color: var(--c-timeout); }
-.flow-node.v-error { border-left-color: var(--c-error); }
-.flow-node.v-router-error { border-left-color: var(--c-error); }
-
-/* ---------- groups ---------- */
-
-.flow-group {
-  width: 100%;
-  height: 100%;
-  box-sizing: border-box;
-  border-radius: var(--xy-node-border-radius);
-  background: var(--xy-node-group-background-color);
-  border: 1px dashed var(--fg-dim);
-  cursor: default;
-}
-
-.flow-group-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 34px;
-  padding: 0 10px;
-  box-sizing: border-box;
-  cursor: pointer;
-  font-size: var(--flow-label-font, 12px);
-}
-
-.flow-group-arrow {
-  color: var(--fg-dim);
-}
-
-.flow-group.forced .flow-group-header {
-  cursor: default;
-}
-
-.flow-group-pin {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-  flex: none;
-}
-
-.flow-group.dim {
-  opacity: 0.45;
-}
-
-.flow-group.on {
-  border-color: var(--accent);
-}
-
-/* ---------- edges ---------- */
-
-.flow-edge.faint {
-  opacity: 0.15;
-}
-
-.flow-edge.direct {
-  stroke-dasharray: 4 3;
-}
-
-.flow-edge.on {
-  stroke: var(--accent);
-  opacity: 0.9;
-}
-
-.flow-body.hl .flow-node:not(.on),
-.flow-body.hl .flow-group:not(.on),
-.flow-body.hl .flow-edge:not(.on) {
-  opacity: 0.12;
-}
-
-/* ---------- pulses ---------- */
-
-.flow-dot {
-  fill: var(--accent);
-}
-
-/* ---------- tooltip ---------- */
-
+/* tooltip */
 .flow-tip {
   position: absolute;
   z-index: 5;
   pointer-events: none;
-  max-width: 420px;
-  padding: 6px 8px;
+  min-width: 240px;
+  max-width: 360px;
+  padding: 8px 10px;
   background: var(--bg-raised);
   border: 1px solid var(--border);
   border-radius: 4px;
-  color: var(--fg);
   font-size: 12px;
-  white-space: pre;
-  overflow: hidden;
+  line-height: 1.5;
 }
-
-.flow-tip .title {
-  font-weight: 600;
-}
-
-.flow-tip .dim {
-  color: var(--fg-dim);
-}
-
-/* ---------- minimap ---------- */
-
-.flow-minimap-hidden {
-  display: none;
-}
+.flow-tip .tt-title { font-weight: 600; }
+.flow-tip .tt-fact { color: var(--fg-dim); }
+.flow-tip .tt-sec { color: var(--fg-dim); font-size: 11px; margin-top: 6px; border-top: 1px solid var(--border); padding-top: 4px; }
+.flow-tip .tt-row { display: flex; gap: 8px; align-items: center; font-variant-numeric: tabular-nums; }
+.flow-tip .tt-l { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flow-tip .tt-row.loud .tt-l { color: var(--oc); font-weight: 700; }
+.flow-tip .tt-note { font-size: 11px; white-space: nowrap; }
+.flow-tip .tt-note span { color: var(--oc); font-weight: 600; }
+.flow-tip .tt-row b { font-weight: 500; }
+.flow-tip .sw { width: 10px; height: 4px; flex: none; }
+.flow-tip .sw[data-o] { background: var(--oc); }
+.flow-tip .tt-hint { color: var(--fg-dim); font-size: 11px; margin-top: 6px; }

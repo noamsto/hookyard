@@ -7,11 +7,10 @@
     "module": "preserve",
     "moduleResolution": "bundler",
     "types": ["node"],
-    "jsx": "react-jsx",
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "app.d.ts"]
+  "include": ["src/**/*.ts", "app.d.ts"]
 }

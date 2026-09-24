@@ -1,4 +1,4 @@
-// Shapes shared across the flow view's model, layout and view layers.
+// Shapes shared across the flow view's model and view layers.
 
 export type Col = "engine" | "event" | "handler" | "outcome";
 export type DisplayCol = Col | "group";
@@ -24,14 +24,6 @@ export interface Filters { engine: string[]; event: string[]; handler: string[];
   outcome: string[]; verdict: string[]; session: string; }
 
 // Node keys: col + "\x00" + name (display col "group" for a group); edge keys: a + "\x01" + b.
-export interface LayoutNode { key: string; col: DisplayCol; name: string;
+export interface PlanNode { key: string; col: DisplayCol; name: string;
   parent?: string;     // group node key, when this handler is a member of an EXPANDED group
 }
-export interface LayoutInput {
-  gen: number;
-  key: string;         // stable signature of nodes (+ parent) — equal key ⇒ no relayout
-  nodes: LayoutNode[]; // ordered: previous snapshot order for kept nodes, then new ones in topology order
-  edges: [string, string][]; // display edges among `nodes` (skeleton + observed), for ordering only
-}
-export interface Box { x: number; y: number; w: number; h: number; } // x/y relative to parent if any
-export interface LayoutResult { gen: number; boxes: Record<string, Box>; columnX: number[]; } // columnX[0..3]

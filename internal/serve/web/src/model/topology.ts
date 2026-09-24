@@ -101,8 +101,3 @@ export function columnNames(topo: Topology, col: Col): string[] {
     : topo.outcomeOrder;
   return base.concat(topo.extra[col]);
 }
-
-export function* rawEdges(topo: Topology): Iterable<RawEdge> {
-  yield* topo.skeletonEdges.values();
-  yield* topo.observedEdges.values();
-}

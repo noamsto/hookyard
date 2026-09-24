@@ -41,7 +41,6 @@ const filterChipsEl = el("filter-chips");
 const rowTemplate = el("row-template");
 const chipTemplate = el("handler-chip-template");
 const handlerDetailTemplate = el("handler-detail-template");
-const tableRowTemplate = el("table-row-template");
 const dividerTemplate = el("divider-template");
 
 // state.day is the day currently displayed; state.today is what the server
@@ -432,56 +431,67 @@ async function loadEvents(day) {
   emitSync({ day, live: day === state.today });
 }
 
+// Verdicts that decided something: drawn in their outcome colour. Class
+// names come only from this list, never from the wire.
+const DECISIONS = ["router-error", "error", "timeout", "deny", "ask", "advise", "allow"];
+
 function renderStats(snap) {
   lastStats = snap;
   statsDayEl.textContent = snap.day + " · " + snap.calls + " calls";
 
-  const blocks = [];
+  const grids = [];
 
   const verdictRows = Object.entries(snap.verdicts || {}).sort((a, b) => b[1].total - a[1].total);
-  blocks.push(statBlock("verdict mix", verdictRows.map(([v, c]) =>
-    [v, c.total + " (" + c.enforced + " enforced / " + c.unenforced + " un)"])));
+  grids.push(statGrid(["verdict", "calls"], verdictRows.map(([v, c]) => ({
+    cells: [v, String(c.total)],
+    cls: DECISIONS.includes(v) ? "v-" + v : "",
+    title: c.enforced + " enforced / " + c.unenforced + " unenforced",
+  }))));
 
   const handlerRows = (snap.handlers || []).slice().sort((a, b) => (b.total_ms / Math.max(b.calls, 1)) - (a.total_ms / Math.max(a.calls, 1)));
-  blocks.push(statBlock("slowest handlers", handlerRows.map((h) =>
-    [h.name, Math.round(h.total_ms / Math.max(h.calls, 1)) + "ms mean / " + h.max_ms + "ms max / " + h.calls + " calls"])));
+  grids.push(statGrid(["slowest handler", "mean ms", "max ms"], handlerRows.map((h) => ({
+    cells: [h.name, String(Math.round(h.total_ms / Math.max(h.calls, 1))), String(h.max_ms)],
+    title: h.name + " · " + h.calls + " calls",
+  }))));
 
   const routerRows = Object.entries(snap.router || {}).sort((a, b) => b[1] - a[1]);
-  blocks.push(statBlock("router status", routerRows.map(([status, n]) => [status, String(n)])));
+  grids.push(statGrid(["router status", "calls"], routerRows.map(([status, n]) => ({ cells: [status, String(n)] }))));
 
-  blocks.push(statBlock("truncated", [["records", String(snap.truncated)]]));
+  grids.push(statGrid(["truncated", "records"], [{ cells: ["records", String(snap.truncated)] }]));
 
   statsBodyEl.textContent = "";
-  for (const b of blocks) statsBodyEl.appendChild(b);
+  for (const g of grids) statsBodyEl.appendChild(g);
 
   if (tableCache) renderTable(tableCache, snap);
 }
 
-function statBlock(title, rows) {
-  const block = document.createElement("div");
-  block.className = "stat-block";
-  const h3 = document.createElement("h3");
-  h3.textContent = title;
-  block.appendChild(h3);
+// statGrid lays a block out as one grid: a header row, then one line per
+// row, the first column ellipsized and every number right-aligned.
+function statGrid(head, rows) {
+  const grid = document.createElement("div");
+  grid.className = "sb-grid c" + head.length;
+  head.forEach((h, i) => {
+    const cell = document.createElement("span");
+    cell.className = "h" + (i > 0 ? " n" : "");
+    cell.textContent = h;
+    grid.appendChild(cell);
+  });
   if (rows.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "dim stat-row";
+    const empty = document.createElement("span");
+    empty.className = "dim sb-empty";
     empty.textContent = "none yet";
-    block.appendChild(empty);
+    grid.appendChild(empty);
   }
-  for (const [label, value] of rows) {
-    const row = document.createElement("div");
-    row.className = "stat-row";
-    const l = document.createElement("span");
-    l.textContent = label;
-    const v = document.createElement("span");
-    v.className = "n";
-    v.textContent = value;
-    row.appendChild(l);
-    row.appendChild(v);
-    block.appendChild(row);
+  for (const row of rows) {
+    row.cells.forEach((v, i) => {
+      const cell = document.createElement("span");
+      cell.className = i > 0 ? "n" : row.cls || "";
+      cell.textContent = v;
+      if (row.title) cell.title = row.title;
+      grid.appendChild(cell);
+    });
   }
-  return block;
+  return grid;
 }
 
 function renderTable(table, snap) {
@@ -504,15 +514,28 @@ function renderTable(table, snap) {
   // (Accumulator.Add only creates the entry on first sight), so membership
   // in snap.handlers is exactly "has fired today".
   const fired = new Set((snap && snap.handlers || []).map((h) => h.name));
-  for (const h of table.handlers) {
-    const node = tableRowTemplate.content.cloneNode(true);
-    const row = node.querySelector(".table-row");
-    if (fired.has(h.id)) row.classList.add("fired");
-    node.querySelector(".tr-id").textContent = h.id;
-    node.querySelector(".tr-lane").textContent = h.lane || "";
-    node.querySelector(".tr-events").textContent = (h.events || []).join(", ");
-    tableBodyEl.appendChild(node);
+  const grid = document.createElement("div");
+  grid.className = "sb-grid table-grid";
+  for (const h of ["", "handler", "lane"]) {
+    const cell = document.createElement("span");
+    cell.className = "h";
+    cell.textContent = h;
+    grid.appendChild(cell);
   }
+  for (const h of table.handlers) {
+    const dot = document.createElement("span");
+    dot.className = "tr-fired" + (fired.has(h.id) ? " fired" : "");
+    dot.title = fired.has(h.id) ? "fired today" : "idle today";
+    const id = document.createElement("span");
+    id.className = "tr-id";
+    id.textContent = h.id;
+    id.title = h.id + "\n" + (h.events || []).join(", ");
+    const lane = document.createElement("span");
+    lane.className = "tr-lane";
+    lane.textContent = h.lane === "fire_and_forget" ? "async" : h.lane || "";
+    grid.append(dot, id, lane);
+  }
+  tableBodyEl.appendChild(grid);
 }
 
 async function loadTable() {

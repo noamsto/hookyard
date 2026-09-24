@@ -5,27 +5,33 @@
 // read to interpret a click on a drawn node.
 
 import { COLUMNS } from "../types.ts";
-import type { Col, Facets, FlowResponse, Filters, LayoutInput, LayoutNode, PathLike, TableResponse } from "../types.ts";
+import type { Col, Facets, FlowResponse, Filters, PathLike, PlanNode, TableResponse } from "../types.ts";
 import { pathBranches } from "./branches.ts";
 import type { EventLabel } from "./branches.ts";
-import { computeGroups, displayKeyFor } from "./groups.ts";
+import { computeGroups } from "./groups.ts";
 import type { Groups } from "./groups.ts";
-import { edgeKey, nodeKey, pathKey } from "./keys.ts";
+import { nodeKey, pathKey } from "./keys.ts";
 import type { Branch } from "./keys.ts";
 import { advanceRing, bucketIndex } from "./ring.ts";
 import type { Ring } from "./ring.ts";
-import { buildTopology, columnNames, observeNode, observePath, rawEdges } from "./topology.ts";
+import { buildTopology, columnNames, observeNode, observePath } from "./topology.ts";
 import type { Topology } from "./topology.ts";
 
 export interface PathEntry { path: PathLike; counts: number[]; }
 
 export interface GroupRecord { expanded: boolean; forced: boolean; }
 
-// LayoutPlan is a LayoutInput plus the display decisions it was derived
-// from; a snapshot is built from a plan and its LayoutResult, so every
-// display question is answered as of the plan, never live.
+export interface PlanInput {
+  gen: number;
+  key: string;         // stable signature of nodes (+ parent) — equal key ⇒ the drawn snapshot is still exact
+  nodes: PlanNode[];   // ordered: previous snapshot order for kept nodes, then new ones in topology order
+}
+
+// LayoutPlan is the node set to draw plus the display decisions it was
+// derived from; a snapshot is built from a plan, so every display question is
+// answered as of the plan, never live.
 export interface LayoutPlan {
-  input: LayoutInput;
+  input: PlanInput;
   groups: Groups;
   expanded: Set<string>; // group keys expanded as of this plan
   forced: Set<string>; // group keys holding an active handler filter value
@@ -195,7 +201,7 @@ export class FlowModel {
     return idle;
   }
 
-  // layoutPlan derives the next layout input from the data state. Node order:
+  // layoutPlan derives the next node set to draw from the data state. Node order:
   // prevOrder's order for kept nodes, then new ones in topology order; each
   // group node is followed directly by its members. key is a signature of
   // what a snapshot bakes in per node — identity, parent, and for a group its
@@ -215,7 +221,7 @@ export class FlowModel {
       if (st.expanded) expanded.add(key);
     }
 
-    const nodes: LayoutNode[] = [];
+    const nodes: PlanNode[] = [];
     const plain = (col: Col) => {
       for (const name of columnNames(topo, col)) {
         if (this.isShown(col, name)) nodes.push({ key: nodeKey(col, name), col, name });
@@ -248,31 +254,18 @@ export class FlowModel {
     const kept = nodes.filter((n) => prevIdx.has(n.key))
       .sort((a, b) => (prevIdx.get(a.key) ?? 0) - (prevIdx.get(b.key) ?? 0));
     const ordered = kept.concat(nodes.filter((n) => !prevIdx.has(n.key)));
-    const children = new Map<string, LayoutNode[]>();
+    const children = new Map<string, PlanNode[]>();
     for (const n of ordered) {
       if (n.parent === undefined) continue;
       const list = children.get(n.parent);
       if (list) list.push(n);
       else children.set(n.parent, [n]);
     }
-    const out: LayoutNode[] = [];
+    const out: PlanNode[] = [];
     for (const n of ordered) {
       if (n.parent !== undefined) continue;
       out.push(n);
       out.push(...children.get(n.key) ?? []);
-    }
-
-    const drawn = new Set(out.map((n) => n.key));
-    const edges: [string, string][] = [];
-    const seenEdges = new Set<string>();
-    for (const [a, b] of rawEdges(topo)) {
-      const da = displayKeyFor(groups.groupOf, expanded, a[0], a[1]);
-      const db = displayKeyFor(groups.groupOf, expanded, b[0], b[1]);
-      if (!drawn.has(da) || !drawn.has(db)) continue;
-      const k = edgeKey(da, db);
-      if (seenEdges.has(k)) continue;
-      seenEdges.add(k);
-      edges.push([da, db]);
     }
 
     const sig = out.map((n) => {
@@ -283,6 +276,6 @@ export class FlowModel {
     });
     const key = sig.sort().join("\n");
 
-    return { input: { gen: 0, key, nodes: out, edges }, groups, expanded, forced, ghost };
+    return { input: { gen: 0, key, nodes: out }, groups, expanded, forced, ghost };
   }
 }
