@@ -463,9 +463,10 @@ func TestNativeRetainsEngineOnlyFields(t *testing.T) {
 	}
 }
 
-// D2/D3: PiOutcome and PiStopHookActive are pi-only — hookyard authors pi's
-// payload, so an outcome or stop_hook_active key on another engine's payload
-// is not ours to interpret, and reads as absent regardless of its value.
+// D2/D3: PiOutcome is pi-only — hookyard authors pi's payload, so an outcome
+// key on another engine's payload is not ours to interpret, and reads as
+// absent regardless of its value. StopHookActive is not pi-only (below): it
+// also answers for Claude Code and Codex's Stop.
 func TestPiOutcome(t *testing.T) {
 	env := decodeFixture(t, "pi-agent_before_settle.json")
 	if got := env.PiOutcome(); got != "completed" {
@@ -483,33 +484,102 @@ func TestPiOutcome(t *testing.T) {
 	}
 }
 
-func TestPiStopHookActive(t *testing.T) {
+// TestStopHookActive pins the engine-dependent default (§11.3): pi's bridge
+// caps its own continuations, so absent/non-bool reads as "not yet
+// continued" (false). Claude Code and Codex have no engine-side cap of their
+// own to rely on, so on turn_end an unreadable value fails toward settling
+// (true) instead of toward an unbounded forced continuation; false is read
+// only when the key is present and decodes to JSON bool false.
+func TestStopHookActive(t *testing.T) {
 	env := decodeFixture(t, "pi-agent_before_settle.json")
-	if env.PiStopHookActive() {
-		t.Error("PiStopHookActive on the fixture (stop_hook_active: false) = true, want false")
+	if env.StopHookActive() {
+		t.Error("StopHookActive on the pi fixture (stop_hook_active: false) = true, want false")
 	}
 
 	env = From(vocab.Pi, map[string]json.RawMessage{"stop_hook_active": json.RawMessage(`true`)})
-	if !env.PiStopHookActive() {
-		t.Error("PiStopHookActive with stop_hook_active: true = false, want true")
+	if !env.StopHookActive() {
+		t.Error("pi StopHookActive with stop_hook_active: true = false, want true")
 	}
 
 	env = From(vocab.Pi, map[string]json.RawMessage{})
-	if env.PiStopHookActive() {
-		t.Error("PiStopHookActive with no stop_hook_active key = true, want false")
+	if env.StopHookActive() {
+		t.Error("pi StopHookActive with no stop_hook_active key = true, want false")
 	}
 
 	env = From(vocab.Pi, map[string]json.RawMessage{"stop_hook_active": json.RawMessage(`"yes"`)})
-	if env.PiStopHookActive() {
-		t.Error("PiStopHookActive with a non-bool value = true, want false")
+	if env.StopHookActive() {
+		t.Error("pi StopHookActive with a non-bool value = true, want false")
 	}
 
-	// Claude Code's own Stop payload carries this same field name and
-	// meaning, but PiStopHookActive must not read it: it is pi's own loop
-	// bound, not a cross-engine convention.
-	env = From(vocab.ClaudeCode, map[string]json.RawMessage{"stop_hook_active": json.RawMessage(`true`)})
-	if env.PiStopHookActive() {
-		t.Error("PiStopHookActive on a non-pi engine carrying stop_hook_active:true = true, want false")
+	env = From(vocab.Pi, map[string]json.RawMessage{"stop_hook_active": json.RawMessage(`null`)})
+	if env.StopHookActive() {
+		t.Error("pi StopHookActive with stop_hook_active: null = true, want false")
+	}
+
+	env = decodeFixture(t, "claude-Stop.json")
+	if env.StopHookActive() {
+		t.Error("StopHookActive on the claude-Stop fixture (stop_hook_active: false) = true, want false")
+	}
+
+	env = From(vocab.ClaudeCode, map[string]json.RawMessage{
+		"hook_event_name": json.RawMessage(`"Stop"`), "stop_hook_active": json.RawMessage(`true`),
+	})
+	if !env.StopHookActive() {
+		t.Error("claude-code turn_end StopHookActive with stop_hook_active: true = false, want true")
+	}
+
+	env = From(vocab.ClaudeCode, map[string]json.RawMessage{"hook_event_name": json.RawMessage(`"Stop"`)})
+	if !env.StopHookActive() {
+		t.Error("claude-code turn_end StopHookActive with no stop_hook_active key = false, want true (fail toward settling)")
+	}
+
+	env = From(vocab.ClaudeCode, map[string]json.RawMessage{
+		"hook_event_name": json.RawMessage(`"Stop"`), "stop_hook_active": json.RawMessage(`"yes"`),
+	})
+	if !env.StopHookActive() {
+		t.Error("claude-code turn_end StopHookActive with a non-bool value = false, want true (fail toward settling)")
+	}
+
+	env = From(vocab.ClaudeCode, map[string]json.RawMessage{
+		"hook_event_name": json.RawMessage(`"Stop"`), "stop_hook_active": json.RawMessage(`null`),
+	})
+	if !env.StopHookActive() {
+		t.Error("claude-code turn_end StopHookActive with stop_hook_active: null = false, want true (fail toward settling)")
+	}
+
+	env = From(vocab.Codex, map[string]json.RawMessage{
+		"hook_event_name": json.RawMessage(`"Stop"`), "stop_hook_active": json.RawMessage(`false`),
+	})
+	if env.StopHookActive() {
+		t.Error("codex turn_end StopHookActive with stop_hook_active: false = true, want false")
+	}
+
+	env = From(vocab.Codex, map[string]json.RawMessage{"hook_event_name": json.RawMessage(`"Stop"`)})
+	if !env.StopHookActive() {
+		t.Error("codex turn_end StopHookActive with no stop_hook_active key = false, want true (fail toward settling)")
+	}
+
+	env = From(vocab.Codex, map[string]json.RawMessage{
+		"hook_event_name": json.RawMessage(`"Stop"`), "stop_hook_active": json.RawMessage(`null`),
+	})
+	if !env.StopHookActive() {
+		t.Error("codex turn_end StopHookActive with stop_hook_active: null = false, want true (fail toward settling)")
+	}
+
+	// Claude Code's own PreToolUse payload never carries this key, and off
+	// turn_end the field is not hookyard's to read even if it did.
+	env = From(vocab.ClaudeCode, map[string]json.RawMessage{"hook_event_name": json.RawMessage(`"PreToolUse"`)})
+	if env.StopHookActive() {
+		t.Error("claude-code pre_tool StopHookActive with no stop_hook_active key = true, want false")
+	}
+
+	// Cursor's turn_end carries no decision slot at all (§11.3), so its
+	// stop_hook_active, if any, is not hookyard's loop bound to read.
+	env = From(vocab.Cursor, map[string]json.RawMessage{
+		"hook_event_name": json.RawMessage(`"stop"`), "stop_hook_active": json.RawMessage(`true`),
+	})
+	if env.StopHookActive() {
+		t.Error("cursor turn_end StopHookActive with stop_hook_active: true = true, want false")
 	}
 }
 

@@ -1003,7 +1003,7 @@ func runRoute(ctx context.Context, opts routeOptions, in io.Reader, out io.Write
 		Verdict:        result.Verdict,
 		Reason:         result.Reason,
 		Advice:         result.Advice,
-		StopHookActive: env.PiStopHookActive(),
+		StopHookActive: env.StopHookActive(),
 	})
 	// Printed before the record is touched, and that order is load-bearing
 	// (§6): the verdict is complete and flushed before any filesystem I/O that

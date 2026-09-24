@@ -582,7 +582,7 @@ func TestRunRouteAgentBeforeSettleDenyOutcomeAndStopHookActive(t *testing.T) {
 }
 
 // A deny handler that gives neither reason nor advice must still render a
-// non-empty block reason (verdict.piTurnEndEmptyDenyReason): without one,
+// non-empty block reason (verdict.turnEndEmptyDenyReason): without one,
 // the bridge's own decision() falls back to "Blocked by hookyard" for the
 // continuation message it injects, which reads as a rejection rather than
 // the "keep going" instruction a turn_end deny is meant to carry.
@@ -629,6 +629,152 @@ func TestRunRoutePiTurnEndNativeRecordsBlankCanonicalEventAndOutcome(t *testing.
 	}
 	if len(rec.Handlers) != 1 || rec.Handlers[0].Name != "observer" || rec.Handlers[0].Outcome != record.OutcomeAbstain {
 		t.Errorf("want the pi:turn_end observer recorded abstain, got %+v", rec.Handlers)
+	}
+}
+
+// claudeStopTemplate is docs/design/fixtures/hook-payloads/claude-Stop.json
+// (a live Claude Code 2.1.272 capture) flattened to one line, with
+// stop_hook_active replaced by %s (fmt.Sprintf). prompt_id is what
+// envelope.Detect places as claude-code.
+const claudeStopTemplate = `{"background_tasks":[],"cwd":"/work","hook_event_name":"Stop",` +
+	`"last_assistant_message":"ok","permission_mode":"default",` +
+	`"prompt_id":"894436e3-b9fa-4b66-a9ed-05d246a5d115","session_crons":[],` +
+	`"session_id":"2e836ac9-0906-468f-b575-1a3ce651e3dc","stop_hook_active":%s,` +
+	`"transcript_path":"/tmp/capture/2e836ac9.jsonl"}`
+
+// codexStopTemplate is synthesized from the pinned upstream schema
+// (openai/codex codex-rs/hooks/schema/generated/stop.command.input.schema.json
+// @ rust-v0.156.1), not captured: codex is not installed on this host.
+// turn_id is required there and is envelope.Detect's codex discriminator.
+const codexStopTemplate = `{"cwd":"/work","hook_event_name":"Stop","last_assistant_message":"ok",` +
+	`"model":"gpt-5.6-terra","permission_mode":"default","session_id":"sess-1",` +
+	`"stop_hook_active":%s,"transcript_path":null,"turn_id":"turn-1"}`
+
+// stopDenyHandler is piDenyHandler's counterpart for Claude Code/Codex's Stop
+// (canonical turn_end): the same decides() wire dialect every handler speaks,
+// rescoped onto turn_end for the engines it names (issue #77).
+func stopDenyHandler(t *testing.T, dir, id, reason string, engines []string) manifest.Handler {
+	t.Helper()
+	h := decides(t, dir, id, "deny", reason)
+	h.Events = []string{"turn_end"}
+	h.Engines = engines
+	return h
+}
+
+// A consolidated deny on Claude Code's Stop (canonical turn_end) must render
+// the top-level block shape {"decision":"block","reason":...} — not
+// hookSpecificOutput, which is PreToolUse's own wire shape — and be recorded
+// enforced; once the native payload's stop_hook_active is true (the loop is
+// already bounded) the same deny must render nothing and be recorded
+// unenforced, the same posture as pi's settle boundary (D2/D3).
+func TestRunRouteClaudeCodeStopDenyAndStopHookActive(t *testing.T) {
+	dir := t.TempDir()
+
+	stateDir := filepath.Join(dir, "state-active")
+	writeTable(t, stateDir, stopDenyHandler(t, dir, "deny-a", "A", []string{"claude-code"}))
+	opts := routeOptions{start: time.Now(), registeredFor: "claude-code", event: "Stop", stateDir: stateDir}
+	printed := runPipeline(t, opts, fmt.Sprintf(claudeStopTemplate, "false"))
+	wantStdout := `{"decision":"block","reason":"A"}` + "\n"
+	if printed != wantStdout {
+		t.Errorf("want %q printed, got %q", wantStdout, printed)
+	}
+	rec := readRecord(t, stateDir)
+	if rec.Verdict != record.OutcomeDeny || !rec.Enforced {
+		t.Errorf("want an enforced deny, got %q enforced=%v", rec.Verdict, rec.Enforced)
+	}
+	if rec.CanonicalEvent != "turn_end" || rec.NativeEvent != "Stop" || rec.Engine != "claude-code" {
+		t.Errorf("want canonical_event turn_end / native_event Stop / engine claude-code, got %+v", rec)
+	}
+
+	stoppedStateDir := filepath.Join(dir, "state-stopped")
+	writeTable(t, stoppedStateDir, stopDenyHandler(t, dir, "deny-b", "A", []string{"claude-code"}))
+	opts.stateDir = stoppedStateDir
+	printed = runPipeline(t, opts, fmt.Sprintf(claudeStopTemplate, "true"))
+	if printed != "" {
+		t.Errorf("want nothing printed once stop_hook_active is true, got %q", printed)
+	}
+	rec = readRecord(t, stoppedStateDir)
+	if rec.Verdict != record.OutcomeDeny || rec.Enforced {
+		t.Errorf("want an unenforced deny once stop_hook_active is true, got %q enforced=%v", rec.Verdict, rec.Enforced)
+	}
+}
+
+// Same two halves as above, on Codex's Stop. Codex's validator is stricter
+// than Claude Code's about unknown/malformed top-level fields (§4), but the
+// consolidated block shape is the same {"decision":"block","reason":...}.
+func TestRunRouteCodexStopDenyAndStopHookActive(t *testing.T) {
+	dir := t.TempDir()
+
+	stateDir := filepath.Join(dir, "state-active")
+	writeTable(t, stateDir, stopDenyHandler(t, dir, "deny-a", "A", []string{"codex"}))
+	opts := routeOptions{start: time.Now(), registeredFor: "codex", event: "Stop", stateDir: stateDir}
+	printed := runPipeline(t, opts, fmt.Sprintf(codexStopTemplate, "false"))
+	wantStdout := `{"decision":"block","reason":"A"}` + "\n"
+	if printed != wantStdout {
+		t.Errorf("want %q printed, got %q", wantStdout, printed)
+	}
+	rec := readRecord(t, stateDir)
+	if rec.Verdict != record.OutcomeDeny || !rec.Enforced {
+		t.Errorf("want an enforced deny, got %q enforced=%v", rec.Verdict, rec.Enforced)
+	}
+	if rec.Engine != "codex" {
+		t.Errorf("want engine codex, got %+v", rec)
+	}
+
+	stoppedStateDir := filepath.Join(dir, "state-stopped")
+	writeTable(t, stoppedStateDir, stopDenyHandler(t, dir, "deny-b", "A", []string{"codex"}))
+	opts.stateDir = stoppedStateDir
+	printed = runPipeline(t, opts, fmt.Sprintf(codexStopTemplate, "true"))
+	if printed != "" {
+		t.Errorf("want nothing printed once stop_hook_active is true, got %q", printed)
+	}
+	rec = readRecord(t, stoppedStateDir)
+	if rec.Verdict != record.OutcomeDeny || rec.Enforced {
+		t.Errorf("want an unenforced deny once stop_hook_active is true, got %q enforced=%v", rec.Verdict, rec.Enforced)
+	}
+}
+
+// A deny handler that gives neither reason nor advice must still render a
+// non-empty block reason: Codex's stop parser treats a block with a blank
+// reason as invalid and does not block at all.
+func TestRunRouteCodexStopDenyWithNoReasonFallsBackToFixedReason(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	writeTable(t, stateDir, stopDenyHandler(t, dir, "deny-a", "", []string{"codex"}))
+
+	opts := routeOptions{start: time.Now(), registeredFor: "codex", event: "Stop", stateDir: stateDir}
+	printed := runPipeline(t, opts, fmt.Sprintf(codexStopTemplate, "false"))
+	wantStdout := `{"decision":"block","reason":"a hookyard handler asked you to keep working before finishing"}` + "\n"
+	if printed != wantStdout {
+		t.Errorf("want %q printed, got %q", wantStdout, printed)
+	}
+	rec := readRecord(t, stateDir)
+	if rec.Verdict != record.OutcomeDeny || !rec.Enforced {
+		t.Errorf("want an enforced deny, got %q enforced=%v", rec.Verdict, rec.Enforced)
+	}
+	if rec.Reason != "" {
+		t.Errorf("want the record's own reason field empty (the fallback lives only in the rendered stdout), got %q", rec.Reason)
+	}
+}
+
+// An abstaining handler on Claude Code's Stop prints nothing and is recorded
+// enforced, the same as every other canonical event's abstain path.
+func TestRunRouteClaudeCodeStopObserverPrintsNothing(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	observer := handlerScript(t, dir, "observer", "exit 0")
+	observer.Events = []string{"turn_end"}
+	observer.Engines = []string{"claude-code"}
+	writeTable(t, stateDir, observer)
+
+	opts := routeOptions{start: time.Now(), registeredFor: "claude-code", event: "Stop", stateDir: stateDir}
+	printed := runPipeline(t, opts, fmt.Sprintf(claudeStopTemplate, "false"))
+	if printed != "" {
+		t.Errorf("want nothing printed, got %q", printed)
+	}
+	rec := readRecord(t, stateDir)
+	if !rec.Enforced {
+		t.Errorf("want abstain recorded enforced, got enforced=%v", rec.Enforced)
 	}
 }
 
