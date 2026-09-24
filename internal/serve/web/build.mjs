@@ -26,8 +26,8 @@ await build({
   outdir,
 });
 
-// elkjs's minified worker carries no licence header upstream [plan-critic r1
-// medium] — prepend one, byte-for-byte otherwise.
+// elkjs's minified worker carries no licence header upstream — prepend one,
+// byte-for-byte otherwise.
 const elkPkg = JSON.parse(readFileSync(require.resolve("elkjs/package.json"), "utf8"));
 const banner = `/*! elkjs ${elkPkg.version} | EPL-2.0 | https://github.com/kieler/elkjs */\n`;
 const worker = readFileSync(require.resolve("elkjs/lib/elk-worker.min.js"), "utf8");

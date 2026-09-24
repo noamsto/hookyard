@@ -1,8 +1,8 @@
 // Entry point: mounts <FlowApp> into #flow-panel, wires the controller to
-// app.js's hookyard:sync / hookyard:call events, and ports #93's feed|flow
-// setView toggle (view=flow in the URL, visible flag, fit-once-visible,
-// reload-when-stale) as plain DOM code — there is nothing here for React to
-// own until the panel is mounted.
+// app.js's hookyard:sync / hookyard:call events, and ports flow.js's
+// feed|flow setView toggle (view=flow in the URL, visible flag,
+// fit-once-visible, reload-when-stale) as plain DOM code — there is nothing
+// here for React to own until the panel is mounted.
 import "@xyflow/react/dist/style.css";
 import "./flow.css";
 import { createRoot } from "react-dom/client";

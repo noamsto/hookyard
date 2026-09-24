@@ -1,7 +1,6 @@
 // The rendered snapshot: an immutable view of one committed layout. Display
 // mapping, counts, hover, tooltips and pulses all read THIS snapshot's
-// expansion, so they stay pinned to what is drawn (#93's invariant, and the
-// basis of #96's R1).
+// expansion, so they stay pinned to what is drawn, never live model state.
 
 import { COL_TITLES, OUTCOMES, ROUTER_ERROR } from "../constants.ts";
 import type { Box, Col, DisplayCol, LayoutNode, LayoutResult, PathLike } from "../types.ts";

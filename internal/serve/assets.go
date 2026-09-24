@@ -8,8 +8,8 @@ import (
 // assetsFS embeds the frontend (SPEC 4.8). Most of it is hand-written, no
 // bundler, no build step — what's on disk here is exactly what the browser
 // loads. The flow view under assets/flow/ is the exception: a committed
-// esbuild bundle built from source in web/ (#97; nix/checks/flow-bundle.nix
-// keeps the two in sync).
+// esbuild bundle built from source in web/; nix/checks/flow-bundle.nix keeps
+// the two in sync.
 //
 //go:embed assets
 var assetsFS embed.FS

@@ -1,6 +1,6 @@
 // Builds React Flow nodes/edges from a controller's rendered snapshot +
 // throttled totals + hover state. Pure (given a Snapshot and Totals object)
-// so it never reads live model state (#96 R1's invariant extends to the view).
+// so it never reads live model state — display stays pinned to what's drawn.
 import { COL_HEADERS } from "./constants.ts";
 import type { CardData, CardNodeType } from "./nodes/CardNode.tsx";
 import type { GroupData, GroupNodeType } from "./nodes/GroupNode.tsx";

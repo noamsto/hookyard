@@ -1,4 +1,4 @@
-// Ported from #93's flow.js. NODE_W/NODE_H/GROUP_PAD_TOP are ELK layout
+// Ported from flow.js. NODE_W/NODE_H/GROUP_PAD_TOP are ELK layout
 // sizes, not the old SVG's hand-tuned pixel geometry.
 import type { Col, DisplayCol } from "./types.ts";
 

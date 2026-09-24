@@ -667,9 +667,9 @@ func TestNoAccessControlAllowOrigin(t *testing.T) {
 	}
 }
 
-// TestFlowBundleEmbedded guards the #97 esbuild bundle: the embedded FS
-// carries the built flow/ assets, index.html points at their /static/flow/
-// path (not the old /static/flow.js), and the server actually serves them.
+// TestFlowBundleEmbedded guards the esbuild bundle: the embedded FS carries
+// the built flow/ assets, index.html points at their /static/flow/ path (not
+// the old /static/flow.js), and the server actually serves them.
 func TestFlowBundleEmbedded(t *testing.T) {
 	sub, err := staticFS()
 	if err != nil {

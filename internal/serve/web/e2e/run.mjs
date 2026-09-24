@@ -16,7 +16,7 @@ import { GUARDS_DENY, GUARDS_FIFTH, TODAY_PATHS, append, record, writeFixture } 
 const WEB = dirname(dirname(fileURLToPath(import.meta.url)));
 const REPO = resolve(WEB, "../../..");
 
-// Mirrors src/constants.ts; the #96 checks time themselves against these.
+// Mirrors src/constants.ts; checks 5 and 6 time themselves against these.
 const RELAYOUT_MS = 5000;
 const PRESS_HOLD_MAX_MS = 10000;
 const MAX_DOTS = 48;
@@ -316,7 +316,7 @@ async function check4(page, env) {
   return summary.concat("console clean");
 }
 
-// #96 setup: outcome=deny with the guards group drawn auto-open (4 deny members).
+// outcome=deny with the guards group drawn auto-open (4 deny members).
 async function openGuardsExpanded(page, env) {
   await openFlow(page, env.base, "outcome=deny");
   const member = JSON.stringify(GUARDS_DENY[0]);
@@ -415,7 +415,7 @@ async function check7(page, env) {
 }
 
 // Column header nodes exist only so ELK sizes/positions them; they must
-// never behave like graph nodes (bridge review: HIGH).
+// never behave like graph nodes.
 async function check8(page, env) {
   await openFlow(page, env.base);
   const lines = [];
@@ -465,7 +465,7 @@ async function assertPulsesGone(page, what) {
 }
 
 // In-flight pulses must not freeze mid-edge when animation stops without a
-// relayout (bridge review: HIGH).
+// relayout.
 async function check9(page, env) {
   const lines = [];
 
@@ -509,8 +509,8 @@ const CHECKS = [
   { n: 2, title: "zoom, pan, fit, minimap", fn: check2 },
   { n: 3, title: "node click filters, shift-click adds, re-click and chip × remove", fn: check3 },
   { n: 4, title: "burst of 500 live calls stays bounded", fn: check4 },
-  { n: 5, title: "#96 window 1: header click before the coalesced relayout", fn: check5, fresh: true },
-  { n: 6, title: "#96 window 2: relayout ready mid-press is held", fn: check6, fresh: true },
+  { n: 5, title: "window 1: header click before the coalesced relayout", fn: check5, fresh: true },
+  { n: 6, title: "window 2: relayout ready mid-press is held", fn: check6, fresh: true },
   { n: 7, title: "static past day: no pulses, whole-day meta", fn: check7 },
   { n: 8, title: "column headers are not interactive graph nodes", fn: check8 },
   { n: 9, title: "in-flight pulses cancel on a day switch or a view toggle", fn: check9, fresh: true },

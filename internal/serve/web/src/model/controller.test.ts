@@ -1,5 +1,5 @@
-// Sensitivity note (#96 R1): swapping toggleGroup's record for the live
-// `this.model.groupState(name)` makes "R1 window 1" fail — the live state
+// Sensitivity note: swapping toggleGroup's record for the live
+// `this.model.groupState(name)` makes "window 1" below fail — the live state
 // already says "collapsed" (5 shown members) while the drawn group is still
 // expanded, so the click sets userExpanded = true and the group never
 // collapses. Checked once by hand when this suite was written.
@@ -22,8 +22,8 @@ async function visible(h: Harness): Promise<void> {
   await h.c.setVisible(true);
 }
 
-// The #96 setup: under outcome=deny exactly four guards members have traffic,
-// so the group auto-opens; a fifth member's live call flips the live default.
+// Under outcome=deny exactly four guards members have traffic, so the group
+// auto-opens; a fifth member's live call flips the live default.
 async function fourDenies(): Promise<Harness> {
   const h = harness();
   h.filters.outcome = ["deny"];
@@ -60,7 +60,7 @@ test("load: live fetch params, commit, meta; a past day is whole-day", async () 
   assert.equal(p.c.meta(), DAY + " · whole day · 0 calls · 0 branches");
 });
 
-test("before any load nothing is laid out (#95)", async () => {
+test("before any load nothing is laid out", async () => {
   const h = harness();
   await visible(h);
   h.c.setShowIdle(true);
@@ -185,7 +185,7 @@ test("a live node addition long after the last commit lays out at once", async (
   assert.equal(h.layout.calls.length, 2);
 });
 
-test("R3: a superseded layout result is dropped", async () => {
+test("a superseded layout result is dropped", async () => {
   const h = await fourDenies();
   h.c.setShowIdle(true);
   const a = h.layout.calls[1];
@@ -209,7 +209,7 @@ test("R3: a superseded layout result is dropped", async () => {
   assert.deepEqual(h.c.snapshot()?.groupState("guards"), { expanded: false, forced: false });
 });
 
-test("#96 R1 window 1: a click before the coalesced relayout toggles what is drawn", async () => {
+test("window 1: a click before the coalesced relayout toggles what is drawn", async () => {
   const h = await fourDenies();
   h.clock.advance(1000);
   assert.deepEqual(h.c.onCall(entry(1001, deny(GUARDS[4]), TS, [0])), []);
@@ -229,7 +229,7 @@ test("#96 R1 window 1: a click before the coalesced relayout toggles what is dra
   assert.equal(h.layout.calls.length, 2, "the coalesced live relayout was folded in");
 });
 
-test("#96 R2 window 2: no commit mid-press; the toggle uses the pressed record", async () => {
+test("window 2: no commit mid-press; the toggle uses the pressed record", async () => {
   const h = await fourDenies();
   h.c.pressBegin(G);
   h.c.onCall(entry(1001, deny(GUARDS[4]), TS, [0]));
@@ -249,7 +249,7 @@ test("#96 R2 window 2: no commit mid-press; the toggle uses the pressed record",
   assert.deepEqual(h.c.snapshot()?.groupState("guards"), { expanded: false, forced: false });
 });
 
-test("R2: a missed release ends the press after PRESS_HOLD_MAX_MS", async () => {
+test("a missed release ends the press after PRESS_HOLD_MAX_MS", async () => {
   const h = await fourDenies();
   h.c.pressBegin();
   h.c.setShowIdle(true);

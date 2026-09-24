@@ -2,7 +2,7 @@
 // snapshot and the pending layout. Pure: every browser dependency is injected
 // (FlowDeps), so it runs under node --test.
 //
-// View API (React, Step 4):
+// View API (React):
 //   subscribe(fn) / getVersion()  useSyncExternalStore pair; the version bumps
 //                                 on every refresh. Count-only refreshes are
 //                                 throttled to <= 1 per RENDER_MS; commits and
@@ -24,12 +24,11 @@
 //   onPulse(fn)       subscribe the pulse layer; returns an unsubscribe
 //   addDropped(n)     the pulse pool's overflow count (reset per load)
 //   setVisible(v) setShowIdle(v)
-//   pressBegin(nodeKey?) / pressEnd()   any press in the flow (#96 R2);
-//                     pressEnd must run after the click handler (one macrotask
-//                     after release)
+//   pressBegin(nodeKey?) / pressEnd()   any press in the flow; pressEnd must
+//                     run after the click handler (one macrotask after release)
 //   toggleGroup(nodeKey)   a group header click, by the group's display node
 //                     key ("group\0<key>"); toggles relative to what was drawn
-//                     at press (#96 R1); a forced group is inert
+//                     at press; a forced group is inert
 //   dispose()         clears every timer and listener
 
 import { PENDING_CAP, PRESS_HOLD_MAX_MS, RELAYOUT_MS, RENDER_MS, WINDOW_MIN } from "../constants.ts";
@@ -369,7 +368,7 @@ export class FlowController {
   // requestLayout: user reasons run now; live node-set growth coalesces to at
   // most one layout per RELAYOUT_MS since the last commit.
   private requestLayout(reason: LayoutReason): void {
-    if (!this.model.topo) return; // nothing to draw before the first load (#95)
+    if (!this.model.topo) return; // nothing to draw before the first load
     if (reason === "live") {
       if (this.liveTimer !== null) return;
       const wait = this.lastCommitAt + RELAYOUT_MS - this.deps.now();
@@ -393,7 +392,7 @@ export class FlowController {
     const key = plan.input.key;
     if (key === (this.pending?.plan.input.key ?? this.rendered?.key)) return;
     if (this.pending && key === this.rendered?.key) {
-      // Back to what is drawn: retire the in-flight/held layout (R3 drops it).
+      // Back to what is drawn: retire the in-flight/held layout.
       this.layoutGenSeq++;
       this.pending = null;
       this.emit();
@@ -410,9 +409,9 @@ export class FlowController {
   }
 
   private onLayout(gen: number, result: LayoutResult): void {
-    if (gen !== this.layoutGenSeq || this.pending?.gen !== gen) return; // R3: latest wins
+    if (gen !== this.layoutGenSeq || this.pending?.gen !== gen) return; // stale: latest wins
     this.pending.result = result;
-    if (this.pressed) return; // R2: held until pressEnd
+    if (this.pressed) return; // held until pressEnd
     this.commit();
   }
 

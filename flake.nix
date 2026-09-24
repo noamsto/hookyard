@@ -111,7 +111,7 @@
           check-merge-conflicts.enable = true;
           trim-trailing-whitespace = {
             enable = true;
-            # Committed esbuild output, not hand-edited prose (#97).
+            # Committed esbuild output, not hand-edited prose.
             excludes = ["^internal/serve/assets/flow/"];
           };
         };

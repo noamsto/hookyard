@@ -1,4 +1,4 @@
-# The serve flow view (#97) is a committed esbuild bundle under
+# The serve flow view is a committed esbuild bundle under
 # internal/serve/assets/flow/, source in internal/serve/web/ — not built at
 # hookyard's build time (SPEC 4.8). A committed generated artefact drifts
 # from its source unless something checks: this rebuilds the bundle from

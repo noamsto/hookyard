@@ -2,7 +2,7 @@
 // the live ring, facets, active filters, sticky-shown nodes, topology,
 // showIdle and the user's group toggles. It knows nothing about what is
 // drawn — the rendered snapshot (snapshot.ts) does — so nothing here may be
-// read to interpret a click on a drawn node (#96 R1).
+// read to interpret a click on a drawn node.
 
 import { COLUMNS } from "../types.ts";
 import type { Col, Facets, FlowResponse, Filters, LayoutInput, LayoutNode, PathLike, TableResponse } from "../types.ts";

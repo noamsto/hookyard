@@ -9,7 +9,7 @@ import { join } from "node:path";
 export const GUARDS = ["guards.rm", "guards.git-push", "guards.secrets", "guards.curl",
   "guards.sudo", "guards.chmod", "guards.dd", "guards.fork"];
 // Exactly these four guards members carry a deny today: under outcome=deny
-// the guards group auto-opens (≤ 4 shown members) — the #96 setup.
+// the guards group auto-opens (≤ 4 shown members).
 export const GUARDS_DENY = GUARDS.slice(0, 4);
 // A guards member with traffic today but no deny: a live deny through it
 // sticky-shows a 5th member.

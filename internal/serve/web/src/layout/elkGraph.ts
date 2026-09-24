@@ -1,5 +1,5 @@
-// ELK graph adapter (plan.md Step 3): builds an ELK input graph from a
-// LayoutInput and reads the laid-out result back into a LayoutResult.
+// ELK graph adapter: builds an ELK input graph from a LayoutInput and reads
+// the laid-out result back into a LayoutResult.
 //
 // Node keys ("col\x00name", or a group's own "group\x00name") can carry
 // control characters, so they never become ELK node ids directly. Instead
