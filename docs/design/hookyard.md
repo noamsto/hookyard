@@ -4205,14 +4205,17 @@ Consequences of the remap, accepted rather than hidden:
   change read `native_event: "turn_end", canonical_event: "turn_end"`;
   records written after read `native_event: "agent_before_settle"` for the
   canonical firing and `native_event: "turn_end", canonical_event: ""` for
-  the per-turn one. `internal/serve`'s filter matches on `canonical_event OR
-  native_event`, so its `turn_end` filter still catches the pre-amendment
-  records. It also catches the post-amendment per-turn ones, and the web view
-  labels those rows `turn_end` too. That mixes the per-settle and per-turn
-  frequencies back together in the view, though not in the stream. Narrowing
-  it takes more care than making a canonical value match `canonical_event`
-  only: router-error records carry the manifest's canonical event name in
-  `native_event`, and that rule would hide them. Tracked as issue #78.
+  the per-turn one. `internal/serve` addresses each of those shapes distinctly
+  (issue #78). A routed record matches a filter value on `canonical_event`
+  only, so the `turn_end` filter catches the pre-amendment records and the
+  post-amendment canonical firing, but not the per-turn ones. A routed record
+  with no canonical event — pi's per-turn `turn_end`, claude-code's
+  `Notification` — is addressed by its engine-scoped label,
+  `engine + ":" + native_event` (`pi:turn_end`), the same string the web view
+  shows for the row. Router-error records carry the manifest's canonical event
+  name in `native_event` and no canonical event, so they keep matching on
+  `native_event` alone and are labelled by it as-is; a canonical-only rule
+  would have hidden them during an outage.
 - **The `pendingToolAdvice` sweep is unaffected.** It is registered by the
   bridge directly on pi's *native* `turn_end`, not through the canonical
   mapping (§11.1), so the remap does not move it.

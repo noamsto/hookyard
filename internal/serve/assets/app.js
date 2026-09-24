@@ -190,6 +190,18 @@ function toggleRow(li) {
   main.setAttribute("aria-expanded", String(expanded));
 }
 
+// eventLabel renders a record's event cell. A router-error row carries the
+// manifest's canonical event name in native_event and no canonical event, so
+// it reads by native_event as-is. A routed record with no canonical event
+// (pi's engine-scoped per-turn turn_end) reads as engine:native_event — the
+// same string its filter value uses. A canonical row reads by canonical_event.
+function eventLabel(rec) {
+  if (rec.router === "error") return rec.native_event || "—";
+  if (rec.canonical_event) return rec.canonical_event;
+  if (rec.native_event) return rec.engine + ":" + rec.native_event;
+  return "—";
+}
+
 // buildRow renders one Entry. Every piece of record-derived text is set via
 // textContent — the record carries operator-controlled strings, and this is
 // the one place they meet the DOM.
@@ -204,7 +216,7 @@ function buildRow(entry) {
   node.querySelector(".c-time").textContent = fmtTime(rec.ts);
   node.querySelector(".c-engine").textContent = rec.engine;
   node.querySelector(".c-key").textContent = rec.key;
-  node.querySelector(".c-event").textContent = rec.canonical_event || rec.native_event || "—";
+  node.querySelector(".c-event").textContent = eventLabel(rec);
   node.querySelector(".c-tool").textContent = rec.tool_name || "—";
 
   const verdictEl = node.querySelector(".c-verdict");

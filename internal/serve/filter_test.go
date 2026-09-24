@@ -46,7 +46,9 @@ func TestFilterMatch(t *testing.T) {
 		{"session substring case-insensitive", Filter{Session: "abc"}, fullRecord(), true},
 		{"session mismatch", Filter{Session: "zzz"}, fullRecord(), false},
 		{"event matches canonical", Filter{Events: []string{"pre_tool"}}, fullRecord(), true},
-		{"event matches native", Filter{Events: []string{"PreToolUse"}}, fullRecord(), true},
+		// A routed record with a canonical event is addressed by its canonical
+		// value only (#78); its native literal no longer matches.
+		{"event native value does not match a routed record", Filter{Events: []string{"PreToolUse"}}, fullRecord(), false},
 		{"event mismatch", Filter{Events: []string{"post_tool"}}, fullRecord(), false},
 		{"handler match", Filter{Handlers: []string{"guard-b"}}, fullRecord(), true},
 		{"handler mismatch", Filter{Handlers: []string{"guard-z"}}, fullRecord(), false},
@@ -71,6 +73,58 @@ func TestFilterMatch(t *testing.T) {
 		{"truncated record matches verdict", Filter{Verdicts: []string{"deny"}}, truncatedRecord(), true},
 		{"truncated record never matches event", Filter{Events: []string{"pre_tool"}}, truncatedRecord(), false},
 		{"truncated record never matches handler", Filter{Handlers: []string{"guard-a"}}, truncatedRecord(), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.f.Match(tt.rec); got != tt.want {
+				t.Errorf("Match() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFilterMatchEventShapes pins the three record shapes #78 distinguishes:
+// a routed record with a canonical event, a routed record with an empty
+// canonical event (pi's engine-scoped per-turn turn_end), and a router-error
+// row whose native_event is the manifest's canonical name.
+func TestFilterMatchEventShapes(t *testing.T) {
+	canonicalTurnEnd := record.Record{
+		Engine:         "pi",
+		SessionID:      "SESS-abc123",
+		CanonicalEvent: "turn_end",
+		NativeEvent:    "agent_before_settle",
+		Verdict:        "abstain",
+		Router:         record.RouterOK,
+	}
+	perTurn := record.Record{
+		Engine:         "pi",
+		SessionID:      "SESS-abc123",
+		CanonicalEvent: "",
+		NativeEvent:    "turn_end",
+		Verdict:        "abstain",
+		Router:         record.RouterOK,
+	}
+	routerErr := record.Record{
+		Engine:         "claude-code",
+		SessionID:      "SESS-abc123",
+		CanonicalEvent: "",
+		NativeEvent:    "pre_tool",
+		Verdict:        "abstain",
+		Router:         record.RouterError,
+	}
+	tests := []struct {
+		name string
+		f    Filter
+		rec  record.Record
+		want bool
+	}{
+		{"turn_end selects the canonical settle row", Filter{Events: []string{"turn_end"}}, canonicalTurnEnd, true},
+		{"turn_end does not select the per-turn row", Filter{Events: []string{"turn_end"}}, perTurn, false},
+		{"pi:turn_end selects the per-turn row", Filter{Events: []string{"pi:turn_end"}}, perTurn, true},
+		{"engine:native does not select a canonical row", Filter{Events: []string{"pi:agent_before_settle"}}, canonicalTurnEnd, false},
+		{"bare native does not select a routed canonical row", Filter{Events: []string{"agent_before_settle"}}, canonicalTurnEnd, false},
+		{"pre_tool still selects a router-error row", Filter{Events: []string{"pre_tool"}}, routerErr, true},
+		{"engine:native does not select a router-error row", Filter{Events: []string{"claude-code:pre_tool"}}, routerErr, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
