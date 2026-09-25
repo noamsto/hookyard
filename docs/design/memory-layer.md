@@ -31,6 +31,8 @@ memory-startup category sells.
 | Codex | none | — | — |
 | Cursor | none | — | — |
 
+Codex does not ship a native memory store, but since PR #101 its hookyard advisory slot carries `session_start` and `prompt_submit`.
+
 Claude Code's auto memory is a real layer, not a stub. Verified on this machine:
 52 topic files across 11 project directories plus 11 `MEMORY.md` indexes — 63 files
 in total — each a markdown file with
@@ -243,7 +245,7 @@ several of them rule out otherwise-attractive designs.
 | # | requirement | evidence |
 | --- | --- | --- |
 | R1 | **Readable and writable with ordinary file tools, and injectable without an MCP server** | workers are launched with one fixed `--mcp-config` chosen at dispatch time (`adapters/core/dispatch.sh:2423`), so making memory an MCP dependency means editing the worker launch path and widening every worker's tool surface; Pi and Cursor have no MCP registration path in this fleet at all; and a file the agent *writes* needs no tool surface, which no MCP design gives you. (An earlier revision justified this with a zero-server worker profile that no longer exists — see the PR review.) |
-| R2 | **Reaches all four engines** | Cursor's advisory rides only a rendered permission (`internal/verdict/capability.go`). So the store must be readable as *files* regardless, and injection covers a subset even at best — **and that subset is larger than this document first claimed: Codex does document an advisory channel**, on `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse` and `SubagentStart`, which hookyard's table currently denies. See the PR review; the reach matrix in §4.7 is unverified until that is probed |
+| R2 | **Reaches all four engines** | Cursor's advisory rides only a rendered permission (`internal/verdict/capability.go`). So the store must be readable as *files* regardless, and injection covers a subset even at best — **and that subset is larger than this document first claimed: Codex now has a confirmed advisory channel**, on `session_start` and `prompt_submit` (PR #101, confirmed by `TestLiveCodexDeliversSessionStartAndPromptSubmitAdvice`). `PreToolUse`, `PostToolUse` and `SubagentStart` remain unprobed at the advisory layer |
 | R3 | **Works on a host with no GUI** | `halo` runs `desktop.mode = "none"`. The `obsidian-cli` binary is a Unix-socket client to a *running* Obsidian app (`$XDG_RUNTIME_DIR/.obsidian-cli.sock`; verified on this machine: *"The CLI is unable to find Obsidian"*), so it is not an agent interface |
 | R4 | **Survives concurrent writers on two or more machines** | agents run on `tp-g5`/`tp-g6` and `mbp-m4-pro`, sometimes simultaneously in worktrees off one repo |
 | R5 | **Human-curatable and retireable** | agent memory's dominant real failure is a stale fact that keeps being injected. It needs a surface for review, correction, and deletion |
@@ -478,24 +480,13 @@ What each engine can actually receive, read off `internal/verdict/capability.go`
 | Claude Code | ✅ advisory | ⚠️ **channel exists upstream, not rendered yet** | ✅ |
 | Pi | ✅ advisory (queued → `before_agent_start`) | ⚠️ **reply currently discarded** | ✅ |
 | Cursor | ⚠️ only alongside a rendered permission | ❌ | ✅ |
-| Codex | ⚠️ **channel exists upstream, hookyard denies it** | ⚠️ same | ✅ |
+| Codex | ✅ advisory | ✅ advisory | ✅ |
 
-So the reach matrix is the requirement R2 in practice: **the store has to be the
-mechanism because files are the only path all four engines share**, injection
-being an optimisation layered on top. The size of that optimisation is currently
-unknown for Codex — see R2 in §3 and the PR review — and if Codex's
-`SessionStart` and `UserPromptSubmit` `additionalContext` deliver as documented,
-the "file-only" framing in this section is wrong for a primary crew engine.
-store as files, and that is the honest ceiling.** Codex is the interesting case —
-it reads `AGENTS.md` natively, and a repo can therefore point Codex at the index
-through the instruction-file path with no hook at all. That is why the store must
-be file-native rather than hook-native: the hook is an optimization for two
-engines, the files are the mechanism for all four.
+So the reach matrix is the requirement R2 in practice: **the store has to be the mechanism because files are the only path all four engines share**, injection being an optimisation layered on top. That optimisation now reaches three of four engines for tier 1 (Claude Code, Pi, Codex) — Cursor's advisory still rides only a rendered permission — and **Codex is the only engine with a tier-2 `prompt_submit` slot today**. Codex also reads `AGENTS.md` natively, and a repo can therefore point Codex at the index through the instruction-file path with no hook at all. That is why the store must be file-native rather than hook-native: the hook is an optimisation for three engines now, but files are the mechanism for all four.
 
-Two gaps must be closed in **hookyard**, and they are the only hookyard changes
-this design needs:
+Two gaps must be closed in **hookyard**, and they are the only hookyard changes this design needs:
 
-1. **`prompt_submit` has no advisory slot on any engine.** `HasAdvisorySlot`
+1. **No `prompt_submit` advisory slot on Claude Code or Pi (Codex has one since #101).** `HasAdvisorySlot`
    allows only `pre_tool`, `session_start` and `post_tool` for Claude and Pi.
    Upstream, the channel exists on both — Claude's `UserPromptSubmit` returns
    `additionalContext`, and Pi's `before_agent_start` fires per prompt with
@@ -569,7 +560,7 @@ change.
 
 | repo | change | why |
 | --- | --- | --- |
-| **hookyard** | `prompt_submit` added to `HasAdvisorySlot` for Claude and Pi; Pi bridge's `input` reply delivered (not discarded); `before_agent_start` registration made a real per-prompt handler | the only hookyard changes required; tier 2 is impossible without them (R2, §4.7) |
+| **hookyard** | `prompt_submit` added to `HasAdvisorySlot` for Claude and Pi (Codex already has `session_start` and `prompt_submit` since #101, so needs no hookyard change for tiers 1 and 2); Pi bridge's `input` reply delivered (not discarded); `before_agent_start` registration made a real per-prompt handler | the only hookyard changes required; tier 2 is impossible on Claude and Pi without them (R2, §4.7) |
 | **hookyard** | captured `prompt_submit` advisory payload fixtures per engine, per its own evidentiary convention | a claimed-advisory engine with no fixture is a claim, not a capability |
 | **`priors`** (new binary, own repo) | `add` / `list` / `show` / `search` / `lint` / `index`; store path from config; v0 `rg` backend | the store needs a release cadence independent of the router; §4.4's fail-open contract lives here |
 | **nix-config** | install `priors`; a `hookyard.json` manifest entry wiring `session_start` + `prompt_submit` to it; clone the store repo on every host incl. `halo` and `mbp`; `AGENTS.md` include line for Codex/Cursor/Pi; optional Obsidian `programs.obsidian.vaults` entry | one manifest, four engines — the pattern `programs.hookyard.manifests` already exists for |
@@ -614,8 +605,9 @@ Stated so the design can be falsified rather than defended:
 **Injection end-to-end** (the test that actually matters, adapted from
 Pi-memory's test 8): write a fact, start a *new* session, and ask the question
 without instructing the agent to search. If it answers, tier 2 worked. Repeated
-per engine that has an advisory slot, with the Codex case asserted as a
-**negative** test — the fact is reachable by file read, and *not* injected.
+per engine that has an advisory slot — with Codex run the same way now that
+PR #101 gives it a slot whose delivery is confirmed by the live test
+`TestLiveCodexDeliversSessionStartAndPromptSubmitAdvice` (`cmd/hookyard/live_e2e_test.go`).
 
 **Cost and latency**, because §4.4 has a deadline: p50/p95 of `priors search` at
 10, 100 and 1000 facts, against the 800 ms budget, so the v0→v1 trigger is a
@@ -682,7 +674,7 @@ These block implementation and are the author's calls, not the design's:
 | 1 | store layout, `priors` v0 (`add`/`list`/`search`/`lint`), git repo, index generation | `priors` | tier 1 + tier 3 on all four engines |
 | 2 | nix-config wiring: install, clone on every host, `AGENTS.md` include line | nix-config | reach without any hookyard change |
 | 3 | migrate or seed the corpus (decision 2/3) | — | content to actually retrieve |
-| 4 | hookyard: `prompt_submit` advisory slot + Pi bridge `input` reply + fixtures | hookyard | tier 2 on Claude and Pi |
+| 4 | hookyard: `prompt_submit` advisory slot + Pi bridge `input` reply + fixtures | hookyard | tier 2 on Claude and Pi (Codex already has tier 2 via #101) |
 | 5 | dispatcher: judge consults `priors`; `crew reap` distillation proposals | dispatcher | closes failure mode 2 |
 | 6 | optional: Obsidian as a viewer over the checkout; Bases table for the stale sweep | nix-config | §4.6 curation, if it earns it |
 
