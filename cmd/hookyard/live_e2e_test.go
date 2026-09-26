@@ -2422,7 +2422,6 @@ func liveWriteCodexStopManifest(t *testing.T, dir, handlerPath string) string {
 // TestLiveCodexStopDenyForcesExactlyOneContinuation is the Codex twin of
 // TestLiveClaudeCodeStopDenyForcesExactlyOneContinuation
 // (docs/design/hookyard.md §11.3). Gated on HOOKYARD_E2E=1 and codex on PATH.
-// The reason string is not asserted in the session transcript.
 func TestLiveCodexStopDenyForcesExactlyOneContinuation(t *testing.T) {
 	if os.Getenv("HOOKYARD_E2E") != "1" {
 		t.Skip("set HOOKYARD_E2E=1 to run this test against a live codex binary")
