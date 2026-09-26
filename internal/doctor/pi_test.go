@@ -441,10 +441,10 @@ func TestPiLauncherFindingsBuildPackageUnknownWithoutStateDir(t *testing.T) {
 	}
 }
 
-// TestPiLauncherFindingsPassesOnPlainExtensionsOnly pins the false positive
-// this change fixes: a wrapper that injects only plain -e extensions — no
-// PI_AGENT_HOOKS guard path, no build-mode hookyard package — is not the
-// double-fire hazard, so it must not read as a Fail.
+// TestPiLauncherFindingsPassesOnPlainExtensionsOnly: a wrapper that injects
+// only plain -e extensions — no PI_AGENT_HOOKS guard path, no build-mode
+// hookyard package — is not the double-fire hazard, so it must not read as a
+// Fail.
 func TestPiLauncherFindingsPassesOnPlainExtensionsOnly(t *testing.T) {
 	dir := t.TempDir()
 	target := writeLauncherScript(t, dir, "#!/bin/sh\n"+

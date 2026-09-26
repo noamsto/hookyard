@@ -21,8 +21,7 @@ func withCodexOnPath(t *testing.T) {
 	t.Setenv("PATH", dir)
 }
 
-// TestCodexWorkspaceTrustFollowsConfigWhenInstalled pins the arms the
-// absent-from-PATH change would otherwise leave dead: with codex on PATH the
+// TestCodexWorkspaceTrustFollowsConfigWhenInstalled: with codex on PATH the
 // trust level in config.toml decides Pass vs Fail.
 func TestCodexWorkspaceTrustFollowsConfigWhenInstalled(t *testing.T) {
 	for _, tc := range []struct {
