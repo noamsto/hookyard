@@ -1665,7 +1665,7 @@ security decision and a failed append is a bookkeeping problem.
   "cwd":             "/home/noams/nix-config",
   "tool_name":       "Bash",
   "verdict":         "deny",
-  "enforced":        false,
+  "enforced":        true,
   "reason":          "on default branch main; branch first",
   "router":          "ok",
   "router_ms":       4312,
@@ -1674,7 +1674,7 @@ security decision and a failed append is a bookkeeping problem.
     {"name": "secret-read-guard",          "outcome": "abstain", "ms": 9},
     {"name": "git-commit-autostage-guard", "outcome": "advise",  "ms": 8,
      "advice": "Unstaged tracked changes present alongside staged changes",
-     "delivered": false},
+     "delivered": true},
     {"name": "nix-stage-guard",            "outcome": "timeout", "ms": 4300}
   ]
 }
@@ -1715,9 +1715,12 @@ nothing more, whose `ms` is dispatch cost rather than the wall clock every
 other outcome's `ms` reports; and an `advise` outcome
 carries the advisory text itself plus a `delivered` flag, so an advisory the
 target engine had no slot for (§7) is visible as *written but not delivered*
-rather than disappearing. In the example above `delivered` is `false` because
-the event is Codex `pre_tool`, which has no advisory slot — the advice happened, the
-model never saw it, and the record says both.
+rather than disappearing. In the example above `delivered` is `true`: Codex's
+`pre_tool` gained an advisory slot in issue #87, so the guard's advice rides
+`additionalContext` beside the deny in the same payload and the model sees it.
+The flag still earns its place for the events that genuinely have no slot —
+Claude Code's `prompt_submit`, or Codex's `pre_compact` — where the advice
+happened, the model never saw it, and the record says both.
 
 `turn_outcome` is the one field in the example above that isn't there: it is
 optional, `omitempty`, and populated only for pi's `turn_end` and

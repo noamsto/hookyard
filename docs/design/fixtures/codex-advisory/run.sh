@@ -137,7 +137,10 @@ if ((${#rollouts[@]})); then
       echo "deny: NOT acted on"
     fi
     printf 'advice marker hits: '
-    grep -ho 'PRE-ADVICE-MARKER' "${rollouts[@]}" | wc -l
+    # grep exits 1 on no match, which under pipefail/errexit would abort the
+    # negative case this probe exists to measure; the count still prints 0.
+    hits=$(grep -ho 'PRE-ADVICE-MARKER' "${rollouts[@]}" 2>/dev/null | wc -l) || true
+    printf '%s\n' "$hits"
   fi
 else
   echo "  no session rollout written"
