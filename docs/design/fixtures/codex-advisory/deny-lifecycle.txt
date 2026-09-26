@@ -1,0 +1,2 @@
+hook: PreToolUse
+hook: PreToolUse Blocked

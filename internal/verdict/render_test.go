@@ -114,15 +114,24 @@ func TestRenderOnDecisionCapableEvents(t *testing.T) {
 			enforced: true,
 		},
 		{
-			name:     "codex deny drops advice",
-			in:       Input{Engine: vocab.Codex, CanonicalEvent: vocab.PreTool, NativeEvent: "PreToolUse", Verdict: Deny, Reason: "r", Advice: "a"},
-			stdout:   `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"r"}}`,
-			enforced: true,
+			// PreToolUse is a decision slot and an advisory slot: the advisory
+			// rides additionalContext in the same deny payload, the shape the
+			// 0.156.1 deny+advice probe confirmed Codex acts on while still
+			// delivering the advice.
+			name:      "codex deny carries advice",
+			in:        Input{Engine: vocab.Codex, CanonicalEvent: vocab.PreTool, NativeEvent: "PreToolUse", Verdict: Deny, Reason: "r", Advice: "a"},
+			stdout:    `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"r","additionalContext":"a"}}`,
+			enforced:  true,
+			delivered: true,
 		},
 		{
-			name:     "codex standalone advice has no slot",
-			in:       Input{Engine: vocab.Codex, CanonicalEvent: vocab.PreTool, NativeEvent: "PreToolUse", Verdict: Abstain, Advice: "a"},
-			enforced: true,
+			// An abstain on PreToolUse carries no decision, only the advisory —
+			// the same additionalContext-only shape SessionStart uses.
+			name:      "codex standalone advice",
+			in:        Input{Engine: vocab.Codex, CanonicalEvent: vocab.PreTool, NativeEvent: "PreToolUse", Verdict: Abstain, Advice: "a"},
+			stdout:    `{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"a"}}`,
+			enforced:  true,
+			delivered: true,
 		},
 		{
 			name:     "cursor abstain",
@@ -255,9 +264,9 @@ func TestRenderOnDecisionCapableEvents(t *testing.T) {
 
 func TestRenderOffADecisionSlotPrintsNothing(t *testing.T) {
 	for _, engine := range vocab.Engines {
-		if engine == vocab.ClaudeCode {
-			// Claude Code has an advisory slot on post_tool: see
-			// TestRenderAdvisoryOnlyEvents.
+		if engine == vocab.ClaudeCode || engine == vocab.Codex {
+			// Claude Code and Codex both have an advisory slot on post_tool:
+			// see TestRenderAdvisoryOnlyEvents.
 			continue
 		}
 		native, ok := vocab.NativeEvent(engine, vocab.PostTool)
@@ -373,6 +382,44 @@ func TestRenderAdvisoryOnlyEvents(t *testing.T) {
 			name:      "codex prompt_submit deny with advice renders advice only, unenforced",
 			in:        Input{Engine: vocab.Codex, CanonicalEvent: vocab.PromptSubmit, NativeEvent: "UserPromptSubmit", Verdict: Deny, Reason: "r", Advice: "a"},
 			stdout:    `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"a"}}`,
+			delivered: true,
+		},
+		{
+			name:      "codex post_tool abstain with advice",
+			in:        Input{Engine: vocab.Codex, CanonicalEvent: vocab.PostTool, NativeEvent: "PostToolUse", Verdict: Abstain, Advice: "a"},
+			stdout:    `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"a"}}`,
+			enforced:  true,
+			delivered: true,
+		},
+		{
+			name:     "codex post_tool abstain, no advice",
+			in:       Input{Engine: vocab.Codex, CanonicalEvent: vocab.PostTool, NativeEvent: "PostToolUse", Verdict: Abstain},
+			enforced: true,
+		},
+		{
+			name:      "codex post_tool deny with advice renders advice only, unenforced",
+			in:        Input{Engine: vocab.Codex, CanonicalEvent: vocab.PostTool, NativeEvent: "PostToolUse", Verdict: Deny, Reason: "r", Advice: "a"},
+			stdout:    `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"a"}}`,
+			delivered: true,
+		},
+		{
+			// SubagentStart has no canonical event, so it is reached only as the
+			// engine-scoped codex:SubagentStart and carries canonical "".
+			name:      "codex scoped SubagentStart abstain with advice",
+			in:        Input{Engine: vocab.Codex, CanonicalEvent: "", NativeEvent: "SubagentStart", Verdict: Abstain, Advice: "a"},
+			stdout:    `{"hookSpecificOutput":{"hookEventName":"SubagentStart","additionalContext":"a"}}`,
+			enforced:  true,
+			delivered: true,
+		},
+		{
+			name:     "codex scoped SubagentStart abstain, no advice",
+			in:       Input{Engine: vocab.Codex, CanonicalEvent: "", NativeEvent: "SubagentStart", Verdict: Abstain},
+			enforced: true,
+		},
+		{
+			name:      "codex scoped SubagentStart deny with advice renders advice only, unenforced",
+			in:        Input{Engine: vocab.Codex, CanonicalEvent: "", NativeEvent: "SubagentStart", Verdict: Deny, Reason: "r", Advice: "a"},
+			stdout:    `{"hookSpecificOutput":{"hookEventName":"SubagentStart","additionalContext":"a"}}`,
 			delivered: true,
 		},
 	}
@@ -679,11 +726,13 @@ func TestCapabilityTable(t *testing.T) {
 			if engine == vocab.ClaudeCode || engine == vocab.Pi {
 				wantAdvisory = event == vocab.PreTool || event == vocab.SessionStart || event == vocab.PostTool
 			}
-			// Codex delivers additionalContext only on the two events the
-			// 0.154.0 probe confirmed. PreToolUse, PostToolUse, and
-			// SubagentStart stay out.
+			// Codex delivers additionalContext on all five events the
+			// 0.156.1 probe confirmed: SessionStart, UserPromptSubmit,
+			// PreToolUse and PostToolUse here, SubagentStart via the scoped
+			// map asserted below.
 			if engine == vocab.Codex {
-				wantAdvisory = event == vocab.SessionStart || event == vocab.PromptSubmit
+				wantAdvisory = event == vocab.SessionStart || event == vocab.PromptSubmit ||
+					event == vocab.PreTool || event == vocab.PostTool
 			}
 			if got := HasAdvisorySlot(engine, event, native); got != wantAdvisory {
 				t.Errorf("HasAdvisorySlot(%s, %s) = %v, want %v", engine, event, got, wantAdvisory)
@@ -702,6 +751,22 @@ func TestCapabilityTable(t *testing.T) {
 		for _, engine := range []vocab.Engine{vocab.ClaudeCode, vocab.Codex} {
 			if HasDecisionSlot(engine, "", native) {
 				t.Errorf("HasDecisionSlot(%s, %s) = true, want false", engine, native)
+			}
+		}
+	}
+
+	for native := range codexScopedAdvisoryEvents {
+		if !HasAdvisorySlot(vocab.Codex, "", native) {
+			t.Errorf("HasAdvisorySlot(codex, %s) = false, want true", native)
+		}
+		// SubagentStart is advisory-only on Codex, and the scoped name is
+		// Codex's alone.
+		if HasDecisionSlot(vocab.Codex, "", native) {
+			t.Errorf("HasDecisionSlot(codex, %s) = true, want false", native)
+		}
+		for _, engine := range []vocab.Engine{vocab.ClaudeCode, vocab.Pi, vocab.Cursor} {
+			if HasAdvisorySlot(engine, "", native) {
+				t.Errorf("HasAdvisorySlot(%s, %s) = true, want false", engine, native)
 			}
 		}
 	}

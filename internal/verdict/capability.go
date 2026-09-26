@@ -13,6 +13,14 @@ var cursorScopedDecisionEvents = map[string]bool{
 	"subagentStart":        true,
 }
 
+// codexScopedAdvisoryEvents is the engine-scoped half of Codex's advisory
+// set: SubagentStart has no canonical counterpart in the six-event vocabulary,
+// so it is reached only as codex:SubagentStart, and the inbound envelope
+// resolves it with canonical_event "" and native_event "SubagentStart".
+var codexScopedAdvisoryEvents = map[string]bool{
+	"SubagentStart": true,
+}
+
 // HasDecisionSlot reports whether engine can act on a verdict for this event.
 // permissionDecision is a PreToolUse contract, not a universal one, and a
 // manifest may register a handler on any of the six canonical events or on an
@@ -75,14 +83,19 @@ func HasGuardSlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bool 
 // string on this event. Claude Code's advisory set is pre_tool, session_start,
 // post_tool — confirmed by aeye's diagram-guidance.sh (session_start) and
 // diagrams.sh (post_tool) running against real Claude Code in production, in
-// addition to pre_tool's additionalContext. Codex's set is session_start and
-// prompt_submit: docs/design/fixtures/codex-advisory/outcome-0.154.0-positive.md
-// shows SessionStart and UserPromptSubmit delivering additionalContext as a
-// developer-role model input that Codex itself labels hooks.additional_context
-// (codex-cli 0.154.0). PreToolUse, PostToolUse, and SubagentStart stay out
-// because a 401'd turn never runs a tool, so the set is partial on purpose.
-// Cursor's is the user_message field of the decision object itself, so its
-// advisory set is exactly its decision set — and advice only rides there
+// addition to pre_tool's additionalContext. Codex's set is all five events its
+// documentation names an advisory channel on: session_start, prompt_submit,
+// pre_tool, post_tool, and the engine-scoped subagent_start. That is the
+// measured result of docs/design/fixtures/codex-advisory/outcome-0.156.1-positive.md
+// (codex-cli 0.156.1), which shows each delivering additionalContext as a
+// developer-role model input Codex itself labels hooks.additional_context —
+// pre_tool and post_tool need a completed turn, subagent_start needs a spawned
+// subagent, which is why the earlier unauthenticated run could not reach them.
+// pre_tool is both a decision slot (above) and an advisory slot: a deny carries
+// the advice in the same permissionDecision payload, and an abstain/allow
+// carries additionalContext alone. Cursor's advisory set is the user_message
+// field of the decision object itself, so its advisory set is exactly its
+// decision set — and advice only rides there
 // alongside a rendered permission, which Render is what enforces. Pi's set is
 // wider than its decision set: on pre_tool, advice rides the block reason on
 // a deny, and a standalone advisory is appended to that call's own tool
@@ -105,7 +118,9 @@ func HasAdvisorySlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bo
 	case vocab.Pi:
 		return canonicalEvent == vocab.PreTool || canonicalEvent == vocab.SessionStart || canonicalEvent == vocab.PostTool
 	case vocab.Codex:
-		return canonicalEvent == vocab.SessionStart || canonicalEvent == vocab.PromptSubmit
+		return canonicalEvent == vocab.SessionStart || canonicalEvent == vocab.PromptSubmit ||
+			canonicalEvent == vocab.PreTool || canonicalEvent == vocab.PostTool ||
+			codexScopedAdvisoryEvents[nativeEvent]
 	}
 	return false
 }

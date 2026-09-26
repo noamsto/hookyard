@@ -170,10 +170,12 @@ func renderClaudeCodeAdvisoryOnly(in Input) Rendered {
 	return Rendered{Stdout: marshal(hookResponse{out}), Enforced: in.Verdict == Abstain, AdviceDelivered: true}
 }
 
-// renderCodexAdvisoryOnly renders additionalContext on session_start and
-// prompt_submit. Those output schemas are deny_unknown_fields and have no
-// permissionDecision, so a non-Abstain verdict is recorded unenforced and
-// only the advice is printed.
+// renderCodexAdvisoryOnly renders additionalContext on the Codex events with
+// an advisory slot but no decision slot: session_start, prompt_submit,
+// post_tool, and the engine-scoped subagent_start. Those output schemas have no
+// permissionDecision (and are deny_unknown_fields), so a non-Abstain verdict is
+// recorded unenforced and only the advice is printed. pre_tool is not here: it
+// has a decision slot too, so it renders through renderCodex.
 func renderCodexAdvisoryOnly(in Input) Rendered {
 	if in.Advice == "" {
 		return Rendered{Enforced: in.Verdict == Abstain}
@@ -183,11 +185,17 @@ func renderCodexAdvisoryOnly(in Input) Rendered {
 }
 
 // renderCodex renders the deny arm, plus ask degraded to deny per §7's rule
-// for engines whose decision shape is binary, and never an advisory field. An
-// allow records Enforced false rather than true: Codex rejects an explicit
-// allow by name, so printing nothing leaves Codex's own permission flow to
-// run, which is not what an allow asked for — on Claude Code the same verdict
-// bypasses the prompt, and the record must not call both outcomes enforced.
+// for engines whose decision shape is binary, and carries advice on the
+// advisory slot that pre_tool also has. A deny (and a degraded ask) carries the
+// advice in additionalContext beside the permissionDecision — the full shape
+// the 0.156.1 deny+advice probe confirmed Codex acts on while still delivering
+// the advice. An abstain or allow with advice prints additionalContext alone,
+// with no permissionDecision: Codex rejects an explicit allow by name, so the
+// decision is not rendered and stays unenforced (Enforced true only for
+// abstain), while the advice still rides the channel. Without advice, an allow
+// prints nothing, leaving Codex's own permission flow to run, which is not what
+// an allow asked for — on Claude Code the same verdict bypasses the prompt, and
+// the record must not call both outcomes enforced.
 func renderCodex(in Input) Rendered {
 	switch in.Verdict {
 	case Deny:
@@ -195,10 +203,14 @@ func renderCodex(in Input) Rendered {
 		if reason == "" {
 			reason = codexEmptyDenyReason
 		}
-		return renderCodexDeny(in.NativeEvent, reason)
+		return renderCodexDeny(in.NativeEvent, reason, in.Advice)
 	case Ask:
-		return renderCodexDeny(in.NativeEvent, codexAskDegradedReason(in.Reason))
+		return renderCodexDeny(in.NativeEvent, codexAskDegradedReason(in.Reason), in.Advice)
 	default:
+		if in.Advice != "" {
+			out := hookSpecificOutput{HookEventName: in.NativeEvent, AdditionalContext: in.Advice}
+			return Rendered{Stdout: marshal(hookResponse{out}), Enforced: in.Verdict == Abstain, AdviceDelivered: true}
+		}
 		return Rendered{Enforced: in.Verdict == Abstain}
 	}
 }
@@ -215,13 +227,14 @@ func codexAskDegradedReason(handlerReason string) string {
 	return handlerReason + " — " + degraded
 }
 
-func renderCodexDeny(nativeEvent, reason string) Rendered {
+func renderCodexDeny(nativeEvent, reason, advice string) Rendered {
 	out := hookSpecificOutput{
 		HookEventName:            nativeEvent,
 		PermissionDecision:       string(Deny),
 		PermissionDecisionReason: reason,
+		AdditionalContext:        advice,
 	}
-	return Rendered{Stdout: marshal(hookResponse{out}), Enforced: true}
+	return Rendered{Stdout: marshal(hookResponse{out}), Enforced: true, AdviceDelivered: advice != ""}
 }
 
 // renderCursor drops standalone advice: §7 identified no advisory-only

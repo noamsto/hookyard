@@ -1665,7 +1665,7 @@ security decision and a failed append is a bookkeeping problem.
   "cwd":             "/home/noams/nix-config",
   "tool_name":       "Bash",
   "verdict":         "deny",
-  "enforced":        false,
+  "enforced":        true,
   "reason":          "on default branch main; branch first",
   "router":          "ok",
   "router_ms":       4312,
@@ -1674,7 +1674,7 @@ security decision and a failed append is a bookkeeping problem.
     {"name": "secret-read-guard",          "outcome": "abstain", "ms": 9},
     {"name": "git-commit-autostage-guard", "outcome": "advise",  "ms": 8,
      "advice": "Unstaged tracked changes present alongside staged changes",
-     "delivered": false},
+     "delivered": true},
     {"name": "nix-stage-guard",            "outcome": "timeout", "ms": 4300}
   ]
 }
@@ -1715,9 +1715,12 @@ nothing more, whose `ms` is dispatch cost rather than the wall clock every
 other outcome's `ms` reports; and an `advise` outcome
 carries the advisory text itself plus a `delivered` flag, so an advisory the
 target engine had no slot for (§7) is visible as *written but not delivered*
-rather than disappearing. In the example above `delivered` is `false` because
-the event is Codex `pre_tool`, which has no advisory slot — the advice happened, the
-model never saw it, and the record says both.
+rather than disappearing. In the example above `delivered` is `true`: Codex's
+`pre_tool` gained an advisory slot in issue #87, so the guard's advice rides
+`additionalContext` beside the deny in the same payload and the model sees it.
+The flag still earns its place for the events that genuinely have no slot —
+Claude Code's `prompt_submit`, or Codex's `pre_compact` — where the advice
+happened, the model never saw it, and the record says both.
 
 `turn_outcome` is the one field in the example above that isn't there: it is
 optional, `omitempty`, and populated only for pi's `turn_end` and
@@ -2332,7 +2335,7 @@ strings it collected have to ride alongside it:
 | Engine | Verdict rendering | Advisory rendering | Confirmed? |
 |---|---|---|---|
 | Claude Code | `hookSpecificOutput.permissionDecision` = `allow`/`deny`/`ask`, `permissionDecisionReason` = reason, on `pre_tool` only. On `turn_end` (native `Stop`) a deny renders top-level `{"decision":"block","reason":"..."}` instead — never `hookSpecificOutput`, which is a `PreToolUse` contract — and nothing once `stop_hook_active` is true — §11.3 | `hookSpecificOutput.additionalContext`, the concatenation of every advisory collected, delivered on `pre_tool`, `session_start`, and `post_tool` — the latter two have no decision slot, only the advisory one | Verdict yes — documented field, tri-state including `ask`. Advisory arm confirmed on `pre_tool` by an existing guard emitting it, and confirmed live in production on `session_start` and `post_tool` by aeye's `diagram-guidance.sh` and `diagrams.sh` respectively |
-| Codex | Unconfirmed. On `turn_end` (native `Stop`) a deny renders top-level `{"decision":"block","reason":"..."}`, and nothing once `stop_hook_active` is true — §11.3 | `hookSpecificOutput.additionalContext` on `SessionStart` and `UserPromptSubmit` | Confirmed for `SessionStart` and `UserPromptSubmit`: the channel was confirmed by the `fixtures/codex-advisory/outcome-0.154.0-positive.md` probe (codex-cli 0.154.0) — the marker arrives as a `developer`-role model input Codex labels `hooks.additional_context` — and reproduced by `TestLiveCodexDeliversSessionStartAndPromptSubmitAdvice` (codex-cli 0.156.1). `PreToolUse`/`PostToolUse`/`SubagentStart` stay documented and unprobed — a 401'd turn cannot reach them. Separately, the deny-arm and default-timeout clause in this cell was stale for months: both were already fixture-verified (`hook-payloads/codex-pre_tool_use-DENY.json`, `codex-user_prompt_submit-TICK.json`). Issue #87 |
+| Codex | Unconfirmed. On `turn_end` (native `Stop`) a deny renders top-level `{"decision":"block","reason":"..."}`, and nothing once `stop_hook_active` is true — §11.3 | `hookSpecificOutput.additionalContext` on `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse` and the engine-scoped `SubagentStart`. `PreToolUse` is also a decision slot, so a deny carries the advice beside `permissionDecision` in the same payload and an abstain/allow carries `additionalContext` alone | **Confirmed on all five**, authenticated: the `fixtures/codex-advisory/outcome-0.156.1-positive.md` probe (codex-cli 0.156.1) measures each marker arriving as a `developer`-role model input Codex labels `hooks.additional_context` — `PreToolUse`/`PostToolUse` need a completed turn and `SubagentStart` a spawned subagent, which is why the earlier unauthenticated 0.154.0 run stopped at two. `SessionStart`/`UserPromptSubmit` reproduce from `TestLiveCodexDeliversSessionStartAndPromptSubmitAdvice`; the other three from `TestLiveCodexDeliversPreToolPostToolAndSubagentAdvice` (codex-cli 0.156.1). A separate deny+advice probe confirmed Codex acts on a `PreToolUse` deny that still carries `additionalContext`. Separately, the deny-arm and default-timeout clause in this cell was stale for months: both were already fixture-verified (`hook-payloads/codex-pre_tool_use-DENY.json`, `codex-user_prompt_submit-TICK.json`). Issue #87 |
 | Cursor | `permission` field | Unconfirmed | Field name confirmed; exact accepted value set (binary vs. tri-state) not confirmed this pass, and no advisory slot identified |
 | Pi | return `{block: true, reason: string}` from the extension's `tool_call` handler; there is no `allow` wire form — not blocking *is* allow, so an explicit allow renders nothing. On `turn_end` (native `agent_before_settle`) a deny renders the same shape, and the bridge turns it into one continuation carrying the reason — §11.2 | Three channels, one per event, each prefixed `"[hookyard advisory] "`: on `pre_tool`, a deny's advice is joined into the block `reason` (rides with the block, as above); a standalone abstain/allow's advice has no field in the `tool_call` reply pi's agent loop reads, so the bridge stashes it keyed by `toolCallId` and a bridge-owned `tool_result` handler appends it as a text block onto that same call's own tool result — §11.1. On `session_start`, queued advice is flushed as a `before_agent_start` injected message. On `post_tool`, advice is appended to the tool result content | **Confirmed live, twice, including a filesystem side effect**: `touch SIDE-EFFECT.txt` was denied and the file did not exist afterward; a second denied `bash` call produced no `tool_result` event while the reason string still reached the model as the tool's outcome. Decision vocabulary is binary — no `ask` arm was found. The `pre_tool` advisory channels (deny-reason and tool-result-append) are confirmed against `docs/design/fixtures/pi-pre-tool-advisory/` — §11.1 |
 
@@ -2341,7 +2344,11 @@ delivered.** That is a real loss and is stated rather than hidden: a handler
 whose entire purpose is advisory — `git-commit-autostage-guard` is one —
 contributes nothing the model can see on an engine with nowhere to put it.
 Recording it means the loss is visible in the stream rather than silent, which
-is the same trade §5 makes everywhere else.
+is the same trade §5 makes everywhere else. Codex is no longer in that group for
+the five events above: every event its documentation names an advisory channel
+on is wired as of issue #87. Codex events outside that set (`PreCompact`, and a
+standalone `Stop` verdict) still have nowhere to put a non-deny advisory — on
+`Stop` a deny's advice rides the block reason instead (§11.3).
 
 **When a guard returns `ask` and the target engine has no equivalent (a
 binary allow/deny engine), the router degrades `ask` to `deny`, never to
