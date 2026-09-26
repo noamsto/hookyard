@@ -14,13 +14,9 @@ var cursorScopedDecisionEvents = map[string]bool{
 }
 
 // codexScopedAdvisoryEvents is the engine-scoped half of Codex's advisory
-// set: SubagentStart has no canonical counterpart in the six-event vocabulary
-// (nativeEvents carries no Codex row for it), so it is reached only as
-// codex:SubagentStart. Its native hook_event_name is "SubagentStart", so the
-// inbound envelope resolves it with canonical_event "" and the native name set
-// (envelope.From). Codex labels the delivered context hooks.additional_context
-// like the other four events. evidence: docs/design/fixtures/codex-advisory/
-// outcome-0.156.1-positive.md.
+// set: SubagentStart has no canonical counterpart in the six-event vocabulary,
+// so it is reached only as codex:SubagentStart, and the inbound envelope
+// resolves it with canonical_event "" and native_event "SubagentStart".
 var codexScopedAdvisoryEvents = map[string]bool{
 	"SubagentStart": true,
 }
