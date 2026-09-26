@@ -73,10 +73,9 @@ test("layoutPlan: groups, members with parent, ungrouped handlers, group before 
   assert.ok(again);
   const k2 = again.input.nodes.map((n) => n.key);
   assert.deepEqual(k2.slice(0, 4), [nodeKey("outcome", "deny"), g, nodeKey("handler", GUARDS[1]), nodeKey("handler", GUARDS[0])]);
-  assert.ok(plan.input.edges.some(([a, b]) => a === nodeKey("handler", GUARDS[0]) && b === nodeKey("outcome", "deny")));
 });
 
-test("layoutPlan key: unchanged by counts and edges, changed by a node", () => {
+test("layoutPlan key: unchanged by counts and new edges, changed by a node", () => {
   const m = model([[{ hops: [["lint", "allow"]] }, 1], [{ verdict: "deny" }, 1]]);
   const k0 = m.layoutPlan([])?.input;
   assert.ok(k0);
@@ -86,9 +85,7 @@ test("layoutPlan key: unchanged by counts and edges, changed by a node", () => {
   assert.equal(k1?.key, k0.key);
 
   m.recordCall(pathOf({ hops: [["lint", "deny"]] }), ""); // lint -> deny: a new edge between shown nodes
-  const k2 = m.layoutPlan([])?.input;
-  assert.equal(k2?.key, k0.key);
-  assert.notDeepEqual(k2?.edges, k0.edges);
+  assert.equal(m.layoutPlan([])?.input.key, k0.key);
 
   m.stickyShow("engine", "codex");
   assert.notEqual(m.layoutPlan([])?.input.key, k0.key);

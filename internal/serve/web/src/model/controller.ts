@@ -1,24 +1,24 @@
 // FlowController owns the flow view's data state (FlowModel), the rendered
-// snapshot and the pending layout. Pure: every browser dependency is injected
-// (FlowDeps), so it runs under node --test.
+// snapshot and the pending relayout. Pure: every browser dependency is
+// injected (FlowDeps), so it runs under node --test.
 //
-// View API (React):
-//   subscribe(fn) / getVersion()  useSyncExternalStore pair; the version bumps
-//                                 on every refresh. Count-only refreshes are
-//                                 throttled to <= 1 per RENDER_MS; commits and
-//                                 user actions refresh at once. Every getter
-//                                 below is stable between two versions.
-//   snapshot()        committed Snapshot | null — nodes, boxes, columnX, groups
-//   totals()          throttled Totals (display node/edge counts, calls, branches)
-//   edges()           display edges to draw, with counts and the dashed flag
-//   highlight(key) / tooltip(key)   hover data for a drawn node key
-//   meta() idleCount() error() dropped() layoutGen() pendingLayout()
+// View API:
+//   subscribe(fn) / getVersion()  the version bumps on every refresh.
+//                     Count-only refreshes are throttled to <= 1 per
+//                     RENDER_MS; commits and user actions refresh at once.
+//   frame()           what to draw: the committed Snapshot + its Totals, or
+//                     null before the first commit. Held while a press is in
+//                     progress: no new snapshot or counts are drawn under
+//                     the pointer; the release publishes the latest.
+//   counts()          calls/branches as of the latest refresh, held or not
+//   subset(key) / tooltip(key)   hover data for a drawn node key
+//   meta() decisions() idleCount() error() dropped() layoutGen() pendingLayout()
 //   isLive() isVisible() showIdle() isSelected(col, name)
 // Inputs:
 //   sync(detail)      hookyard:sync; loads when visible, else marks stale
 //   onCall(entry)     hookyard:call; returns the call's branches that can pulse
 //                     now, as RAW branches ([col, name] nodes). Map one to drawn
-//                     edges with snapshot().displayNodes(branch) at animation
+//                     edges with frame().snap.displayNodes(branch) at animation
 //                     time. The same branches go to onPulse listeners, only
 //                     while visible.
 //   onPulse(fn)       subscribe the pulse layer; returns an unsubscribe
@@ -26,24 +26,20 @@
 //   setVisible(v) setShowIdle(v)
 //   pressBegin(nodeKey?) / pressEnd()   any press in the flow; pressEnd must
 //                     run after the click handler (one macrotask after release)
-//   toggleGroup(nodeKey)   a group header click, by the group's display node
-//                     key ("group\0<key>"); toggles relative to what was drawn
-//                     at press; a forced group is inert
+//   toggleGroup(nodeKey)   a group click, by the group's display node key
+//                     ("group\0<key>"); toggles relative to what was drawn at
+//                     press; a forced group is inert
 //   dispose()         clears every timer and listener
 
 import { PENDING_CAP, PRESS_HOLD_MAX_MS, RELAYOUT_MS, RENDER_MS, WINDOW_MIN } from "../constants.ts";
-import type {
-  Col, Entry, Filters, FlowResponse, LayoutInput, LayoutResult, PathLike, TableResponse,
-} from "../types.ts";
-import { pathBranches } from "./branches.ts";
+import type { Col, Entry, Filters, FlowResponse, PathLike, TableResponse } from "../types.ts";
 import type { EventLabel } from "./branches.ts";
-import { nodeKey, splitKey } from "./keys.ts";
+import { splitKey } from "./keys.ts";
 import type { Branch } from "./keys.ts";
-import { computeTotals, EMPTY_TOTALS, Snapshot } from "./snapshot.ts";
-import type { DisplayEdge, TipLine, Totals } from "./snapshot.ts";
+import { bySeverity, emptyTotals, isLoud, Snapshot } from "./snapshot.ts";
+import type { Tip, Totals } from "./snapshot.ts";
 import { FlowModel } from "./state.ts";
-import type { GroupRecord, LayoutPlan } from "./state.ts";
-import { rawEdges } from "./topology.ts";
+import type { GroupRecord, LayoutPlan, PathEntry } from "./state.ts";
 
 export interface FlowDeps {
   // Resolves the parsed JSON; rejects on a non-OK response ("<url>: <status>").
@@ -51,7 +47,6 @@ export interface FlowDeps {
   filterParams: () => URLSearchParams;
   activeFilters: () => Filters;
   eventLabel: EventLabel;
-  layout: (input: LayoutInput) => Promise<LayoutResult>;
   now: () => number; // epoch ms: the live ring buckets by wall-clock minute
   setTimeout: (fn: () => void, ms: number) => number;
   clearTimeout: (id: number) => void;
@@ -63,9 +58,13 @@ export type LayoutReason = "load" | "toggle" | "idle" | "live";
 
 const RING_TICK_MS = 1000;
 
-interface PendingLayout { plan: LayoutPlan; gen: number; result: LayoutResult | null; }
+interface PendingLayout { plan: LayoutPlan; gen: number; }
 
-interface ViewCache { totals: Totals; edges: DisplayEdge[]; idle: number; }
+// A frame's paths are copied at refresh: live calls count into the model's
+// paths in place, and hover counts must add up against the drawn totals.
+export interface Frame { snap: Snapshot; totals: Totals; paths: readonly PathEntry[]; }
+
+interface Refresh { frame: Frame | null; calls: number; branches: number; idle: number; }
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -95,7 +94,6 @@ export class FlowController {
   private loadGen = 0;
   private fetchError = "";
   private tableError = "";
-  private layoutError = "";
   private droppedCount = 0;
 
   private version = 0;
@@ -104,7 +102,10 @@ export class FlowController {
   private refreshTimer: number | null = null;
   private lastRefreshAt = -Infinity;
   private ringTimer: number | null = null;
-  private view: ViewCache = { totals: EMPTY_TOTALS, edges: [], idle: 0 };
+  // latest: the newest refresh; drawn: what the view draws — the same
+  // except while a press holds it.
+  private latest: Refresh = { frame: null, calls: 0, branches: 0, idle: 0 };
+  private drawn: Refresh = this.latest;
 
   constructor(deps: FlowDeps) {
     this.deps = deps;
@@ -126,10 +127,10 @@ export class FlowController {
   }
 
   snapshot(): Snapshot | null { return this.rendered; }
-  totals(): Totals { return this.view.totals; }
-  edges(): DisplayEdge[] { return this.view.edges; }
-  idleCount(): number { return this.view.idle; }
-  error(): string { return this.fetchError || this.tableError || this.layoutError; }
+  frame(): Frame | null { return this.drawn.frame; }
+  counts(): { calls: number; branches: number } { return { calls: this.latest.calls, branches: this.latest.branches }; }
+  idleCount(): number { return this.latest.idle; }
+  error(): string { return this.fetchError || this.tableError; }
   dropped(): number { return this.droppedCount; }
   layoutGen(): number { return this.rendered?.gen ?? 0; }
   pendingLayout(): boolean { return this.pending !== null; }
@@ -140,17 +141,32 @@ export class FlowController {
 
   meta(): string {
     if (!this.model.topo) return "";
-    const t = this.view.totals;
-    return (this.live ? "live · last " + WINDOW_MIN + " min · " : (this.dayValue ?? "") + " · whole day · ")
-      + t.calls + " calls · " + t.branches + " branches";
+    const fmt = (n: number) => n.toLocaleString("en-US");
+    return (this.live ? "live · last " + WINDOW_MIN + " min · " : "whole day · ")
+      + fmt(this.latest.calls) + " calls · " + fmt(this.latest.branches) + " branches";
   }
 
-  highlight(key: string): { nodes: Set<string>; edges: Set<string> } {
-    return this.rendered?.highlight(key, this.model.paths.values()) ?? { nodes: new Set(), edges: new Set() };
+  // decisions: every drawn consequential outcome's branch count, most
+  // consequential first.
+  decisions(): [string, number][] {
+    const f = this.drawn.frame;
+    if (!f) return [];
+    const out: [string, number][] = [];
+    for (const n of f.snap.nodes) {
+      const c = f.totals.nodeTotals.get(n.key) ?? 0;
+      if (n.col === "outcome" && isLoud(n.name) && c > 0) out.push([n.name, c]);
+    }
+    return out.sort((a, b) => bySeverity(a[0], b[0]));
   }
 
-  tooltip(key: string): TipLine[] {
-    return this.rendered?.tooltip(key, this.view.totals, this.model.paths.values()) ?? [];
+  subset(key: string): Totals {
+    const f = this.drawn.frame;
+    return f ? f.snap.subset(key, f.paths) : emptyTotals();
+  }
+
+  tooltip(key: string, sub: Totals): Tip | null {
+    const f = this.drawn.frame;
+    return f ? f.snap.tooltip(key, f.totals, sub) : null;
   }
 
   // ---------- inputs ----------
@@ -158,6 +174,7 @@ export class FlowController {
   sync(detail: SyncDetail): Promise<void> {
     this.dayValue = detail.day;
     this.live = detail.live;
+    this.emit(); // a pulse layer stops at once when the day stops being live
     if (!this.visible) {
       this.stale = true;
       return Promise.resolve();
@@ -168,10 +185,10 @@ export class FlowController {
   setVisible(v: boolean): Promise<void> {
     this.visible = v;
     if (!v) {
-      // No relayout follows hiding the panel; emit anyway so a subscriber
-      // (PulseLayer) sees the visibility change and can cancel in-flight
-      // dots rather than wait for a queued rAF that may run after the tab
-      // has flipped back to visible.
+      // No relayout follows hiding the panel; emit anyway so the pulse
+      // layer sees the visibility change and cancels in-flight dots rather
+      // than wait for a queued rAF that may run after the tab has flipped
+      // back to visible.
       this.emit();
       return Promise.resolve();
     }
@@ -229,7 +246,8 @@ export class FlowController {
       this.deps.clearTimeout(this.pressTimer);
       this.pressTimer = null;
     }
-    if (this.pending?.result) this.commit();
+    if (this.pending) this.commit();
+    else if (this.drawn !== this.latest) this.refreshNow();
   }
 
   // toggleGroup reads the record captured at press, else the rendered
@@ -252,7 +270,6 @@ export class FlowController {
     this.listeners.clear();
     this.pulseListeners.clear();
     this.loadGen++;
-    this.layoutGenSeq++;
   }
 
   // ---------- load ----------
@@ -363,10 +380,10 @@ export class FlowController {
     }, RING_TICK_MS);
   }
 
-  // ---------- layout (spec §4.5) ----------
+  // ---------- relayout (spec §4.5) ----------
 
   // requestLayout: user reasons run now; live node-set growth coalesces to at
-  // most one layout per RELAYOUT_MS since the last commit.
+  // most one relayout per RELAYOUT_MS since the last commit.
   private requestLayout(reason: LayoutReason): void {
     if (!this.model.topo) return; // nothing to draw before the first load
     if (reason === "live") {
@@ -386,48 +403,34 @@ export class FlowController {
     this.runLayout();
   }
 
+  // runLayout commits the next node set at once, or holds it while a press
+  // is in progress (the latest held plan wins).
   private runLayout(): void {
     const plan = this.model.layoutPlan(this.rendered?.order ?? []);
     if (!plan) return;
     const key = plan.input.key;
     if (key === (this.pending?.plan.input.key ?? this.rendered?.key)) return;
     if (this.pending && key === this.rendered?.key) {
-      // Back to what is drawn: retire the in-flight/held layout.
-      this.layoutGenSeq++;
+      // Back to what is drawn: retire the held relayout.
       this.pending = null;
       this.emit();
       return;
     }
     const gen = ++this.layoutGenSeq;
     plan.input.gen = gen;
-    this.pending = { plan, gen, result: null };
-    this.deps.layout(plan.input).then(
-      (result) => this.onLayout(gen, result),
-      (err: unknown) => this.onLayoutError(gen, err),
-    );
-    this.emit();
-  }
-
-  private onLayout(gen: number, result: LayoutResult): void {
-    if (gen !== this.layoutGenSeq || this.pending?.gen !== gen) return; // stale: latest wins
-    this.pending.result = result;
-    if (this.pressed) return; // held until pressEnd
+    this.pending = { plan, gen };
+    if (this.pressed) {
+      this.emit();
+      return;
+    }
     this.commit();
-  }
-
-  private onLayoutError(gen: number, err: unknown): void {
-    if (gen !== this.layoutGenSeq) return;
-    this.pending = null;
-    this.layoutError = "flow layout: " + errText(err);
-    this.refreshNow();
   }
 
   private commit(): void {
     const p = this.pending;
-    if (!p?.result) return;
-    this.rendered = new Snapshot(p.plan, p.result, this.deps.eventLabel);
+    if (!p) return;
+    this.rendered = new Snapshot(p.plan, this.deps.eventLabel);
     this.pending = null;
-    this.layoutError = "";
     this.lastCommitAt = this.deps.now();
     this.refreshNow();
   }
@@ -449,14 +452,18 @@ export class FlowController {
       this.refreshTimer = null;
     }
     const snap = this.rendered;
-    const topo = this.model.topo;
-    const paths = this.model.paths.values();
-    const el = this.deps.eventLabel;
-    const totals = snap
-      ? snap.totals(paths)
-      : computeTotals(paths, (p) => pathBranches(p, el).map((b) => b.nodes.map(([c, n]) => nodeKey(c, n))));
-    const edges = snap && topo ? snap.displayEdges(rawEdges(topo), totals) : [];
-    this.view = { totals, edges, idle: this.model.idleCount() };
+    let frame: Frame | null = null;
+    let calls = 0;
+    let branches = 0;
+    if (snap) {
+      const paths = Array.from(this.model.paths.values(), (e) => ({ path: e.path, counts: e.counts.slice() }));
+      const totals = snap.totals(paths, this.model.ring !== null);
+      frame = { snap, totals, paths };
+      calls = totals.calls;
+      branches = totals.branches;
+    }
+    this.latest = { frame, calls, branches, idle: this.model.idleCount() };
+    if (!this.pressed) this.drawn = this.latest;
     this.lastRefreshAt = this.deps.now();
     this.emit();
   }

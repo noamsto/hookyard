@@ -11,7 +11,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Browser, KEYS, MOD, runCleanups, sleep, spawnGroup, tempDir, waitForLine } from "./cdp.mjs";
 import { installHelpers, openFlow } from "./helpers.mjs";
-import { GUARDS_DENY, GUARDS_FIFTH, TODAY_PATHS, append, record, writeFixture } from "./fixture.mjs";
+import { AEYE, GUARDS, GUARDS_DENY, GUARDS_FIFTH, GUARDS_PI, TODAY_PATHS, append, record, writeFixture } from "./fixture.mjs";
 
 const WEB = dirname(dirname(fileURLToPath(import.meta.url)));
 const REPO = resolve(WEB, "../../..");
@@ -19,7 +19,7 @@ const REPO = resolve(WEB, "../../..");
 // Mirrors src/constants.ts; checks 5 and 6 time themselves against these.
 const RELAYOUT_MS = 5000;
 const PRESS_HOLD_MAX_MS = 10000;
-const MAX_DOTS = 48;
+const MAX_DOTS = 128;
 const BURST_CALLS = 500;
 const BURST_MS = 5000;
 const BURST_ELEMENT_SLACK = 20;
@@ -154,68 +154,125 @@ async function check1(page, env) {
   return lines;
 }
 
-async function check2(page, env) {
+async function setViewport(page, width, height) {
+  await page.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+}
+
+// clickGroup toggles the group holding member (its collapsed plate or its
+// open fold header) and waits for the commit that draws the new state.
+async function clickGroup(page, member, wantExpanded) {
+  const m = JSON.stringify(member);
+  const gen = (await page.evaluate("__e2e.state()")).gen;
+  const p = await page.evaluate(`(() => { const h = __e2e.groupHeaderPoint(${m}); if (h && !h.ok) scrollBy(0, h.y - innerHeight / 2); return __e2e.groupHeaderPoint(${m}); })()`);
+  assert(p?.ok, `group of ${member} not hit-testable: ` + JSON.stringify(p));
+  await page.click(p.x, p.y);
+  await page.waitFor(`__e2e.settled() && __e2e.state().gen > ${gen} && __e2e.groupOf(${m})?.expanded === ${wantExpanded}`,
+    5000, `group of ${member} ${wantExpanded ? "open" : "folded"}`);
+}
+
+async function openAll(page) {
+  for (;;) {
+    const g = await page.evaluate("__e2e.groups().find((g) => !g.expanded && !g.forced) ?? null");
+    if (!g) return;
+    await clickGroup(page, g.members[0], true);
+  }
+}
+
+// fitsAt: at one viewport, the graph fits the panel with no horizontal
+// page scroll, and opening every group grows the body without overlaps.
+async function fitsAt(page, env, width, height) {
+  const at = `${width} × ${height}`;
+  await setViewport(page, width, height);
   await openFlow(page, env.base);
+  const fit = await page.evaluate(`({ h: __e2e.horizontalScroll(), out: __e2e.outside(), body: document.getElementById("flow-body").getBoundingClientRect().width, svg: document.querySelector("#flow-body svg").getBoundingClientRect().width })`);
+  assert(fit.h === 0, `horizontal page scroll of ${fit.h} px at ${at}`);
+  assert(fit.out.length === 0, `nodes outside the flow body at ${at}: ` + fit.out.join(", "));
+  assert(fit.svg <= fit.body + 0.5, `graph ${fit.svg} px wide in a ${fit.body} px panel at ${at}`);
+  const lines = [`${at}: graph ${fit.svg.toFixed(0)} px in a ${fit.body.toFixed(0)} px panel, no horizontal scroll`];
+
+  const h0 = await page.evaluate(`document.getElementById("flow-body").getBoundingClientRect().height`);
+  await openAll(page);
+  const open = await page.evaluate(`({ groups: __e2e.groups(), h: document.getElementById("flow-body").getBoundingClientRect().height,
+    hs: __e2e.horizontalScroll(), out: __e2e.outside(), overlaps: __e2e.overlaps(), page: document.documentElement.scrollHeight })`);
+  assert(open.groups.every((g) => g.expanded), "a group stayed folded: " + JSON.stringify(open.groups));
+  assert(open.h > h0, `the flow body did not grow with every group open at ${at} (${h0} -> ${open.h} px)`);
+  assert(open.hs === 0 && open.out.length === 0, `open groups at ${at}: horizontal scroll ${open.hs}, outside: ${open.out.join(", ")}`);
+  assert(open.overlaps.length === 0, `overlaps with every group open at ${at}: ` + open.overlaps.join(", "));
+  lines.push(`${at}, every group open: the flow body grew ${h0.toFixed(0)} -> ${open.h.toFixed(0)} px (page ${open.page} px tall), no overlaps`);
+  return lines;
+}
+
+async function check2(page, env) {
   const lines = [];
-  const e = "__e2e";
+  try {
+    lines.push(...await fitsAt(page, env, 1600, 1000));
+    lines.push(...await fitsAt(page, env, 1280, 800));
 
-  const c = await page.evaluate(e + ".paneCenter()");
-  const t0 = await page.evaluate(e + ".transform()");
-  await page.wheel(c.x, c.y, -300);
-  const t1 = await page.waitFor(`(() => { const t = ${e}.transform(); return t && t.k > ${t0.k} * 1.05 ? t : null; })()`, 3000, "wheel zoom");
-  lines.push(`zoom: wheel scale ${t0.k.toFixed(3)} -> ${t1.k.toFixed(3)}`);
-
-  const p = await page.evaluate(e + ".panePoint()");
-  assert(p, "no bare pane point to drag from");
-  await page.drag(p.x, p.y, p.x + 150, p.y + 90);
-  await sleep(100);
-  const t2 = await page.evaluate(e + ".transform()");
-  const dx = t2.x - t1.x;
-  const dy = t2.y - t1.y;
-  assert(Math.abs(dx - 150) < 10 && Math.abs(dy - 90) < 10, `pane drag moved the viewport by (${dx}, ${dy}), want ≈ (150, 90)`);
-  lines.push(`pan: pane drag moved the viewport (${dx.toFixed(0)}, ${dy.toFixed(0)})`);
-
-  const n = await page.evaluate(`${e}.nodePoint("engine", "claude-code")`);
-  assert(n?.ok, "engine claude-code node not hit-testable: " + JSON.stringify(n));
-  const search = await page.evaluate("location.search");
-  await page.drag(n.x, n.y, n.x + 100, n.y + 60);
-  await sleep(300);
-  const t3 = await page.evaluate(e + ".transform()");
-  const ndx = t3.x - t2.x;
-  const ndy = t3.y - t2.y;
-  assert(Math.abs(ndx - 100) < 10 && Math.abs(ndy - 60) < 10, `node drag moved the viewport by (${ndx}, ${ndy}), want ≈ (100, 60)`);
-  const after = await page.evaluate(`({ search: location.search, chips: ${e}.chips() })`);
-  assert(after.search === search && after.chips.length === 0, "a drag starting on a node filtered: " + JSON.stringify(after));
-  lines.push(`pan: drag from a node moved the viewport (${ndx.toFixed(0)}, ${ndy.toFixed(0)}) and did not filter`);
-
-  const zoomInFar = async () => {
-    for (let i = 0; i < 4; i++) {
-      await page.wheel(c.x, c.y, -400);
-      await sleep(50);
+    const names = await page.evaluate(`__e2e.boxes().map((b) => [b.col, b.name])`);
+    const unreachable = [];
+    for (const [col, name] of names) {
+      const hit = await page.evaluate(`(() => { const el = __e2e.node(${JSON.stringify(col)}, ${JSON.stringify(name)}); el.scrollIntoView({ block: "center" });
+        return __e2e.hit(el.querySelector(".hit")); })()`);
+      if (!hit.ok) unreachable.push(col + ":" + name);
     }
-    return page.waitFor(`${e}.outside().length`, 3000, "zoomed in past the canvas");
-  };
-  await zoomInFar();
-  const fit = await page.evaluate(`${e}.hit(document.querySelector("#flow-body .react-flow__controls-fitview"))`);
-  assert(fit.ok, "Controls fit button not hit-testable");
-  await page.click(fit.x, fit.y);
-  await page.waitFor(`${e}.outside().length === 0`, 3000, "Controls fit brings every node inside").catch(async () => {
-    throw new CheckFailed("after the fit button, nodes outside the canvas: " + (await page.evaluate(`${e}.outside()`)).join(", "));
-  });
-  const nodes = await page.evaluate(`${e}.nodeCount()`);
-  lines.push(`fit: Controls fit button -> all ${nodes} nodes inside the canvas`);
+    assert(unreachable.length === 0, "nodes not reachable by scrolling: " + unreachable.join(", "));
+    lines.push(`all ${names.length} nodes reachable by scrolling the page`);
 
-  await zoomInFar();
-  await page.key(KEYS.zero);
-  await page.waitFor(`${e}.outside().length === 0`, 3000, "key 0 brings every node inside").catch(async () => {
-    throw new CheckFailed("after key 0, nodes outside the canvas: " + (await page.evaluate(`${e}.outside()`)).join(", "));
-  });
-  lines.push(`fit: key 0 -> all ${nodes} nodes inside the canvas`);
+    await page.evaluate("scrollTo(0, 0)");
+    const probe = JSON.stringify(GUARDS[0]);
+    const before = await page.evaluate(`(() => { const r = __e2e.node("handler", ${probe}).getBoundingClientRect(); return { w: r.width, h: r.height, y: scrollY }; })()`);
+    const at = await page.evaluate(`(() => { const r = document.getElementById("flow-body").getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + 200 }; })()`);
+    await page.wheel(at.x, at.y, 400);
+    await sleep(300);
+    const after = await page.evaluate(`(() => { const r = __e2e.node("handler", ${probe}).getBoundingClientRect(); return { w: r.width, h: r.height, y: scrollY }; })()`);
+    assert(after.w === before.w && after.h === before.h, `wheel changed a node's size: ${JSON.stringify(before)} -> ${JSON.stringify(after)}`);
+    assert(after.y > before.y, `wheel over the flow did not scroll the page (scrollY ${before.y} -> ${after.y})`);
+    lines.push(`wheel over the flow scrolls the page (scrollY ${before.y} -> ${after.y}); node size unchanged (no zoom)`);
 
-  const mm = await page.evaluate(`({ present: !!document.querySelector("#flow-body .react-flow__minimap"), mini: ${e}.minimapNodes(), top: ${e}.topLevel() })`);
-  assert(mm.present, "no MiniMap");
-  assert(mm.mini === mm.top && mm.top > 0, `MiniMap shows ${mm.mini} mini-nodes, want one per top-level node (${mm.top})`);
-  lines.push(`minimap: ${mm.mini} mini-nodes == ${mm.top} top-level nodes`);
+    // Phone- and tablet-width panels: the graph keeps its minimum width and
+    // scrolls inside the flow body, the page itself never scrolls sideways,
+    // and the column headers (whose plates give way first) never overlap.
+    for (const [w, h] of [[400, 800], [700, 800]]) {
+      const at = `${w} × ${h}`;
+      await setViewport(page, w, h);
+      const errorsAt = page.errors.length;
+      await openFlow(page, env.base);
+      await sleep(300);
+      const narrow = await page.evaluate(`({ h: __e2e.horizontalScroll(), body: document.getElementById("flow-body").clientWidth, inner: document.getElementById("flow-body").scrollWidth })`);
+      const errors = page.errors.slice(errorsAt);
+      assert(errors.length === 0, `${errors.length} console errors at ${at}:\n      ` + [...new Set(errors)].join("\n      "));
+      assert(narrow.h === 0, `horizontal page scroll of ${narrow.h} px at ${at}`);
+      lines.push(`${at}: no console errors, no horizontal page scroll; the graph (${narrow.inner} px) scrolls inside the ${narrow.body} px flow body`);
+
+      const heads = await page.evaluate(`__e2e.headerBoxes()`);
+      const overlap = [];
+      for (let i = 1; i < heads.length; i++) {
+        if (heads[i].left < heads[i - 1].right - 0.5) {
+          overlap.push(`header ${i - 1} ends at ${heads[i - 1].right.toFixed(0)}, header ${i} starts at ${heads[i].left.toFixed(0)}`);
+        }
+      }
+      assert(overlap.length === 0, `column headers overlap at ${at}: ` + overlap.join("; "));
+      lines.push(`${at}: ${heads.length} column header boxes do not overlap`);
+
+      if (w === 400) {
+        // The tallest group tooltip (guards.pi.*, 8 members) must fit the
+        // flow body's visible area, or scroll inside it — never clip.
+        const piMember = JSON.stringify(GUARDS_PI[0]);
+        await page.evaluate(`__e2e.scrollGroupIntoView(${piMember})`);
+        const hp = await page.evaluate(`__e2e.groupHeaderPoint(${piMember})`);
+        assert(hp?.ok, `guards.pi.* group header not hit-testable at ${at}: ` + JSON.stringify(hp));
+        await page.move(hp.x, hp.y);
+        await page.waitFor(`!document.querySelector("#flow-body .flow-tip").hidden`, 2000, "guards.pi.* group tooltip");
+        const tip = await page.evaluate(`__e2e.tipFit()`);
+        assert(tip.fits || tip.scrolls,
+          `guards.pi.* tooltip (${tip.tipH.toFixed(0)} px) neither fits the ${tip.bodyH.toFixed(0)} px flow body nor scrolls ` +
+          `(scrollHeight ${tip.scrollHeight}, clientHeight ${tip.clientHeight}, overflow-y ${tip.overflowY})`);
+        lines.push(`${at}: guards.pi.* group tooltip (${tip.tipH.toFixed(0)} px) ${tip.fits ? "fits" : "scrolls"} inside the ${tip.bodyH.toFixed(0)} px flow body`);
+      }
+    }
+  } finally {
+    await page.send("Emulation.clearDeviceMetricsOverride");
+  }
   return lines;
 }
 
@@ -414,8 +471,8 @@ async function check7(page, env) {
   ];
 }
 
-// Column header nodes exist only so ELK sizes/positions them; they must
-// never behave like graph nodes.
+// Column headers label the columns; they must never behave like graph
+// nodes.
 async function check8(page, env) {
   await openFlow(page, env.base);
   const lines = [];
@@ -504,9 +561,126 @@ async function check9(page, env) {
   return lines;
 }
 
+// Folding: two groups open at once, fold one, fold the other, Enter on a
+// focused header, every group open — never an overlap.
+async function check10(page, env) {
+  await openFlow(page, env.base);
+  const lines = [];
+  const errorsAt = page.errors.length;
+  const folded = async () => (await page.evaluate("__e2e.groups().filter((g) => !g.expanded).map((g) => g.name).sort()")).join(" ");
+  const initial = await folded();
+  const noOverlap = async (what) => {
+    const bad = await page.evaluate("__e2e.overlaps()");
+    assert(bad.length === 0, what + ": " + bad.join(", "));
+  };
+
+  await clickGroup(page, GUARDS[0], true);
+  await clickGroup(page, GUARDS_PI[0], true);
+  const heads = await page.evaluate(`document.querySelectorAll("#flow-body .flow-group-open").length`);
+  assert(heads === 2, `${heads} fold headers with guards.* and guards.pi.* open, want 2`);
+  await noOverlap("guards.* and guards.pi.* open");
+  lines.push("opened guards.* then guards.pi.*: two fold headers, no plate/header overlap, nothing in the legend row");
+
+  await clickGroup(page, GUARDS[0], false);
+  assert((await page.evaluate(`__e2e.groupOf(${JSON.stringify(GUARDS_PI[0])}).expanded`)) === true, "folding guards.* folded guards.pi.* too");
+  await clickGroup(page, GUARDS_PI[0], false);
+  const back = await folded();
+  assert(back === initial, `after folding both: folded [${back}], want [${initial}]`);
+  lines.push("folded guards.* (guards.pi.* stayed open), then guards.pi.*: back to the collapsed set");
+
+  await clickGroup(page, AEYE[0], true);
+  const gen = (await page.evaluate("__e2e.state()")).gen;
+  await page.evaluate(`__e2e.node("group", ${JSON.stringify(await page.evaluate(`__e2e.groupOf(${JSON.stringify(AEYE[0])}).name`))}).querySelector(".flow-group-header").focus()`);
+  await page.key(KEYS.enter);
+  await page.waitFor(`__e2e.settled() && __e2e.state().gen > ${gen} && __e2e.groupOf(${JSON.stringify(AEYE[0])})?.expanded === false`, 5000, "Enter folds aeye-*");
+  lines.push("opened aeye-*, Enter on its focused fold header folded it");
+
+  await openAll(page);
+  await noOverlap("every group open");
+  const n = await page.evaluate("__e2e.groups().length");
+  const errors = page.errors.slice(errorsAt);
+  assert(errors.length === 0, "page errors: " + errors.join(" | "));
+  lines.push(`all ${n} groups open: no overlaps; no page errors`);
+  return lines;
+}
+
+const opacity = (col, name) => `(() => { const el = __e2e.label(${JSON.stringify(col)}, ${JSON.stringify(name)}); return el ? Number(getComputedStyle(el).opacity) : null; })()`;
+
+// Hover: the hovered node's path stays lit, labels included; a band's
+// tooltip survives a live count refresh under a still pointer.
+async function check11(page, env) {
+  await openFlow(page, env.base);
+  const lines = [];
+  const p = await page.evaluate(`__e2e.nodePoint("event", "pre_tool")`);
+  assert(p?.ok, "event pre_tool not hit-testable: " + JSON.stringify(p));
+  await page.move(p.x, p.y);
+  await page.waitFor(`document.getElementById("flow-body").classList.contains("hl")`, 2000, "hover highlight on pre_tool");
+  const o = await page.evaluate(`({ hovered: ${opacity("event", "pre_tool")}, onPath: ${opacity("handler", "notify")}, offPath: ${opacity("event", "post_tool")} })`);
+  assert(o.hovered === 1, `hovered pre_tool's label has opacity ${o.hovered}, want 1`);
+  assert(o.onPath === 1, `on-path handler notify's label has opacity ${o.onPath}, want 1`);
+  assert(o.offPath !== null && o.offPath < 1, `off-path event post_tool's label has opacity ${o.offPath}, want < 1`);
+  lines.push(`hover pre_tool: its label and on-path notify's at opacity 1; off-path post_tool's at ${o.offPath}`);
+
+  const key = JSON.stringify(["engine", "claude-code", "event", "pre_tool"]);
+  const b = await page.evaluate(`__e2e.bandPoint(${JSON.stringify(key)})`);
+  assert(b?.ok, "no hit-testable claude-code -> pre_tool band");
+  await page.move(b.x, b.y);
+  await page.waitFor(`!document.querySelector("#flow-body .flow-tip").hidden`, 2000, "band tooltip");
+  // Record the tooltip's state right after each redraw, before any later
+  // pointer event could re-hover.
+  const calls = (await page.evaluate("__e2e.state()")).calls;
+  await page.evaluate(`(() => {
+    window.__tipAfterDraw = [];
+    new MutationObserver(() => __tipAfterDraw.push(!document.querySelector("#flow-body .flow-tip").hidden))
+      .observe(document.querySelector("#flow-body .l-bands"), { childList: true });
+  })()`);
+  append(env.stateDir, TODAY_PATHS.slice(0, 3).map((t) => record({ ...t, ts: Date.now() })));
+  await page.waitFor(`__e2e.state().calls > ${calls} && __tipAfterDraw.length > 0`, 4000, "a live refresh redraw");
+  const after = await page.evaluate("__tipAfterDraw");
+  assert(after.every(Boolean), `band tooltip hidden after a live redraw (visible per redraw: ${JSON.stringify(after)})`);
+  lines.push(`band claude-code -> pre_tool hovered: tooltip still shown after ${after.length} live redraw(s)`);
+  return lines;
+}
+
+// Every event plate's ×N and its fan-out gate agree (a gate only where
+// handler runs exceed calls); the legend says how widths are drawn.
+async function check12(page, env) {
+  const lines = [];
+  for (const query of ["", "handler=guards.rm"]) {
+    await openFlow(page, env.base, query);
+    const plates = await page.evaluate(`[...document.querySelectorAll('#flow-body [data-col="event"]')].map((el) => ({
+      name: el.dataset.name, gate: !!el.querySelector(".gate"), fan: __e2e.label("event", el.dataset.name)?.querySelector(".fan")?.textContent ?? "" }))`);
+    const bad = plates.filter((p) => p.gate !== (p.fan !== ""));
+    assert(bad.length === 0, `[${query || "no filter"}] gate and ×N disagree: ` + JSON.stringify(bad));
+    lines.push(`[${query || "no filter"}] ${plates.length} event plates: gates on ${plates.filter((p) => p.gate).map((p) => p.name + p.fan).join(", ") || "none"}`);
+  }
+  const legend = await page.evaluate(`document.querySelector("#flow-body .l-legend").textContent`);
+  assert(legend.includes("width ∝ √count · decisions floored"), `legend "${legend}" does not say decision bands are floored`);
+  lines.push(`legend: "${legend}"`);
+  return lines;
+}
+
+// One outcome everywhere (outcome=deny): emphasis follows each band's share
+// of its column's biggest band — a thin, rare band never outshines it.
+async function check13(page, env) {
+  await openFlow(page, env.base, "outcome=deny");
+  const bands = await page.evaluate(`(() => {
+    if (!document.querySelector("#flow-body svg").classList.contains("mono")) return null;
+    return [...document.querySelectorAll("#flow-body .l-bands .band")].map((p) => ({
+      share: Number(p.style.getPropertyValue("--share")), thin: p.classList.contains("thin"), op: Number(getComputedStyle(p).fillOpacity) }));
+  })()`);
+  assert(bands !== null, "outcome=deny is not drawn in single-outcome mode");
+  const thin = bands.filter((b) => b.thin);
+  assert(thin.length > 0, "no thin band under outcome=deny: the check needs one");
+  const top = Math.min(...bands.filter((b) => b.share === 1).map((b) => b.op));
+  const brighter = bands.filter((b) => b.op > top + 1e-6);
+  assert(brighter.length === 0, `bands more opaque than the biggest (${top}): ` + JSON.stringify(brighter));
+  return [`${bands.length} bands (${thin.length} thin): biggest at ${top}, thin ones ${[...new Set(thin.map((b) => b.op))].join(" / ")}`];
+}
+
 const CHECKS = [
   { n: 1, title: "edge totals == /api/flow derivation (4 filter sets)", fn: check1 },
-  { n: 2, title: "zoom, pan, fit, minimap", fn: check2 },
+  { n: 2, title: "fits the panel at 1600 and 1280: no horizontal scroll, open groups grow it, every node reachable, wheel scrolls; 400 degrades", fn: check2, fresh: true },
   { n: 3, title: "node click filters, shift-click adds, re-click and chip × remove", fn: check3 },
   { n: 4, title: "burst of 500 live calls stays bounded", fn: check4 },
   { n: 5, title: "window 1: header click before the coalesced relayout", fn: check5, fresh: true },
@@ -514,6 +688,10 @@ const CHECKS = [
   { n: 7, title: "static past day: no pulses, whole-day meta", fn: check7 },
   { n: 8, title: "column headers are not interactive graph nodes", fn: check8 },
   { n: 9, title: "in-flight pulses cancel on a day switch or a view toggle", fn: check9, fresh: true },
+  { n: 10, title: "fold: two groups open, fold each, Enter folds, all open without overlap", fn: check10, fresh: true },
+  { n: 11, title: "hover keeps the path's labels lit; a band tooltip survives a live refresh", fn: check11, fresh: true },
+  { n: 12, title: "event plates: the fan-out gate only where ×N shows; legend", fn: check12 },
+  { n: 13, title: "single-outcome emphasis follows share", fn: check13, fresh: true },
 ];
 
 async function main() {

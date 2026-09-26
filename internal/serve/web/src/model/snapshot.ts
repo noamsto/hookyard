@@ -1,9 +1,10 @@
-// The rendered snapshot: an immutable view of one committed layout. Display
-// mapping, counts, hover, tooltips and pulses all read THIS snapshot's
-// expansion, so they stay pinned to what is drawn, never live model state.
+// The rendered snapshot: an immutable view of one committed node set.
+// Display mapping, counts, hover, tooltips and pulses all read THIS
+// snapshot's expansion, so they stay pinned to what is drawn, never live
+// model state.
 
-import { COL_TITLES, OUTCOMES, ROUTER_ERROR } from "../constants.ts";
-import type { Box, Col, DisplayCol, LayoutNode, LayoutResult, PathLike } from "../types.ts";
+import { COL_TITLES, LOUD, OUTCOMES, ROUTER_ERROR, SEVERITY } from "../constants.ts";
+import type { Col, DisplayCol, PathLike, PlanNode } from "../types.ts";
 import { pathBranches } from "./branches.ts";
 import type { EventLabel } from "./branches.ts";
 import { displayKeyFor, groupLabel } from "./groups.ts";
@@ -11,18 +12,25 @@ import { edgeKey, nodeKey, splitEdgeKey, splitKey } from "./keys.ts";
 import type { Branch } from "./keys.ts";
 import { pathTotal } from "./state.ts";
 import type { GroupRecord, LayoutPlan, PathEntry } from "./state.ts";
-import type { RawEdge } from "./topology.ts";
+
+export type Counts = Map<string, number>; // outcome -> count
+
+// Handled: calls that ran at least one handler, and their handler runs. A
+// direct verdict or a router error is a branch but runs no handler.
+export interface Handled { calls: number; runs: number; }
 
 export interface Totals {
   calls: number;
   branches: number;
-  nodeTotals: Map<string, number>; // display node key -> count (an expanded group: sum of its shown members)
+  nodeTotals: Map<string, number>; // display node key -> count (calls for engine/event, else branches)
+  nodeCalls: Map<string, number>; // display node key -> calls with >= 1 branch through it
+  nodeOutcomes: Map<string, Counts>; // display node key -> branches by outcome
+  handled: Map<string, Handled>; // engine/event display key -> its calls that ran a handler
   edgeTotals: Map<string, number>; // display edge key -> count
+  edgeOutcomes: Map<string, Counts>; // display edge key -> count by outcome (engine -> event: by call class)
+  buckets: Map<string, number[]>; // display node key -> per-bucket count (live ring only)
+  members: Map<string, Map<string, Counts>>; // collapsed group node key -> member id -> branches by outcome
 }
-
-export interface DisplayEdge { key: string; from: string; to: string; n: number; direct: boolean; }
-
-export interface TipLine { text: string; cls: "title" | "" | "dim"; }
 
 export interface SnapGroup {
   label: string; // "guards.*" / "aeye-*"
@@ -32,76 +40,167 @@ export interface SnapGroup {
   forced: boolean;
 }
 
-export interface SnapNode extends LayoutNode {
-  box: Box;
-  tipName: string; // "router error", "guards.* (8)", or the name
+export interface SnapNode extends PlanNode {
+  label: string; // "router error", "guards.*", or the name
   dataName: string; // data-name: the group label for a group, else the raw name
   ghost: boolean;
   group?: SnapGroup;
+}
+
+export interface TipRow { label: string; n: number; o?: string; note?: Counts; }
+export interface TipSection { head: string; rows: TipRow[]; }
+export interface Tip {
+  title: string;
+  kind: string; // "engine", "handler group · 8", …
+  facts: string[]; // one line each, e.g. "11,429 calls → 67,610 handler runs (×5.9)"
+  sections: TipSection[];
+  hint: string;
 }
 
 export function displayLabel(col: DisplayCol, name: string): string {
   return col === "outcome" && name === ROUTER_ERROR ? "router error" : name;
 }
 
-// outcomeClass derives a class name only from the known outcome list.
-export function outcomeClass(name: string): string {
-  if (name === ROUTER_ERROR) return "v-router-error";
-  return OUTCOMES.includes(name) ? "v-" + name : "";
+// knownOutcome maps a wire outcome onto the known list (for data-o and
+// classes); anything else is "other".
+export function knownOutcome(name: string): string {
+  return name === ROUTER_ERROR || OUTCOMES.includes(name) ? name : "other";
+}
+
+export function severityRank(o: string): number {
+  const i = SEVERITY.indexOf(o);
+  return i < 0 ? SEVERITY.length : i;
+}
+
+export function bySeverity(a: string, b: string): number {
+  return severityRank(a) - severityRank(b);
+}
+
+export function isLoud(o: string): boolean {
+  return LOUD.has(o);
 }
 
 export function unitOf(col: DisplayCol): string {
   return col === "engine" || col === "event" ? "calls" : "branches";
 }
 
-export const EMPTY_TOTALS: Totals = { calls: 0, branches: 0, nodeTotals: new Map(), edgeTotals: new Map() };
+export function emptyTotals(): Totals {
+  return {
+    calls: 0, branches: 0, nodeTotals: new Map(), nodeCalls: new Map(), nodeOutcomes: new Map(), handled: new Map(),
+    edgeTotals: new Map(), edgeOutcomes: new Map(), buckets: new Map(), members: new Map(),
+  };
+}
+
+function bump(m: Map<string, number>, k: string, n: number): void {
+  m.set(k, (m.get(k) ?? 0) + n);
+}
+
+function bumpIn<K>(m: Map<K, Counts>, k: K, o: string, n: number): void {
+  let c = m.get(k);
+  if (!c) m.set(k, c = new Map());
+  bump(c, o, n);
+}
+
+function addBuckets(m: Map<string, number[]>, k: string, counts: readonly number[], times: number): void {
+  let b = m.get(k);
+  if (!b) m.set(k, b = new Array<number>(counts.length).fill(0));
+  for (let i = 0; i < counts.length; i++) b[i] += counts[i] * times;
+}
+
+const outcomeOf = (keys: readonly string[]): string => splitKey(keys[keys.length - 1])[1];
 
 // computeTotals counts paths onto display nodes and edges: engine and event
 // nodes and the engine->event edge count calls, everything past the event
 // counts branches. Two branches of one call sharing a display edge into a
-// collapsed group both count.
-export function computeTotals(paths: Iterable<PathEntry>, branchesOf: (p: PathLike) => string[][]): Totals {
-  const edgeTotals = new Map<string, number>();
-  const nodeTotals = new Map<string, number>();
-  const bump = (m: Map<string, number>, k: string, n: number) => m.set(k, (m.get(k) ?? 0) + n);
-  let calls = 0;
-  let branches = 0;
+// collapsed group both count. keep restricts to a subset of branches (a
+// hover): a call counts when at least one of its branches is kept. The
+// engine->event edge is split by the call's class: its most consequential
+// kept branch outcome.
+export function computeTotals(
+  paths: Iterable<PathEntry>,
+  branchesOf: (p: PathLike) => string[][],
+  opts: { keep?: (keys: readonly string[]) => boolean; buckets?: boolean } = {},
+): Totals {
+  const t = emptyTotals();
   for (const entry of paths) {
     const n = pathTotal(entry);
-    calls += n;
     if (n === 0) continue;
-    const bs = branchesOf(entry.path);
-    branches += n * bs.length;
+    const all = branchesOf(entry.path);
+    const bs = opts.keep ? all.filter(opts.keep) : all;
+    if (bs.length === 0) continue;
+    t.calls += n;
+    t.branches += n * bs.length;
     const [eng, ev] = bs[0];
-    bump(nodeTotals, eng, n);
-    bump(nodeTotals, ev, n);
-    bump(edgeTotals, edgeKey(eng, ev), n);
-    for (const keys of bs) {
-      for (let i = 2; i < keys.length; i++) {
-        bump(nodeTotals, keys[i], n);
-        bump(edgeTotals, edgeKey(keys[i - 1], keys[i]), n);
+    const ee = edgeKey(eng, ev);
+    const cls = bs.map(outcomeOf).sort(bySeverity)[0];
+    bump(t.nodeTotals, eng, n);
+    bump(t.nodeTotals, ev, n);
+    bump(t.edgeTotals, ee, n);
+    bumpIn(t.edgeOutcomes, ee, cls, n);
+    const runs = bs.filter((keys) => keys.length === 4).length;
+    if (runs > 0) {
+      for (const k of [eng, ev]) {
+        const h = t.handled.get(k) ?? { calls: 0, runs: 0 };
+        h.calls += n;
+        h.runs += n * runs;
+        t.handled.set(k, h);
       }
     }
+    const touched = new Map<string, number>(); // node -> branches through it
+    for (const keys of bs) {
+      const o = outcomeOf(keys);
+      for (const k of keys) {
+        bumpIn(t.nodeOutcomes, k, o, n);
+        touched.set(k, (touched.get(k) ?? 0) + 1);
+      }
+      for (let i = 2; i < keys.length; i++) {
+        const e = edgeKey(keys[i - 1], keys[i]);
+        bump(t.nodeTotals, keys[i], n);
+        bump(t.edgeTotals, e, n);
+        bumpIn(t.edgeOutcomes, e, o, n);
+      }
+    }
+    for (const [k, times] of touched) {
+      bump(t.nodeCalls, k, n);
+      if (opts.buckets) addBuckets(t.buckets, k, entry.counts, k === eng || k === ev ? 1 : times);
+    }
   }
-  return { calls, branches, nodeTotals, edgeTotals };
+  return t;
+}
+
+function sum(c: Counts | undefined): number {
+  let s = 0;
+  for (const v of c?.values() ?? []) s += v;
+  return s;
+}
+
+function outcomeRows(c: Counts | undefined): TipRow[] {
+  return [...c ?? []].sort((a, b) => bySeverity(a[0], b[0])).map(([o, n]) => ({ label: o, n, o }));
+}
+
+const fmt = (n: number): string => n.toLocaleString("en-US");
+
+// runsFact: "N calls → R handler runs (×F)", F per call that ran a handler.
+function runsFact(calls: number, h: Handled | undefined): string {
+  const fact = fmt(calls) + " calls → " + fmt(h?.runs ?? 0) + " handler runs";
+  if (!h) return fact;
+  return fact + (h.calls < calls ? " on " + fmt(h.calls) : "") + " (×" + (h.runs / h.calls).toFixed(1) + ")";
 }
 
 export class Snapshot {
   readonly gen: number;
   readonly key: string;
-  readonly order: readonly string[]; // node keys in layout-input order (group before its members)
+  readonly order: readonly string[]; // node keys in plan order (group before its members)
   readonly nodes: readonly SnapNode[];
-  readonly columnX: readonly number[];
   private readonly byKey: Map<string, SnapNode>;
   private readonly plan: LayoutPlan;
   private readonly eventLabel: EventLabel;
 
-  constructor(plan: LayoutPlan, result: LayoutResult, eventLabel: EventLabel) {
+  constructor(plan: LayoutPlan, eventLabel: EventLabel) {
     this.plan = plan;
     this.eventLabel = eventLabel;
     this.gen = plan.input.gen;
     this.key = plan.input.key;
-    this.columnX = result.columnX;
     this.order = plan.input.nodes.map((n) => n.key);
 
     const shownOf = new Map<string, string[]>();
@@ -112,15 +211,14 @@ export class Snapshot {
       else shownOf.set(n.parent, [n.key]);
     }
     this.nodes = plan.input.nodes.map((n): SnapNode => {
-      const box = result.boxes[n.key];
       if (n.col !== "group") {
         const label = displayLabel(n.col, n.name);
-        return { ...n, box, tipName: label, dataName: n.name, ghost: n.col === "handler" && plan.ghost.has(n.name) };
+        return { ...n, label, dataName: n.name, ghost: n.col === "handler" && plan.ghost.has(n.name) };
       }
       const members = plan.groups.members.get(n.name) ?? [];
       const label = groupLabel(n.name, members);
       return {
-        ...n, box, tipName: label + " (" + members.length + ")", dataName: label, ghost: false,
+        ...n, label, dataName: label, ghost: false,
         group: {
           label, members,
           shown: shownOf.get(n.key) ?? [],
@@ -147,6 +245,17 @@ export class Snapshot {
     return g && { expanded: g.expanded, forced: g.forced };
   }
 
+  // memberLabel: a member drawn inside an expanded group, without the
+  // group's prefix ("read-skeleton" under guards.*).
+  memberLabel(key: string): string {
+    const n = this.byKey.get(key);
+    if (!n) return splitKey(key)[1];
+    const parent = n.parent !== undefined ? this.byKey.get(n.parent)?.group : undefined;
+    if (!parent) return n.label;
+    const prefix = parent.label.slice(0, -1); // "guards." / "aeye-"
+    return n.name.startsWith(prefix) ? n.name.slice(prefix.length) : n.name;
+  }
+
   displayKey(col: Col, name: string): string {
     return displayKeyFor(this.plan.groups.groupOf, this.plan.expanded, col, name);
   }
@@ -164,95 +273,105 @@ export class Snapshot {
     return b.nodes.every(([col, name]) => this.byKey.has(this.displayKey(col, name)));
   }
 
-  totals(paths: Iterable<PathEntry>): Totals {
-    const t = computeTotals(paths, (p) => this.displayBranches(p));
+  totals(paths: Iterable<PathEntry>, buckets = false): Totals {
+    const list = [...paths];
+    const t = computeTotals(list, (p) => this.displayBranches(p), { buckets });
     for (const n of this.nodes) {
       if (!n.group?.expanded) continue;
       t.nodeTotals.set(n.key, n.group.shown.reduce((a, k) => a + (t.nodeTotals.get(k) ?? 0), 0));
     }
-    return t;
-  }
-
-  // displayEdges maps the topology's raw edges onto this snapshot: deduped,
-  // both endpoints drawn. A new edge between drawn nodes shows up here without
-  // a relayout.
-  displayEdges(raw: Iterable<RawEdge>, totals: Totals): DisplayEdge[] {
-    const out: DisplayEdge[] = [];
-    const seen = new Set<string>();
-    for (const [a, b] of raw) {
-      const from = this.displayKey(a[0], a[1]);
-      const to = this.displayKey(b[0], b[1]);
-      const key = edgeKey(from, to);
-      if (seen.has(key) || !this.byKey.has(from) || !this.byKey.has(to)) continue;
-      seen.add(key);
-      const direct = a[0] === "event" && b[0] === "outcome" && b[1] !== ROUTER_ERROR;
-      out.push({ key, from, to, n: totals.edgeTotals.get(key) ?? 0, direct });
-    }
-    return out;
-  }
-
-  // highlight: every drawn branch through the node (upstream prefix and
-  // downstream suffix); an expanded group header targets its members.
-  highlight(key: string, paths: Iterable<PathEntry>): { nodes: Set<string>; edges: Set<string> } {
-    const node = this.byKey.get(key);
-    const targets = new Set(node?.group?.expanded ? node.group.shown : [key]);
-    const nodes = new Set([key]);
-    const edges = new Set<string>();
-    for (const entry of paths) {
-      if (pathTotal(entry) === 0) continue;
-      for (const keys of this.displayBranches(entry.path)) {
-        if (!keys.some((k) => targets.has(k))) continue;
-        for (const k of keys) nodes.add(k);
-        for (let i = 1; i < keys.length; i++) edges.add(edgeKey(keys[i - 1], keys[i]));
-      }
-    }
-    return { nodes, edges };
-  }
-
-  tooltip(key: string, totals: Totals, paths: Iterable<PathEntry>): TipLine[] {
-    const node = this.byKey.get(key);
-    if (!node) return [];
-    const lines: TipLine[] = [{ text: node.tipName + " — " + COL_TITLES[node.col], cls: "title" }];
-    const n = totals.nodeTotals.get(key) ?? 0;
-    lines.push({ text: n + " " + unitOf(node.col) + (node.ghost ? " · not in the installed table" : ""), cls: "" });
-
-    const outs: [string, number][] = [];
-    const ins: [string, number][] = [];
-    for (const [ek, en] of totals.edgeTotals) {
-      if (en === 0) continue;
-      const [from, to] = splitEdgeKey(ek);
-      if (!this.byKey.has(from) || !this.byKey.has(to)) continue;
-      if (from === key) outs.push([to, en]);
-      else if (to === key) ins.push([from, en]);
-    }
-    const top = (list: [string, number][]) => list.sort((a, b) => b[1] - a[1]).slice(0, 4);
-    const tip = (k: string) => this.byKey.get(k)?.tipName ?? splitKey(k)[1];
-    for (const [k, en] of top(outs)) lines.push({ text: "→ " + tip(k) + "  " + en, cls: "" });
-    for (const [k, en] of top(ins)) lines.push({ text: "← " + tip(k) + "  " + en, cls: "" });
-
-    if (node.group) {
-      for (const [id, mn] of this.memberCounts(node.group.members, paths)) lines.push({ text: "  " + id + "  " + mn, cls: "" });
-    }
-    const hint = !node.group ? "click: filter · shift-click: add"
-      : node.group.forced ? "held open by the handler filter"
-      : "click: expand/collapse";
-    lines.push({ text: hint, cls: "dim" });
-    return lines;
-  }
-
-  private memberCounts(members: readonly string[], paths: Iterable<PathEntry>): [string, number][] {
-    const counts = new Map(members.map((id) => [id, 0]));
-    for (const entry of paths) {
+    for (const entry of list) {
       const n = pathTotal(entry);
       if (n === 0) continue;
       for (const b of pathBranches(entry.path, this.eventLabel)) {
         const h = b.nodes[2];
-        if (h && h[0] === "handler") {
-          const c = counts.get(h[1]);
-          if (c !== undefined) counts.set(h[1], c + n);
-        }
+        if (h?.[0] !== "handler") continue;
+        const dk = this.displayKey("handler", h[1]);
+        if (!this.byKey.get(dk)?.group) continue;
+        let m = t.members.get(dk);
+        if (!m) t.members.set(dk, m = new Map());
+        bumpIn(m, h[1], b.nodes[3][1], n);
       }
     }
-    return [...counts].sort((a, b) => b[1] - a[1]);
+    return t;
+  }
+
+  // subset: the totals of every drawn branch through the node (upstream
+  // prefix and downstream suffix); an expanded group header targets its
+  // members.
+  subset(key: string, paths: Iterable<PathEntry>): Totals {
+    const node = this.byKey.get(key);
+    const targets = new Set(node?.group?.expanded ? node.group.shown : [key]);
+    return computeTotals(paths, (p) => this.displayBranches(p), { keep: (keys) => keys.some((k) => targets.has(k)) });
+  }
+
+  tooltip(key: string, totals: Totals, sub: Totals): Tip | null {
+    const node = this.byKey.get(key);
+    if (!node) return null;
+    const title = node.group ? node.group.label : node.label;
+    const n = totals.nodeTotals.get(key) ?? 0;
+    const sections: TipSection[] = [];
+    const facts: string[] = [];
+    let kind: string = COL_TITLES[node.col];
+
+    if (node.col === "engine" || node.col === "event") {
+      facts.push(runsFact(n, totals.handled.get(key)));
+      sections.push({ head: "outcomes · branches", rows: outcomeRows(totals.nodeOutcomes.get(key)) });
+    } else if (node.col === "outcome") {
+      facts.push(fmt(n) + " branches on " + fmt(totals.nodeCalls.get(key) ?? 0) + " calls");
+      const from: TipRow[] = [];
+      for (const [ek, en] of totals.edgeTotals) {
+        const [a, b] = splitEdgeKey(ek);
+        if (b !== key || en === 0) continue;
+        const an = this.byKey.get(a);
+        from.push({ label: (an?.group?.label ?? an?.label ?? splitKey(a)[1]) + (an?.col === "event" ? " (no handler)" : ""), n: en });
+      }
+      sections.push({ head: "from · branches", rows: from.sort((x, y) => y.n - x.n).slice(0, 8) });
+    } else {
+      if (node.group) kind = COL_TITLES.group + " · " + node.group.members.length;
+      facts.push(fmt(n) + " runs on " + fmt(totals.nodeCalls.get(key) ?? sub.calls) + " calls");
+      if (node.ghost) facts.push("not in the installed table");
+      sections.push({ head: "outcomes · branches", rows: outcomeRows(this.outcomesOf(key, totals)) });
+      if (node.group) {
+        const rows = this.memberRows(key, node.group, totals);
+        sections.push({ head: "member · runs", rows });
+      }
+      const fed = new Map<string, number>();
+      for (const [ek, en] of sub.edgeTotals) {
+        const [a, b] = splitEdgeKey(ek);
+        if (splitKey(a)[0] !== "engine") continue;
+        bump(fed, splitKey(a)[1] + " · " + (this.byKey.get(b)?.label ?? splitKey(b)[1]), en);
+      }
+      sections.push({ head: "fed by · calls", rows: [...fed].sort((x, y) => y[1] - x[1]).slice(0, 6).map(([label, c]) => ({ label, n: c })) });
+    }
+    const hint = !node.group ? "click to filter · shift-click to add"
+      : node.group.forced ? "held open by the handler filter"
+      : node.group.expanded ? "click to fold"
+      : "click to expand";
+    return { title, kind, facts, sections, hint };
+  }
+
+  // outcomesOf a handler-column node: an expanded group sums its members.
+  private outcomesOf(key: string, totals: Totals): Counts | undefined {
+    const g = this.byKey.get(key)?.group;
+    if (!g?.expanded) return totals.nodeOutcomes.get(key);
+    const out: Counts = new Map();
+    for (const k of g.shown) for (const [o, c] of totals.nodeOutcomes.get(k) ?? []) bump(out, o, c);
+    return out;
+  }
+
+  private memberRows(key: string, g: SnapGroup, totals: Totals): TipRow[] {
+    const byMember = new Map<string, Counts>();
+    if (g.expanded) {
+      for (const k of g.shown) byMember.set(splitKey(k)[1], totals.nodeOutcomes.get(k) ?? new Map());
+    } else {
+      for (const [id, c] of totals.members.get(key) ?? []) byMember.set(id, c);
+    }
+    const prefix = g.label.slice(0, -1);
+    return g.members.map((id): TipRow => {
+      const c = byMember.get(id);
+      const loud = new Map([...c ?? []].filter(([o]) => isLoud(o)));
+      return { label: id.startsWith(prefix) ? id.slice(prefix.length) : id, n: sum(c), note: loud.size ? loud : undefined };
+    }).sort((a, b) => b.n - a.n);
   }
 }

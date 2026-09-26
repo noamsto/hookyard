@@ -3,9 +3,9 @@
 //
 //   CHROME=… npm run screenshots -- http://127.0.0.1:7757 ../../../docs/serve-flow
 //
-// writes <prefix>.png (default view), <prefix>-grouped.png (one group
-// expanded, zoomed in, a member hovered) and <prefix>-filtered.png (a past
-// day, filtered by clicking its deny outcome node).
+// writes <prefix>.png (default view), <prefix>-grouped.png (the busiest
+// group opened, a member hovered) and <prefix>-filtered.png (a past day,
+// filtered by clicking its deny outcome node).
 import { Browser, runCleanups, sleep } from "./cdp.mjs";
 import { installHelpers, openFlow } from "./helpers.mjs";
 
@@ -36,28 +36,20 @@ async function main() {
     await openFlow(page, base);
     await shoot(page, prefix + ".png");
 
-    // The busiest collapsible group, expanded, zoomed into, a member hovered.
+    // The busiest collapsible group, opened, a member hovered.
     const group = await page.evaluate(`__e2e.groups().filter((g) => !g.expanded && !g.forced).sort((a, b) => b.n - a.n)[0] ?? null`);
-    if (!group) throw new Error("no collapsed group to expand");
+    if (!group) throw new Error("no collapsed group to open");
     const gen = (await page.evaluate("__e2e.state()")).gen;
     const member = JSON.stringify(group.members[0]);
-    const hdr = await hitOrFail(page, `__e2e.groupHeaderPoint(${member})`, "group header " + group.name);
+    const hdr = await hitOrFail(page, `__e2e.groupHeaderPoint(${member})`, "group " + group.name);
     await page.click(hdr.x, hdr.y);
-    await page.waitFor(`__e2e.settled() && __e2e.state().gen > ${gen} && __e2e.groupOf(${member})?.expanded`, 10000, "group expanded");
+    await page.waitFor(`__e2e.settled() && __e2e.state().gen > ${gen} && __e2e.groupOf(${member})?.expanded`, 10000, "group opened");
     await sleep(300);
     const shown = await page.evaluate(`__e2e.groupOf(${member}).members.find((m) => __e2e.nodePoint("handler", m)?.ok) ?? null`);
     if (!shown) throw new Error("no drawn member in " + group.name);
-    const at = await page.evaluate(`__e2e.nodePoint("handler", ${JSON.stringify(shown)})`);
-    for (let i = 0; i < 2; i++) {
-      await page.wheel(at.x, at.y, -250);
-      await sleep(150);
-    }
-    // Wheel zoom no longer drops the hover, so the node hovered into before
-    // zooming is still hovered; move to its (possibly shifted) screen point
-    // to settle the tooltip position.
     const hover = await hitOrFail(page, `__e2e.nodePoint("handler", ${JSON.stringify(shown)})`, "member " + shown);
     await page.move(hover.x, hover.y);
-    await page.waitFor(`!!document.querySelector("#flow-body .flow-tip")`, 3000, "tooltip");
+    await page.waitFor(`!document.querySelector("#flow-body .flow-tip").hidden`, 3000, "tooltip");
     await shoot(page, prefix + "-grouped.png");
 
     // A past day, filtered by clicking its deny outcome.

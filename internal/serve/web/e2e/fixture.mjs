@@ -93,6 +93,10 @@ export const TODAY_PATHS = [
   { n: 3, engine: "pi", event: "", native: "turn_end", verdict: "abstain" },
   // A cross-registration drop: suppressed as the call verdict, no handlers.
   { n: 1, engine: "claude-code", event: "pre_tool", native: "PreToolUse", tool: "Read", verdict: "suppressed" },
+  // One handler each on pi's turn_end, both allow: two bands leave it for
+  // one arriving, yet nothing fans out.
+  { n: 1, engine: "pi", event: "", native: "turn_end", verdict: "allow", hops: [["lint-go", "allow"]] },
+  { n: 1, engine: "pi", event: "", native: "turn_end", verdict: "allow", hops: [["notify", "allow"]] },
 ];
 
 const PAST_PATHS = [

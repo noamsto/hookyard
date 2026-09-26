@@ -32,7 +32,7 @@ function pageHelpers() {
       return this.groups().find((g) => g.members.includes(member)) ?? null;
     },
     edges() {
-      return qa("#flow-body path[data-key]").map((p) => [p.dataset.key, Number(p.dataset.n)]);
+      return qa("#flow-body [data-key]").map((p) => [p.dataset.key, Number(p.dataset.n)]);
     },
     // hit: the element's centre, and whether a click there lands on it.
     hit(el) {
@@ -42,66 +42,111 @@ function pageHelpers() {
       const at = document.elementFromPoint(x, y);
       return { x, y, ok: !!at && (at === el || el.contains(at)) };
     },
+    node(col, name) {
+      return q(`#flow-body [data-col="${CSS.escape(col)}"][data-name="${CSS.escape(name)}"]`);
+    },
+    // label: a node's label group (labels sit in their own layer, above the
+    // bands, so they are not children of the node).
+    label(col, name) {
+      return q(`#flow-body .label[data-of="${CSS.escape(JSON.stringify([col, name]))}"]`);
+    },
+    // bandPoint: a point that hit-tests to one of the edge's bands.
+    bandPoint(key) {
+      const g = qa("#flow-body .flow-edge").find((el) => el.dataset.key === key);
+      for (const p of g ? g.querySelectorAll(".band") : []) {
+        const r = p.getBoundingClientRect();
+        const x = r.left + r.width / 2;
+        for (let y = r.top; y <= r.bottom; y++) if (document.elementFromPoint(x, y) === p) return { x, y, ok: true };
+      }
+      return null;
+    },
     nodePoint(col, name) {
-      const el = q(`#flow-body [data-col="${CSS.escape(col)}"][data-name="${CSS.escape(name)}"]`);
+      const el = this.node(col, name);
       return el ? this.hit(el) : null;
     },
-    // headerPoint: the i-th column header (engine, event, handler, outcome —
-    // DOM order matches buildNodes' COLUMNS loop). Headers aren't graph
-    // nodes, so unlike nodePoint this can't key off data-col/data-name.
+    // headerPoint: the i-th column header (engine, event, handler, outcome).
+    // Headers aren't graph nodes, so unlike nodePoint this can't key off
+    // data-col/data-name.
     headerPoint(i) {
-      const el = qa(".react-flow__node-colHeader")[i];
+      const el = qa("#flow-body .flow-colhead")[i];
       return el ? this.hit(el) : null;
     },
+    // headerBoxes: every column header's rendered extent (rect + text, so
+    // header text overflowing its background box is caught), in page
+    // coordinates, left to right.
+    headerBoxes() {
+      return qa("#flow-body .flow-colhead").map((el) => {
+        const r = el.getBoundingClientRect();
+        return { left: r.left + scrollX, right: r.right + scrollX, top: r.top + scrollY, bottom: r.bottom + scrollY };
+      }).sort((a, b) => a.left - b.left);
+    },
+    // tipFit: whether the open tooltip sits fully inside the flow body's
+    // visible area, or — when taller than that — scrolls inside it instead
+    // of being clipped.
+    tipFit() {
+      const t = q("#flow-body .flow-tip");
+      const b = body();
+      if (!t || !b) return null;
+      const tr = t.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      // b.clientHeight excludes a horizontal scrollbar's own strip (present
+      // when .wide scrolls sideways); that strip is not visible content, so
+      // the tooltip must fit above it, not just inside the full box.
+      const visibleBottom = br.top + b.clientHeight;
+      const overflowY = getComputedStyle(t).overflowY;
+      return {
+        tipH: tr.height, bodyH: b.clientHeight,
+        fits: tr.top >= br.top - 0.5 && tr.bottom <= visibleBottom + 0.5,
+        scrolls: t.scrollHeight > t.clientHeight && overflowY === "auto",
+        scrollHeight: t.scrollHeight, clientHeight: t.clientHeight, overflowY,
+      };
+    },
+    // groupHeaderPoint: what toggles the member's group — a collapsed
+    // group's plate, or an open group's fold header.
     groupHeaderPoint(member) {
       const g = groupEls().find((el) => JSON.parse(el.dataset.members).includes(member));
       const h = g?.querySelector(".flow-group-header");
       return h ? this.hit(h) : null;
     },
+    // scrollGroupIntoView: bring a member's group element into view — the
+    // flow body scrolls horizontally at narrow widths, not just the page.
+    scrollGroupIntoView(member) {
+      const g = groupEls().find((el) => JSON.parse(el.dataset.members).includes(member));
+      g?.scrollIntoView({ block: "center", inline: "center" });
+      return !!g;
+    },
     selected(col, name) {
-      return !!q(`#flow-body [data-col="${CSS.escape(col)}"][data-name="${CSS.escape(name)}"].selected`);
+      return !!this.node(col, name)?.classList.contains("selected");
     },
-    transform() {
-      const t = q("#flow-body .react-flow__viewport")?.style.transform ?? "";
-      const m = t.match(/translate\(([-\d.e]+)px, ([-\d.e]+)px\) scale\(([-\d.e]+)\)/);
-      return m ? { x: Number(m[1]), y: Number(m[2]), k: Number(m[3]) } : null;
+    // boxes: every drawn node's hit area in page coordinates, by column.
+    boxes() {
+      return qa("#flow-body [data-col]").map((el) => {
+        const r = el.querySelector(".hit").getBoundingClientRect();
+        return { col: el.dataset.col, name: el.dataset.name, expanded: el.dataset.expanded, left: r.left + scrollX, right: r.right + scrollX, top: r.top + scrollY, bottom: r.bottom + scrollY };
+      });
     },
-    paneCenter() {
-      const r = q("#flow-body .react-flow").getBoundingClientRect();
-      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-    },
-    // panePoint: a point where a press lands on the bare pane.
-    panePoint() {
-      const r = q("#flow-body .react-flow").getBoundingClientRect();
-      for (let fy = 0.1; fy < 0.95; fy += 0.05) {
-        for (let fx = 0.1; fx < 0.9; fx += 0.05) {
-          const x = r.left + r.width * fx;
-          const y = r.top + r.height * fy;
-          if (document.elementFromPoint(x, y)?.classList.contains("react-flow__pane")) return { x, y };
-        }
+    // overlaps: pairs of handler-column hit areas (plates, open-group fold
+    // headers) that overlap, and any that reach into the legend row.
+    overlaps() {
+      const rs = this.boxes().filter((b) => b.col === "handler" || b.col === "group").sort((a, b) => a.top - b.top);
+      const bad = [];
+      for (let i = 1; i < rs.length; i++) {
+        if (rs[i].top < rs[i - 1].bottom - 0.5 && rs[i].left < rs[i - 1].right && rs[i - 1].left < rs[i].right) bad.push(rs[i - 1].name + " / " + rs[i].name);
       }
-      return null;
+      const legend = q("#flow-body .l-legend")?.getBoundingClientRect();
+      const floor = legend && legend.height > 0 ? legend.top + scrollY : Infinity;
+      for (const b of this.boxes()) if (b.bottom > floor + 0.5) bad.push(b.name + " reaches the legend");
+      return bad;
     },
-    // outside: ids of nodes not fully inside the flow canvas.
+    // outside: nodes not fully inside the flow body.
     outside() {
-      const r = q("#flow-body .react-flow").getBoundingClientRect();
-      return qa("#flow-body .react-flow__node").filter((n) => {
-        const b = n.getBoundingClientRect();
-        return b.left < r.left - 1 || b.top < r.top - 1 || b.right > r.right + 1 || b.bottom > r.bottom + 1;
-      }).map((n) => n.dataset.id.replace("\x00", ":"));
+      const r = body().getBoundingClientRect();
+      const [left, top] = [r.left + scrollX, r.top + scrollY];
+      return this.boxes().filter((b) => b.left < left - 1 || b.top < top - 1 || b.right > left + r.width + 1 || b.bottom > top + r.height + 1)
+        .map((b) => b.col + ":" + b.name);
     },
-    nodeCount() {
-      return qa("#flow-body .react-flow__node").length;
-    },
-    // topLevel: drawn cards and groups that are not members inside an
-    // expanded group.
-    topLevel() {
-      const inside = new Set();
-      for (const g of this.groups()) if (g.expanded) for (const m of g.members) inside.add(m);
-      return qa("#flow-body [data-col]").filter((el) => !(el.dataset.col === "handler" && inside.has(el.dataset.name))).length;
-    },
-    minimapNodes() {
-      return qa("#flow-body .react-flow__minimap .react-flow__minimap-node:not(.flow-minimap-hidden)").length;
+    horizontalScroll() {
+      return document.documentElement.scrollWidth - document.documentElement.clientWidth;
     },
     chips() {
       return qa("#filter-chips .fchip").map((c) => c.firstChild.textContent);
@@ -138,11 +183,11 @@ export function installHelpers(page) {
   return page.addInitScript(`(${pageHelpers.toString()})();`);
 }
 
-// openFlow loads the flow view and waits for the first committed layout and
-// the initial fitView animation to land inside the canvas.
+// openFlow loads the flow view and waits for the first committed snapshot
+// to be drawn.
 export async function openFlow(page, base, query = "") {
   await page.navigate(base + "/?view=flow" + (query ? "&" + query : ""));
   await page.waitFor("window.__e2e.settled()", 15000, "first layout committed");
-  await page.waitFor(`new Promise((r) => { const a = JSON.stringify(__e2e.transform());
-    setTimeout(() => r(a === JSON.stringify(__e2e.transform()) && __e2e.outside().length === 0), 150); })`, 5000, "initial fit");
+  await page.waitFor(`!!document.querySelector("#flow-body [data-col]") || !document.querySelector("#flow-body .flow-empty").hidden`,
+    5000, "flow drawn");
 }

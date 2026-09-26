@@ -1,11 +1,8 @@
 // Test helpers shared by the model's *.test.ts: a copy of app.js's
-// eventLabel rule, a fake clock with timers, a deferred fake layout, and
-// builders for /api/table, /api/flow and hookyard:call payloads.
+// eventLabel rule, a fake clock with timers, and builders for /api/table,
+// /api/flow and hookyard:call payloads.
 
-import { COL_INDEX } from "../types.ts";
-import type {
-  Box, Entry, Facets, Filters, FlowPath, FlowResponse, LayoutInput, LayoutResult, PathLike, TableResponse,
-} from "../types.ts";
+import type { Entry, Facets, Filters, FlowPath, FlowResponse, PathLike, TableResponse } from "../types.ts";
 import { pathBranches } from "./branches.ts";
 import { FlowController } from "./controller.ts";
 import { emptyFilters } from "./state.ts";
@@ -51,31 +48,6 @@ export class FakeClock {
     }
     this.t = end;
   }
-}
-
-// FakeLayout records every request and resolves it only when told to; a
-// result stacks the nodes of each column top to bottom.
-export class FakeLayout {
-  readonly calls: { input: LayoutInput; resolve: () => void; reject: (err: Error) => void }[] = [];
-
-  run = (input: LayoutInput): Promise<LayoutResult> =>
-    new Promise((resolve, reject) => {
-      this.calls.push({ input, resolve: () => resolve(fakeResult(input)), reject });
-    });
-
-  get last(): LayoutInput {
-    return this.calls[this.calls.length - 1].input;
-  }
-}
-
-export function fakeResult(input: LayoutInput): LayoutResult {
-  const boxes: Record<string, Box> = {};
-  const rows = [0, 0, 0, 0];
-  for (const n of input.nodes) {
-    const c = COL_INDEX[n.col];
-    boxes[n.key] = { x: c * 300, y: rows[c]++ * 50, w: 220, h: 34 };
-  }
-  return { gen: input.gen, boxes, columnX: [0, 300, 600, 900] };
 }
 
 // settle lets every pending promise callback run.
@@ -152,7 +124,6 @@ export const BUCKET_START = Date.parse(DAY + "T11:51:00Z");
 export interface Harness {
   c: FlowController;
   clock: FakeClock;
-  layout: FakeLayout;
   filters: Filters;
   flowURLs: string[];
   setFlow: (resp: FlowResponse) => void;
@@ -162,7 +133,6 @@ export interface Harness {
 
 export function harness(): Harness {
   const clock = new FakeClock(NOW);
-  const layout = new FakeLayout();
   const filters = emptyFilters();
   const flowURLs: string[] = [];
   let tableResp = table();
@@ -184,24 +154,21 @@ export function harness(): Harness {
     },
     activeFilters: () => structuredClone(filters),
     eventLabel,
-    layout: layout.run,
     now: clock.now,
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
   });
   return {
-    c, clock, layout, filters, flowURLs,
+    c, clock, filters, flowURLs,
     setFlow: (r) => { flowResp = r; },
     setTable: (t) => { tableResp = t; },
     failFlow: (e) => { flowErr = e; },
   };
 }
 
-// loadAndCommit syncs a live (or past) day, lets the fetch land and commits
-// the resulting layout.
+// loadAndCommit syncs a live (or past) day and lets the fetch land; the
+// relayout it asks for commits synchronously.
 export async function loadAndCommit(h: Harness, live = true): Promise<void> {
   await h.c.sync({ day: DAY, live });
-  const pending = h.layout.calls.length;
-  if (h.c.pendingLayout()) h.layout.calls[pending - 1].resolve();
   await settle();
 }
