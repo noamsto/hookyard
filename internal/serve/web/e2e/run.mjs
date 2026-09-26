@@ -802,6 +802,45 @@ async function check14(page, env) {
     }
     assert(seen > 0, "no pulse dot was ever sampled while zoomed");
     lines.push(`${seen} pulse dot samples at k>1, all inside a band of their outcome`);
+
+    // The wheel never traps the page on a fitted graph: wheel-down scrolls the page and leaves the view fitted.
+    await page.key(ZERO);
+    await sleep(100);
+    await page.evaluate("scrollTo(0, 0)");
+    const wp = await page.evaluate(`(() => { const r = document.getElementById("flow-body").getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + 200 }; })()`);
+    for (let i = 0; i < 6; i++) await page.wheel(wp.x, wp.y, 120);
+    await sleep(300);
+    const scrolled = await page.evaluate("scrollY");
+    const stillFit = await view(page);
+    assert(stillFit.fitted && stillFit.k === 1, "wheel-down on a fitted graph changed the view: " + JSON.stringify(stillFit));
+    assert(scrolled > 0, "wheel-down on a fitted graph did not scroll the page");
+    lines.push(`wheel-down on the fitted graph scrolled the page (scrollY ${scrolled.toFixed(0)}) and left it fitted`);
+
+    // Band tooltips keep a constant 12 px offset from the band at any zoom.
+    await page.evaluate("scrollTo(0, 0)");
+    const bkey = JSON.stringify(JSON.stringify(["engine", "claude-code", "event", "pre_tool"]));
+    const bp0 = await page.evaluate(`__e2e.bandPoint(${bkey})`);
+    assert(bp0?.ok, "no hit-testable claude-code -> pre_tool band");
+    await page.wheel(bp0.x, bp0.y, -1500);
+    await sleep(200);
+    const zb = await view(page);
+    assert(zb.k >= 4, "not zoomed to 4 for the band tooltip: " + JSON.stringify(zb));
+    const bp = await page.evaluate(`__e2e.bandPoint(${bkey})`);
+    assert(bp?.ok, "band not hit-testable at zoom");
+    await page.move(5, 5);
+    await page.move(bp.x, bp.y);
+    await page.waitFor(`!document.querySelector("#flow-body .flow-tip").hidden`, 2000, "band tooltip at zoom");
+    const bt = await page.evaluate(`(() => {
+      const body = document.getElementById("flow-body");
+      const b = body.getBoundingClientRect();
+      const t = document.querySelector("#flow-body .flow-tip");
+      const band = document.querySelector("#flow-body .l-over .band").getBoundingClientRect();
+      const want = (band.left + band.right) / 2 - b.left + 12;
+      return { want, unclamped: want >= 4 && want <= body.clientWidth - t.offsetWidth - 8, got: t.getBoundingClientRect().left - b.left };
+    })()`);
+    assert(bt.unclamped, "band tooltip anchor clamped at zoom; cannot check its offset: " + JSON.stringify(bt));
+    near(bt.got, bt.want, 3, `band tooltip offset at k=${zb.k.toFixed(2)} is not a constant 12 px`);
+    lines.push(`band tooltip sits 12 px from its band at k=${zb.k.toFixed(2)}`);
   } finally {
     await page.send("Emulation.clearDeviceMetricsOverride");
   }
@@ -872,7 +911,25 @@ const CHECKS = [
   { n: 13, title: "single-outcome emphasis follows share", fn: check13, fresh: true },
   { n: 14, title: "pan, zoom and fit: cursor-anchored wheel, drag pans without clicking, 0 / fit, refresh keeps the view, tips and pulses follow", fn: check14, fresh: true },
   { n: 15, title: "400 px: fitted by scale, no sideways scroll, panning reaches the outcomes", fn: check15, fresh: true },
+  { n: 16, title: "a press released outside the body ends the press", fn: check16, fresh: true },
 ];
+
+// A press released outside the body, below the drag threshold, must end the
+// press so a held relayout commits at once rather than after the safety release.
+async function check16(page, env) {
+  const s0 = await openGuardsExpanded(page, env);
+  const r = await page.evaluate(`(() => { const r = document.getElementById("flow-body").getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top }; })()`);
+  await page.press(r.x, r.y + 1);
+  const pressedAt = Date.now();
+  append(env.stateDir, [fifthDeny()]);
+  await page.waitFor(`__e2e.state().pending`, RELAYOUT_MS + 3000, "a relayout held by the press");
+  await page.release(r.x, r.y - 3);
+  const post = await page.waitFor(`(() => { const s = __e2e.state(); return s.gen > ${s0.gen} && !s.pending ? s : null; })()`,
+    3000, "the commit after a release outside the body");
+  const took = Date.now() - pressedAt;
+  assert(took < PRESS_HOLD_MAX_MS, `press held ${took} ms: the release outside the body did not end it`);
+  return [`press at the body's top edge released 3 px outside; the held relayout committed at gen ${post.gen} after ${took} ms (< ${PRESS_HOLD_MAX_MS} ms safety release)`];
+}
 
 async function main() {
   const only = process.argv.slice(2).map(Number);

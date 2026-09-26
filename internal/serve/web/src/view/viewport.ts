@@ -30,8 +30,9 @@ export function clampView(v: View, scene: Size, panel: Size, fitK: number): View
 }
 
 // zoomAt scales by factor about the panel point (px, py), which stays put.
-export function zoomAt(v: View, factor: number, px: number, py: number, scene: Size, panel: Size, fitK: number): View {
-  const k = Math.min(MAX_K, Math.max(fitK * FIT_TO_MIN, v.k * factor));
+// minK is the zoom-out floor; the wheel passes fitK so a fitted graph lets the page scroll.
+export function zoomAt(v: View, factor: number, px: number, py: number, scene: Size, panel: Size, fitK: number, minK = fitK * FIT_TO_MIN): View {
+  const k = Math.min(MAX_K, Math.max(minK, v.k * factor));
   const f = k / v.k;
   return clampView({ k, tx: px - (px - v.tx) * f, ty: py - (py - v.ty) * f }, scene, panel, fitK);
 }

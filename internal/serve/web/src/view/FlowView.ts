@@ -149,7 +149,11 @@ export class FlowView {
     document.addEventListener("keydown", (ev) => this.key(ev));
     const release = (ev: Event) => {
       if (ev.type === "blur") this.resetPointers();
-      else if (this.pointers.size > 0) return;
+      else {
+        // a release outside the body never reaches its own pointerup listener
+        if ((ev.type === "pointerup" || ev.type === "pointercancel") && this.pointers.has((ev as PointerEvent).pointerId)) this.pointerUp(ev as PointerEvent);
+        if (this.pointers.size > 0) return;
+      }
       window.setTimeout(() => c.pressEnd(), 0);
     };
     for (const t of ["pointerup", "pointercancel", "lostpointercapture", "blur"]) window.addEventListener(t, release);
@@ -353,7 +357,7 @@ export class FlowView {
   private wheel(ev: WheelEvent): void {
     if (!this.drawn || this.drawn.geo.nodes.length === 0) return;
     const p = this.local(ev);
-    const next = zoomAt(this.view, wheelFactor(ev.deltaY, ev.deltaMode, ev.ctrlKey, this.body.clientHeight), p.x, p.y, this.sceneSize(), this.panel(), this.fitK);
+    const next = zoomAt(this.view, wheelFactor(ev.deltaY, ev.deltaMode, ev.ctrlKey, this.body.clientHeight), p.x, p.y, this.sceneSize(), this.panel(), this.fitK, ev.ctrlKey ? undefined : Math.min(this.fitK, this.view.k));
     if (sameView(next, this.view)) return; // nothing to zoom: let the page scroll
     ev.preventDefault();
     this.setView(next);
@@ -778,7 +782,7 @@ export class FlowView {
       hint: "",
     };
     const l0 = links[0];
-    if (l0) this.showTip(tip, d, null, { x: (l0.x0 + l0.x1) / 2 + 12, y: (l0.y0 + l0.y1) / 2 + 12 });
+    if (l0) this.showTip(tip, d, null, { x: (l0.x0 + l0.x1) / 2, y: (l0.y0 + l0.y1) / 2 });
   }
 
   private showTip(tip: Tip, d: Drawn, key: string | null, at?: { x: number; y: number }): void {
@@ -821,7 +825,7 @@ export class FlowView {
     // Scene coordinates to panel ones, so the tip lands beside its node at any zoom.
     const px = (sx: number) => sx * v.k + v.tx;
     const py = (sy: number) => sy * v.k + v.ty;
-    if (at) [x, y] = [px(at.x), py(at.y)];
+    if (at) [x, y] = [px(at.x) + 12, py(at.y) + 12];
     const g = key !== null ? d.geo.byKey.get(key) : undefined;
     if (g) {
       const [x0, x1, y0, y1] = [px(g.x0), px(g.x1), py(g.y0), py(g.y0 + g.h)];
