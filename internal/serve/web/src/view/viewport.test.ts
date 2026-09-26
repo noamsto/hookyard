@@ -51,3 +51,11 @@ test("wheelFactor normalises line and page deltas", () => {
   assert.ok(wheelFactor(-100, 0, false, 500) > 1);
   assert.ok(wheelFactor(-5, 0, true, 500) > wheelFactor(-5, 0, false, 500));
 });
+
+test("wheel zoom-out floors at fitK so a fitted graph is left unchanged", () => {
+  const fit = fitView(scene, panel);
+  const out = zoomAt(fit, 0.5, 100, 100, scene, panel, fit.k, fit.k);
+  assert.deepEqual(out, fit);
+  const dflt = zoomAt(fit, 0.5, 100, 100, scene, panel, fit.k);
+  assert.ok(dflt.k < fit.k);
+});
