@@ -1,0 +1,11 @@
+{
+  "session_id": "01a0df37-9802-7a00-846c-ec962d0d7dd9",
+  "turn_id": "01a0df37-9816-7cc0-8ea7-c1aed6d92f93",
+  "transcript_path": "<PROBE>/sessions/2026/09/26/rollout-2026-09-26T22-35-57-01a0df37-9802-7a00-846c-ec962d0d7dd9.jsonl",
+  "cwd": "<PROBE>/work",
+  "hook_event_name": "Stop",
+  "model": "gpt-6-sol",
+  "permission_mode": "bypassPermissions",
+  "stop_hook_active": false,
+  "last_assistant_message": "ok"
+}

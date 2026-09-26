@@ -4504,8 +4504,10 @@ deny/unenforced with the handler's own reason, and the reason did reach the
 session transcript — Claude Code continued exactly once and then stopped,
 with nothing but hookyard's render rule declining the second block.
 
-**Evidence, Codex — code-reading grade; `codex-cli` is not installed on this
-host, so no live capture backs this engine yet.** openai/codex tag
+**Evidence, Codex — live fixture plus the code-reading that named the
+shape.** The live fixture is
+`docs/design/fixtures/hook-payloads/codex-Stop.json` (codex-cli 0.156.1,
+`stop_hook_active` false, `turn_id` present). openai/codex tag
 `rust-v0.156.1`, commit `b412ff32c417f855c2b2d1581b77058eed87c84b` (latest
 release, 2026-09-23), cross-checked byte-identical at `rust-v0.153.4` (the
 version §4 already cites) for both Stop schemas. Output schema
@@ -4518,14 +4520,16 @@ blocking hooks' reasons. `codex-rs/core/src/session/turn.rs` (~L645-680) is
 the `should_block` → `stop_hook_active = true; continue;` site cited above.
 Input schema (`stop.command.input.schema.json`) requires both
 `stop_hook_active` and `turn_id` — so a Codex Stop payload carries Detect's
-own `turn_id` discriminator, which is what resolves §12's engine-detection
-item for Codex `Stop` at code-reading grade below.
+own `turn_id` discriminator, which the live fixture confirms and which
+resolves §12's engine-detection item for Codex `Stop` below.
 `codex-rs/core/tests/suite/hooks.rs` is Codex's own integration coverage: it
 emits exactly `{"decision": "block", "reason": ...}` from a Stop hook and
 branches on `payload["stop_hook_active"]`, matching the shape above rather
-than a variant of it. This is the same evidence grade §4 used to lift
-Codex's `pre_tool` observe-only ruling (§12 item 3); the live capture and a
-live continuation run are follow-up issue **#89**.
+than a variant of it.
+`TestLiveCodexStopDenyForcesExactlyOneContinuation` (`HOOKYARD_E2E=1`)
+passed on 2026-09-26 against codex-cli 0.156.1: the handler saw
+`stop_hook_active` false then true, and the two `turn_end` records were
+deny/enforced then deny/unenforced, both with the handler's reason.
 
 ### What this amends
 
@@ -4998,18 +5002,18 @@ because the captures don't reach them yet, not because they were missed.**
   whose shipped schema lacks `turn_id` — keyed on argv's exact `--event`.
   Codex `SessionStart`, Cursor canonical `SessionStart`/`Stop`, and Claude
   Code's build mode, are unchanged: this item stays open for those events,
-  since no equivalent capture or fallback exists for them. Codex `Stop` is
-  the one entry that resolves without a capture at all: its shipped schema
-  requires `turn_id` (`stop.command.input.schema.json`, §11.3), the same
-  discriminator the router already reads, so detection there rests on
-  code-reading grade rather than the DOC/inferred grade the rest of this
-  item is stuck at.
-- **Codex `Stop` block not yet watched live (§11.3, issue #77).** The
-  decision slot itself ships on code-reading evidence — Codex's own output
-  parser, event handler, and integration tests, cited in §11.3 — because
-  `codex-cli` is not installed on this host. A live capture of a real Codex
-  `Stop` payload, and a live run watching a deny actually force one bounded
-  continuation, are issue **#89**.
+  since no equivalent capture or fallback exists for them. Codex `Stop`
+  detection is confirmed by the live fixture
+  `docs/design/fixtures/hook-payloads/codex-Stop.json`, which carries
+  `turn_id` (codex-cli 0.156.1, §11.3) — the same discriminator the router
+  already reads. The shipped schema (`stop.command.input.schema.json`)
+  requires that field; the fixture is what confirms it on a real payload.
+- **Codex `Stop` block watched live (§11.3).**
+  `TestLiveCodexStopDenyForcesExactlyOneContinuation` (`HOOKYARD_E2E=1`)
+  passed on 2026-09-26 against codex-cli 0.156.1: the handler saw
+  `stop_hook_active` false then true, and the two `turn_end` records were
+  deny/enforced then deny/unenforced. The live fixture is
+  `docs/design/fixtures/hook-payloads/codex-Stop.json`.
 - **Payload-level `hook_event_name` spellings are unverified for twelve of the
   table's eighteen rows.** Only `PreToolUse`/`PostToolUse` (Claude Code),
   `PreToolUse`/`UserPromptSubmit` (Codex) and `preToolUse`/`postToolUse`
@@ -5194,8 +5198,8 @@ Pi's multi-extension `tool_call` consolidation (deny-wins by
 first-handler-to-block short-circuit, detailed above).
 
 Still **open**, in the order it should be closed: three residuals this pass's
-own code creates — engine detection unverified for `SessionStart` and `Stop`
-payloads, payload-level `hook_event_name` spellings unverified for twelve of
+own code creates — engine detection unverified for Codex `SessionStart` and
+for Cursor `SessionStart`/`Stop`, payload-level `hook_event_name` spellings unverified for twelve of
 the table's eighteen rows, and `tool_input` field spellings unverified for
 non-shell tools — all three closing the same way, one more capture run, and
 all three a stated prerequisite for issue #9; Pi's `pre_compact` mapping,
@@ -5205,9 +5209,7 @@ beyond what was already known, and couldn't try Codex at all, for want of the
 binary on this host; Codex's `apply_patch` sub-tool mapping; whether
 fail-open should be conditional for security-classed handlers; the exact
 preimage of Codex's trust hash; the
-prior pass's drift-count arithmetic; HookBus's carried facts; and Codex's
-`Stop` decision slot, shipped on code-reading evidence and not yet watched
-live (§11.3, issue #89). Moved from
+prior pass's drift-count arithmetic; and HookBus's carried facts. Moved from
 fully open to resting on the middle evidence grade, one short of a live
 capture: whether Claude Code honours `projectSettings` hooks at all (detailed
 above, under the gate-list item). None of these blocks starting the
