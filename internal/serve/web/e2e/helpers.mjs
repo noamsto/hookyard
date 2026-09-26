@@ -89,9 +89,6 @@ function pageHelpers() {
       if (!t || !b) return null;
       const tr = t.getBoundingClientRect();
       const br = b.getBoundingClientRect();
-      // b.clientHeight excludes a horizontal scrollbar's own strip (present
-      // when .wide scrolls sideways); that strip is not visible content, so
-      // the tooltip must fit above it, not just inside the full box.
       const visibleBottom = br.top + b.clientHeight;
       const overflowY = getComputedStyle(t).overflowY;
       return {
@@ -144,6 +141,33 @@ function pageHelpers() {
       const [left, top] = [r.left + scrollX, r.top + scrollY];
       return this.boxes().filter((b) => b.left < left - 1 || b.top < top - 1 || b.right > left + r.width + 1 || b.bottom > top + r.height + 1)
         .map((b) => b.col + ":" + b.name);
+    },
+    // view: the flow's pan/zoom state, as the view publishes it.
+    view() {
+      const d = body().dataset;
+      return { k: Number(d.viewK), tx: Number(d.viewTx), ty: Number(d.viewTy), fitted: d.fitted === "1" };
+    },
+    // bgPoint: a point in the flow body that hit-tests to the bare svg (no
+    // node or band), i.e. empty background a drag can start on.
+    bgPoint() {
+      const b = body().getBoundingClientRect();
+      const svg = q("#flow-body svg.flow-svg");
+      for (let y = b.bottom - 4; y > b.top + 30; y -= 6) {
+        for (let x = b.right - 4; x > b.left + 4; x -= 6) if (document.elementFromPoint(x, y) === svg) return { x, y, ok: true };
+      }
+      return { ok: false };
+    },
+    // strayDots: drawn pulse dots whose centre is outside every band of
+    // their outcome (client coordinates, so the scene transform is included).
+    strayDots() {
+      const bands = qa("#flow-body .l-bands .band").map((p) => ({ o: p.dataset.o, r: p.getBoundingClientRect() }));
+      const dots = qa("#flow-body .flow-dot").filter((c) => Number(c.getAttribute("r")) > 0);
+      const stray = dots.filter((c) => {
+        const r = c.getBoundingClientRect();
+        const [x, y] = [r.left + r.width / 2, r.top + r.height / 2];
+        return !bands.some((b) => b.o === c.dataset.o && x >= b.r.left - 1 && x <= b.r.right + 1 && y >= b.r.top - 1 && y <= b.r.bottom + 1);
+      });
+      return { dots: dots.length, stray: stray.length };
     },
     horizontalScroll() {
       return document.documentElement.scrollWidth - document.documentElement.clientWidth;

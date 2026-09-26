@@ -218,31 +218,37 @@ async function check2(page, env) {
     assert(unreachable.length === 0, "nodes not reachable by scrolling: " + unreachable.join(", "));
     lines.push(`all ${names.length} nodes reachable by scrolling the page`);
 
+    // The wheel over the graph zooms it (the page does not scroll); 0 fits.
     await page.evaluate("scrollTo(0, 0)");
     const probe = JSON.stringify(GUARDS[0]);
-    const before = await page.evaluate(`(() => { const r = __e2e.node("handler", ${probe}).getBoundingClientRect(); return { w: r.width, h: r.height, y: scrollY }; })()`);
+    const size = `(() => { const r = __e2e.node("handler", ${probe}).getBoundingClientRect(); return { w: r.width, y: scrollY }; })()`;
+    const before = await page.evaluate(size);
     const at = await page.evaluate(`(() => { const r = document.getElementById("flow-body").getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + 200 }; })()`);
-    await page.wheel(at.x, at.y, 400);
+    await page.wheel(at.x, at.y, -400);
     await sleep(300);
-    const after = await page.evaluate(`(() => { const r = __e2e.node("handler", ${probe}).getBoundingClientRect(); return { w: r.width, h: r.height, y: scrollY }; })()`);
-    assert(after.w === before.w && after.h === before.h, `wheel changed a node's size: ${JSON.stringify(before)} -> ${JSON.stringify(after)}`);
-    assert(after.y > before.y, `wheel over the flow did not scroll the page (scrollY ${before.y} -> ${after.y})`);
-    lines.push(`wheel over the flow scrolls the page (scrollY ${before.y} -> ${after.y}); node size unchanged (no zoom)`);
+    const after = await page.evaluate(size);
+    assert(after.w > before.w, `wheel over the flow did not zoom in (node ${before.w} -> ${after.w} px wide)`);
+    assert(after.y === before.y, `wheel over the flow scrolled the page (scrollY ${before.y} -> ${after.y})`);
+    await page.key({ key: "0", code: "Digit0", keyCode: 48, text: "0" });
+    await sleep(100);
+    assert((await page.evaluate(size)).w === before.w, "key 0 did not restore the fitted view");
+    lines.push(`wheel over the flow zooms (node ${before.w.toFixed(0)} -> ${after.w.toFixed(0)} px), the page stays put; 0 restores`);
 
-    // Phone- and tablet-width panels: the graph keeps its minimum width and
-    // scrolls inside the flow body, the page itself never scrolls sideways,
-    // and the column headers (whose plates give way first) never overlap.
+    // Phone- and tablet-width panels: the graph fits by scaling, the flow body
+    // never scrolls sideways, neither does the page, and the column headers
+    // (whose plates give way first) never overlap.
     for (const [w, h] of [[400, 800], [700, 800]]) {
       const at = `${w} × ${h}`;
       await setViewport(page, w, h);
       const errorsAt = page.errors.length;
       await openFlow(page, env.base);
       await sleep(300);
-      const narrow = await page.evaluate(`({ h: __e2e.horizontalScroll(), body: document.getElementById("flow-body").clientWidth, inner: document.getElementById("flow-body").scrollWidth })`);
+      const narrow = await page.evaluate(`({ h: __e2e.horizontalScroll(), body: document.getElementById("flow-body").clientWidth, inner: document.getElementById("flow-body").scrollWidth, k: __e2e.view().k })`);
       const errors = page.errors.slice(errorsAt);
       assert(errors.length === 0, `${errors.length} console errors at ${at}:\n      ` + [...new Set(errors)].join("\n      "));
       assert(narrow.h === 0, `horizontal page scroll of ${narrow.h} px at ${at}`);
-      lines.push(`${at}: no console errors, no horizontal page scroll; the graph (${narrow.inner} px) scrolls inside the ${narrow.body} px flow body`);
+      assert(narrow.inner <= narrow.body, `flow body scrolls sideways at ${at}: scrollWidth ${narrow.inner} > clientWidth ${narrow.body}`);
+      lines.push(`${at}: no console errors, no horizontal page scroll; the ${narrow.body} px flow body has no sideways scroll (fit scale ${narrow.k.toFixed(2)})`);
 
       const heads = await page.evaluate(`__e2e.headerBoxes()`);
       const overlap = [];
@@ -678,9 +684,181 @@ async function check13(page, env) {
   return [`${bands.length} bands (${thin.length} thin): biggest at ${top}, thin ones ${[...new Set(thin.map((b) => b.op))].join(" / ")}`];
 }
 
+const ZERO = { key: "0", code: "Digit0", keyCode: 48, text: "0" };
+const PLUS = { key: "+", code: "Equal", keyCode: 187, text: "+" };
+const view = (page) => page.evaluate("__e2e.view()");
+const near = (a, b, tol, what) => assert(Math.abs(a - b) <= tol, `${what}: ${a} vs ${b} (tolerance ${tol})`);
+
+// Pan, zoom and fit on the Sankey: the wheel zooms about the cursor, a drag
+// pans without clicking, 0 / the fit button re-fit, a relayout keeps the
+// user's transform, tooltips and pulses follow it.
+async function check14(page, env) {
+  const lines = [];
+  try {
+    await setViewport(page, 1280, 800);
+    await openFlow(page, env.base);
+    const fit = await view(page);
+    assert(fit.fitted && fit.k === 1, "first view is not fitted: " + JSON.stringify(fit));
+
+    // AC1: the node under the cursor stays under it while zooming.
+    const p0 = await page.evaluate(`__e2e.nodePoint("engine", "claude-code")`);
+    assert(p0?.ok, "engine claude-code not hit-testable");
+    await page.wheel(p0.x, p0.y, -300);
+    await sleep(200);
+    const zoomed = await view(page);
+    assert(!zoomed.fitted && zoomed.k > 1.3, "wheel did not zoom in: " + JSON.stringify(zoomed));
+    const r = await page.evaluate(`(() => { const r = __e2e.node("engine", "claude-code").querySelector(".hit").getBoundingClientRect(); return { l: r.left, r: r.right, t: r.top, b: r.bottom }; })()`);
+    assert(p0.x >= r.l - 2 && p0.x <= r.r + 2 && p0.y >= r.t - 2 && p0.y <= r.b + 2, `the node left the cursor (${p0.x},${p0.y}) -> ${JSON.stringify(r)}`);
+    lines.push(`wheel at (${p0.x.toFixed(0)}, ${p0.y.toFixed(0)}) zoomed to k=${zoomed.k.toFixed(2)}; the engine node stays under the cursor`);
+
+    // AC5: the tooltip sits beside its node at zoom >= 2.
+    await page.wheel(p0.x, p0.y, -300);
+    await sleep(200);
+    const z2 = await view(page);
+    assert(z2.k >= 2, "not zoomed to 2: " + JSON.stringify(z2));
+    const p1 = await page.evaluate(`__e2e.nodePoint("engine", "claude-code")`);
+    await page.move(p1.x + 3, p1.y);
+    await page.waitFor(`!document.querySelector("#flow-body .flow-tip").hidden`, 2000, "tooltip at zoom");
+    const gap = await page.evaluate(`(() => {
+      const t = document.querySelector("#flow-body .flow-tip").getBoundingClientRect();
+      const n = __e2e.node("engine", "claude-code").querySelector(".hit").getBoundingClientRect();
+      return { dx: Math.max(n.left - t.right, t.left - n.right, 0), dy: Math.max(n.top - t.bottom, t.top - n.bottom, 0) };
+    })()`);
+    assert(gap.dx <= 24 && gap.dy <= 24, "tooltip not adjacent to its node at zoom " + z2.k.toFixed(2) + ": " + JSON.stringify(gap));
+    lines.push(`tooltip beside its node at k=${z2.k.toFixed(2)} (gap ${gap.dx.toFixed(0)}, ${gap.dy.toFixed(0)} px)`);
+
+    // AC2: a drag pans and never filters, even when it starts on a node.
+    await page.move(5, 5);
+    await page.drag(p1.x, p1.y, p1.x + 40, p1.y + 25);
+    await sleep(100);
+    const moved = await view(page);
+    near(moved.tx - z2.tx, 40, 2, "drag from a node panned x");
+    near(moved.ty - z2.ty, 25, 2, "drag from a node panned y");
+    assert((await page.evaluate(`__e2e.params("engine")`)).length === 0, "a panning drag on a node applied a filter");
+    const bg = await page.evaluate("__e2e.bgPoint()");
+    assert(bg.ok, "no empty background point to drag from");
+    await page.drag(bg.x, bg.y, bg.x - 30, bg.y - 10);
+    const moved2 = await view(page);
+    near(moved2.tx - moved.tx, -30, 2, "background drag panned x");
+    lines.push(`a 40 px drag from a node and a 30 px drag on the background panned the view; no filter applied`);
+
+    // a click on a node after all this still filters; shift-click adds
+    await page.key(ZERO);
+    await sleep(100);
+    await clickNode(page, "engine", "claude-code");
+    await expectFilter(page, ["claude-code"], "click after panning");
+    await clickNode(page, "engine", "codex", MOD.shift);
+    await expectFilter(page, ["claude-code", "codex"], "shift-click after panning");
+    lines.push("click and shift-click on a node still set filters");
+    await openFlow(page, env.base);
+
+    // AC3: a refresh and a group toggle keep the user's transform; 0 and fit re-fit.
+    await page.wheel(p0.x, p0.y, -300);
+    await sleep(200);
+    const keep = await view(page);
+    const calls = (await page.evaluate("__e2e.state()")).calls;
+    append(env.stateDir, TODAY_PATHS.slice(0, 3).map((t) => record({ ...t, ts: Date.now() })));
+    await page.waitFor(`__e2e.state().calls > ${calls}`, 8000, "a count refresh redraw");
+    await sleep(300);
+    const afterRefresh = await view(page);
+    assert(afterRefresh.k === keep.k && afterRefresh.tx === keep.tx && afterRefresh.ty === keep.ty, `count refresh changed the view: ${JSON.stringify(keep)} -> ${JSON.stringify(afterRefresh)}`);
+    const member = GUARDS[0];
+    const g0 = (await page.evaluate("__e2e.state()")).gen;
+    const gp = await page.evaluate(`__e2e.groupHeaderPoint(${JSON.stringify(member)})`);
+    if (gp?.ok) {
+      await page.click(gp.x, gp.y);
+      await page.waitFor(`__e2e.settled() && __e2e.state().gen > ${g0}`, 5000, "group toggle redraw");
+      const afterToggle = await view(page);
+      assert(afterToggle.k === keep.k, `group toggle changed the zoom: ${keep.k} -> ${afterToggle.k}`);
+      lines.push("a count refresh and a group toggle kept the zoomed view");
+    } else {
+      lines.push("a count refresh kept the zoomed view (group header off screen while zoomed)");
+    }
+    await page.key(PLUS);
+    await sleep(100);
+    assert((await view(page)).k > keep.k, "+ did not zoom in");
+    await page.key(ZERO);
+    await sleep(100);
+    const refit = await view(page);
+    assert(refit.fitted && refit.k === 1 && refit.tx === 0 && refit.ty === 0, "0 did not re-fit: " + JSON.stringify(refit));
+    await page.wheel(p0.x, p0.y, -300);
+    await sleep(100);
+    assert(!(await view(page)).fitted, "the wheel left the view fitted");
+    await page.evaluate(`document.querySelector("#flow-panel .flow-fit").click()`);
+    const refit2 = await view(page);
+    assert(refit2.fitted && refit2.k === 1, "the fit button did not re-fit: " + JSON.stringify(refit2));
+    lines.push("+ zooms, 0 and the fit button return to the fitted view");
+
+    // AC6: pulses ride the transform: zoom in, then every live dot is on a band of its outcome.
+    await page.wheel(p0.x, p0.y, -300);
+    await sleep(100);
+    let seen = 0;
+    for (let i = 0; i < 12; i++) {
+      if (i % 3 === 0) append(env.stateDir, TODAY_PATHS.slice(0, 5).map((t) => record({ ...t, ts: Date.now() })));
+      await sleep(250);
+      const s = await page.evaluate("__e2e.strayDots()");
+      seen += s.dots;
+      assert(s.stray === 0, `${s.stray} of ${s.dots} pulse dots off their bands while zoomed`);
+    }
+    assert(seen > 0, "no pulse dot was ever sampled while zoomed");
+    lines.push(`${seen} pulse dot samples at k>1, all inside a band of their outcome`);
+  } finally {
+    await page.send("Emulation.clearDeviceMetricsOverride");
+  }
+  return lines;
+}
+
+// Phone width: the graph is fitted by scaling, the body never scrolls
+// sideways, and zooming in reaches every corner by panning.
+async function check15(page, env) {
+  const lines = [];
+  try {
+    // A resize re-fits a fitted view and keeps a zoomed one.
+    await setViewport(page, 1280, 800);
+    await openFlow(page, env.base);
+    assert((await view(page)).k === 1, "not fitted at 1280");
+    await setViewport(page, 400, 800);
+    await page.waitFor(`__e2e.view().k < 1 && __e2e.view().fitted`, 4000, "the fitted view re-fitting after a resize to 400 px");
+    const mid = await page.evaluate(`(() => { const r = document.getElementById("flow-body").getBoundingClientRect(); return { x: r.left + 20, y: r.top + 60 }; })()`);
+    await page.wheel(mid.x, mid.y, -300);
+    await sleep(200);
+    const zk = (await view(page)).k;
+    await setViewport(page, 500, 800);
+    await sleep(600);
+    const kept = await view(page);
+    assert(!kept.fitted && kept.k === zk, "a resize changed the zoomed view: " + JSON.stringify(kept));
+    lines.push(`a resize re-fitted the fitted view (1280 -> 400 px) and kept the zoomed one (k=${zk.toFixed(2)})`);
+    await setViewport(page, 400, 800);
+    await openFlow(page, env.base);
+    await sleep(300);
+    const m = await page.evaluate(`(() => { const b = document.getElementById("flow-body"); return { sw: b.scrollWidth, cw: b.clientWidth, h: __e2e.horizontalScroll(), v: __e2e.view() }; })()`);
+    assert(m.sw <= m.cw && m.h === 0, `sideways scroll at 400: body ${m.sw}/${m.cw}, page ${m.h}`);
+    assert(m.v.fitted && m.v.k < 1, "the wide graph was not scaled to fit: " + JSON.stringify(m.v));
+    const c = await page.evaluate(`(() => { const r = document.getElementById("flow-body").getBoundingClientRect(); return { x: r.left + 20, y: r.top + 60 }; })()`);
+    await page.wheel(c.x, c.y, -600);
+    await sleep(200);
+    const z = await view(page);
+    assert(z.k > m.v.k * 2, "zoom in at 400 did not zoom: " + JSON.stringify(z));
+    const w = await page.evaluate(`({ sw: document.getElementById("flow-body").scrollWidth, cw: document.getElementById("flow-body").clientWidth, h: __e2e.horizontalScroll() })`);
+    assert(w.sw <= w.cw && w.h === 0, `sideways scroll when zoomed at 400: body ${w.sw}/${w.cw}, page ${w.h}`);
+    // pan to the far right: the right-most node comes into the panel
+    for (let i = 0; i < 12; i++) {
+      const bg = await page.evaluate("__e2e.bgPoint()");
+      if (!bg.ok) break;
+      await page.drag(bg.x, bg.y, Math.max(bg.x - 300, 0), bg.y);
+    }
+    const right = await page.evaluate(`(() => { const b = document.getElementById("flow-body").getBoundingClientRect(); return __e2e.boxes().filter((n) => n.col === "outcome").some((n) => n.right <= b.right + scrollX + 1 && n.left >= b.left + scrollX); })()`);
+    assert(right, "panning left never brought an outcome node into the panel: " + JSON.stringify(await view(page)));
+    lines.push(`400 px: fitted at k=${m.v.k.toFixed(2)}, no sideways scroll; zoomed to k=${z.k.toFixed(2)} still none, and panning reaches the outcome column`);
+  } finally {
+    await page.send("Emulation.clearDeviceMetricsOverride");
+  }
+  return lines;
+}
+
 const CHECKS = [
   { n: 1, title: "edge totals == /api/flow derivation (4 filter sets)", fn: check1 },
-  { n: 2, title: "fits the panel at 1600 and 1280: no horizontal scroll, open groups grow it, every node reachable, wheel scrolls; 400 degrades", fn: check2, fresh: true },
+  { n: 2, title: "fits the panel at 1600 and 1280: no horizontal scroll, open groups grow it, every node reachable, wheel zooms; 400 has no body scroll", fn: check2, fresh: true },
   { n: 3, title: "node click filters, shift-click adds, re-click and chip × remove", fn: check3 },
   { n: 4, title: "burst of 500 live calls stays bounded", fn: check4 },
   { n: 5, title: "window 1: header click before the coalesced relayout", fn: check5, fresh: true },
@@ -692,6 +870,8 @@ const CHECKS = [
   { n: 11, title: "hover keeps the path's labels lit; a band tooltip survives a live refresh", fn: check11, fresh: true },
   { n: 12, title: "event plates: the fan-out gate only where ×N shows; legend", fn: check12 },
   { n: 13, title: "single-outcome emphasis follows share", fn: check13, fresh: true },
+  { n: 14, title: "pan, zoom and fit: cursor-anchored wheel, drag pans without clicking, 0 / fit, refresh keeps the view, tips and pulses follow", fn: check14, fresh: true },
+  { n: 15, title: "400 px: fitted by scale, no sideways scroll, panning reaches the outcomes", fn: check15, fresh: true },
 ];
 
 async function main() {
