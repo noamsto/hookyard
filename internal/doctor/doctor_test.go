@@ -3,7 +3,10 @@ package doctor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/noamsto/hookyard/internal/vocab"
 )
 
 // The expected value is the directory name Cursor actually created for the
@@ -17,6 +20,14 @@ func TestCursorProjectSlugMatchesCursorsOwnNaming(t *testing.T) {
 }
 
 func TestCursorWorkspaceTrustFailureHasExactFix(t *testing.T) {
+	// LookPath must find cursor-agent for the trust check to reach its Fail
+	// arm, so point PATH at a stub rather than whatever the host has.
+	stub := filepath.Join(t.TempDir(), "cursor-agent")
+	if err := os.WriteFile(stub, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", filepath.Dir(stub))
+
 	root := t.TempDir()
 	dir := filepath.Join(root, "project")
 	marker := filepath.Join(root, "projects", cursorProjectSlug(dir), ".workspace-trusted")
@@ -38,5 +49,44 @@ func TestCursorWorkspaceTrustFailureHasExactFix(t *testing.T) {
 	}
 	if trust.Fix != "Open the target workspace in Cursor and accept its workspace-trust prompt." {
 		t.Errorf("fix = %q, want exact Cursor trust repair", trust.Fix)
+	}
+}
+
+func TestCodexWorkspaceTrustUnknownWhenAbsentFromPath(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	root := t.TempDir()
+	dir := filepath.Join(root, "project")
+	codexHome := filepath.Join(root, "codex")
+	writeFile(t, filepath.Join(codexHome, "config.toml"), []byte(
+		"[projects.\""+dir+"\"]\ntrust_level = \"untrusted\"\n"))
+
+	f := findByCheck(t, codexFindings(Paths{CodexHome: codexHome}, dir), "workspace trust")
+	if f.Status != Unknown {
+		t.Fatalf("status = %v, want Unknown; detail=%q", f.Status, f.Detail)
+	}
+	if f.Engine != vocab.Codex {
+		t.Errorf("engine = %v, want Codex", f.Engine)
+	}
+	if !strings.Contains(f.Detail, "PATH") {
+		t.Errorf("detail = %q, want it to say codex is not on PATH", f.Detail)
+	}
+}
+
+func TestCursorWorkspaceTrustUnknownWhenAbsentFromPath(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	root := t.TempDir()
+	dir := filepath.Join(root, "project")
+
+	trust := cursorFindings(Paths{CursorHome: root}, dir, "")[0]
+	if trust.Status != Unknown {
+		t.Fatalf("status = %v, want Unknown; detail=%q", trust.Status, trust.Detail)
+	}
+	if trust.Engine != vocab.Cursor {
+		t.Errorf("engine = %v, want Cursor", trust.Engine)
+	}
+	if !strings.Contains(trust.Detail, "PATH") {
+		t.Errorf("detail = %q, want it to say cursor-agent is not on PATH", trust.Detail)
 	}
 }

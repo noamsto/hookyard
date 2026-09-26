@@ -334,7 +334,7 @@ func TestOtherEnginesFindingsAreUnchanged(t *testing.T) {
 			"[[hooks.pre_tool]]\ncommand = \""+routedCommand(router, vocab.Codex, stateDir)+"\"\n"))
 
 	cursorHome := filepath.Join(root, "cursor")
-	cursorMarker := writeFile(t, filepath.Join(cursorHome, "projects", cursorProjectSlug(dir), ".workspace-trusted"), nil)
+	writeFile(t, filepath.Join(cursorHome, "projects", cursorProjectSlug(dir), ".workspace-trusted"), nil)
 	// No hookyard entry: the arm that carries the shared repair advice.
 	cursorHooks := writeFile(t, filepath.Join(cursorHome, "hooks.json"), []byte(`{"version":1,"hooks":{}}`))
 	// A valid, empty handler table: competingWriter distinguishes a read-empty
@@ -348,11 +348,11 @@ func TestOtherEnginesFindingsAreUnchanged(t *testing.T) {
 	p := Paths{CodexHome: codexHome, CursorHome: cursorHome, PiAgentDir: piAgentDir}
 
 	want := []Finding{
-		{Engine: vocab.Codex, Check: "workspace trust", Status: Pass, Detail: "trusted in " + codexConfig},
+		{Engine: vocab.Codex, Check: "workspace trust", Status: Unknown, Detail: "no codex on PATH to check for workspace trust"},
 		{Engine: vocab.Codex, Check: "hook trust", Status: Pass, Detail: "1 reviewed hook entries in " + codexConfig},
 		{Engine: vocab.Codex, Check: "hookyard registered", Status: Pass, Detail: "1 hookyard entry in " + codexConfig},
 		{Engine: vocab.Codex, Check: "router path", Status: Pass, Detail: executable},
-		{Engine: vocab.Cursor, Check: "workspace trust", Status: Pass, Detail: "trusted, per " + cursorMarker},
+		{Engine: vocab.Cursor, Check: "workspace trust", Status: Unknown, Detail: "no cursor-agent on PATH to check for workspace trust"},
 		{Engine: vocab.Cursor, Check: "hookyard registered", Status: Fail, Detail: "no hookyard entry in " + cursorHooks + "; run hookyard install", Fix: "Run hookyard install."},
 		{Engine: vocab.Cursor, Check: "router path", Status: Unknown, Detail: "no hookyard entry in " + cursorHooks + " to check"},
 		{Engine: vocab.Cursor, Check: "competing writer", Status: Pass, Detail: "no handlers in the table, so no foreign entry can double-register one"},

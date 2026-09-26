@@ -318,7 +318,7 @@ func TestPiLauncherFindingsReportsInjectedGuardsAndExtensions(t *testing.T) {
 		`exec /opt/example/real-pi "$@" -e /opt/example/extra-extension.js`+"\n")
 	withPiOnPath(t, target)
 
-	f := piLauncherFindings()
+	f := piLauncherFindings("")
 	if f.Status != Fail {
 		t.Fatalf("status = %v, want Fail; detail=%q", f.Status, f.Detail)
 	}
@@ -341,7 +341,7 @@ func TestPiLauncherFindingsPassesWhenNothingInjected(t *testing.T) {
 	target := writeLauncherScript(t, dir, "#!/bin/sh\nexec /opt/example/real-pi \"$@\"\n")
 	withPiOnPath(t, target)
 
-	f := piLauncherFindings()
+	f := piLauncherFindings("")
 	if f.Status != Pass {
 		t.Fatalf("status = %v, want Pass; detail=%q", f.Status, f.Detail)
 	}
@@ -350,7 +350,7 @@ func TestPiLauncherFindingsPassesWhenNothingInjected(t *testing.T) {
 func TestPiLauncherFindingsUnknownWhenPiAbsentFromPath(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 
-	f := piLauncherFindings()
+	f := piLauncherFindings("")
 	if f.Status != Unknown {
 		t.Fatalf("status = %v, want Unknown; detail=%q", f.Status, f.Detail)
 	}
@@ -371,12 +371,108 @@ func TestPiLauncherFindingsSkipsACompiledBinary(t *testing.T) {
 	}
 	withPiOnPath(t, target)
 
-	f := piLauncherFindings()
+	f := piLauncherFindings("")
 	if f.Status != Pass {
 		t.Fatalf("status = %v, want Pass; detail=%q", f.Status, f.Detail)
 	}
 	if !strings.Contains(f.Detail, "binary") {
 		t.Errorf("detail = %q, want it to say this is a binary", f.Detail)
+	}
+}
+
+// TestPiLauncherFindingsBuildPackageWithoutOverlapPasses pins the aeye-style
+// build-mode package: it is intentional, and a baked table disjoint from the
+// yard table is not a double-fire.
+func TestPiLauncherFindingsBuildPackageWithoutOverlapPasses(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	writeTable(t, stateDir, []manifest.Handler{aeyeScript("guard/one", "/nix/store/x/guard.sh")})
+	extension := piBuildPackageFixture(t, filepath.Join(dir, "pkg"), []manifest.Handler{pluginHandler("guard/two", "bin/guard.sh")})
+
+	target := writeLauncherScript(t, dir, "#!/bin/sh\n"+
+		`exec /opt/example/real-pi "$@" -e `+extension+"\n")
+	withPiOnPath(t, target)
+
+	f := piLauncherFindings(stateDir)
+	if f.Status == Fail {
+		t.Fatalf("status = Fail, want a non-failing status; detail=%q", f.Detail)
+	}
+	if !strings.Contains(f.Detail, filepath.Dir(filepath.Dir(extension))) {
+		t.Errorf("detail = %q, want it to name the build package root", f.Detail)
+	}
+}
+
+// TestPiLauncherFindingsBuildPackageOverlapFails pins the build-mode package
+// that does double-register: its baked table shares a handler id with the yard
+// table, the hazard piDoubleFire also reports, and the id is named.
+func TestPiLauncherFindingsBuildPackageOverlapFails(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	writeTable(t, stateDir, []manifest.Handler{aeyeScript("guard/one", "/nix/store/x/guard.sh")})
+	extension := piBuildPackageFixture(t, filepath.Join(dir, "pkg"), []manifest.Handler{pluginHandler("guard/one", "bin/guard.sh")})
+
+	target := writeLauncherScript(t, dir, "#!/bin/sh\n"+
+		`exec /opt/example/real-pi "$@" -e `+extension+"\n")
+	withPiOnPath(t, target)
+
+	f := piLauncherFindings(stateDir)
+	if f.Status != Fail {
+		t.Fatalf("status = %v, want Fail; detail=%q", f.Status, f.Detail)
+	}
+	if !strings.Contains(f.Detail, "guard/one") {
+		t.Errorf("detail = %q, want it to name the shared handler id", f.Detail)
+	}
+}
+
+// TestPiLauncherFindingsBuildPackageUnknownWithoutStateDir pins the honest
+// answer when no yard table is recoverable: without it, overlap cannot be
+// ruled out, so the package must not read as a Pass.
+func TestPiLauncherFindingsBuildPackageUnknownWithoutStateDir(t *testing.T) {
+	dir := t.TempDir()
+	extension := piBuildPackageFixture(t, filepath.Join(dir, "pkg"), []manifest.Handler{pluginHandler("guard/two", "bin/guard.sh")})
+
+	target := writeLauncherScript(t, dir, "#!/bin/sh\n"+
+		`exec /opt/example/real-pi "$@" -e `+extension+"\n")
+	withPiOnPath(t, target)
+
+	f := piLauncherFindings("")
+	if f.Status != Unknown {
+		t.Fatalf("status = %v, want Unknown; detail=%q", f.Status, f.Detail)
+	}
+}
+
+// TestPiLauncherFindingsPassesOnPlainExtensionsOnly: a wrapper that injects
+// only plain -e extensions — no PI_AGENT_HOOKS guard path, no build-mode
+// hookyard package — is not the double-fire hazard, so it must not read as a
+// Fail.
+func TestPiLauncherFindingsPassesOnPlainExtensionsOnly(t *testing.T) {
+	dir := t.TempDir()
+	target := writeLauncherScript(t, dir, "#!/bin/sh\n"+
+		`exec /opt/example/real-pi "$@" -e /opt/example/plain-extension.js`+"\n")
+	withPiOnPath(t, target)
+
+	f := piLauncherFindings("")
+	if f.Status == Fail {
+		t.Fatalf("status = Fail, want a non-failing status; detail=%q", f.Detail)
+	}
+	if !strings.Contains(f.Detail, "/opt/example/plain-extension.js") {
+		t.Errorf("detail = %q, want it to name the plain extension", f.Detail)
+	}
+}
+
+// TestPiLauncherFindingsGuardsAreFail pins the hazard that stays a Fail:
+// PI_AGENT_HOOKS paths are hookyard guards the launcher re-injects, so the
+// same guard can fire twice per event.
+func TestPiLauncherFindingsGuardsAreFail(t *testing.T) {
+	dir := t.TempDir()
+	target := writeLauncherScript(t, dir, "#!/bin/sh\n"+
+		"export PI_AGENT_HOOKS=/opt/example/guard-one.js\n"+
+		`exec /opt/example/real-pi "$@"`+"\n")
+	withPiOnPath(t, target)
+
+	f := piLauncherFindings("")
+	if f.Status != Fail {
+		t.Fatalf("status = %v, want Fail; detail=%q", f.Status, f.Detail)
 	}
 }
 

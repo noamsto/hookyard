@@ -1,11 +1,52 @@
 package doctor
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/noamsto/hookyard/internal/vocab"
 )
+
+// withCodexOnPath points PATH at a fresh directory holding only a "codex"
+// stub, so the workspace-trust check resolves codex without reaching the
+// host's real install.
+func withCodexOnPath(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "codex"), nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+}
+
+// TestCodexWorkspaceTrustFollowsConfigWhenInstalled: with codex on PATH the
+// trust level in config.toml decides Pass vs Fail.
+func TestCodexWorkspaceTrustFollowsConfigWhenInstalled(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		trust string
+		want  Status
+	}{
+		{"trusted", "trusted", Pass},
+		{"untrusted", "untrusted", Fail},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withCodexOnPath(t)
+			root := t.TempDir()
+			dir := filepath.Join(root, "project")
+			codexHome := filepath.Join(root, "codex")
+			writeFile(t, filepath.Join(codexHome, "config.toml"), []byte(
+				"[projects.\""+dir+"\"]\ntrust_level = \""+tc.trust+"\"\n"))
+
+			f := findByCheck(t, codexFindings(Paths{CodexHome: codexHome}, dir), "workspace trust")
+			if f.Status != tc.want {
+				t.Fatalf("status = %v, want %v; detail=%q", f.Status, tc.want, f.Detail)
+			}
+		})
+	}
+}
 
 func TestCodexRegistrationCountsCommandsNotBeginComments(t *testing.T) {
 	root := t.TempDir()
