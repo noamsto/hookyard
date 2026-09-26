@@ -16,8 +16,11 @@ import type { GeoLink, GeoNode, Geometry } from "./geometry.ts";
 import { Pulses } from "./pulses.ts";
 import { buildScene, fanOut, linkId, loudOutcomes, PSEUDO, ranksFor, singleOutcome } from "./scene.ts";
 import type { Scene, SceneNode } from "./scene.ts";
+import { clampView, fitView, panBy, sameView, wheelFactor, zoomAt } from "./viewport.ts";
+import type { View } from "./viewport.ts";
 
-const HINT = "hover for exact counts · click to filter · shift-click to add";
+const HINT = "hover for exact counts · click to filter · shift-click to add · drag to pan · wheel to zoom · 0 to fit";
+const DRAG_PX = 5; // a press that moves less than this is still a click
 const MIN_H = 420;
 const INSET = 8; // plate text inset
 const SPARK = { w: 3, gap: 1, h: 10 };
@@ -43,6 +46,8 @@ export class FlowView {
   private readonly c: FlowController;
   private readonly body: HTMLDivElement;
   private readonly svg: SVGSVGElement;
+  private readonly scene: SVGGElement;
+  private readonly fitBtn: HTMLButtonElement;
   private readonly layers: Record<LayerName, SVGGElement>;
   private readonly tip: HTMLDivElement;
   private readonly empty: HTMLParagraphElement;
@@ -62,6 +67,17 @@ export class FlowView {
   private width = 0;
   private activeDots = -1;
   private resizeRaf = 0;
+  // The user's view of the scene. While `fitted` it is recomputed on every
+  // layout; once they zoom or pan it is kept (and only clamped).
+  private view: View = { k: 1, tx: 0, ty: 0 };
+  private fitted = true;
+  private fitK = 1;
+  private sceneW = 0;
+  private sceneH = 0;
+  private readonly pointers = new Map<number, { x: number; y: number }>();
+  private pinch = 0; // the pinch's last finger distance
+  private press: { x: number; y: number } | null = null; // where the primary press began, until it counts as a drag
+  private dragged = false;
 
   constructor(panel: HTMLElement, c: FlowController) {
     this.c = c;
@@ -75,14 +91,19 @@ export class FlowView {
     this.idleInput.type = "checkbox";
     this.idleText = htmlEl("span", "", "", idle);
     this.idleInput.addEventListener("change", () => c.setShowIdle(this.idleInput.checked));
+    this.fitBtn = htmlEl("button", "flow-fit", "fit", header);
+    this.fitBtn.type = "button";
+    this.fitBtn.title = "fit the graph to the panel (0)";
+    this.fitBtn.addEventListener("click", () => this.fit());
     htmlEl("p", "hint flow-hint", HINT, panel);
 
     this.body = htmlEl("div", "flow-body", "", panel);
     this.body.id = "flow-body";
     this.svg = svgEl("svg", { class: "flow-svg" }, this.body);
+    this.scene = svgEl("g", { class: "flow-scene" }, this.svg);
     const layers = {} as Record<LayerName, SVGGElement>;
     for (const k of ["heads", "bands", "over", "nodes", "labels", "dots", "legend"] as const) {
-      layers[k] = svgEl("g", { class: "l-" + k }, this.svg);
+      layers[k] = svgEl("g", { class: "l-" + k }, this.scene);
     }
     this.layers = layers;
     this.tip = htmlEl("div", "flow-tip", "", this.body);
@@ -110,8 +131,27 @@ export class FlowView {
       this.pulses.call(branches.map((b) => d.frame.snap.displayNodes(b)));
     });
 
-    this.body.addEventListener("pointerdown", (ev) => c.pressBegin(this.keyAt(ev.target)), true);
-    const release = () => window.setTimeout(() => c.pressEnd(), 0);
+    this.body.addEventListener("pointerdown", (ev) => {
+      if (this.pointers.size === 0) c.pressBegin(this.keyAt(ev.target));
+      this.pointerDown(ev);
+    }, true);
+    // A body that is never scrolled: focus() and find-in-page must not offset the transform.
+    this.body.addEventListener("scroll", () => this.body.scrollTo(0, 0));
+    this.body.addEventListener("pointermove", (ev) => this.pointerMove(ev));
+    for (const t of ["pointerup", "pointercancel"]) this.body.addEventListener(t, (ev) => this.pointerUp(ev as PointerEvent));
+    // a drag that panned is not a click on whatever lay under the pointer
+    this.body.addEventListener("click", (ev) => {
+      if (!this.dragged) return;
+      this.dragged = false;
+      ev.stopPropagation();
+    }, true);
+    this.body.addEventListener("wheel", (ev) => this.wheel(ev), { passive: false });
+    document.addEventListener("keydown", (ev) => this.key(ev));
+    const release = (ev: Event) => {
+      if (ev.type === "blur") this.resetPointers();
+      else if (this.pointers.size > 0) return;
+      window.setTimeout(() => c.pressEnd(), 0);
+    };
     for (const t of ["pointerup", "pointercancel", "lostpointercapture", "blur"]) window.addEventListener(t, release);
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) this.pulses.cancel();
@@ -220,13 +260,15 @@ export class FlowView {
     };
     this.drawn = d;
 
-    this.svg.setAttribute("width", String(geo.width));
-    this.svg.setAttribute("height", String(geo.height));
-    this.svg.setAttribute("viewBox", `0 0 ${geo.width} ${geo.height}`);
-    // Laid out wider than the panel: the body scrolls sideways, not the page.
-    const wide = geo.width > width;
-    this.body.classList.toggle("wide", wide);
-    this.body.style.height = geo.height + (wide ? this.body.offsetHeight - this.body.clientHeight : 0) + "px";
+    // Laid out wider than the panel: the scene pans and zooms inside it.
+    this.sceneW = geo.width;
+    this.sceneH = geo.height;
+    this.fitK = fitView(this.sceneSize(), { w: width, h: 0 }).k;
+    this.body.style.height = Math.ceil(geo.height * this.fitK) + "px";
+    this.svg.setAttribute("width", String(width));
+    this.svg.setAttribute("height", String(this.body.clientHeight));
+    this.view = this.fitted ? this.fitView() : clampView(this.view, this.sceneSize(), this.panel(), this.fitK);
+    this.applyView();
     this.svg.classList.toggle("mono", d.mono);
     for (const k of ["heads", "bands", "over", "nodes", "labels", "legend"] as const) this.layers[k].replaceChildren();
 
@@ -244,9 +286,154 @@ export class FlowView {
     if (hoverEdge !== null && d.geo.links.some((l) => l.edge === hoverEdge)) this.hoverBand(hoverEdge);
     if (focused !== undefined) {
       for (const el of this.svg.querySelectorAll("[tabindex]")) {
-        if (this.keyOf.get(el) === focused) (el as SVGElement).focus();
+        if (this.keyOf.get(el) === focused) (el as SVGElement).focus({ preventScroll: true });
       }
     }
+  }
+
+  // ---------- pan and zoom ----------
+
+  private sceneSize() {
+    return { w: this.sceneW, h: this.sceneH };
+  }
+
+  private panel() {
+    return { w: this.body.clientWidth, h: this.body.clientHeight };
+  }
+
+  private fitView(): View {
+    return fitView(this.sceneSize(), this.panel());
+  }
+
+  private applyView(): void {
+    const v = this.view;
+    this.scene.setAttribute("transform", `translate(${v.tx.toFixed(2)} ${v.ty.toFixed(2)}) scale(${v.k.toFixed(5)})`);
+    this.body.classList.toggle("zoomed", !this.fitted);
+    const d = this.body.dataset;
+    d.viewK = v.k.toFixed(4);
+    d.viewTx = v.tx.toFixed(2);
+    d.viewTy = v.ty.toFixed(2);
+    d.fitted = this.fitted ? "1" : "0";
+  }
+
+  private setView(v: View): void {
+    if (this.sceneW === 0 || (this.drawn?.geo.nodes.length ?? 0) === 0 || sameView(v, this.view)) return;
+    this.view = v;
+    this.fitted = false;
+    this.applyView();
+    this.rehover();
+  }
+
+  private fit(): void {
+    if (this.sceneW === 0) return;
+    this.fitted = true;
+    this.view = this.fitView();
+    this.applyView();
+    this.rehover();
+  }
+
+  // The hover overlay rides the scene transform; only the tooltip needs to
+  // move. A drag in progress has no hover at all.
+  private rehover(): void {
+    const [node, edge] = [this.hover, this.hoverEdge];
+    if (this.body.classList.contains("panning") || this.pointers.size > 1) this.clearHover();
+    else if (node !== null) this.hoverNode(node);
+    else if (edge !== null) this.hoverBand(edge);
+  }
+
+  private zoomBy(factor: number, px: number, py: number): void {
+    this.setView(zoomAt(this.view, factor, px, py, this.sceneSize(), this.panel(), this.fitK));
+  }
+
+  private local(ev: { clientX: number; clientY: number }): { x: number; y: number } {
+    const r = this.body.getBoundingClientRect();
+    return { x: ev.clientX - r.left, y: ev.clientY - r.top };
+  }
+
+  private wheel(ev: WheelEvent): void {
+    if (!this.drawn || this.drawn.geo.nodes.length === 0) return;
+    const p = this.local(ev);
+    const next = zoomAt(this.view, wheelFactor(ev.deltaY, ev.deltaMode, ev.ctrlKey, this.body.clientHeight), p.x, p.y, this.sceneSize(), this.panel(), this.fitK);
+    if (sameView(next, this.view)) return; // nothing to zoom: let the page scroll
+    ev.preventDefault();
+    this.setView(next);
+  }
+
+  private key(ev: KeyboardEvent): void {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey || !this.c.isVisible()) return;
+    const t = ev.target;
+    if (t instanceof HTMLElement && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+    const [w, h] = [this.body.clientWidth, this.body.clientHeight];
+    if (ev.key === "+" || ev.key === "=") this.zoomBy(1.25, w / 2, h / 2);
+    else if (ev.key === "-") this.zoomBy(0.8, w / 2, h / 2);
+    else if (ev.key === "0") this.fit();
+    else return;
+    ev.preventDefault();
+  }
+
+  private pointerDown(ev: PointerEvent): void {
+    if (ev.pointerType === "mouse" && ev.button !== 0) return;
+    this.pointers.set(ev.pointerId, this.local(ev));
+    this.dragged = false;
+    if (this.pointers.size === 1) this.press = this.local(ev);
+    else {
+      this.press = null;
+      this.pinch = this.pinchDistance();
+      this.dragged = true;
+    }
+  }
+
+  private pinchDistance(): number {
+    const [a, b] = [...this.pointers.values()];
+    return a && b ? Math.hypot(a.x - b.x, a.y - b.y) : 0;
+  }
+
+  private pointerMove(ev: PointerEvent): void {
+    const prev = this.pointers.get(ev.pointerId);
+    if (!prev) return;
+    if (ev.pointerType === "mouse" && ev.buttons === 0) {
+      this.resetPointers();
+      return;
+    }
+    const p = this.local(ev);
+    this.pointers.set(ev.pointerId, p);
+    if (this.pointers.size >= 2) {
+      const dist = this.pinchDistance();
+      const [a, b] = [...this.pointers.values()];
+      if (this.pinch > 0 && dist > 0) this.zoomBy(dist / this.pinch, (a.x + b.x) / 2, (a.y + b.y) / 2);
+      this.pinch = dist;
+      return;
+    }
+    let from = prev;
+    if (this.press) {
+      if (Math.hypot(p.x - this.press.x, p.y - this.press.y) < DRAG_PX) return;
+      from = this.press; // the threshold's travel counts: the graph does not lag the finger
+      this.press = null;
+      this.dragged = true;
+      this.body.setPointerCapture(ev.pointerId);
+      this.body.classList.add("panning");
+      this.clearHover();
+    }
+    if (this.dragged) this.setView(panBy(this.view, p.x - from.x, p.y - from.y, this.sceneSize(), this.panel(), this.fitK));
+  }
+
+  private pointerUp(ev: PointerEvent): void {
+    this.pointers.delete(ev.pointerId);
+    this.pinch = 0;
+    if (this.pointers.size === 0) {
+      this.press = null;
+      this.body.classList.remove("panning");
+      // the click that follows a drag is swallowed first; a pinch has none
+      window.setTimeout(() => (this.dragged = false), 0);
+    }
+  }
+
+  private resetPointers(): void {
+    this.pointers.clear();
+    this.pinch = 0;
+    this.press = null;
+    this.dragged = false;
+    this.body.classList.remove("panning");
   }
 
   private drawHeaders(geo: Geometry): void {
@@ -626,23 +813,28 @@ export class FlowView {
 
     const W = this.body.clientWidth;
     const H = this.body.clientHeight;
-    const sx = this.body.scrollLeft;
+    const v = this.view;
     const w = t.offsetWidth;
     const th = t.offsetHeight;
-    let x = at?.x ?? 0;
-    let y = at?.y ?? 0;
+    let x = 0;
+    let y = 0;
+    // Scene coordinates to panel ones, so the tip lands beside its node at any zoom.
+    const px = (sx: number) => sx * v.k + v.tx;
+    const py = (sy: number) => sy * v.k + v.ty;
+    if (at) [x, y] = [px(at.x), py(at.y)];
     const g = key !== null ? d.geo.byKey.get(key) : undefined;
     if (g) {
-      if (g.kind === "outcome") [x, y] = [g.x0 - w - 14, g.y0];
-      else if (g.kind === "engine") [x, y] = [g.x1 + 14, g.y0];
-      else [x, y] = [g.x0, g.y0 + g.h + 8 + th < H ? g.y0 + g.h + 8 : g.y0 - th - 8];
+      const [x0, x1, y0, y1] = [px(g.x0), px(g.x1), py(g.y0), py(g.y0 + g.h)];
+      if (g.kind === "outcome") [x, y] = [x0 - w - 14, y0];
+      else if (g.kind === "engine") [x, y] = [x1 + 14, y0];
+      else [x, y] = [x0, y1 + 8 + th < H ? y1 + 8 : y0 - th - 8];
     } else if (key !== null) {
       const el = d.nodeEls.get(key)?.querySelector("rect.hit");
       const r = el?.getBoundingClientRect();
       const b = this.body.getBoundingClientRect();
-      if (r) [x, y] = [r.left - b.left + sx, r.bottom - b.top + 6];
+      if (r) [x, y] = [r.left - b.left, r.bottom - b.top + 6];
     }
-    t.style.left = Math.max(sx + 4, Math.min(x, sx + W - w - 8)) + "px";
+    t.style.left = Math.max(4, Math.min(x, W - w - 8)) + "px";
     t.style.top = Math.max(4, Math.min(y, H - th - 8)) + "px";
   }
 

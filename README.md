@@ -175,6 +175,11 @@ rule, same filter.
   live call pulses: a dot enters its event, then fans out into one dot per
   handler run. A past day shows static whole-day totals.
 
+  The graph pans and zooms: drag to pan, wheel (or pinch) to zoom at the
+  cursor, `+` / `-` to zoom, `0` or the `fit` button to fit it to the panel.
+  A zoomed view survives refreshes and group toggles; a fitted one re-fits
+  on resize. On a narrow panel the graph is scaled down to fit, not scrolled.
+
   Handlers are grouped by id prefix (`guards.*`, `guards.pi.*`, `aeye-*`,
   `houston.*`); a folded group is one plate naming its top decider. Click
   it (or Enter on it) to open it: its members are drawn under a fold

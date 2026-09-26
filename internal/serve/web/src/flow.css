@@ -31,10 +31,14 @@
 [data-o="dispatched"] { --oc: color-mix(in oklab, var(--c-dispatched) 30%, var(--c-abstain)); }
 [data-o="abstain"] { --oc: var(--c-abstain); }
 
-.flow-body { position: relative; min-height: 420px; }
-.flow-body.wide { overflow-x: auto; overflow-y: hidden; }
-.flow-body.wide .flow-tip { max-height: calc(100% - 8px); overflow-y: auto; }
-.flow-svg { display: block; font-family: inherit; overflow: visible; }
+/* the graph pans and zooms inside the body; it never scrolls. Fitted, a touch
+   still scrolls the page vertically; zoomed, the finger belongs to the graph. */
+.flow-body { position: relative; min-height: 420px; overflow: hidden; cursor: grab; touch-action: pan-y; }
+.flow-body.zoomed { touch-action: none; }
+.flow-body.panning { cursor: grabbing; user-select: none; }
+.flow-body.panning .flow-node .hit, .flow-body.panning .flow-group-open .hit { cursor: grabbing; }
+.flow-svg { display: block; font-family: inherit; }
+.flow-fit { font: inherit; padding: 0 8px; }
 .flow-svg text { font-size: 12px; fill: var(--fg); }
 .flow-empty { position: absolute; inset: 45% 0 auto; margin: 0; text-align: center; }
 
