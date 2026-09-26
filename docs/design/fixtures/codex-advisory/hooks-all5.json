@@ -1,0 +1,32 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [{"type": "command", "command": "/home/noams/Data/git/.worktrees/noamsto/hookyard/feat-87-probe-and-wire-codex-advisory-events/docs/design/fixtures/codex-advisory/emit-advisory.sh SS-MARKER /home/noams/.local/cache/codex-advisory-probe/hook-log.jsonl", "timeout": 10}]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [{"type": "command", "command": "/home/noams/Data/git/.worktrees/noamsto/hookyard/feat-87-probe-and-wire-codex-advisory-events/docs/design/fixtures/codex-advisory/emit-advisory.sh UPS-MARKER /home/noams/.local/cache/codex-advisory-probe/hook-log.jsonl", "timeout": 10}]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{"type": "command", "command": "/home/noams/Data/git/.worktrees/noamsto/hookyard/feat-87-probe-and-wire-codex-advisory-events/docs/design/fixtures/codex-advisory/emit-advisory.sh PRE-MARKER /home/noams/.local/cache/codex-advisory-probe/hook-log.jsonl", "timeout": 10}]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{"type": "command", "command": "/home/noams/Data/git/.worktrees/noamsto/hookyard/feat-87-probe-and-wire-codex-advisory-events/docs/design/fixtures/codex-advisory/emit-advisory.sh POST-MARKER /home/noams/.local/cache/codex-advisory-probe/hook-log.jsonl", "timeout": 10}]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [{"type": "command", "command": "/home/noams/Data/git/.worktrees/noamsto/hookyard/feat-87-probe-and-wire-codex-advisory-events/docs/design/fixtures/codex-advisory/emit-advisory.sh SUB-MARKER /home/noams/.local/cache/codex-advisory-probe/hook-log.jsonl", "timeout": 10}]
+      }
+    ]
+  }
+}

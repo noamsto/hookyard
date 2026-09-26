@@ -173,7 +173,7 @@ func TestRouteAgainstTheRealBinary(t *testing.T) {
 		wantDelivered(t, rec.Handlers[2], true)
 	})
 
-	t.Run("codex deny drops the advice", func(t *testing.T) {
+	t.Run("codex deny carries the advice", func(t *testing.T) {
 		dir := t.TempDir()
 		stateDir := filepath.Join(dir, "state")
 		writeTable(t, stateDir,
@@ -187,7 +187,7 @@ func TestRouteAgainstTheRealBinary(t *testing.T) {
 			t.Fatalf("want exit 0, got %d", code)
 		}
 		want := `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",` +
-			`"permissionDecisionReason":"blocked"}}` + "\n"
+			`"permissionDecisionReason":"blocked","additionalContext":"fyi"}}` + "\n"
 		if printed != want {
 			t.Errorf("printed = %q, want %q", printed, want)
 		}
@@ -199,9 +199,43 @@ func TestRouteAgainstTheRealBinary(t *testing.T) {
 		if len(rec.Handlers) != 3 {
 			t.Fatalf("want 3 handler entries, got %+v", rec.Handlers)
 		}
-		// Codex pre_tool has no advisory slot: the advise handler's own
-		// contribution is still recorded, just never delivered.
-		wantDelivered(t, rec.Handlers[2], false)
+		// Codex pre_tool is both a decision slot and an advisory slot: the
+		// deny carries the advise handler's contribution in the same payload.
+		wantDelivered(t, rec.Handlers[2], true)
+	})
+
+	t.Run("codex post_tool delivers advice", func(t *testing.T) {
+		dir := t.TempDir()
+		stateDir := filepath.Join(dir, "state")
+		writeTable(t, stateDir, e2eAdvise(t, dir, "codex", "post_tool", "a"))
+
+		printed, code := runRouteBinary(t, bin, nil, codexAdvisoryPayload(t, "PostToolUse"),
+			routeArgs("codex", "post_tool", stateDir)...)
+		if code != 0 {
+			t.Fatalf("want exit 0, got %d", code)
+		}
+		want := `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"a"}}` + "\n"
+		if printed != want {
+			t.Errorf("printed = %q, want %q", printed, want)
+		}
+		wantDelivered(t, readRecord(t, stateDir).Handlers[0], true)
+	})
+
+	t.Run("codex scoped subagent_start delivers advice", func(t *testing.T) {
+		dir := t.TempDir()
+		stateDir := filepath.Join(dir, "state")
+		writeTable(t, stateDir, e2eAdvise(t, dir, "codex", "codex:SubagentStart", "a"))
+
+		printed, code := runRouteBinary(t, bin, nil, codexAdvisoryPayload(t, "SubagentStart"),
+			routeArgs("codex", "codex:SubagentStart", stateDir)...)
+		if code != 0 {
+			t.Fatalf("want exit 0, got %d", code)
+		}
+		want := `{"hookSpecificOutput":{"hookEventName":"SubagentStart","additionalContext":"a"}}` + "\n"
+		if printed != want {
+			t.Errorf("printed = %q, want %q", printed, want)
+		}
+		wantDelivered(t, readRecord(t, stateDir).Handlers[0], true)
 	})
 
 	t.Run("codex session_start delivers advice", func(t *testing.T) {

@@ -1,0 +1,5 @@
+{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"SS-MARKER"}}
+{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"UPS-MARKER"}}
+{"hookSpecificOutput":{"hookEventName":"SubagentStart","additionalContext":"SUB-MARKER"}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"PRE-MARKER"}}
+{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"POST-MARKER"}}

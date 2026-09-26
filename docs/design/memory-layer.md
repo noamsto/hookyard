@@ -31,7 +31,7 @@ memory-startup category sells.
 | Codex | none | — | — |
 | Cursor | none | — | — |
 
-Codex does not ship a native memory store, but since PR #101 its hookyard advisory slot carries `session_start` and `prompt_submit`.
+Codex does not ship a native memory store, but its hookyard advisory slot carries all five events Codex documents an advisory channel on — `session_start`, `prompt_submit`, `pre_tool`, `post_tool` and the engine-scoped `subagent_start` (PR #101 wired the first two; issue #87 confirmed and wired the rest).
 
 Claude Code's auto memory is a real layer, not a stub. Verified on this machine:
 52 topic files across 11 project directories plus 11 `MEMORY.md` indexes — 63 files
@@ -245,7 +245,7 @@ several of them rule out otherwise-attractive designs.
 | # | requirement | evidence |
 | --- | --- | --- |
 | R1 | **Readable and writable with ordinary file tools, and injectable without an MCP server** | workers are launched with one fixed `--mcp-config` chosen at dispatch time (`adapters/core/dispatch.sh:2423`), so making memory an MCP dependency means editing the worker launch path and widening every worker's tool surface; Pi and Cursor have no MCP registration path in this fleet at all; and a file the agent *writes* needs no tool surface, which no MCP design gives you. (An earlier revision justified this with a zero-server worker profile that no longer exists — see the PR review.) |
-| R2 | **Reaches all four engines** | Cursor's advisory rides only a rendered permission (`internal/verdict/capability.go`). So the store must be readable as *files* regardless, and injection covers a subset even at best — **and that subset is larger than this document first claimed: Codex now has a confirmed advisory channel**, on `session_start` and `prompt_submit` (PR #101, confirmed by `TestLiveCodexDeliversSessionStartAndPromptSubmitAdvice`). `PreToolUse`, `PostToolUse` and `SubagentStart` remain unprobed at the advisory layer |
+| R2 | **Reaches all four engines** | Cursor's advisory rides only a rendered permission (`internal/verdict/capability.go`). So the store must be readable as *files* regardless, and injection covers a subset even at best — **and that subset is larger than this document first claimed: Codex's advisory channel is confirmed on all five events its docs name**, `session_start`, `prompt_submit`, `pre_tool`, `post_tool` and `subagent_start` (PR #101 for the first two, issue #87 for the rest; `docs/design/fixtures/codex-advisory/outcome-0.156.1-positive.md`) |
 | R3 | **Works on a host with no GUI** | `halo` runs `desktop.mode = "none"`. The `obsidian-cli` binary is a Unix-socket client to a *running* Obsidian app (`$XDG_RUNTIME_DIR/.obsidian-cli.sock`; verified on this machine: *"The CLI is unable to find Obsidian"*), so it is not an agent interface |
 | R4 | **Survives concurrent writers on two or more machines** | agents run on `tp-g5`/`tp-g6` and `mbp-m4-pro`, sometimes simultaneously in worktrees off one repo |
 | R5 | **Human-curatable and retireable** | agent memory's dominant real failure is a stale fact that keeps being injected. It needs a surface for review, correction, and deletion |

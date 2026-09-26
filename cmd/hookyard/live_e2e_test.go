@@ -335,6 +335,34 @@ func liveCodexSessionLogs(t *testing.T, codexHome string) []string {
 
 func assertCodexAdviceMarker(t *testing.T, files []string, marker string, codexOutput []byte) {
 	t.Helper()
+	hits := codexAdviceMarkerLines(t, files, marker)
+	if len(hits) != 1 {
+		t.Fatalf("marker %s occurs %d times in sessions/**/*.jsonl, want 1\n--- codex output ---\n%s",
+			marker, len(hits), codexOutput)
+	}
+	assertCodexAdviceRow(t, marker, hits[0])
+}
+
+// assertCodexAdviceMarkerAtLeastOnce is the weaker sibling of
+// assertCodexAdviceMarker for a marker that legitimately lands more than once:
+// a SubagentStart run writes two rollouts, and the child thread carries the
+// parent's SessionStart/UserPromptSubmit context as well as its own, so a
+// marker can appear in both. Each hit still has to be a labelled
+// hooks.additional_context developer row.
+func assertCodexAdviceMarkerAtLeastOnce(t *testing.T, files []string, marker string, codexOutput []byte) {
+	t.Helper()
+	hits := codexAdviceMarkerLines(t, files, marker)
+	if len(hits) == 0 {
+		t.Fatalf("marker %s occurs 0 times in sessions/**/*.jsonl, want at least 1\n--- codex output ---\n%s",
+			marker, codexOutput)
+	}
+	for _, hit := range hits {
+		assertCodexAdviceRow(t, marker, hit)
+	}
+}
+
+func codexAdviceMarkerLines(t *testing.T, files []string, marker string) []string {
+	t.Helper()
 	var hits []string
 	for _, path := range files {
 		raw, err := os.ReadFile(path)
@@ -347,10 +375,11 @@ func assertCodexAdviceMarker(t *testing.T, files []string, marker string, codexO
 			}
 		}
 	}
-	if len(hits) != 1 {
-		t.Fatalf("marker %s occurs %d times in sessions/**/*.jsonl, want 1\n--- codex output ---\n%s",
-			marker, len(hits), codexOutput)
-	}
+	return hits
+}
+
+func assertCodexAdviceRow(t *testing.T, marker, line string) {
+	t.Helper()
 	var row struct {
 		Type    string `json:"type"`
 		Payload struct {
@@ -360,12 +389,12 @@ func assertCodexAdviceMarker(t *testing.T, files []string, marker string, codexO
 			} `json:"internal_chat_message_metadata_passthrough"`
 		} `json:"payload"`
 	}
-	if err := json.Unmarshal([]byte(hits[0]), &row); err != nil {
-		t.Fatalf("marker %s line is not JSON: %v\n%s", marker, err, hits[0])
+	if err := json.Unmarshal([]byte(line), &row); err != nil {
+		t.Fatalf("marker %s line is not JSON: %v\n%s", marker, err, line)
 	}
 	if row.Type != "response_item" || row.Payload.Role != "developer" {
 		t.Fatalf("marker %s line type=%q role=%q, want response_item / developer\n%s",
-			marker, row.Type, row.Payload.Role, hits[0])
+			marker, row.Type, row.Payload.Role, line)
 	}
 	found := false
 	for _, kind := range row.Payload.Meta.Kinds {
@@ -375,8 +404,137 @@ func assertCodexAdviceMarker(t *testing.T, files []string, marker string, codexO
 	}
 	if !found {
 		t.Fatalf("marker %s line content_item_kinds = %v, want hooks.additional_context\n%s",
-			marker, row.Payload.Meta.Kinds, hits[0])
+			marker, row.Payload.Meta.Kinds, line)
 	}
+}
+
+// TestLiveCodexDeliversPreToolPostToolAndSubagentAdvice drives a real codex
+// exec and checks the session rollouts for the three events #87's authenticated
+// probe confirmed beyond the two the existing test covers: PreToolUse,
+// PostToolUse and SubagentStart. Those need a completed turn (and, for
+// SubagentStart, a spawned subagent), so the turn has to authenticate: the test
+// symlinks the user's ~/.codex/auth.json into the scratch CODEX_HOME — it never
+// reads, copies or prints that file — and skips when it is absent. The prompt
+// asks for a subagent that runs one Bash command, and each event's marker must
+// land as a developer-role response_item Codex labels
+// hooks.additional_context.
+func TestLiveCodexDeliversPreToolPostToolAndSubagentAdvice(t *testing.T) {
+	if os.Getenv("HOOKYARD_E2E") != "1" {
+		t.Skip("set HOOKYARD_E2E=1 to run this test against a live codex binary")
+	}
+	codexBin, err := exec.LookPath("codex")
+	if err != nil {
+		t.Skip("codex binary not found on PATH")
+	}
+	if out, err := exec.Command(codexBin, "--version").CombinedOutput(); err != nil {
+		t.Fatalf("codex --version: %v\n%s", err, out)
+	} else {
+		t.Logf("codex --version: %s", out)
+	}
+
+	auth := filepath.Join(os.Getenv("HOME"), ".codex", "auth.json")
+	if _, err := os.Stat(auth); err != nil {
+		t.Skipf("no Codex credentials at %s; run 'codex login' to enable this live test", auth)
+	}
+
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatalf("user cache dir: %v", err)
+	}
+	scratch, err := os.MkdirTemp(cacheDir, "hookyard-codex-e2e-")
+	if err != nil {
+		t.Fatalf("mkdir scratch: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(scratch) })
+	// Symlink, never copy: the credential file's contents are not this test's
+	// to read.
+	if err := os.Symlink(auth, filepath.Join(scratch, "auth.json")); err != nil {
+		t.Fatalf("symlink codex auth: %v", err)
+	}
+
+	hookyardBin := liveBuildHookyard(t)
+	work := filepath.Join(scratch, "work")
+	stateDir := filepath.Join(scratch, "state")
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", work, err)
+	}
+
+	preMarker := fmt.Sprintf("HY-PRE-%d", time.Now().UnixNano())
+	postMarker := fmt.Sprintf("HY-POST-%d", time.Now().UnixNano())
+	subMarker := fmt.Sprintf("HY-SUB-%d", time.Now().UnixNano())
+	const prompt = "Spawn a subagent to run the shell command 'echo probe-tool', then report the subagent's output."
+	preHandler := liveWriteAdviseHandler(t, scratch, "pre-tool", preMarker)
+	postHandler := liveWriteAdviseHandler(t, scratch, "post-tool", postMarker)
+	subHandler := liveWriteAdviseHandler(t, scratch, "subagent-start", subMarker)
+	manifestPath := liveWriteCodexToolAdvisoryManifest(t, scratch, preHandler, postHandler, subHandler)
+
+	install := exec.Command(hookyardBin, "install",
+		"--manifest", manifestPath,
+		"--router-path", hookyardBin,
+		"--state-dir", stateDir,
+		"--codex-config", filepath.Join(scratch, "config.toml"),
+		"--cursor-hooks", filepath.Join(scratch, "unused-cursor", "hooks.json"),
+		"--pi-settings", filepath.Join(scratch, "unused-pi", "settings.json"),
+	)
+	if out, err := install.CombinedOutput(); err != nil {
+		t.Fatalf("hookyard install: %v\n%s", err, out)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	probe := exec.CommandContext(ctx, codexBin,
+		"--dangerously-bypass-hook-trust",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--enable", "multi_agent",
+		"-C", work,
+		"exec", prompt)
+	probe.Env = append(os.Environ(), "CODEX_HOME="+scratch)
+	output, _ := probe.CombinedOutput()
+
+	files := liveCodexSessionLogs(t, scratch)
+	if len(files) == 0 {
+		t.Fatalf("no sessions/**/*.jsonl under %s\n--- codex output ---\n%s", scratch, output)
+	}
+	assertCodexAdviceMarkerAtLeastOnce(t, files, preMarker, output)
+	assertCodexAdviceMarkerAtLeastOnce(t, files, postMarker, output)
+	assertCodexAdviceMarkerAtLeastOnce(t, files, subMarker, output)
+}
+
+func liveWriteCodexToolAdvisoryManifest(t *testing.T, dir, preToolExec, postToolExec, subagentStartExec string) string {
+	t.Helper()
+	// SubagentStart has no canonical event, so it is registered engine-scoped.
+	m := manifest.Manifest{Handlers: []manifest.Handler{
+		{
+			ID:      "e2e-pre-tool",
+			Exec:    preToolExec,
+			Events:  []string{"pre_tool"},
+			Engines: []string{"codex"},
+			Match:   []string{},
+		},
+		{
+			ID:      "e2e-post-tool",
+			Exec:    postToolExec,
+			Events:  []string{"post_tool"},
+			Engines: []string{"codex"},
+			Match:   []string{},
+		},
+		{
+			ID:      "e2e-subagent-start",
+			Exec:    subagentStartExec,
+			Events:  []string{"codex:SubagentStart"},
+			Engines: []string{"codex"},
+			Match:   []string{},
+		},
+	}}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	path := filepath.Join(dir, "hookyard-tools.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	return path
 }
 
 // liveBuildHookyard compiles cmd/hookyard at a path containing

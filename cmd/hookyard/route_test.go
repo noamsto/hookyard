@@ -425,6 +425,25 @@ func codexAdvisorySessionStartPayload(t *testing.T) string {
 	return line
 }
 
+// codexAdvisoryPayload returns the recorded inbound payload for one of the
+// five events from the 0.156.1 all-five probe (hook-log-all5.jsonl), so a
+// route test asserts against a real captured payload rather than a retyped
+// shape.
+func codexAdvisoryPayload(t *testing.T, event string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs", "design", "fixtures", "codex-advisory", "hook-log-all5.jsonl"))
+	if err != nil {
+		t.Fatalf("read codex advisory hook log: %v", err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.Contains(line, `"hook_event_name":"`+event+`"`) {
+			return line
+		}
+	}
+	t.Fatalf("no %s payload in hook-log-all5.jsonl", event)
+	return ""
+}
+
 // Cursor's SessionEnd carries cursor_version, so Detect places it with no
 // fallback: an entry whose --event names cursor:sessionEnd routes normally.
 func TestRunRouteCursorSessionEndRoutes(t *testing.T) {
