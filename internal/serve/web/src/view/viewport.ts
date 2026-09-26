@@ -19,7 +19,7 @@ export function fitView(scene: Size, panel: Size): View {
 // the panel pans until its far edge meets the panel's; a smaller one stays inside.
 const range = (panel: number, scene: number): [number, number] => {
   const [a, b] = [panel - scene - PAD, PAD];
-  return a < b ? [a, b] : [b, a];
+  return [Math.min(a, b, 0), Math.max(a, b, 0)]; // the fitted origin (0) is always in range
 };
 
 export function clampView(v: View, scene: Size, panel: Size, fitK: number): View {

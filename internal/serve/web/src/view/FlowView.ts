@@ -132,9 +132,11 @@ export class FlowView {
     });
 
     this.body.addEventListener("pointerdown", (ev) => {
-      c.pressBegin(this.keyAt(ev.target));
+      if (this.pointers.size === 0) c.pressBegin(this.keyAt(ev.target));
       this.pointerDown(ev);
     }, true);
+    // A body that is never scrolled: focus() and find-in-page must not offset the transform.
+    this.body.addEventListener("scroll", () => this.body.scrollTo(0, 0));
     this.body.addEventListener("pointermove", (ev) => this.pointerMove(ev));
     for (const t of ["pointerup", "pointercancel"]) this.body.addEventListener(t, (ev) => this.pointerUp(ev as PointerEvent));
     // a drag that panned is not a click on whatever lay under the pointer
@@ -145,7 +147,11 @@ export class FlowView {
     }, true);
     this.body.addEventListener("wheel", (ev) => this.wheel(ev), { passive: false });
     document.addEventListener("keydown", (ev) => this.key(ev));
-    const release = () => window.setTimeout(() => c.pressEnd(), 0);
+    const release = (ev: Event) => {
+      if (ev.type === "blur") this.resetPointers();
+      else if (this.pointers.size > 0) return;
+      window.setTimeout(() => c.pressEnd(), 0);
+    };
     for (const t of ["pointerup", "pointercancel", "lostpointercapture", "blur"]) window.addEventListener(t, release);
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) this.pulses.cancel();
@@ -280,7 +286,7 @@ export class FlowView {
     if (hoverEdge !== null && d.geo.links.some((l) => l.edge === hoverEdge)) this.hoverBand(hoverEdge);
     if (focused !== undefined) {
       for (const el of this.svg.querySelectorAll("[tabindex]")) {
-        if (this.keyOf.get(el) === focused) (el as SVGElement).focus();
+        if (this.keyOf.get(el) === focused) (el as SVGElement).focus({ preventScroll: true });
       }
     }
   }
@@ -311,7 +317,7 @@ export class FlowView {
   }
 
   private setView(v: View): void {
-    if (sameView(v, this.view)) return;
+    if (this.sceneW === 0 || (this.drawn?.geo.nodes.length ?? 0) === 0 || sameView(v, this.view)) return;
     this.view = v;
     this.fitted = false;
     this.applyView();
@@ -319,6 +325,7 @@ export class FlowView {
   }
 
   private fit(): void {
+    if (this.sceneW === 0) return;
     this.fitted = true;
     this.view = this.fitView();
     this.applyView();
@@ -329,7 +336,7 @@ export class FlowView {
   // move. A drag in progress has no hover at all.
   private rehover(): void {
     const [node, edge] = [this.hover, this.hoverEdge];
-    if (this.dragged) this.clearHover();
+    if (this.body.classList.contains("panning") || this.pointers.size > 1) this.clearHover();
     else if (node !== null) this.hoverNode(node);
     else if (edge !== null) this.hoverBand(edge);
   }
@@ -345,9 +352,11 @@ export class FlowView {
 
   private wheel(ev: WheelEvent): void {
     if (!this.drawn || this.drawn.geo.nodes.length === 0) return;
-    ev.preventDefault();
     const p = this.local(ev);
-    this.zoomBy(wheelFactor(ev.deltaY, ev.deltaMode, ev.ctrlKey, this.body.clientHeight), p.x, p.y);
+    const next = zoomAt(this.view, wheelFactor(ev.deltaY, ev.deltaMode, ev.ctrlKey, this.body.clientHeight), p.x, p.y, this.sceneSize(), this.panel(), this.fitK);
+    if (sameView(next, this.view)) return; // nothing to zoom: let the page scroll
+    ev.preventDefault();
+    this.setView(next);
   }
 
   private key(ev: KeyboardEvent): void {
@@ -382,6 +391,10 @@ export class FlowView {
   private pointerMove(ev: PointerEvent): void {
     const prev = this.pointers.get(ev.pointerId);
     if (!prev) return;
+    if (ev.pointerType === "mouse" && ev.buttons === 0) {
+      this.resetPointers();
+      return;
+    }
     const p = this.local(ev);
     this.pointers.set(ev.pointerId, p);
     if (this.pointers.size >= 2) {
@@ -410,7 +423,17 @@ export class FlowView {
     if (this.pointers.size === 0) {
       this.press = null;
       this.body.classList.remove("panning");
+      // the click that follows a drag is swallowed first; a pinch has none
+      window.setTimeout(() => (this.dragged = false), 0);
     }
+  }
+
+  private resetPointers(): void {
+    this.pointers.clear();
+    this.pinch = 0;
+    this.press = null;
+    this.dragged = false;
+    this.body.classList.remove("panning");
   }
 
   private drawHeaders(geo: Geometry): void {
