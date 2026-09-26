@@ -431,7 +431,10 @@ func codexFindings(p Paths, dir string) []Finding {
 		trust.Detail = fmt.Sprintf("%s: %v", config, err)
 		hookTrust.Detail = trust.Detail
 	} else {
-		if codexConfig.Projects[dir].TrustLevel == "trusted" {
+		if _, err := exec.LookPath("codex"); err != nil {
+			trust.Status = Unknown
+			trust.Detail = "no codex on PATH to check for workspace trust"
+		} else if codexConfig.Projects[dir].TrustLevel == "trusted" {
 			trust.Status = Pass
 			trust.Detail = "trusted in " + config
 		} else {
@@ -510,7 +513,10 @@ func cursorFindings(p Paths, dir, stateDir string) []Finding {
 	marker := filepath.Join(p.CursorHome, "projects", cursorProjectSlug(dir), ".workspace-trusted")
 
 	trust := Finding{Engine: vocab.Cursor, Check: "workspace trust", Detail: marker}
-	if _, err := os.Stat(marker); err == nil {
+	if _, err := exec.LookPath("cursor-agent"); err != nil {
+		trust.Status = Unknown
+		trust.Detail = "no cursor-agent on PATH to check for workspace trust"
+	} else if _, err := os.Stat(marker); err == nil {
 		trust.Status = Pass
 		trust.Detail = "trusted, per " + marker
 	} else {
@@ -669,7 +675,7 @@ func piFindings(p Paths, stateDir string) []Finding {
 	}
 	// The launcher check resolves the single `pi` binary on PATH, which no
 	// settings directory can vary, so it runs once rather than per directory.
-	findings = append(findings, piLauncherFindings())
+	findings = append(findings, piLauncherFindings(stateDir))
 	return append(findings, piUnmanagedDir(p.PiAgentDir, managed))
 }
 
@@ -760,6 +766,35 @@ func piBuildPackageRoot(entry string) string {
 	return filepath.Dir(filepath.Dir(entry))
 }
 
+// yardHandlerIDs reads the handler ids the yard table registers, plus the
+// table path for a caller that has to name it in a collision. An empty stateDir
+// is the caller's own guard: tableHandlers("") yields no ids and no error, so a
+// caller that wants Unknown there checks it before calling.
+func yardHandlerIDs(stateDir string) (map[string]bool, string, error) {
+	handlers, err := tableHandlers(stateDir)
+	if err != nil {
+		return nil, "", err
+	}
+	ids := make(map[string]bool, len(handlers))
+	for _, h := range handlers {
+		ids[h.ID] = true
+	}
+	return ids, filepath.Join(stateDir, "table.json"), nil
+}
+
+// sharedHandlerIDs is the overlap comparison piDoubleFire and the launcher
+// check share: the ids a build-mode package's baked table registers that the
+// yard table also registers.
+func sharedHandlerIDs(handlers []manifest.Handler, yardIDs map[string]bool) []string {
+	var shared []string
+	for _, h := range handlers {
+		if yardIDs[h.ID] {
+			shared = append(shared, h.ID)
+		}
+	}
+	return shared
+}
+
 // piDoubleFire detects a double registration: pi tolerates `hookyard install`
 // (yard mode) and `pi install <built package>` naming the same handler id,
 // running it twice per event with no warning of its own — the shape a
@@ -778,16 +813,11 @@ func piDoubleFire(stateDir, settingsPath string) Finding {
 		f.Detail = "no --state-dir recoverable to read the handler table from"
 		return f
 	}
-	yardHandlers, err := tableHandlers(stateDir)
+	yardIDs, yardPath, err := yardHandlerIDs(stateDir)
 	if err != nil {
 		f.Status = Unknown
 		f.Detail = fmt.Sprintf("cannot read the handler table at %s: %v", filepath.Join(stateDir, "table.json"), err)
 		return f
-	}
-	yardPath := filepath.Join(stateDir, "table.json")
-	yardIDs := make(map[string]bool, len(yardHandlers))
-	for _, h := range yardHandlers {
-		yardIDs[h.ID] = true
 	}
 
 	var settings struct {
@@ -827,10 +857,8 @@ func piDoubleFire(stateDir, settingsPath string) Finding {
 			continue
 		}
 		found = true
-		for _, h := range handlers {
-			if yardIDs[h.ID] {
-				collisions = append(collisions, fmt.Sprintf("%s is registered in both %s and %s", h.ID, yardPath, tablePath))
-			}
+		for _, id := range sharedHandlerIDs(handlers, yardIDs) {
+			collisions = append(collisions, fmt.Sprintf("%s is registered in both %s and %s", id, yardPath, tablePath))
 		}
 	}
 
@@ -1126,12 +1154,16 @@ var (
 
 // piLauncherFindings resolves pi on PATH, follows symlinks to the real
 // target, and — only if that target is a text script rather than a compiled
-// binary — scans it for injected guard paths and extensions. This machine's
-// own wrapper injects a bridge plus four guard paths that already enforce on
-// Pi, so the same guard can fire twice per tool_call; hookyard cannot rewrite
-// a Nix store script, so naming the injection is the whole of its honest
-// response.
-func piLauncherFindings() Finding {
+// binary — scans it for injected guard paths and extensions, classifying each
+// injection by what hookyard can actually observe. PI_AGENT_HOOKS paths are
+// guard scripts the launcher re-injects, so the same guard can fire twice per
+// tool_call; hookyard cannot rewrite a Nix store script, so naming them is the
+// whole of its honest response. A -e path that is a build-mode hookyard package
+// is intentional unless its baked table collides with the yard table on a
+// handler id — the comparison piDoubleFire already runs. Every other -e path is
+// a plain extension: hookyard has no way to tell whether it registers pi hook
+// handlers, so it reports the list without guessing the answer.
+func piLauncherFindings(stateDir string) Finding {
 	f := Finding{Engine: vocab.Pi, Check: "launcher wrapper", Detail: "pi (PATH)"}
 
 	path, err := exec.LookPath("pi")
@@ -1160,22 +1192,90 @@ func piLauncherFindings() Finding {
 		return f
 	}
 
-	var injected []string
+	var guards, extensions []string
 	for _, m := range piLauncherHooksPattern.FindAllStringSubmatch(string(raw), -1) {
-		injected = append(injected, strings.Split(m[1], ":")...)
+		guards = append(guards, strings.Split(m[1], ":")...)
 	}
 	for _, m := range piLauncherExtensionPattern.FindAllStringSubmatch(string(raw), -1) {
-		injected = append(injected, m[1])
+		extensions = append(extensions, m[1])
 	}
-	injected = distinctStrings(injected)
+	guards = distinctStrings(guards)
+	extensions = distinctStrings(extensions)
 
-	if len(injected) == 0 {
+	if len(guards) == 0 && len(extensions) == 0 {
 		f.Status = Pass
 		f.Detail = resolved + " does not inject PI_AGENT_HOOKS or -e extensions"
 		return f
 	}
-	f.Status = Fail
-	f.Detail = fmt.Sprintf("%s injects registrations hookyard did not write and cannot strip: %s", resolved, strings.Join(injected, ", "))
+
+	// Classify every injected path. A plain -e extension carries no signal
+	// hookyard can observe about whether it registers pi hook handlers; a
+	// build-mode hookyard package carries its baked table, which is exactly
+	// the comparison piDoubleFire already runs against the yard table.
+	var plain, buildRoots, unreadable, collisions []string
+	var yardIDs map[string]bool
+	var yardPath string
+	yardRead := false
+	for _, e := range extensions {
+		root := piBuildPackageRoot(e)
+		if root == "" {
+			plain = append(plain, e)
+			continue
+		}
+		tablePath := filepath.Join(root, manifest.PluginTablePath)
+		handlers, err := manifest.ReadPluginTable(tablePath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				plain = append(plain, e)
+				continue
+			}
+			unreadable = append(unreadable, fmt.Sprintf("%s (%v)", tablePath, err))
+			continue
+		}
+		buildRoots = append(buildRoots, root)
+		if !yardRead {
+			yardRead = true
+			if stateDir == "" {
+				unreadable = append(unreadable, "no --state-dir recoverable to read the yard handler table from")
+				continue
+			}
+			if yardIDs, yardPath, err = yardHandlerIDs(stateDir); err != nil {
+				unreadable = append(unreadable, fmt.Sprintf("cannot read the yard handler table: %v", err))
+				continue
+			}
+		}
+		if yardIDs == nil {
+			continue
+		}
+		for _, id := range sharedHandlerIDs(handlers, yardIDs) {
+			collisions = append(collisions, fmt.Sprintf("%s is registered in both %s and %s", id, yardPath, tablePath))
+		}
+	}
+
+	sort.Strings(collisions)
+	if len(guards) > 0 || len(collisions) > 0 {
+		hazards := append(append([]string{}, guards...), collisions...)
+		f.Status = Fail
+		f.Detail = fmt.Sprintf("%s injects registrations hookyard did not write and cannot strip: %s", resolved, strings.Join(hazards, ", "))
+		if len(plain) > 0 {
+			f.Detail += "; plain -e extensions (hookyard cannot observe whether they register pi hook handlers): " + strings.Join(plain, ", ")
+		}
+		return f
+	}
+	if len(unreadable) > 0 {
+		f.Status = Unknown
+		f.Detail = "cannot tell whether every injected build-mode pi package is disjoint from the yard handler table: " + strings.Join(distinctStrings(unreadable), ", ")
+		return f
+	}
+
+	f.Status = Pass
+	f.Detail = resolved + " injects no hookyard guard path"
+	if len(plain) > 0 {
+		f.Detail += "; plain -e extensions (hookyard cannot observe whether they register pi hook handlers): " + strings.Join(plain, ", ")
+	}
+	if len(buildRoots) > 0 {
+		f.Detail += "; build-mode pi packages disjoint from the yard handler table: " + strings.Join(buildRoots, ", ")
+	}
 	return f
 }
 
