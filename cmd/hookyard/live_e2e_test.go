@@ -2399,3 +2399,131 @@ func TestLiveClaudeCodeStopDenyForcesExactlyOneContinuation(t *testing.T) {
 
 	t.Logf("claude forced exactly one continuation on the turn_end deny; full output:\n%s", output)
 }
+
+func liveWriteCodexStopManifest(t *testing.T, dir, handlerPath string) string {
+	t.Helper()
+	m := manifest.Manifest{Handlers: []manifest.Handler{{
+		ID:      "e2e-codex-stop-deny",
+		Exec:    handlerPath,
+		Events:  []string{"turn_end"},
+		Engines: []string{"codex"},
+	}}}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	path := filepath.Join(dir, "hookyard-codex-stop.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	return path
+}
+
+// TestLiveCodexStopDenyForcesExactlyOneContinuation is the Codex twin of
+// TestLiveClaudeCodeStopDenyForcesExactlyOneContinuation
+// (docs/design/hookyard.md §11.3). Gated on HOOKYARD_E2E=1 and codex on PATH.
+// The reason string is not asserted in the session transcript.
+func TestLiveCodexStopDenyForcesExactlyOneContinuation(t *testing.T) {
+	if os.Getenv("HOOKYARD_E2E") != "1" {
+		t.Skip("set HOOKYARD_E2E=1 to run this test against a live codex binary")
+	}
+	codexBin, err := exec.LookPath("codex")
+	if err != nil {
+		t.Skip("codex binary not found on PATH")
+	}
+	if out, err := exec.Command(codexBin, "--version").CombinedOutput(); err != nil {
+		t.Fatalf("codex --version: %v\n%s", err, out)
+	} else {
+		t.Logf("codex --version: %s", out)
+	}
+
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatalf("user cache dir: %v", err)
+	}
+	scratch, err := os.MkdirTemp(cacheDir, "hookyard-codex-stop-e2e-")
+	if err != nil {
+		t.Fatalf("mkdir scratch: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(scratch) })
+
+	work := filepath.Join(scratch, "work")
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", work, err)
+	}
+	stateDir := filepath.Join(scratch, "state")
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("user home dir: %v", err)
+	}
+	real := filepath.Join(home, ".codex", "auth.json")
+	if _, err := os.Lstat(real); err != nil {
+		t.Fatalf("codex auth.json: %v", err)
+	}
+	if err := os.Symlink(real, filepath.Join(scratch, "auth.json")); err != nil {
+		t.Fatalf("symlink auth.json: %v", err)
+	}
+
+	hookyardBin := liveBuildHookyard(t)
+	reasonTok := fmt.Sprintf("hookyard-e2e-codex-stop-%d", time.Now().UnixNano())
+	firedMarker := filepath.Join(scratch, "stop-handler-fired")
+	stdinCapture := filepath.Join(scratch, "stop-handler-stdin.jsonl")
+	handler := livePiWriteTurnEndDenyHandler(t, scratch, firedMarker, stdinCapture, reasonTok)
+	manifest := liveWriteCodexStopManifest(t, scratch, handler)
+
+	install := exec.Command(hookyardBin, "install",
+		"--manifest", manifest,
+		"--router-path", hookyardBin,
+		"--state-dir", stateDir,
+		"--codex-config", filepath.Join(scratch, "config.toml"),
+		"--cursor-hooks", filepath.Join(scratch, "unused-cursor", "hooks.json"),
+		"--pi-settings", filepath.Join(scratch, "unused-pi", "settings.json"),
+	)
+	if out, err := install.CombinedOutput(); err != nil {
+		t.Fatalf("hookyard install: %v\n%s", err, out)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	probe := exec.CommandContext(ctx, codexBin,
+		"--dangerously-bypass-hook-trust",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"-C", work,
+		"exec", "Reply with exactly: ok")
+	probe.Env = append(os.Environ(), "CODEX_HOME="+scratch)
+	output, runErr := probe.CombinedOutput()
+
+	if _, statErr := os.Stat(firedMarker); os.IsNotExist(statErr) {
+		t.Fatalf("Stop never fired (codex run error: %v)\n--- codex output ---\n%s", runErr, output)
+	}
+
+	stopHookActiveSeen := livePiReadHandlerStdinCaptures(t, stdinCapture)
+	t.Logf("captured native.stop_hook_active across Stop invocations: %v", stopHookActiveSeen)
+	if len(stopHookActiveSeen) != 2 || stopHookActiveSeen[0] || !stopHookActiveSeen[1] {
+		t.Fatalf("expected the Stop handler to see native.stop_hook_active false then true across exactly "+
+			"2 invocations, got %v (codex run error: %v)\n--- codex output ---\n%s",
+			stopHookActiveSeen, runErr, output)
+	}
+
+	records := liveReadAllRecords(t, stateDir)
+	var turnEndRecords []record.Record
+	for _, rec := range records {
+		if rec.CanonicalEvent == "turn_end" && rec.Engine == "codex" {
+			turnEndRecords = append(turnEndRecords, rec)
+		}
+	}
+	t.Logf("canonical turn_end records: %+v", turnEndRecords)
+	if len(turnEndRecords) != 2 {
+		t.Fatalf("expected exactly 2 canonical turn_end records for codex (one per Stop invocation), got "+
+			"%d: %+v\n--- codex output ---\n%s", len(turnEndRecords), turnEndRecords, output)
+	}
+	if turnEndRecords[0].Verdict != record.OutcomeDeny || !turnEndRecords[0].Enforced {
+		t.Fatalf("the first canonical turn_end record must be an enforced deny, got verdict=%q enforced=%v\n--- codex output ---\n%s",
+			turnEndRecords[0].Verdict, turnEndRecords[0].Enforced, output)
+	}
+	if turnEndRecords[1].Verdict != record.OutcomeDeny || turnEndRecords[1].Enforced {
+		t.Fatalf("the second canonical turn_end record must be an unenforced deny, got verdict=%q enforced=%v\n--- codex output ---\n%s",
+			turnEndRecords[1].Verdict, turnEndRecords[1].Enforced, output)
+	}
+}

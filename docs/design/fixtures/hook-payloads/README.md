@@ -1,7 +1,7 @@
 # Captured hook payloads
 
 Real hook payloads, captured from live agent sessions on 2026-09-10,
-2026-09-15, 2026-09-17, 2026-09-22 and 2026-09-23. These are the ground truth
+2026-09-15, 2026-09-17, 2026-09-22, 2026-09-23 and 2026-09-26. These are the ground truth
 behind §7's inbound field table; before them, that table was derived from
 each engine's documentation.
 
@@ -29,6 +29,7 @@ each engine's documentation.
 | `claude-SessionStart.json` | Claude Code 2.1.272 | `SessionStart` | no `prompt_id`/`effort`; the router's yard-mode fallback exists because of this (R-G) |
 | `claude-UserPromptSubmit.json` | Claude Code 2.1.272 | `UserPromptSubmit` | carries the literal probe `prompt` |
 | `claude-Stop.json` | Claude Code 2.1.272 | `Stop` | `last_assistant_message` is `"ok"`; `background_tasks`/`session_crons` are empty |
+| `codex-Stop.json` | Codex 0.156.1 | `Stop` | live capture; `turn_id` and `stop_hook_active` present; `stop_hook_active` is false (observe hook, no continuation) |
 | `claude-SessionEnd.json` | Claude Code 2.1.272 | `SessionEnd` | `reason` is `"other"` |
 
 `pi-agent_settled.json` is captured from a real `pi -p` run, but its
@@ -112,6 +113,14 @@ Codex ran under a scratch `CODEX_HOME`, Claude Code under a scratch
 `CLAUDE_CONFIG_DIR`, and Cursor from a scratch directory with its own
 project-level `.cursor/hooks.json`. Authentication was reached by symlink,
 never copied.
+
+`codex-Stop.json` was captured 2026-09-26 against codex-cli 0.156.1. Scratch
+`CODEX_HOME` lived under the user cache (not `/tmp`). `auth.json` was
+symlinked from the developer Codex home and never read or copied.
+`hooks.json` registered a single `Stop` command hook running
+`capture-hook.sh` in observe mode. The prompt was "Reply with exactly: ok",
+with `--dangerously-bypass-hook-trust` and
+`--dangerously-bypass-approvals-and-sandbox`.
 
 The four `claude-*.json` fixtures dated 2026-09-15 (`SessionStart`,
 `UserPromptSubmit`, `Stop`, `SessionEnd`) were captured differently: unlike
