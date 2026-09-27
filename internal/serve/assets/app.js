@@ -118,6 +118,19 @@ function debounce(fn, ms) {
 // add-selects never carry selection themselves — they only append to this.
 const filterState = { engine: [], event: [], handler: [], outcome: [], verdict: [], session: "" };
 
+// trail is the same values as filterState's arrays, in the order they were
+// added: the drill path. Each step narrows the one before it, so a crumb is a
+// way back to its level. It is kept in lockstep with filterState by
+// setTrail, and the URL carries it in this order, so a reload or a shared
+// link keeps the path.
+let trail = [];
+
+function setTrail(next) {
+  trail = next;
+  for (const field of FIELDS) filterState[field] = [];
+  for (const [field, value] of trail) filterState[field].push(value);
+}
+
 // activeFilters returns a deep copy for callers outside this module (the
 // flow view reads it to know which nodes are already filtered-in).
 export function activeFilters() {
@@ -126,78 +139,129 @@ export function activeFilters() {
   return f;
 }
 
+// filterTrail is the drill path, oldest step first, as [field, value] pairs.
+export function filterTrail() {
+  return trail.map(([field, value]) => [field, value]);
+}
+
 // filterParams is the one place filterState becomes a query string, shared
-// by the SSE URL, the events fetch and the URL bar mirror.
+// by the SSE URL, the events fetch and the URL bar mirror. Values go out in
+// trail order; the server reads them as sets, so the order is only for the
+// URL's sake.
 export function filterParams() {
   const params = new URLSearchParams();
-  for (const field of FIELDS) {
-    for (const v of filterState[field]) params.append(field, v);
-  }
+  for (const [field, value] of trail) params.append(field, value);
   if (filterState.session) params.set("session", filterState.session);
   return params;
 }
 
-// applyFiltersFromParams loads filterState from the URL. A value not among a
-// field's current select options still lands in the state and still shows as
-// a chip — the state is the truth, not the options.
+// applyFiltersFromParams loads filterState from the URL, in the URL's order.
+// A value not among a field's current select options still lands in the
+// state and still shows as a chip — the state is the truth, not the options.
 function applyFiltersFromParams(params) {
-  for (const field of FIELDS) filterState[field] = params.getAll(field).filter(Boolean);
+  const next = [];
+  for (const [field, value] of params) {
+    if (!FIELDS.includes(field) || !value) continue;
+    if (!next.some(([f, v]) => f === field && v === value)) next.push([field, value]);
+  }
+  setTrail(next);
   filterState.session = params.get("session") || "";
   sessionInput.value = filterState.session;
 }
 
-function updateURL() {
+// updateURL mirrors the state to the address bar. push is set for a change
+// the operator made to the drill path, so the browser's back button steps
+// back up it; day switches and bookkeeping replace in place.
+function updateURL(push) {
   const params = filterParams();
   if (state.day) params.set("day", state.day);
   const view = new URLSearchParams(location.search).get("view");
   if (view) params.set("view", view);
   const qs = params.toString();
-  history.replaceState(null, "", qs ? "?" + qs : location.pathname);
+  const url = qs ? "?" + qs : location.pathname;
+  if (push && url !== location.search && !(url === location.pathname && !location.search)) history.pushState(null, "", url);
+  else history.replaceState(null, "", url);
 }
 
 function clearFilters() {
-  for (const field of FIELDS) filterState[field] = [];
+  setTrail([]);
   filterState.session = "";
   sessionInput.value = "";
-  onFiltersChanged();
+  onFiltersChanged(true);
 }
 
 // toggleFilter is the one mutator shared by the filter-chip × buttons and
 // flow.js's node clicks: active → remove; else additive → append; else
-// replace the field's values with just this one.
+// replace the field's values with just this one, at the field's first step.
 export function toggleFilter(field, value, additive) {
-  const values = filterState[field];
-  const idx = values.indexOf(value);
-  if (idx !== -1) values.splice(idx, 1);
-  else if (additive) values.push(value);
-  else filterState[field] = [value];
-  onFiltersChanged();
+  const idx = trail.findIndex(([f, v]) => f === field && v === value);
+  let next;
+  if (idx !== -1) next = trail.filter((_, i) => i !== idx);
+  else if (additive) next = trail.concat([[field, value]]);
+  else {
+    const at = trail.findIndex(([f]) => f === field);
+    next = trail.filter(([f]) => f !== field);
+    next.splice(at === -1 ? next.length : at, 0, [field, value]);
+  }
+  setTrail(next);
+  onFiltersChanged(true);
 }
 
+// backTo keeps the first n steps of the drill path; popFilter drops the last.
+export function backTo(n) {
+  if (n >= trail.length) return;
+  setTrail(trail.slice(0, Math.max(0, n)));
+  onFiltersChanged(true);
+}
+
+export function popFilter() {
+  if (trail.length) backTo(trail.length - 1);
+}
+
+// renderChips draws the drill path: one crumb per step, in trail order. The
+// crumb's label goes back to that level; its × removes just that value.
 function renderChips() {
   filterChipsEl.textContent = "";
-  for (const field of FIELDS) {
-    for (const value of filterState[field]) {
-      const chip = document.createElement("span");
-      chip.className = "fchip";
-      const label = document.createElement("span");
-      label.textContent = FIELD_LABELS[field] + ": " + value;
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "fchip-remove";
-      remove.textContent = "×";
-      remove.setAttribute("aria-label", "remove " + FIELD_LABELS[field] + ": " + value);
-      remove.addEventListener("click", () => toggleFilter(field, value));
-      chip.appendChild(label);
-      chip.appendChild(remove);
-      filterChipsEl.appendChild(chip);
+  trail.forEach(([field, value], i) => {
+    if (i > 0) {
+      const sep = document.createElement("span");
+      sep.className = "crumb-sep";
+      sep.textContent = "›";
+      sep.setAttribute("aria-hidden", "true");
+      filterChipsEl.appendChild(sep);
     }
-  }
+    const last = i === trail.length - 1;
+    const chip = document.createElement("span");
+    chip.className = "fchip crumb" + (last ? " current" : "");
+    chip.dataset.field = field;
+    if (field === "outcome" || field === "verdict") chip.dataset.o = value;
+    const label = document.createElement("button");
+    label.type = "button";
+    label.className = "crumb-go";
+    label.textContent = FIELD_LABELS[field] + ": " + value;
+    if (last) label.setAttribute("aria-current", "step");
+    label.title = last ? "the current level" : "back to this level";
+    label.addEventListener("click", () => backTo(i + 1));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "fchip-remove";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", "remove " + FIELD_LABELS[field] + ": " + value);
+    remove.addEventListener("click", () => toggleFilter(field, value));
+    chip.appendChild(label);
+    chip.appendChild(remove);
+    filterChipsEl.appendChild(chip);
+  });
+  const any = trail.length > 0;
+  el("trail-back").hidden = !any;
+  el("trail-root").classList.toggle("current", !any);
+  el("clear-filters").hidden = !any && !filterState.session;
+  document.body.classList.toggle("filtered", any);
 }
 
-function onFiltersChanged() {
+function onFiltersChanged(push) {
   renderChips();
-  updateURL();
+  updateURL(push);
   if (state.day === state.today) {
     // Reopening the stream runs the one connect sequence (reset -> backfill),
     // which is also how the new filters reach /api/events — there is no
@@ -206,6 +270,30 @@ function onFiltersChanged() {
   } else {
     loadEvents(state.day);
   }
+}
+
+// The browser's back and forward buttons walk the drill path.
+window.addEventListener("popstate", () => {
+  const params = new URLSearchParams(location.search);
+  applyFiltersFromParams(params);
+  const day = params.get("day");
+  renderChips();
+  if (day && day !== state.day) {
+    fillDaySelect([...daySelect.options].map((o) => o.value), day);
+    selectDay(day);
+  } else {
+    onFiltersChanged(false);
+  }
+});
+
+// ---------- focus mode ----------
+
+// Focus mode hides the chrome so the flow graph gets the whole window. The
+// graph sizes itself from the window, so a resize event re-fits it.
+function setFocus(on) {
+  document.body.classList.toggle("focus", on);
+  el("focus-toggle").setAttribute("aria-pressed", String(on));
+  window.dispatchEvent(new Event("resize"));
 }
 
 // ---------- connection indicator ----------
@@ -701,11 +789,20 @@ function handleDayFrame(data) {
 document.addEventListener("keydown", (ev) => {
   const tag = document.activeElement && document.activeElement.tagName;
   const typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+  if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
   if (ev.key === "/" && !typing) {
     ev.preventDefault();
     sessionInput.focus();
   } else if (ev.key === "Escape") {
-    clearFilters();
+    if (document.body.classList.contains("focus")) setFocus(false);
+    else if (!el("filters").hidden) closeFilterPop();
+    else clearFilters();
+  } else if (ev.key === "Backspace" && (!typing || (ev.target === sessionInput && !sessionInput.value))) {
+    if (!trail.length) return;
+    ev.preventDefault();
+    popFilter();
+  } else if (ev.key === "f" && !typing) {
+    setFocus(!document.body.classList.contains("focus"));
   }
 });
 
@@ -720,15 +817,38 @@ for (const field of FIELDS) {
     const value = select.value;
     select.value = "";
     if (!value) return;
-    if (!filterState[field].includes(value)) filterState[field].push(value);
-    onFiltersChanged();
+    if (!filterState[field].includes(value)) setTrail(trail.concat([[field, value]]));
+    closeFilterPop();
+    onFiltersChanged(true);
   });
 }
 sessionInput.addEventListener("input", debounce(() => {
   filterState.session = sessionInput.value.trim();
-  onFiltersChanged();
+  onFiltersChanged(false);
 }, 150));
 el("clear-filters").addEventListener("click", clearFilters);
+el("trail-root").addEventListener("click", () => backTo(0));
+el("trail-back").addEventListener("click", popFilter);
+el("focus-toggle").addEventListener("click", () => setFocus(!document.body.classList.contains("focus")));
+el("focus-exit").addEventListener("click", () => setFocus(false));
+
+// The add-selects live in a small popover under "+ filter": the drill path
+// is how filters are usually made, so the selects stay out of the way.
+const filterPop = el("filters");
+const filterAddToggle = el("filter-add-toggle");
+function closeFilterPop() {
+  filterPop.hidden = true;
+  filterAddToggle.setAttribute("aria-expanded", "false");
+}
+filterAddToggle.addEventListener("click", () => {
+  const open = filterPop.hidden;
+  filterPop.hidden = !open;
+  filterAddToggle.setAttribute("aria-expanded", String(open));
+  if (open) el("f-engine").focus();
+});
+document.addEventListener("click", (ev) => {
+  if (!filterPop.hidden && !ev.target.closest(".filter-add")) closeFilterPop();
+});
 daySelect.addEventListener("change", () => selectDay(daySelect.value));
 loadOlderBtn.addEventListener("click", loadOlder);
 

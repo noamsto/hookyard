@@ -130,12 +130,17 @@ what actually happened.
 `http://127.0.0.1:7757`. It binds loopback only and loads nothing from the
 network. It has two views, and one filter bar applies to both.
 
-**Filters.** Six fields: engine, session, event, handler, handler outcome,
-call verdict. Engine, event, handler, handler outcome and call verdict each
-have an "add" picker; session is a free-text input. Every active value shows
-as a chip (`field: value ×`) in the bar; values within a field OR, different
-fields AND. Esc or "clear" drops everything. The bar mirrors to the URL, so a
-filtered view is a shareable link.
+**Filters are a drill path.** Six fields: engine, session, event, handler,
+handler outcome, call verdict. Clicking a node in the flow graph, or one of
+its decision counts (`2 deny`), drills into it; each value becomes a crumb in
+the top bar (`all calls › handler outcome: deny › engine: codex`) in the order
+you added it. A crumb steps back to its level, its `×` removes just that
+value, Backspace pops the last level, the browser's back button walks the
+path, and Esc or "clear" drops everything. Values within a field OR,
+different fields AND; session is a free-text search at the end of the path,
+and "+ filter" holds the add-pickers for values you'd rather pick from a
+list. The path mirrors to the URL in order, so a drilled view is a shareable
+link.
 
 Engine, session, event and call verdict filter whole calls. Call verdict is
 the call's consolidated verdict (`allow`/`ask`/`deny`/`abstain`/`suppressed`)
@@ -151,6 +156,14 @@ A feed row is a call with at least one matching handler run. Under a handler
 or handler-outcome filter, the row's matching handler chips are highlighted
 and the rest dimmed. The flow graph draws only the matching branches — same
 rule, same filter.
+
+The chrome is one row, sized for a laptop screen: in the flow view the
+graph takes the width (the day's counts stay in the feed view), and `f`
+(or the corner button) is focus mode, which hides the chrome altogether.
+Once you drill in, a details panel beside the graph describes the level
+you're on: its outcome mix, the handlers carrying it (the engines, when
+the level is one handler), each a click to drill further, and the latest
+decisions on it with the handler's own message.
 
 - **feed** — every call, newest first, live for today and paged for past days.
 - **flow** — the pipeline as a decision Sankey, engine → event → handler →

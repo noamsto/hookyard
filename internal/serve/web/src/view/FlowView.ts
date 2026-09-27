@@ -19,7 +19,7 @@ import type { Scene, SceneNode } from "./scene.ts";
 import { clampView, fitView, panBy, sameView, wheelFactor, zoomAt } from "./viewport.ts";
 import type { View } from "./viewport.ts";
 
-const HINT = "hover for exact counts · click to filter · shift-click to add · drag to pan · wheel to zoom · 0 to fit";
+const HINT = "click to drill in · shift-click adds · Backspace steps back · hover for counts · drag to pan · wheel to zoom · 0 fits · f focus";
 const DRAG_PX = 5; // a press that moves less than this is still a click
 const MIN_H = 420;
 const INSET = 8; // plate text inset
@@ -91,10 +91,23 @@ export class FlowView {
     this.idleInput.type = "checkbox";
     this.idleText = htmlEl("span", "", "", idle);
     this.idleInput.addEventListener("change", () => c.setShowIdle(this.idleInput.checked));
-    this.fitBtn = htmlEl("button", "flow-fit", "fit", header);
+    const zoom = htmlEl("div", "flow-zoom", "", header);
+    zoom.setAttribute("role", "group");
+    zoom.setAttribute("aria-label", "zoom");
+    const zoomBtn = (label: string, title: string, f: number) => {
+      const b = htmlEl("button", "flow-zoom-step", label, zoom);
+      b.type = "button";
+      b.title = title;
+      b.setAttribute("aria-label", title);
+      b.addEventListener("click", () => this.zoomBy(f, this.body.clientWidth / 2, this.body.clientHeight / 2));
+      return b;
+    };
+    zoomBtn("−", "zoom out (-)", 0.8);
+    this.fitBtn = htmlEl("button", "flow-fit", "fit", zoom);
     this.fitBtn.type = "button";
     this.fitBtn.title = "fit the graph to the panel (0)";
     this.fitBtn.addEventListener("click", () => this.fit());
+    zoomBtn("+", "zoom in (+)", 1.25);
     htmlEl("p", "hint flow-hint", HINT, panel);
 
     this.body = htmlEl("div", "flow-body", "", panel);
@@ -180,11 +193,17 @@ export class FlowView {
     const c = this.c;
     this.metaEl.textContent = c.meta();
     this.decisionsEl.replaceChildren();
+    const drilled = new Set(activeFilters().outcome);
     for (const [o, n] of c.decisions()) {
-      const s = htmlEl("span", "dec", "", this.decisionsEl);
+      // Each decision count is a way in: click it to drill into that outcome.
+      const s = htmlEl("button", "dec", "", this.decisionsEl);
+      s.type = "button";
       s.dataset.o = knownOutcome(o);
+      s.title = drilled.has(o) ? "drilled into " + o + " — click to step back out" : "drill into " + o;
+      s.setAttribute("aria-pressed", String(drilled.has(o)));
       htmlEl("b", "", fmt(n), s);
       s.append(" " + o);
+      s.addEventListener("click", () => toggleFilter("outcome", o, false));
     }
     this.errorEl.textContent = c.error();
     this.idleInput.checked = c.showIdle();

@@ -6,6 +6,7 @@ import { activeFilters, eventLabel, filterParams, syncState } from "./bridge.ts"
 import { FlowController } from "./model/controller.ts";
 import type { SyncDetail } from "./model/controller.ts";
 import type { Entry } from "./types.ts";
+import { Details } from "./view/Details.ts";
 import { FlowView } from "./view/FlowView.ts";
 
 async function fetchJSON(url: string): Promise<unknown> {
@@ -26,6 +27,8 @@ const controller = new FlowController({
 
 const flowPanel = document.getElementById("flow-panel");
 if (flowPanel) new FlowView(flowPanel, controller);
+const detailsPanel = document.getElementById("flow-details");
+const details = detailsPanel ? new Details(detailsPanel, flowPanel?.querySelector<HTMLElement>(".panel-header") ?? null, controller) : null;
 
 const feedPanel = document.querySelector<HTMLElement>(".feed-panel");
 const viewButtons = document.querySelectorAll<HTMLButtonElement>(".view-toggle [role=tab]");
@@ -35,6 +38,8 @@ function setView(v: string): void {
   if (feedPanel) feedPanel.hidden = flow;
   if (flowPanel) flowPanel.hidden = !flow;
   for (const btn of viewButtons) btn.setAttribute("aria-selected", String(btn.dataset.view === v));
+  document.body.dataset.view = flow ? "flow" : "feed";
+  details?.setView(flow ? "flow" : "feed");
 
   const params = new URLSearchParams(location.search);
   if (flow) params.set("view", "flow");

@@ -7,52 +7,56 @@
 <link rel="stylesheet" href="/static/style.css">
 <link rel="stylesheet" href="/static/flow/flow.css">
 </head>
-<body>
+<body data-view="feed">
 <header class="topbar">
-  <div class="brand">hookyard <span class="dim">serve</span></div>
-  <div id="state-dir" class="state-dir dim"></div>
-  <div class="spacer"></div>
+  <div class="brand">hookyard <span id="state-dir" class="state-dir dim"></span></div>
   <div class="view-toggle" role="tablist" aria-label="view">
     <button type="button" role="tab" data-view="feed" aria-selected="true">feed</button>
     <button type="button" role="tab" data-view="flow" aria-selected="false">flow</button>
   </div>
+
+  <!-- The drill trail: every active filter value in the order it was added,
+       each a step back to that level; the session search types into it. -->
+  <nav id="trail" class="trail" aria-label="drill path">
+    <button type="button" id="trail-back" class="trail-back" title="back one level (Backspace)" aria-label="back one level" hidden>←</button>
+    <button type="button" id="trail-root" class="crumb-root">all calls</button>
+    <div id="filter-chips" class="filter-chips" aria-live="polite"></div>
+    <label class="trail-search">
+      <span class="sr-only">session</span>
+      <input id="f-session" name="session" type="text" placeholder="session id…" autocomplete="off">
+      <kbd>/</kbd>
+    </label>
+    <button type="button" id="clear-filters" class="trail-clear" title="clear the drill path and the session search (Esc)" hidden>clear</button>
+  </nav>
+
+  <div class="filter-add">
+    <button type="button" id="filter-add-toggle" aria-expanded="false" aria-controls="filters">+ filter</button>
+    <form id="filters" class="filter-pop" autocomplete="off" hidden>
+      <label for="f-engine">engine</label>
+      <select id="f-engine" data-field="engine"><option value="">+ engine</option></select>
+      <label for="f-event">event</label>
+      <select id="f-event" data-field="event"><option value="">+ event</option></select>
+      <label for="f-handler">handler</label>
+      <select id="f-handler" data-field="handler"><option value="">+ handler</option></select>
+      <label for="f-outcome">handler outcome</label>
+      <select id="f-outcome" data-field="outcome"><option value="">+ handler outcome</option></select>
+      <label for="f-verdict">call verdict</label>
+      <select id="f-verdict" data-field="verdict"><option value="">+ call verdict</option></select>
+    </form>
+  </div>
+
   <label class="day-picker">
-    <span class="dim">day</span>
+    <span class="sr-only">day</span>
     <select id="day-select"></select>
   </label>
   <div id="conn" class="conn" data-state="static">
     <span class="conn-dot"></span><span class="conn-label">static</span>
   </div>
+  <button type="button" id="focus-toggle" class="icon-btn" title="focus mode: hide the chrome (f)" aria-label="focus mode" aria-pressed="false">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+  </button>
 </header>
-
-<form id="filters" class="filterbar" autocomplete="off">
-  <div class="filter-group">
-    <label for="f-engine">engine</label>
-    <select id="f-engine" data-field="engine"><option value="">+ engine</option></select>
-  </div>
-  <div class="filter-group filter-group--wide">
-    <label for="f-session">session <kbd>/</kbd></label>
-    <input id="f-session" name="session" type="text" placeholder="substring of session id…">
-  </div>
-  <div class="filter-group">
-    <label for="f-event">event</label>
-    <select id="f-event" data-field="event"><option value="">+ event</option></select>
-  </div>
-  <div class="filter-group">
-    <label for="f-handler">handler</label>
-    <select id="f-handler" data-field="handler"><option value="">+ handler</option></select>
-  </div>
-  <div class="filter-group">
-    <label for="f-outcome">handler outcome</label>
-    <select id="f-outcome" data-field="outcome"><option value="">+ handler outcome</option></select>
-  </div>
-  <div class="filter-group">
-    <label for="f-verdict">call verdict</label>
-    <select id="f-verdict" data-field="verdict"><option value="">+ call verdict</option></select>
-  </div>
-  <button type="button" id="clear-filters"><kbd>Esc</kbd> clear</button>
-</form>
-<div id="filter-chips" class="filter-chips" aria-live="polite"></div>
+<button type="button" id="focus-exit" class="focus-exit" title="leave focus mode (f or Esc)">exit focus</button>
 
 <main class="body">
   <section class="panel feed-panel">
@@ -68,6 +72,8 @@
   </section>
 
   <section class="panel flow-panel" id="flow-panel" hidden></section>
+
+  <aside id="flow-details" class="panel details-panel" aria-label="details for the current drill level" hidden></aside>
 
   <aside class="side">
     <section class="panel stats-panel">
