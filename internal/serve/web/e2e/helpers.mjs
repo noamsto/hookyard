@@ -158,14 +158,20 @@ function pageHelpers() {
       return { ok: false };
     },
     // strayDots: drawn pulse dots whose centre is outside every band of
-    // their outcome (client coordinates, so the scene transform is included).
+    // their outcome, and outside every node's own plate (a leg-transition
+    // bridge deliberately crosses the plate between two bands — that is
+    // on-path motion, not a stray dot; a plate carries mixed-outcome
+    // traffic, so this check does not filter by outcome).
     strayDots() {
       const bands = qa("#flow-body .l-bands .band").map((p) => ({ o: p.dataset.o, r: p.getBoundingClientRect() }));
+      const plates = qa("#flow-body .l-nodes .hit").map((el) => el.getBoundingClientRect());
       const dots = qa("#flow-body .flow-dot").filter((c) => Number(c.getAttribute("r")) > 0);
       const stray = dots.filter((c) => {
         const r = c.getBoundingClientRect();
         const [x, y] = [r.left + r.width / 2, r.top + r.height / 2];
-        return !bands.some((b) => b.o === c.dataset.o && x >= b.r.left - 1 && x <= b.r.right + 1 && y >= b.r.top - 1 && y <= b.r.bottom + 1);
+        const onBand = bands.some((b) => b.o === c.dataset.o && x >= b.r.left - 1 && x <= b.r.right + 1 && y >= b.r.top - 1 && y <= b.r.bottom + 1);
+        const onPlate = plates.some((p) => x >= p.left - 1 && x <= p.right + 1 && y >= p.top - 1 && y <= p.bottom + 1);
+        return !onBand && !onPlate;
       });
       return { dots: dots.length, stray: stray.length };
     },

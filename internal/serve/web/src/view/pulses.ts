@@ -1,15 +1,15 @@
 // Live pulses: one dot per real call enters its event, then fans out into
 // one dot per handler run of that call — the fan-out made literal, never
 // invented motion. Real traffic is sparse (a call every few seconds), so each
-// pulse lingers: ~3 s engine to outcome, a short fading trail, an ease-out
+// pulse lingers: ~5 s engine to outcome, a short fading trail, an ease-out
 // into the outcome bar, and a decision slower and larger still. A fixed pool
 // of MAX_DOTS dots (a circle and two trail segments each), created once; a
-// dot that finds the pool empty is counted as dropped, never drawn.
+// dot that finds the pool full evicts the oldest flight so it can be drawn.
 // rAF-driven, DOM attributes only, and every flight resolves its band
 // against the CURRENT geometry each frame, so a refresh mid-flight just moves
 // the dot (or ends it if its band is gone).
 
-import { MAX_DOTS } from "../constants.ts";
+import { BRIDGE_MS, FAN_DELAY_MS, HOP_MS, LOUD_HOP_MS, MAX_DOTS, TRAIL } from "../constants.ts";
 import { edgeKey, splitKey } from "../model/keys.ts";
 import { bySeverity, isLoud, knownOutcome } from "../model/snapshot.ts";
 import { svgEl } from "./dom.ts";
@@ -17,13 +17,11 @@ import { pointOn } from "./geometry.ts";
 import type { GeoLink } from "./geometry.ts";
 import { linkId, PSEUDO } from "./scene.ts";
 
-const LEG_MS = 950; // per hop: engine -> event -> handler -> outcome ≈ 3 s
-const LOUD_LEG_MS = 1150; // a decision takes its time
-const FAN_DELAY_MS = 200; // the dot crosses its event plate, then fans out
-const TRAIL = [0.035, 0.09]; // trail segment ends, as leg fractions behind the dot
-
 interface Leg { id: string; ms: number; last: boolean; }
-interface Flight { slot: number; legs: Leg[]; leg: number; t0: number; jitter: number; outcome: string; arrive: string; }
+interface Flight {
+  slot: number; legs: Leg[]; leg: number; t0: number; jitter: number; outcome: string; arrive: string;
+  lastX?: number; lastY?: number; bridgeFrom: { x: number; y: number } | null; bridgeStart: number;
+}
 
 interface Dot { circle: SVGCircleElement; near: SVGPathElement; far: SVGPathElement; }
 
@@ -34,7 +32,7 @@ export interface PulseHost {
   active(n: number): void;
 }
 
-const legMs = (outcome: string): number => (isLoud(outcome) ? LOUD_LEG_MS : LEG_MS);
+const legMs = (outcome: string): number => (isLoud(outcome) ? LOUD_HOP_MS : HOP_MS);
 const easeOut = (u: number): number => 1 - (1 - u) ** 3;
 
 export class Pulses {
@@ -98,14 +96,19 @@ export class Pulses {
   }
 
   private fly(legs: Leg[], t0: number, outcome: string, arrive: string): void {
-    const slot = this.busy.indexOf(false);
+    let slot = this.busy.indexOf(false);
     if (slot < 0) {
-      this.host.dropped(1);
-      return;
+      const old = this.flights.shift(); // oldest active flight — arrival order, never reordered
+      if (old) {
+        this.release(old);
+        this.host.dropped(1);
+      }
+      slot = this.busy.indexOf(false);
     }
+    if (slot < 0) return; // MAX_DOTS === 0 is not a real configuration; nothing to draw into
     this.busy[slot] = true;
     this.busyCount++;
-    this.flights.push({ slot, legs, leg: 0, t0, jitter: Math.random() - 0.5, outcome, arrive });
+    this.flights.push({ slot, legs, leg: 0, t0, jitter: Math.random() - 0.5, outcome, arrive, bridgeFrom: null, bridgeStart: 0 });
     this.host.active(this.busyCount);
     if (!this.raf) this.raf = requestAnimationFrame(this.frame);
   }
@@ -129,7 +132,48 @@ export class Pulses {
       const d = this.dots[f.slot];
       let leg = f.legs[f.leg];
       let u = (now - f.t0) / leg.ms;
+
       if (u < 0) {
+        if (f.bridgeFrom) {
+          const l = this.host.link(leg.id);
+          if (!l) {
+            this.release(f);
+            continue;
+          }
+          const bt = Math.min(1, (now - f.bridgeStart) / BRIDGE_MS);
+          const dy = f.jitter * Math.max(l.width - 2, 0);
+          const target = pointOn(l, 0, dy);
+          const from = f.bridgeFrom;
+          const x = from.x + (target.x - from.x) * bt;
+          const y = from.y + (target.y - from.y) * bt;
+          const bridgeAt = (t: number) => {
+            const tt = Math.max(bt - t, 0);
+            return { x: from.x + (target.x - from.x) * tt, y: from.y + (target.y - from.y) * tt };
+          };
+          const loud = isLoud(f.outcome);
+          const o = knownOutcome(f.outcome);
+          d.circle.setAttribute("cx", x.toFixed(1));
+          d.circle.setAttribute("cy", y.toFixed(1));
+          d.circle.setAttribute("data-o", o);
+          d.circle.setAttribute("r", loud ? "4.2" : "3");
+          const segB = (a: number, b: number) => {
+            const q0 = bridgeAt(b);
+            const q1 = bridgeAt((a + b) / 2);
+            const q2 = bridgeAt(a);
+            return `M${q0.x.toFixed(1)},${q0.y.toFixed(1)}L${q1.x.toFixed(1)},${q1.y.toFixed(1)}L${q2.x.toFixed(1)},${q2.y.toFixed(1)}`;
+          };
+          d.near.setAttribute("d", segB(0, TRAIL[0]));
+          d.far.setAttribute("d", segB(TRAIL[0], TRAIL[1]));
+          d.near.setAttribute("data-o", o);
+          d.far.setAttribute("data-o", o);
+          d.near.setAttribute("stroke-width", loud ? "4.4" : "3");
+          d.far.setAttribute("stroke-width", loud ? "3.4" : "2.2");
+          f.lastX = x;
+          f.lastY = y;
+          if (bt >= 1) f.bridgeFrom = null;
+          keep.push(f);
+          continue;
+        }
         this.hide(d);
         keep.push(f);
         continue;
@@ -141,9 +185,15 @@ export class Pulses {
           this.release(f);
           continue;
         }
-        f.t0 = now;
-        leg = f.legs[f.leg];
-        u = 0;
+        if (f.lastX !== undefined) {
+          f.bridgeFrom = { x: f.lastX, y: f.lastY! };
+          f.bridgeStart = now;
+          f.t0 = now + BRIDGE_MS;
+        } else {
+          f.t0 = now;
+        }
+        keep.push(f);
+        continue;
       }
       const l = this.host.link(leg.id);
       if (!l) {
@@ -172,6 +222,8 @@ export class Pulses {
       d.far.setAttribute("data-o", o);
       d.near.setAttribute("stroke-width", loud ? "4.4" : "3");
       d.far.setAttribute("stroke-width", loud ? "3.4" : "2.2");
+      f.lastX = p.x;
+      f.lastY = p.y;
       keep.push(f);
     }
     this.flights = keep;

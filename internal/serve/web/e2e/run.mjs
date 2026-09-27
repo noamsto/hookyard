@@ -11,7 +11,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Browser, KEYS, MOD, runCleanups, sleep, spawnGroup, tempDir, waitForLine } from "./cdp.mjs";
 import { installHelpers, openFlow } from "./helpers.mjs";
-import { AEYE, GUARDS, GUARDS_DENY, GUARDS_FIFTH, GUARDS_PI, TODAY_PATHS, append, record, writeFixture } from "./fixture.mjs";
+import { AEYE, GUARDS, GUARDS_DENY, GUARDS_FIFTH, GUARDS_PI, TODAY_PATHS, UNGROUPED, append, record, writeFixture } from "./fixture.mjs";
 
 const WEB = dirname(dirname(fileURLToPath(import.meta.url)));
 const REPO = resolve(WEB, "../../..");
@@ -302,6 +302,20 @@ async function expectFilter(page, want, what) {
   }
   await page.waitFor(`__e2e.settled() && ${want.map((v) => `__e2e.selected("engine", ${JSON.stringify(v)})`).concat("true").join(" && ")}`,
     5000, what + " (flow reloaded)");
+  // The optimistic `.selected` class (and isSelected() reading the live
+  // filter state) both resolve before the refetch this filter triggers
+  // completes, so the two waits above no longer imply the model's real
+  // totals — and therefore node layout — have caught up. Wait for
+  // __e2e.state() to stop changing across a short window too, so a
+  // caller's next click lands on a node that has actually finished moving,
+  // not one about to reposition under a still-in-flight re-render.
+  await page.waitFor(`(() => new Promise((resolve) => {
+    const a = __e2e.state();
+    setTimeout(() => {
+      const b = __e2e.state();
+      resolve(!b.pending && a.gen === b.gen && a.calls === b.calls && a.branches === b.branches ? b : null);
+    }, 120);
+  }))()`, 5000, what + " (layout quiescent)");
 }
 
 async function check3(page, env) {
@@ -912,6 +926,9 @@ const CHECKS = [
   { n: 14, title: "pan, zoom and fit: cursor-anchored wheel, drag pans without clicking, 0 / fit, refresh keeps the view, tips and pulses follow", fn: check14, fresh: true },
   { n: 15, title: "400 px: fitted by scale, no sideways scroll, panning reaches the outcomes", fn: check15, fresh: true },
   { n: 16, title: "a press released outside the body ends the press", fn: check16, fresh: true },
+  { n: 17, title: "engine→outcome single pulse travel time ~5s", fn: check17, fresh: true },
+  { n: 18, title: "live pulses: no long frames, no leg-boundary teleport", fn: check18, fresh: true },
+  { n: 19, title: "click gives immediate visual feedback before the refetch resolves", fn: check19, fresh: true },
 ];
 
 // A press released outside the body, below the drag threshold, must end the
@@ -929,6 +946,158 @@ async function check16(page, env) {
   const took = Date.now() - pressedAt;
   assert(took < PRESS_HOLD_MAX_MS, `press held ${took} ms: the release outside the body did not end it`);
   return [`press at the body's top edge released 3 px outside; the held relayout committed at gen ${post.gen} after ${took} ms (< ${PRESS_HOLD_MAX_MS} ms safety release)`];
+}
+
+// A single hop through one non-pseudo branch should take ~5 s end to end
+// (event -> handler -> outcome, each leg HOP_MS/LOUD_HOP_MS).
+async function check17(page, env) {
+  await openFlow(page, env.base);
+  await sleep(500);
+  append(env.stateDir, [record({ engine: "pi", event: "", native: "turn_end", verdict: "allow", hops: [["lint-go", "allow"]], ts: Date.now() })]);
+
+  let t0 = null;
+  let t1 = null;
+  let sawActiveCircles = false;
+  const deadline = Date.now() + 8000;
+  for (;;) {
+    const s = await page.evaluate("({ dots: __e2e.state().dots, active: __e2e.activeCircles() })");
+    if (s.active > 0) sawActiveCircles = true;
+    if (t0 === null && s.dots > 0) t0 = Date.now();
+    else if (t0 !== null && s.dots === 0) {
+      t1 = Date.now();
+      break;
+    }
+    if (Date.now() > deadline) break;
+    await sleep(20);
+  }
+  assert(t0 !== null, "pulse never started (dots stayed 0)");
+  assert(t1 !== null, "pulse never finished");
+  assert(sawActiveCircles, "no dot was ever drawn (activeCircles() stayed 0)");
+  const ms = t1 - t0;
+  assert(ms >= 4500 && ms <= 5500, `single pulse took ${ms} ms, want 4500-5500`);
+  return [`single pulse: ${ms} ms (target 4500-5500)`];
+}
+
+// Live traffic at a moderate rate, well under the 128-dot pool's capacity:
+// no dot should ever jump far in one frame (a leg-transition teleport), and
+// no frame should take unusually long to render.
+async function check18(page, env) {
+  await openFlow(page, env.base);
+  await sleep(500);
+
+  await page.evaluate(`(() => {
+    window.__probe18 = { samples: [] };
+    const frame = () => {
+      const row = [...document.querySelectorAll("#flow-body .flow-dot")].map((c) => {
+        const r = Number(c.getAttribute("r"));
+        return r > 0 ? { x: Number(c.getAttribute("cx")), y: Number(c.getAttribute("cy")) } : null;
+      });
+      window.__probe18.samples.push({ t: performance.now(), row });
+      window.__probe18.raf = requestAnimationFrame(frame);
+    };
+    window.__probe18.raf = requestAnimationFrame(frame);
+  })()`);
+
+  for (let i = 0; i < 17; i++) {
+    append(env.stateDir, [record({ ...TODAY_PATHS[i % TODAY_PATHS.length], ts: Date.now() })]);
+    await sleep(900);
+  }
+  await sleep(2000);
+
+  const probe = await page.evaluate(`(() => { cancelAnimationFrame(window.__probe18.raf); const p = window.__probe18; window.__probe18 = null; return p; })()`);
+
+  let maxJump = 0;
+  let framesOver50 = 0;
+  let maxFrameDelta = 0;
+  for (let i = 1; i < probe.samples.length; i++) {
+    const prev = probe.samples[i - 1];
+    const cur = probe.samples[i];
+    const dt = cur.t - prev.t;
+    if (dt > maxFrameDelta) maxFrameDelta = dt;
+    if (dt > 50) framesOver50++;
+    for (let slot = 0; slot < cur.row.length; slot++) {
+      const a = prev.row[slot];
+      const b = cur.row[slot];
+      if (a && b) maxJump = Math.max(maxJump, Math.hypot(b.x - a.x, b.y - a.y));
+    }
+  }
+
+  assert(maxJump <= 60, `dot jumped ${maxJump.toFixed(1)}px in one frame (want <=60px)`);
+  assert(framesOver50 === 0, `${framesOver50} frames exceeded 50ms (max ${maxFrameDelta.toFixed(1)}ms)`);
+  return [
+    `max per-frame dot jump: ${maxJump.toFixed(1)}px`,
+    `frames >50ms: ${framesOver50} (max frame delta ${maxFrameDelta.toFixed(1)}ms)`,
+    `${probe.samples.length} frames sampled`,
+  ];
+}
+
+// A click should toggle .selected immediately, not wait on the refetch it
+// triggers. Holds /api/flow requests open via a post-load fetch patch (the
+// app already resolved its own `fetch` reference, so this only affects
+// requests issued after the patch installs) to isolate the two phases.
+async function check19(page, env) {
+  await openFlow(page, env.base);
+  await sleep(500);
+  const baselineCount = await page.evaluate("__e2e.elementCount()");
+  const baselineView = await page.evaluate("__e2e.view()");
+
+  await page.evaluate(`(() => {
+    window.__realFetch = window.fetch.bind(window);
+    window.__holdFlowFetch = false;
+    window.__heldFlowFetches = [];
+    window.__releaseFlowFetch = () => {
+      for (const r of window.__heldFlowFetches) r();
+      window.__heldFlowFetches = [];
+    };
+    window.fetch = (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (window.__holdFlowFetch && url.includes("/api/flow")) {
+        return new Promise((resolve) => { window.__heldFlowFetches.push(() => resolve(window.__realFetch(input, init))); });
+      }
+      return window.__realFetch(input, init);
+    };
+  })()`);
+
+  const boxes = await page.evaluate("__e2e.boxes()");
+  const engineNode = boxes.find((b) => b.col === "engine");
+  assert(engineNode, "no engine node drawn to click");
+  const handlerName = UNGROUPED.find((n) => boxes.some((b) => b.col === "handler" && b.name === n));
+  assert(handlerName, `none of ${UNGROUPED.join(", ")} drawn as an ungrouped handler node`);
+
+  const lines = [];
+  for (const [col, name] of [["engine", engineNode.name], ["handler", handlerName]]) {
+    await page.evaluate("window.__holdFlowFetch = true");
+    await clickNode(page, col, name);
+    const selected = await page.evaluate(`__e2e.selected(${JSON.stringify(col)}, ${JSON.stringify(name)})`);
+    const labelSelected = await page.evaluate(`!!__e2e.label(${JSON.stringify(col)}, ${JSON.stringify(name)})?.classList.contains("selected")`);
+    lines.push(`${col} ${name}: immediately after click (fetch held), selected=${selected}, label.selected=${labelSelected}`);
+    assert(selected, `${col} ${name}: node not .selected immediately after click (before the refetch resolved)`);
+    assert(labelSelected, `${col} ${name}: label not .selected immediately after click (before the refetch resolved)`);
+
+    await page.evaluate("window.__releaseFlowFetch()");
+    await page.evaluate("window.__holdFlowFetch = false");
+    // A filter legitimately shrinks the drawn set (the server prunes
+    // /api/flow to the hit branches), so elementCount is not expected to
+    // hold at the baseline — what must never happen is a transient blank
+    // frame (the subtree going empty, or the "no calls" placeholder
+    // flashing) while the old scene is torn down and the new one built.
+    let minCount = Infinity;
+    let sawEmptyPlaceholder = false;
+    const until = Date.now() + 600;
+    while (Date.now() < until) {
+      const c = await page.evaluate("__e2e.elementCount()");
+      const emptyShown = await page.evaluate("document.querySelector('#flow-body .flow-empty')?.hidden === false");
+      minCount = Math.min(minCount, c);
+      if (emptyShown) sawEmptyPlaceholder = true;
+      await sleep(25);
+    }
+    const view = await page.evaluate("__e2e.view()");
+    lines.push(`${col} ${name}: after the refetch resolved, min elementCount observed ${minCount} (baseline ${baselineCount}), view ${JSON.stringify(view)} (baseline ${JSON.stringify(baselineView)})`);
+    assert(minCount > 0, `${col} ${name}: flow subtree went empty (elementCount hit ${minCount}) during the re-render`);
+    assert(!sawEmptyPlaceholder, `${col} ${name}: the "no calls" placeholder flashed during the re-render`);
+    assert(JSON.stringify(view) === JSON.stringify(baselineView), `${col} ${name}: view changed after the refetch resolved`);
+  }
+  return lines;
 }
 
 async function main() {

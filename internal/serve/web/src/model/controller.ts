@@ -137,7 +137,7 @@ export class FlowController {
   isLive(): boolean { return this.live; }
   isVisible(): boolean { return this.visible; }
   showIdle(): boolean { return this.model.showIdle; }
-  isSelected(col: Col, name: string): boolean { return this.model.active[col].includes(name); }
+  isSelected(col: Col, name: string): boolean { return this.deps.activeFilters()[col].includes(name); }
 
   meta(): string {
     if (!this.model.topo) return "";
