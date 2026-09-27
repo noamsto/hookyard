@@ -369,17 +369,32 @@ async function check4(page, env) {
   const burstMs = Date.now() - started;
 
   const t = await totalsMatch(page, env, "", env.today, 8000);
-  await sleep(1500); // let the last pulses finish
-  const after = await page.evaluate("__e2e.elementCount()");
   const circles = await page.evaluate("__e2e.circles()");
   const st = await page.evaluate("__e2e.state()");
   const errors = page.errors.slice(errorsAt);
+
+  // The burst saturates the 128-dot pool (this is the only check that
+  // reliably drives it that far), which exercises the pool-eviction path
+  // (Pulses.fly() evicting the oldest flight instead of rejecting the
+  // newest). Wait for every dot to actually drain afterward — a stuck
+  // circle or a busyCount that never reaches 0 would mean an evicted
+  // flight was released twice or a slot ended up shared between two
+  // flights, not just "some calls were dropped."
+  let drained = null;
+  try {
+    drained = await page.waitFor(`(() => { const s = __e2e.state(); return (s.dots === 0 && __e2e.activeCircles() === 0) ? s : null; })()`,
+      8000, "the burst's pulses to fully drain");
+  } catch {
+    // leave drained null; reported as a problem below
+  }
+  const after = await page.evaluate("__e2e.elementCount()");
 
   const summary = [
     `${BURST_CALLS} records appended over ${burstMs} ms`,
     `flow subtree elements: ${before} before, ${after} after (slack ${BURST_ELEMENT_SLACK})`,
     `<circle> count ${circles}; max active dots sampled ${maxDots}; dropped ${st.dropped}`,
     `totals match: calls ${t.calls}, branches ${t.branches}, ${t.nonZero} non-zero edges`,
+    `drained: dots 0, active circles 0 (${drained ? "reached" : "NEVER REACHED"})`,
   ];
   const problems = [];
   if (errors.length > 0) {
@@ -389,6 +404,8 @@ async function check4(page, env) {
   if (circles !== MAX_DOTS) problems.push(`<circle> count ${circles}, want ${MAX_DOTS}`);
   if (Math.abs(after - before) > BURST_ELEMENT_SLACK) problems.push(`flow subtree went from ${before} to ${after} elements`);
   if (maxDots === 0) problems.push("no pulse was animating during the burst");
+  if (st.dropped === 0) problems.push("nothing was recorded as dropped despite saturating the pool — the eviction path may not have run");
+  if (!drained) problems.push("dots/active circles never reached 0 after the burst — a flight may be stuck (double-released slot or desynced busyCount)");
   assert(problems.length === 0, problems.concat(summary).join("\n     "));
   return summary.concat("console clean");
 }

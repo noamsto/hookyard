@@ -115,6 +115,7 @@ export class Pulses {
 
   private hide(d: Dot): void {
     d.circle.setAttribute("r", "0");
+    d.circle.removeAttribute("data-bridging");
     d.near.setAttribute("d", "");
     d.far.setAttribute("d", "");
   }
@@ -155,6 +156,7 @@ export class Pulses {
           d.circle.setAttribute("cx", x.toFixed(1));
           d.circle.setAttribute("cy", y.toFixed(1));
           d.circle.setAttribute("data-o", o);
+          d.circle.setAttribute("data-bridging", "1"); // e2e: on-path across the node's own plate, not stray
           d.circle.setAttribute("r", loud ? "4.2" : "3");
           const segB = (a: number, b: number) => {
             const q0 = bridgeAt(b);
@@ -209,6 +211,7 @@ export class Pulses {
       d.circle.setAttribute("cx", p.x.toFixed(1));
       d.circle.setAttribute("cy", p.y.toFixed(1));
       d.circle.setAttribute("data-o", o);
+      d.circle.removeAttribute("data-bridging");
       d.circle.setAttribute("r", loud ? "4.2" : "3");
       const seg = (a: number, b: number) => {
         const q0 = at(u - b);

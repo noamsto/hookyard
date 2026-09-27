@@ -158,10 +158,13 @@ function pageHelpers() {
       return { ok: false };
     },
     // strayDots: drawn pulse dots whose centre is outside every band of
-    // their outcome, and outside every node's own plate (a leg-transition
-    // bridge deliberately crosses the plate between two bands — that is
-    // on-path motion, not a stray dot; a plate carries mixed-outcome
-    // traffic, so this check does not filter by outcome).
+    // their outcome. A dot mid leg-transition bridge (data-bridging="1",
+    // set only for that ~140 ms window) is also allowed inside any node's
+    // own plate — it deliberately crosses the plate between two bands,
+    // which is on-path motion, not a stray dot; a plate carries
+    // mixed-outcome traffic, so this exemption does not filter by outcome.
+    // Scoped to bridging dots only, so a genuinely off-track dot elsewhere
+    // that happens to pass over an unrelated plate is still caught.
     strayDots() {
       const bands = qa("#flow-body .l-bands .band").map((p) => ({ o: p.dataset.o, r: p.getBoundingClientRect() }));
       const plates = qa("#flow-body .l-nodes .hit").map((el) => el.getBoundingClientRect());
@@ -170,7 +173,7 @@ function pageHelpers() {
         const r = c.getBoundingClientRect();
         const [x, y] = [r.left + r.width / 2, r.top + r.height / 2];
         const onBand = bands.some((b) => b.o === c.dataset.o && x >= b.r.left - 1 && x <= b.r.right + 1 && y >= b.r.top - 1 && y <= b.r.bottom + 1);
-        const onPlate = plates.some((p) => x >= p.left - 1 && x <= p.right + 1 && y >= p.top - 1 && y <= p.bottom + 1);
+        const onPlate = c.dataset.bridging === "1" && plates.some((p) => x >= p.left - 1 && x <= p.right + 1 && y >= p.top - 1 && y <= p.bottom + 1);
         return !onBand && !onPlate;
       });
       return { dots: dots.length, stray: stray.length };
