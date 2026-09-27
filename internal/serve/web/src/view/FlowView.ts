@@ -3,7 +3,7 @@
 // is in progress) or the panel's size changes; hover, tooltips, clicks and
 // pulses all read the frame that is drawn.
 
-import { toggleFilter } from "../bridge.ts";
+import { activeFilters, toggleFilter } from "../bridge.ts";
 import type { Frame, FlowController } from "../model/controller.ts";
 import { splitEdgeKey, splitKey } from "../model/keys.ts";
 import { bySeverity, isLoud, knownOutcome } from "../model/snapshot.ts";
@@ -859,6 +859,24 @@ export class FlowView {
       return;
     }
     toggleFilter(col, name, ev.shiftKey || ev.ctrlKey || ev.metaKey);
+    this.markSelectedOptimistically(col);
+  }
+
+  // markSelectedOptimistically mirrors what render() will show once the
+  // refetch resolves, reading the same activeFilters() source model.active
+  // is set from, so a click gets feedback on the next frame without
+  // waiting on the network.
+  private markSelectedOptimistically(col: Col): void {
+    const d = this.drawn;
+    if (!d) return;
+    const active = new Set(activeFilters()[col]);
+    for (const [key, el] of d.nodeEls) {
+      const [c, name] = splitKey(key);
+      if (c !== col) continue;
+      const isSel = active.has(name);
+      el.classList.toggle("selected", isSel);
+      d.labelEls.get(key)?.classList.toggle("selected", isSel);
+    }
   }
 
   // flash restarts the node's arrival animation (1.5 s decay, in CSS).
