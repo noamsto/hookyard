@@ -84,3 +84,27 @@ Ledger opened before the independent review batch; base `origin/main` `8c802d5`.
 | the fallback comment must not imply canonical codex session_start is rescued | reviewer MEDIUM (round 1), cmd/hookyard/main.go | bb5a8a8 | 3463666 | comment-only; round-2 targeted re-review verified condition byte-identical | fixed | 1 |
 
 recurrence_escalation: unused
+
+---
+
+# Review notes — hookyard #112 (serve flow view: UX pass, smooth motion/clicks, slow dots)
+
+Two plan-critic rounds ran (revision cap reached): round 1 found 4 blocking gaps
+(a stray-dot regression against check14, `allow` wrongly assumed non-loud, `flash()`
+invisible on engine nodes, incomplete tester-pass traces); round 2 found 3 more
+after those were fixed (a flicker-back race in the optimistic selection, a
+double-release bug in the drop-oldest eviction sketch, missing after-traces for
+scenarios c/d) — all folded into the final plan rather than a third round.
+Ledger opened before the independent review batch; base `origin/main` `7325ff2`.
+
+| invariant/family | finding or thread IDs | observed head | fix commit | proof | disposition | rounds used |
+| --- | --- | --- | --- | --- | --- | --- |
+| a fan-out flight's dot must not teleport across a node's own plate at a leg boundary | tester-pass finding (own investigation, not a reviewer) | e816cde | e816cde | live-browser measurement: ~110 leg transitions in 20s showed a consistent 223-227px single-frame jump before the fix; e2e check18 after: max jump 27.1px (n=1040 frames); check14 unaffected (289 pulse samples, all on-band) | fixed | n/a (pre-review finding) |
+| engine→outcome pulse travel must be ~5s ±0.5s | acceptance #3 | e816cde | e816cde | e2e check17: 5088-5144ms across runs (target 4500-5500) | fixed | n/a |
+| a click must show feedback before its refetch resolves | tester-pass finding + acceptance #4 | e816cde | e816cde | e2e check19: `.selected` on node+label true immediately, fetch still held | fixed | n/a |
+| the 128-dot pool must degrade under a burst without going deaf to new calls | task's "likely suspects" list (drop oldest, not freeze) | e816cde | e816cde | e2e check4 (saturates the pool: `dropped 1687`), full drain asserted (see next row) | fixed | n/a |
+| pool eviction must not leak a slot or double-release a flight | typescript-reviewer HIGH (round 1, blocking) | 0bc216e | 0bc216e | check4 waits for `dots===0 && activeCircles()===0` post-burst (independent signals: busyCount bookkeeping vs. DOM circle count) and asserts `dropped>0`; targeted re-review (round 2) approved | fixed | 2 |
+| `strayDots()`'s on-plate exemption must not weaken the check for non-bridging dots elsewhere | typescript-reviewer MEDIUM (round 1) | 0bc216e | 0bc216e | `data-bridging="1"` scopes the exemption to the actual bridge window only; targeted re-review (round 2) traced the attribute's set/clear on every draw/hide path, found no stuck-on/off case; approved | fixed | 2 |
+| trail rendering during a bridge uses a different distance basis than a normal leg (cosmetic: trail briefly shrinks then "pops" back to length) | typescript-reviewer MEDIUM (round 1) | e816cde | n/a | reviewer's own verdict did not mark this blocking; the ~140ms window makes it imperceptible in practice | deferred (documented in PR body, not filed as an issue — cosmetic only) | 1 |
+
+recurrence_escalation: unused

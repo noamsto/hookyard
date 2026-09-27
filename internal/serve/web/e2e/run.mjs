@@ -302,13 +302,10 @@ async function expectFilter(page, want, what) {
   }
   await page.waitFor(`__e2e.settled() && ${want.map((v) => `__e2e.selected("engine", ${JSON.stringify(v)})`).concat("true").join(" && ")}`,
     5000, what + " (flow reloaded)");
-  // The optimistic `.selected` class (and isSelected() reading the live
-  // filter state) both resolve before the refetch this filter triggers
-  // completes, so the two waits above no longer imply the model's real
-  // totals — and therefore node layout — have caught up. Wait for
-  // __e2e.state() to stop changing across a short window too, so a
-  // caller's next click lands on a node that has actually finished moving,
-  // not one about to reposition under a still-in-flight re-render.
+  // __e2e.selected() reflects the live filter immediately, before the
+  // refetch it triggers resolves, so also wait for __e2e.state() to stop
+  // changing: a caller's next click should land on a node that has
+  // actually finished moving, not one about to reposition mid re-render.
   await page.waitFor(`(() => new Promise((resolve) => {
     const a = __e2e.state();
     setTimeout(() => {
@@ -373,13 +370,10 @@ async function check4(page, env) {
   const st = await page.evaluate("__e2e.state()");
   const errors = page.errors.slice(errorsAt);
 
-  // The burst saturates the 128-dot pool (this is the only check that
-  // reliably drives it that far), which exercises the pool-eviction path
-  // (Pulses.fly() evicting the oldest flight instead of rejecting the
-  // newest). Wait for every dot to actually drain afterward — a stuck
-  // circle or a busyCount that never reaches 0 would mean an evicted
-  // flight was released twice or a slot ended up shared between two
-  // flights, not just "some calls were dropped."
+  // The burst saturates the 128-dot pool, exercising Pulses.fly()'s
+  // oldest-flight eviction. Wait for every dot to actually drain
+  // afterward — a stuck circle or a busyCount that never reaches 0 would
+  // mean a slot got released twice or ended up shared between two flights.
   let drained = null;
   try {
     drained = await page.waitFor(`(() => { const s = __e2e.state(); return (s.dots === 0 && __e2e.activeCircles() === 0) ? s : null; })()`,
@@ -1093,11 +1087,8 @@ async function check19(page, env) {
 
     await page.evaluate("window.__releaseFlowFetch()");
     await page.evaluate("window.__holdFlowFetch = false");
-    // A filter legitimately shrinks the drawn set (the server prunes
-    // /api/flow to the hit branches), so elementCount is not expected to
-    // hold at the baseline — what must never happen is a transient blank
-    // frame (the subtree going empty, or the "no calls" placeholder
-    // flashing) while the old scene is torn down and the new one built.
+    // A filter prunes the drawn set server-side, so elementCount naturally
+    // shrinks; this checks it never goes empty (a blank frame) mid re-render.
     let minCount = Infinity;
     let sawEmptyPlaceholder = false;
     const until = Date.now() + 600;

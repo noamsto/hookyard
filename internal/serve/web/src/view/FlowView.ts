@@ -862,11 +862,10 @@ export class FlowView {
     this.markSelectedOptimistically(col);
   }
 
-  // markSelectedOptimistically pre-applies exactly what the next real
-  // render() will derive from the model once the refetch resolves — reading
-  // the same activeFilters() source model.active is set from — so a click
-  // shows feedback on the next frame without waiting on the network, and
-  // can't diverge or flicker back if a render happens to land in between.
+  // markSelectedOptimistically mirrors what render() will show once the
+  // refetch resolves, reading the same activeFilters() source model.active
+  // is set from, so a click gets feedback on the next frame without
+  // waiting on the network.
   private markSelectedOptimistically(col: Col): void {
     const d = this.drawn;
     if (!d) return;

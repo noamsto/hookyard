@@ -158,13 +158,11 @@ function pageHelpers() {
       return { ok: false };
     },
     // strayDots: drawn pulse dots whose centre is outside every band of
-    // their outcome. A dot mid leg-transition bridge (data-bridging="1",
-    // set only for that ~140 ms window) is also allowed inside any node's
-    // own plate — it deliberately crosses the plate between two bands,
-    // which is on-path motion, not a stray dot; a plate carries
-    // mixed-outcome traffic, so this exemption does not filter by outcome.
-    // Scoped to bridging dots only, so a genuinely off-track dot elsewhere
-    // that happens to pass over an unrelated plate is still caught.
+    // their outcome. A dot mid leg-transition bridge (pulses.ts sets
+    // data-bridging="1" only for that window) is also allowed inside any
+    // node's own plate, since it deliberately crosses the plate between
+    // two bands; a plate carries mixed-outcome traffic, so this exemption
+    // ignores outcome.
     strayDots() {
       const bands = qa("#flow-body .l-bands .band").map((p) => ({ o: p.dataset.o, r: p.getBoundingClientRect() }));
       const plates = qa("#flow-body .l-nodes .hit").map((el) => el.getBoundingClientRect());
