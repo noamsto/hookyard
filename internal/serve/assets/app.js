@@ -257,7 +257,17 @@ function renderChips() {
   el("trail-root").classList.toggle("current", !any);
   el("clear-filters").hidden = !any && !filterState.session;
   document.body.classList.toggle("filtered", any);
+  markTrailOverflow();
 }
+
+// markTrailOverflow flags a path too long for the bar: its oldest crumbs
+// slide out on the left, and the class fades that edge so the cut shows.
+function markTrailOverflow() {
+  let need = 0;
+  for (const c of filterChipsEl.children) need += c.offsetWidth + 4;
+  filterChipsEl.classList.toggle("overflowing", need > filterChipsEl.clientWidth + 1);
+}
+window.addEventListener("resize", debounce(markTrailOverflow, 100));
 
 function onFiltersChanged(push) {
   renderChips();

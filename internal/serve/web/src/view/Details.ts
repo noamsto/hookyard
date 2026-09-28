@@ -120,11 +120,11 @@ export class Details {
             ts: e.rec.ts, engine: e.rec.engine, event: e.rec.canonical_event || e.rec.native_event || "—",
             handler: h.name, outcome: h.outcome, text: h.message || h.advice || "",
           });
-          if (runs.length >= RECENT) break;
         }
-        if (runs.length >= RECENT) break;
       }
-      this.recent = runs;
+      // newest first by the call's own time, not its place in the file
+      runs.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
+      this.recent = runs.slice(0, RECENT);
       this.recentFor = url;
     } catch {
       if (seq !== this.recentSeq) return;
@@ -183,6 +183,7 @@ export class Details {
     }
     outs.sort((a, b) => bySeverity(a[0], b[0]));
     const sec1 = this.section(p, "outcomes · branches");
+    sec1.title = "click one to drill into it";
     if (outs.length === 0) htmlEl("p", "dt-empty dim", "no traffic on this level in the window", sec1);
     const max = Math.max(1, ...outs.map(([, n]) => n));
     for (const [o, n] of outs) {
@@ -218,7 +219,8 @@ export class Details {
     const shown = rows.filter((r) => r.n > 0)
       .sort((a, b) => (b.loud.length ? 1 : 0) - (a.loud.length ? 1 : 0) || b.n - a.n || (a.id < b.id ? -1 : 1))
       .slice(0, 8);
-    const sec2 = this.section(p, (byEngine ? "engines" : "handlers") + " on this level · click to drill in");
+    const sec2 = this.section(p, (byEngine ? "engines" : "handlers") + " on this level");
+    sec2.title = "click one to drill into it";
     if (shown.length === 0) htmlEl("p", "dt-empty dim", "none in the window", sec2);
     for (const r of shown) {
       const row = htmlEl("button", "dt-row", "", sec2);

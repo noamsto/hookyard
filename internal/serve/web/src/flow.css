@@ -5,7 +5,7 @@
 .flow-panel .panel-header { flex-wrap: wrap; align-items: center; row-gap: 6px; padding: 6px 12px; }
 .flow-meta { font-variant-numeric: tabular-nums; }
 /* the decision counts double as the way into each outcome */
-.flow-decisions { display: inline-flex; gap: 6px; margin-left: 4px; }
+.flow-decisions { display: inline-flex; flex-wrap: wrap; gap: 6px; margin-left: 4px; }
 .flow-decisions .dec {
   color: var(--oc);
   background: color-mix(in oklab, var(--oc) 14%, transparent);
@@ -13,7 +13,10 @@
   border-radius: 12px;
   padding: 2px 9px;
   font-weight: 600;
+  white-space: nowrap;
 }
+/* a phone has no pointer to hover or shift-click with: the hint only costs height */
+@media (max-width: 700px) { .flow-hint { display: none; } }
 .flow-decisions .dec:hover { border-color: var(--oc); }
 .flow-decisions .dec[aria-pressed="true"] { background: var(--oc); color: var(--bg-panel); }
 .flow-decisions .dec b { font-weight: 700; }
