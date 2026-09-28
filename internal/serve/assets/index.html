@@ -62,8 +62,14 @@
   <section class="panel feed-panel">
     <div class="panel-header">
       <h2>feed</h2>
+      <span class="dim">newest first</span>
       <span id="feed-count" class="dim"></span>
       <span id="feed-windowed" class="dim" hidden>windowed &mdash; more via load older</span>
+      <span class="spacer"></span>
+      <span class="dim feed-hint">click a row for its handlers</span>
+    </div>
+    <div class="feed-cols" aria-hidden="true">
+      <span>time</span><span>engine</span><span>key</span><span>event</span><span>tool</span><span>verdict</span><span title="enforced">E</span><span>handler runs</span>
     </div>
     <ol id="feed" class="feed"></ol>
     <div class="feed-footer">
@@ -78,10 +84,11 @@
   <aside class="side">
     <section class="panel stats-panel">
       <div class="panel-header">
-        <h2>counts</h2>
+        <h2>today</h2>
         <span id="stats-day" class="dim"></span>
+        <span class="spacer"></span>
+        <span class="dim" title="these counts describe the whole day, whatever the drill path">unfiltered</span>
       </div>
-      <p class="hint">unfiltered — describes the whole day, not the feed above</p>
       <div id="stats-body"></div>
     </section>
 

@@ -430,13 +430,47 @@ body[data-view="flow"].details-open .body { grid-template-columns: minmax(0, 1fr
   gap: 12px;
 }
 
-/* ---------- feed ---------- */
+/* ---------- feed ----------
+   One call per row on a fixed grid; the handler runs wrap rather than
+   clip. A decided call (deny, ask, advise, …) carries its verdict colour
+   on the left edge, so a scan down the column finds them. */
+
+.spacer { flex: 1; }
+
+.feed-panel {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - var(--topbar-h) - 24px);
+}
+.feed-panel[hidden] { display: none; }
+.feed-panel .panel-header { align-items: center; }
+.feed-hint { font-size: 11px; }
+@media (max-width: 1100px) { .feed-hint { display: none; } }
+
+.feed-cols, .row-main {
+  display: grid;
+  grid-template-columns: 64px 92px minmax(0, 1fr) 132px 72px 88px 14px minmax(0, 2.2fr);
+  column-gap: 10px;
+  align-items: center;
+  padding: 0 12px 0 15px;
+}
+.feed-cols {
+  height: 28px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-dim);
+  font-size: 10.5px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+.feed-cols > span { overflow: hidden; white-space: nowrap; }
 
 .feed {
   list-style: none;
   margin: 0;
   padding: 0;
-  max-height: 80vh;
+  flex: 1 1 auto;
+  min-height: 120px;
   overflow-y: auto;
 }
 
@@ -445,6 +479,7 @@ body[data-view="flow"].details-open .body { grid-template-columns: minmax(0, 1fr
   border-top: 1px solid var(--border);
   display: flex;
   justify-content: center;
+  flex-shrink: 0;
 }
 
 .feed-footer button {
@@ -457,13 +492,13 @@ body[data-view="flow"].details-open .body { grid-template-columns: minmax(0, 1fr
   border-color: var(--border);
 }
 
+.row { border-bottom: 1px solid color-mix(in oklab, var(--border) 70%, transparent); }
+.row--loud { box-shadow: inset 3px 0 0 var(--oc); }
+
 .row-main {
-  display: grid;
-  grid-template-columns: 72px 84px 1fr 1fr 100px 96px 24px 1fr;
-  gap: 8px;
-  align-items: center;
-  padding: 5px 12px;
-  border-bottom: 1px solid var(--border);
+  min-height: 34px;
+  padding-top: 4px;
+  padding-bottom: 4px;
   cursor: pointer;
 }
 
@@ -473,25 +508,45 @@ body[data-view="flow"].details-open .body { grid-template-columns: minmax(0, 1fr
   outline-offset: -2px;
 }
 
-.row.expanded .row-main { background: var(--row-expanded); }
+.row.expanded { background: var(--row-expanded); box-shadow: inset 3px 0 0 var(--oc); }
+.row.expanded .row-main { background: transparent; }
 
-.c-time, .c-engine { color: var(--fg-dim); }
-.c-key, .c-event, .c-tool {
+.c-time { color: var(--fg-dim); font-variant-numeric: tabular-nums; }
+.c-engine, .c-key, .c-event, .c-tool {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.c-key { color: var(--fg-dim); }
+.c-tool { color: color-mix(in oklab, var(--fg) 75%, var(--fg-dim)); }
 
 .c-enforced {
   text-align: center;
   font-weight: 700;
-  color: var(--accent);
+  color: var(--c-ask);
 }
 
 .c-handlers {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
-  overflow: hidden;
+  min-width: 0;
+}
+
+/* narrower: the key column goes first, then the tool */
+@media (max-width: 1180px) {
+  .feed-cols, .row-main { grid-template-columns: 64px 96px minmax(0, 1fr) 72px 84px 14px; }
+  .feed-cols > :is(:nth-child(3), :nth-child(8)), .c-key { display: none; }
+  .c-handlers { grid-column: 2 / -1; padding-bottom: 2px; }
+  .c-handlers:empty { display: none; }
+}
+@media (max-width: 1180px) and (min-width: 901px) {
+  .body { grid-template-columns: minmax(0, 1fr) 290px; }
+}
+@media (max-width: 760px) {
+  .feed-cols, .row-main { grid-template-columns: 64px minmax(0, 1fr) 84px 14px; }
+  .feed-cols > :is(:nth-child(2), :nth-child(3), :nth-child(5), :nth-child(8)), .c-engine, .c-key, .c-tool { display: none; }
+  .c-handlers { grid-column: 1 / -1; padding-bottom: 4px; }
 }
 
 .row.truncated .c-time::before {
@@ -499,18 +554,37 @@ body[data-view="flow"].details-open .body { grid-template-columns: minmax(0, 1fr
   color: var(--c-timeout);
 }
 
+/* handler-run chips: a dot for the outcome; a decision tints the chip */
 .chip {
   display: inline-flex;
-  gap: 4px;
-  padding: 1px 5px;
-  border: 1px solid var(--border);
-  border-radius: 3px;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 4px;
   background: var(--bg-raised);
+  color: color-mix(in oklab, var(--fg) 80%, var(--fg-dim));
   font-size: 11px;
   white-space: nowrap;
+  max-width: 100%;
 }
-
-.chip-ms { color: var(--fg-dim); }
+.chip::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: color-mix(in oklab, var(--oc) 70%, var(--bg-raised));
+}
+.chip-name { overflow: hidden; text-overflow: ellipsis; }
+.chip--loud {
+  color: var(--oc);
+  background: color-mix(in oklab, var(--oc) 13%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--oc) 40%, transparent);
+  font-weight: 600;
+}
+.chip--loud::before { background: var(--oc); }
+.chip-ms { color: var(--fg-dim); font-weight: 400; }
 
 /* chip--dim/chip--hit mark a handler-run chip against an active branch
    filter (Entry.Hits): dim = not a hit, hit = matched branch. */
@@ -518,43 +592,62 @@ body[data-view="flow"].details-open .body { grid-template-columns: minmax(0, 1fr
 .chip--hit { outline: 1px solid var(--accent); outline-offset: 1px; }
 
 .row-detail {
-  padding: 8px 12px 12px 96px;
-  border-bottom: 1px solid var(--border);
-  background: var(--row-expanded);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr);
+  gap: 16px;
+  padding: 4px 12px 14px 91px;
 }
+@media (max-width: 1180px) { .row-detail { grid-template-columns: minmax(0, 1fr); padding-left: 15px; } }
+.row-detail[hidden] { display: none; }
 
 .row-detail dl {
   display: grid;
-  grid-template-columns: 80px 1fr;
-  gap: 2px 8px;
-  margin: 0 0 8px 0;
+  grid-template-columns: 64px 1fr;
+  gap: 4px 10px;
+  margin: 0;
+  align-content: start;
 }
 
 .row-detail dt { color: var(--fg-dim); }
-.row-detail dd { margin: 0; word-break: break-all; }
+.row-detail dd { margin: 0; overflow-wrap: anywhere; }
 
 .truncated-note {
   color: var(--c-timeout);
   margin: 0 0 8px 0;
 }
 
+.d-handlers {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  align-self: start;
+}
+.d-handlers:empty { display: none; }
+
 .handler-detail {
-  padding: 4px 0;
-  border-top: 1px dashed var(--border);
+  padding: 7px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
 }
 .handler-detail:first-child { border-top: none; }
 
 .handler-detail-head {
   display: flex;
+  align-items: center;
   gap: 8px;
 }
 
-.hd-name { font-weight: 600; }
-.hd-ms { color: var(--fg-dim); margin-left: auto; }
+.hd-name { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.hd-ms { color: var(--fg-dim); margin-left: auto; font-variant-numeric: tabular-nums; }
 .hd-advice, .hd-message {
-  color: var(--fg-dim);
-  word-break: break-word;
+  margin-top: 3px;
+  font-family: system-ui, sans-serif;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: color-mix(in oklab, var(--fg) 85%, var(--fg-dim));
+  overflow-wrap: anywhere;
 }
+.hd-advice:empty, .hd-message:empty { display: none; }
 
 .divider {
   padding: 6px 12px;
@@ -575,13 +668,16 @@ body[data-view="flow"].details-open .body { grid-template-columns: minmax(0, 1fr
 
 .badge {
   display: inline-block;
-  padding: 1px 6px;
+  justify-self: start;
+  padding: 1px 7px;
   font-size: 11px;
   font-weight: 600;
   border-width: 1px;
   border-style: solid;
   white-space: nowrap;
+  background: color-mix(in oklab, currentColor 10%, transparent);
 }
+.badge--abstain, .badge--suppressed, .badge--dispatched { background: transparent; font-weight: 400; }
 
 .badge--allow    { border-radius: 10px; border-color: var(--c-allow); color: var(--c-allow); }
 .badge--ok       { border-radius: 10px; border-color: var(--c-ok); color: var(--c-ok); }
@@ -598,7 +694,17 @@ body[data-view="flow"].details-open .body { grid-template-columns: minmax(0, 1fr
    Every block is one grid: a header row, then one line per row, the name
    column ellipsized, the numbers right-aligned in tabular figures. */
 
-#stats-body, #table-body { padding: 8px 12px 12px; display: grid; gap: 14px; }
+#stats-body, #table-body { padding: 10px 12px 12px; display: grid; gap: 14px; }
+
+.side { position: sticky; top: 10px; max-height: calc(100vh - var(--topbar-h) - 24px); overflow-y: auto; }
+.side > .panel { flex-shrink: 0; }
+
+.sb-total { display: flex; align-items: baseline; gap: 8px; }
+.sb-big { font-size: 28px; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+
+.sb-mix { display: flex; height: 8px; border-radius: 4px; overflow: hidden; gap: 1px; background: var(--row-hover); }
+.sb-mix > span { background: color-mix(in oklab, var(--oc) 45%, var(--bg-panel)); }
+.sb-mix > span.loud { background: var(--oc); }
 
 .sb-grid {
   display: grid;
@@ -608,24 +714,39 @@ body[data-view="flow"].details-open .body { grid-template-columns: minmax(0, 1fr
   font-variant-numeric: tabular-nums;
 }
 .sb-grid.c2 { grid-template-columns: minmax(0, 1fr) auto; }
-.sb-grid.c3 { grid-template-columns: minmax(0, 1fr) 7ch 6ch; }
+.sb-grid.c3 { grid-template-columns: minmax(0, 1fr) auto auto; }
 .sb-grid.table-grid { grid-template-columns: 8px minmax(0, 1fr) auto; }
 .sb-grid > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sb-grid .h {
+.sb-grid .h, .sb-slow .h {
   color: var(--fg-dim);
-  font-size: 11px;
+  font-size: 10.5px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
   padding-bottom: 3px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 2px;
 }
-.sb-grid .n { text-align: right; }
+.sb-grid .n, .sb-slow .n { text-align: right; }
 .sb-grid .sb-empty { grid-column: 1 / -1; }
-.sb-grid .v-allow { color: var(--c-allow); font-weight: 600; }
-.sb-grid .v-deny { color: var(--c-deny); font-weight: 600; }
-.sb-grid .v-ask { color: var(--c-ask); font-weight: 600; }
-.sb-grid .v-advise { color: var(--c-advise); font-weight: 600; }
-.sb-grid .v-timeout { color: var(--c-timeout); font-weight: 600; }
-.sb-grid .v-error, .sb-grid .v-router-error { color: var(--c-error); font-weight: 600; }
+.v-allow { color: var(--c-allow); font-weight: 600; }
+.v-deny { color: var(--c-deny); font-weight: 600; }
+.v-ask { color: var(--c-ask); font-weight: 600; }
+.v-advise { color: var(--c-advise); font-weight: 600; }
+.v-timeout { color: var(--c-timeout); font-weight: 600; }
+.v-error, .v-router-error { color: var(--c-error); font-weight: 600; }
+
+.sb-slow { display: grid; grid-template-columns: minmax(0, 1fr) 5ch 6ch; column-gap: 10px; row-gap: 5px; align-items: center; font-variant-numeric: tabular-nums; }
+.sb-slow-head, .sb-slow-row { display: contents; }
+.sb-slow-name { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.sb-slow-name > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-track { position: relative; height: 3px; border-radius: 2px; background: var(--row-hover); }
+.sb-fill { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: color-mix(in oklab, var(--fg-dim) 70%, var(--bg-panel)); }
+.sb-fill.slow { background: var(--c-timeout); }
+.sb-more { grid-column: 1 / -1; justify-self: start; border: none; background: transparent; color: var(--accent); padding: 2px 0; }
+.sb-slow .sb-empty { grid-column: 1 / -1; }
+
+.sb-foot { display: flex; flex-wrap: wrap; gap: 4px 14px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 11.5px; }
+.sb-ok { color: var(--live); }
 
 .tr-fired {
   width: 6px;

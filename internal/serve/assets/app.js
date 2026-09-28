@@ -325,10 +325,21 @@ function fmtMS(ms) {
   return ms + "ms";
 }
 
+// Outcomes that decided something, most consequential first. They are drawn
+// in their outcome colour; everything else stays quiet. Class names and
+// data-o values come only from this list and OUTCOME_OPTIONS, never the wire.
+const DECISIONS = ["router-error", "error", "timeout", "deny", "ask", "advise", "allow"];
+
+function outcomeKey(o) {
+  return OUTCOME_OPTIONS.includes(o) || VERDICT_OPTIONS.includes(o) ? o : "other";
+}
+
 function buildChip(h) {
   const node = chipTemplate.content.cloneNode(true);
   const chip = node.querySelector(".chip");
-  chip.classList.add("badge--" + h.outcome);
+  chip.dataset.o = outcomeKey(h.outcome);
+  if (DECISIONS.includes(h.outcome)) chip.classList.add("chip--loud");
+  chip.title = h.name + " · " + h.outcome + " · " + fmtMS(h.ms);
   node.querySelector(".chip-name").textContent = h.name;
   node.querySelector(".chip-ms").textContent = fmtMS(h.ms);
   return node;
@@ -379,10 +390,13 @@ function buildRow(entry) {
   const main = node.querySelector(".row-main");
 
   if (rec.truncated) li.classList.add("truncated");
+  li.dataset.o = outcomeKey(rec.verdict);
+  if (DECISIONS.includes(rec.verdict)) li.classList.add("row--loud");
 
   node.querySelector(".c-time").textContent = fmtTime(rec.ts);
   node.querySelector(".c-engine").textContent = rec.engine;
   node.querySelector(".c-key").textContent = rec.key;
+  node.querySelector(".c-key").title = rec.key;
   node.querySelector(".c-event").textContent = eventLabel(rec);
   node.querySelector(".c-tool").textContent = rec.tool_name || "—";
 
@@ -390,7 +404,9 @@ function buildRow(entry) {
   verdictEl.textContent = rec.verdict;
   verdictEl.className = "c-verdict badge badge--" + rec.verdict;
 
-  node.querySelector(".c-enforced").textContent = rec.enforced ? "E" : "";
+  const enforced = node.querySelector(".c-enforced");
+  enforced.textContent = rec.enforced ? "E" : "";
+  if (rec.enforced) enforced.title = "enforced: the engine acted on this verdict";
 
   const handlers = rec.handlers || [];
   const chips = node.querySelector(".c-handlers");
@@ -447,7 +463,7 @@ function trimFeed() {
 }
 
 function updateFeedMeta() {
-  feedCountEl.textContent = rowCount + (rowCount === 1 ? " row" : " rows");
+  feedCountEl.textContent = "· " + rowCount.toLocaleString("en-US") + (rowCount === 1 ? " row" : " rows");
   feedWindowedEl.hidden = !windowedFlag;
 }
 
@@ -529,36 +545,132 @@ async function loadEvents(day) {
   emitSync({ day, live: day === state.today });
 }
 
-// Verdicts that decided something: drawn in their outcome colour. Class
-// names come only from this list, never from the wire.
-const DECISIONS = ["router-error", "error", "timeout", "deny", "ask", "advise", "allow"];
+// renderStats draws the day's counts: the call total, the verdict mix as one
+// bar and a table (split by enforced), the slowest handlers with a bar each,
+// and router status and truncation on one line. Unfiltered by design: it
+// describes the whole day, whatever the drill path.
+const SLOW_ROWS = 10;
+let slowExpanded = false;
 
 function renderStats(snap) {
   lastStats = snap;
-  statsDayEl.textContent = snap.day + " · " + snap.calls + " calls";
+  statsDayEl.textContent = snap.day;
+  statsBodyEl.textContent = "";
 
-  const grids = [];
+  const total = document.createElement("div");
+  total.className = "sb-total";
+  const big = document.createElement("span");
+  big.className = "sb-big";
+  big.textContent = snap.calls.toLocaleString("en-US");
+  const unit = document.createElement("span");
+  unit.className = "dim";
+  unit.textContent = snap.calls === 1 ? "call" : "calls";
+  total.append(big, unit);
+  statsBodyEl.appendChild(total);
 
-  const verdictRows = Object.entries(snap.verdicts || {}).sort((a, b) => b[1].total - a[1].total);
-  grids.push(statGrid(["verdict", "calls"], verdictRows.map(([v, c]) => ({
-    cells: [v, String(c.total)],
+  const verdictRows = Object.entries(snap.verdicts || {}).sort((a, b) => {
+    const la = DECISIONS.indexOf(a[0]), lb = DECISIONS.indexOf(b[0]);
+    if ((la === -1) !== (lb === -1)) return la === -1 ? 1 : -1;
+    return la !== lb && la !== -1 ? la - lb : b[1].total - a[1].total;
+  });
+
+  // The mix bar: decisions get a floor width so a single deny among
+  // thousands of abstains is still a visible sliver.
+  if (snap.calls > 0) {
+    const bar = document.createElement("div");
+    bar.className = "sb-mix";
+    bar.setAttribute("role", "img");
+    bar.setAttribute("aria-label", "verdict mix: " + verdictRows.map(([v, c]) => c.total + " " + v).join(", "));
+    for (const [v, c] of verdictRows) {
+      const seg = document.createElement("span");
+      seg.dataset.o = outcomeKey(v);
+      if (DECISIONS.includes(v)) seg.classList.add("loud");
+      seg.style.flexGrow = String(c.total);
+      seg.style.minWidth = DECISIONS.includes(v) ? "3px" : "0";
+      seg.title = c.total + " " + v;
+      bar.appendChild(seg);
+    }
+    statsBodyEl.appendChild(bar);
+  }
+
+  statsBodyEl.appendChild(statGrid(["verdict", "calls", "enforced"], verdictRows.map(([v, c]) => ({
+    cells: [v, c.total.toLocaleString("en-US"), c.enforced ? c.enforced.toLocaleString("en-US") : "—"],
     cls: DECISIONS.includes(v) ? "v-" + v : "",
     title: c.enforced + " enforced / " + c.unenforced + " unenforced",
   }))));
 
-  const handlerRows = (snap.handlers || []).slice().sort((a, b) => (b.total_ms / Math.max(b.calls, 1)) - (a.total_ms / Math.max(a.calls, 1)));
-  grids.push(statGrid(["slowest handler", "mean ms", "max ms"], handlerRows.map((h) => ({
-    cells: [h.name, String(Math.round(h.total_ms / Math.max(h.calls, 1))), String(h.max_ms)],
-    title: h.name + " · " + h.calls + " calls",
-  }))));
+  const handlerRows = (snap.handlers || []).map((h) => ({ ...h, mean: h.total_ms / Math.max(h.calls, 1) }))
+    .sort((a, b) => b.mean - a.mean);
+  const maxMean = Math.max(1, ...handlerRows.map((h) => h.mean));
+  const slow = document.createElement("div");
+  slow.className = "sb-slow";
+  const head = document.createElement("div");
+  head.className = "sb-slow-head";
+  for (const [t, cls] of [["slowest handlers", ""], ["mean", "n"], ["max ms", "n"]]) {
+    const h = document.createElement("span");
+    h.className = "h" + (cls ? " " + cls : "");
+    h.textContent = t;
+    head.appendChild(h);
+  }
+  slow.appendChild(head);
+  if (handlerRows.length === 0) {
+    const empty = document.createElement("span");
+    empty.className = "dim sb-empty";
+    empty.textContent = "none yet";
+    slow.appendChild(empty);
+  }
+  for (const h of slowExpanded ? handlerRows : handlerRows.slice(0, SLOW_ROWS)) {
+    const row = document.createElement("div");
+    row.className = "sb-slow-row";
+    row.title = h.name + " · " + h.calls + " calls";
+    const name = document.createElement("span");
+    name.className = "sb-slow-name";
+    const label = document.createElement("span");
+    label.textContent = h.name;
+    const track = document.createElement("span");
+    track.className = "sb-track";
+    const fill = document.createElement("span");
+    fill.className = "sb-fill" + (h.max_ms >= 1000 ? " slow" : "");
+    fill.style.width = Math.max(2, Math.round(Math.sqrt(h.mean / maxMean) * 100)) + "%";
+    track.appendChild(fill);
+    name.append(label, track);
+    const mean = document.createElement("span");
+    mean.className = "n";
+    mean.textContent = String(Math.round(h.mean));
+    const max = document.createElement("span");
+    max.className = "n dim";
+    max.textContent = String(h.max_ms);
+    row.append(name, mean, max);
+    slow.appendChild(row);
+  }
+  if (handlerRows.length > SLOW_ROWS) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "sb-more";
+    more.textContent = slowExpanded ? "show the top " + SLOW_ROWS : "show all " + handlerRows.length;
+    more.addEventListener("click", () => {
+      slowExpanded = !slowExpanded;
+      renderStats(lastStats);
+    });
+    slow.appendChild(more);
+  }
+  statsBodyEl.appendChild(slow);
 
+  const foot = document.createElement("div");
+  foot.className = "sb-foot dim";
   const routerRows = Object.entries(snap.router || {}).sort((a, b) => b[1] - a[1]);
-  grids.push(statGrid(["router status", "calls"], routerRows.map(([status, n]) => ({ cells: [status, String(n)] }))));
-
-  grids.push(statGrid(["truncated", "records"], [{ cells: ["records", String(snap.truncated)] }]));
-
-  statsBodyEl.textContent = "";
-  for (const g of grids) statsBodyEl.appendChild(g);
+  for (const [status, n] of routerRows) {
+    const s = document.createElement("span");
+    s.textContent = "router " + status + " " + n.toLocaleString("en-US");
+    if (status === "ok") s.className = "sb-ok";
+    else s.className = "v-error";
+    foot.appendChild(s);
+  }
+  const tr = document.createElement("span");
+  tr.textContent = "truncated " + snap.truncated;
+  if (snap.truncated > 0) tr.className = "v-timeout";
+  foot.appendChild(tr);
+  statsBodyEl.appendChild(foot);
 
   if (tableCache) renderTable(tableCache, snap);
 }
