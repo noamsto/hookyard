@@ -1127,6 +1127,52 @@ async function check21(page, env) {
   return lines;
 }
 
+// A fan-out event plate draws both a straight .rule and a .gate trapezoid;
+// on a live arrival only the gate should paint the accent flash. The rule
+// belongs to plain plates with no gate, and to .selected (a different cue).
+async function check22(page, env) {
+  await openFlow(page, env.base);
+  await sleep(500);
+
+  const hasGate = await page.evaluate(`!!__e2e.node("event", "pre_tool")?.querySelector(".gate")`);
+  assert(hasGate, "event pre_tool has no .gate: the fixture no longer draws it as a fan-out");
+
+  const restingFill = await page.evaluate(`getComputedStyle(__e2e.node("event", "pre_tool").querySelector(".gate")).fill`);
+  const accentStroke = await page.evaluate(`(() => {
+    const probe = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    probe.style.stroke = "var(--accent)";
+    document.body.appendChild(probe);
+    const c = getComputedStyle(probe).stroke;
+    probe.remove();
+    return c;
+  })()`);
+
+  append(env.stateDir, [record({ ...TODAY_PATHS[0], ts: Date.now() })]);
+  await page.waitFor(`__e2e.node("event", "pre_tool")?.classList.contains("flash")`, 5000, "pre_tool flashes on a live pulse");
+
+  const samples = [];
+  const until = Date.now() + 600;
+  while (Date.now() < until) {
+    const s = await page.evaluate(`(() => {
+      const n = __e2e.node("event", "pre_tool");
+      const rs = getComputedStyle(n.querySelector(".rule"));
+      return { ruleStroke: rs.stroke, ruleWidth: Number(rs.strokeWidth.replace("px", "")), gateFill: getComputedStyle(n.querySelector(".gate")).fill };
+    })()`);
+    samples.push(s);
+    await sleep(60);
+  }
+
+  assert(samples.length > 0, "no samples taken during the flash window");
+  const accentHits = samples.filter((s) => s.ruleStroke === accentStroke);
+  assert(accentHits.length === 0, `the rule took the accent stroke (${accentStroke}) on ${accentHits.length}/${samples.length} samples`);
+  const overWidth = samples.filter((s) => s.ruleWidth > 1.05);
+  assert(overWidth.length === 0, `the rule's stroke-width exceeded 1px: ${JSON.stringify(overWidth)}`);
+  const gateChanged = samples.some((s) => s.gateFill !== restingFill);
+  assert(gateChanged, `the gate's fill never changed from its resting fill (${restingFill}) during the flash`);
+
+  return [`pre_tool (gate) flash, ${samples.length} samples over 600ms: rule stroke stayed off-accent and <=1px; gate fill animated (resting ${restingFill})`];
+}
+
 const CHECKS = [
   { n: 1, title: "edge totals == /api/flow derivation (4 filter sets)", fn: check1 },
   { n: 2, title: "fits the panel at 1600 and 1280: no horizontal scroll, open groups grow it, every node reachable, wheel zooms; 400 has no body scroll", fn: check2, fresh: true },
@@ -1149,6 +1195,7 @@ const CHECKS = [
   { n: 19, title: "click gives immediate visual feedback before the refetch resolves", fn: check19, fresh: true },
   { n: 20, title: "drill path: crumbs in click order, a crumb, browser back and Backspace step back; details follow the level", fn: check20, fresh: true },
   { n: 21, title: "drill path fits and details show the decision's words; popover and feed columns stay in bounds", fn: check21, fresh: true },
+  { n: 22, title: "a fan-out event's flash animates its gate, not the rule that follows neither gate edge", fn: check22, fresh: true },
 ];
 
 // A press released outside the body, below the drag threshold, must end the
