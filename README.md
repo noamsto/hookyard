@@ -163,7 +163,9 @@ graph takes the width (the day's counts stay in the feed view), and `f`
 Once you drill in, a details panel beside the graph describes the level
 you're on: its outcome mix, the handlers carrying it (the engines, when
 the level is one handler), each a click to drill further, and the latest
-decisions on it with the handler's own message.
+decisions on it with their words: the handler's message or advice, or,
+for the handler whose outcome became the call's verdict, the call's
+recorded reason (handler runs don't record their own reasons).
 
 - **feed** — every call, newest first, live for today and paged for past days.
 - **flow** — the pipeline as a decision Sankey, engine → event → handler →
@@ -214,7 +216,7 @@ decisions on it with the handler's own message.
 
 ![The default flow view: engines, events, handlers and outcomes, band width showing the last 10 minutes of traffic](docs/serve-flow.png)
 ![A handler group opened, hovering a handler to trace its paths](docs/serve-flow-grouped.png)
-![Filtered to the deny outcome on a past day, showing which guards denied](docs/serve-flow-filtered.png)
+![Drilled into the deny outcome on a past day: the crumb in the top bar, the guards that denied, and the details panel with the latest denials and their reasons](docs/serve-flow-filtered.png)
 
 **Building the flow view.** Its source lives in `internal/serve/web`
 (plain TypeScript on d3-sankey, esbuild-bundled); the built output under

@@ -11,7 +11,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Browser, KEYS, MOD, runCleanups, sleep, spawnGroup, tempDir, waitForLine } from "./cdp.mjs";
 import { installHelpers, openFlow } from "./helpers.mjs";
-import { AEYE, GUARDS, GUARDS_DENY, GUARDS_FIFTH, GUARDS_PI, TODAY_PATHS, UNGROUPED, append, record, writeFixture } from "./fixture.mjs";
+import { AEYE, GUARDS, GUARDS_DENY, GUARDS_FIFTH, GUARDS_PI, RM_DENY_REASON, TODAY_PATHS, UNGROUPED, append, record, writeFixture } from "./fixture.mjs";
 
 const WEB = dirname(dirname(fileURLToPath(import.meta.url)));
 const REPO = resolve(WEB, "../../..");
@@ -984,6 +984,189 @@ async function check20(page, env) {
   return lines;
 }
 
+function errMsg(err) {
+  return err instanceof CheckFailed ? err.message : (err.stack ?? String(err));
+}
+
+// Each sub-check (a–e) navigates afresh and failures are collected, so one
+// broken part doesn't hide the others.
+async function check21(page, env) {
+  const lines = [];
+  const problems = [];
+
+  const drillToGuardsRm = async (tag) => {
+    await setViewport(page, 1280, 800);
+    await openFlow(page, env.base);
+    await clickNode(page, "outcome", "deny");
+    await expectTrail(page, ["handler outcome: deny"], tag + " click deny");
+    await clickNode(page, "engine", "claude-code");
+    await expectTrail(page, ["handler outcome: deny", "engine: claude-code"], tag + " click claude-code");
+    await clickNode(page, "handler", GUARDS[0]);
+    return expectTrail(page, ["handler outcome: deny", "engine: claude-code", "handler: " + GUARDS[0]], tag + " click " + GUARDS[0]);
+  };
+
+  // (a) drilled to guards.rm: every filter chip sits inside #filter-chips,
+  // and the first crumb is hit-testable and steps back one level.
+  try {
+    await drillToGuardsRm("(a)");
+    const boxes = await page.evaluate(`(() => {
+      const c = document.getElementById("filter-chips").getBoundingClientRect();
+      return [...document.querySelectorAll("#filter-chips .fchip")].map((el) => {
+        const r = el.getBoundingClientRect();
+        return { left: r.left, top: r.top, right: r.right, bottom: r.bottom,
+          ok: r.left >= c.left - 1 && r.top >= c.top - 1 && r.right <= c.right + 1 && r.bottom <= c.bottom + 1 };
+      });
+    })()`);
+    assert(boxes.length > 0, "(a) no .fchip found in #filter-chips");
+    assert(boxes.every((b) => b.ok), "(a) a filter chip's box is not inside #filter-chips: " + JSON.stringify(boxes));
+
+    const crumb = await page.evaluate(`__e2e.hit(document.querySelector("#filter-chips .crumb-go"))`);
+    assert(crumb?.ok, "(a) first crumb-go not hit-testable: " + JSON.stringify(crumb));
+    await page.click(crumb.x, crumb.y);
+    await expectTrail(page, ["handler outcome: deny"], "(a) first crumb back to level 1");
+    lines.push(`(a) all ${boxes.length} filter chips stayed inside #filter-chips; the first crumb hit-tested and stepped back to level 1`);
+  } catch (err) {
+    problems.push("(a) " + errMsg(err));
+  }
+
+  // (b) drilled to guards.rm: a "latest decisions" card for guards.rm shows
+  // the call's own reason text.
+  try {
+    await drillToGuardsRm("(b)");
+    await page.waitFor(`!document.getElementById("flow-details").textContent.includes("loading")`, 5000, "(b) details finished loading");
+    const msg = await page.evaluate(`(() => {
+      const cards = [...document.querySelectorAll("#flow-details .dt-card")];
+      const card = cards.find((c) => c.querySelector(".dt-card-h")?.textContent === ${JSON.stringify(GUARDS[0])});
+      if (!card) return "NO_CARD";
+      return card.querySelector(".dt-card-msg")?.textContent ?? "NO_MSG";
+    })()`);
+    assert(msg === RM_DENY_REASON, `(b) ${GUARDS[0]} card's .dt-card-msg is ${JSON.stringify(msg)}, want ${JSON.stringify(RM_DENY_REASON)}`);
+    lines.push(`(b) the ${GUARDS[0]} decision card's .dt-card-msg reads the record's own reason`);
+  } catch (err) {
+    problems.push("(b) " + errMsg(err));
+  }
+
+  // (c) 760 px: the mobile filters popover stays inside the viewport.
+  try {
+    await setViewport(page, 760, 800);
+    await openFlow(page, env.base);
+    const toggle = await page.evaluate(`__e2e.hit(document.getElementById("filter-add-toggle"))`);
+    assert(toggle?.ok, "(c) #filter-add-toggle not hit-testable: " + JSON.stringify(toggle));
+    await page.click(toggle.x, toggle.y);
+    await page.waitFor(`!document.getElementById("filters").hidden`, 3000, "(c) #filters visible");
+    const box = await page.evaluate(`(() => { const r = document.getElementById("filters").getBoundingClientRect(); return { left: r.left, right: r.right, iw: innerWidth }; })()`);
+    assert(box.left >= 0, `(c) #filters left ${box.left} < 0 at 760 px`);
+    assert(box.right <= box.iw + 0.5, `(c) #filters right ${box.right} > innerWidth ${box.iw} at 760 px`);
+    lines.push(`(c) #filters stayed inside the viewport at 760 px (left ${box.left.toFixed(1)}, right ${box.right.toFixed(1)} of ${box.iw})`);
+  } catch (err) {
+    problems.push("(c) " + errMsg(err));
+  }
+
+  // (d) feed view, scrolled: the feed-cols header lines up with each row's
+  // row-main columns.
+  try {
+    await openFlow(page, env.base);
+    const feedTab = await page.evaluate(`__e2e.hit(document.querySelector('.view-toggle [data-view="feed"]'))`);
+    assert(feedTab?.ok, "(d) feed tab not hit-testable");
+    await page.click(feedTab.x, feedTab.y);
+    await page.waitFor(`document.querySelectorAll("#feed .row").length > 0`, 5000, "(d) feed rows rendered");
+
+    for (const width of [1280, 1180]) {
+      let height = 800;
+      let overflow = null;
+      for (let i = 0; i < 6 && !overflow; i++) {
+        await setViewport(page, width, height);
+        await sleep(100);
+        const m = await page.evaluate(`(() => { const f = document.getElementById("feed"); return { sh: f.scrollHeight, ch: f.clientHeight }; })()`);
+        if (m.sh > m.ch) overflow = { height, ...m };
+        else height -= 150;
+      }
+      assert(overflow, `(d) #feed never scrolled at ${width} px down to height ${height + 150} (scrollHeight never exceeded clientHeight)`);
+
+      const cols = await page.evaluate(`(() => {
+        const header = [...document.querySelectorAll(".feed-cols > span")];
+        const rowMain = document.querySelector("#feed .row .row-main");
+        const kids = rowMain ? [...rowMain.children] : [];
+        return header.map((h, i) => {
+          const hr = h.getBoundingClientRect();
+          const rr = kids[i] ? kids[i].getBoundingClientRect() : null;
+          return { i, w: hr.width, hLeft: hr.left, rLeft: rr ? rr.left : null };
+        });
+      })()`);
+      const bad = cols.filter((c) => c.w > 0 && (c.rLeft === null || Math.abs(c.hLeft - c.rLeft) > 1));
+      assert(bad.length === 0, `(d) at ${width} px, feed-cols vs. row-main column left offsets differ: ${JSON.stringify(bad)}`);
+      lines.push(`(d) at ${width} px (feed scrolled, height ${overflow.height}): header columns line up with row columns`);
+    }
+  } catch (err) {
+    problems.push("(d) " + errMsg(err));
+  }
+
+  // (e) a past day, an event filter with no calls: the details panel drops
+  // the live-only "today" / "in the window" wording.
+  try {
+    await openFlow(page, env.base, "day=" + env.past + "&event=pre_compact");
+    await page.waitFor(`!document.getElementById("flow-details").hidden && !document.getElementById("flow-details").textContent.includes("loading")`,
+      5000, "(e) details panel rendered");
+    const text = await page.evaluate(`document.getElementById("flow-details").textContent`);
+    assert(!/today/i.test(text), `(e) details text mentions "today" on a past, call-free level: ${JSON.stringify(text)}`);
+    assert(!text.includes("in the window"), `(e) details text mentions "in the window" on a past, call-free level: ${JSON.stringify(text)}`);
+    lines.push("(e) past day, call-free level: details panel text has neither \"today\" nor \"in the window\"");
+  } catch (err) {
+    problems.push("(e) " + errMsg(err));
+  }
+
+  if (problems.length > 0) {
+    throw new CheckFailed(`${problems.length}/5 sub-check(s) failed:\n      ` + problems.join("\n      "));
+  }
+  return lines;
+}
+
+// A fan-out event plate draws both a straight .rule and a .gate trapezoid;
+// on a live arrival only the gate should paint the accent flash. The rule
+// belongs to plain plates with no gate, and to .selected (a different cue).
+async function check22(page, env) {
+  await openFlow(page, env.base);
+  await sleep(500);
+
+  const hasGate = await page.evaluate(`!!__e2e.node("event", "pre_tool")?.querySelector(".gate")`);
+  assert(hasGate, "event pre_tool has no .gate: the fixture no longer draws it as a fan-out");
+
+  const restingFill = await page.evaluate(`getComputedStyle(__e2e.node("event", "pre_tool").querySelector(".gate")).fill`);
+  const accentStroke = await page.evaluate(`(() => {
+    const probe = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    probe.style.stroke = "var(--accent)";
+    document.body.appendChild(probe);
+    const c = getComputedStyle(probe).stroke;
+    probe.remove();
+    return c;
+  })()`);
+
+  append(env.stateDir, [record({ ...TODAY_PATHS[0], ts: Date.now() })]);
+  await page.waitFor(`__e2e.node("event", "pre_tool")?.classList.contains("flash")`, 5000, "pre_tool flashes on a live pulse");
+
+  const samples = [];
+  const until = Date.now() + 600;
+  while (Date.now() < until) {
+    const s = await page.evaluate(`(() => {
+      const n = __e2e.node("event", "pre_tool");
+      const rs = getComputedStyle(n.querySelector(".rule"));
+      return { ruleStroke: rs.stroke, ruleWidth: Number(rs.strokeWidth.replace("px", "")), gateFill: getComputedStyle(n.querySelector(".gate")).fill };
+    })()`);
+    samples.push(s);
+    await sleep(60);
+  }
+
+  assert(samples.length > 0, "no samples taken during the flash window");
+  const accentHits = samples.filter((s) => s.ruleStroke === accentStroke);
+  assert(accentHits.length === 0, `the rule took the accent stroke (${accentStroke}) on ${accentHits.length}/${samples.length} samples`);
+  const overWidth = samples.filter((s) => s.ruleWidth > 1.05);
+  assert(overWidth.length === 0, `the rule's stroke-width exceeded 1px: ${JSON.stringify(overWidth)}`);
+  const gateChanged = samples.some((s) => s.gateFill !== restingFill);
+  assert(gateChanged, `the gate's fill never changed from its resting fill (${restingFill}) during the flash`);
+
+  return [`pre_tool (gate) flash, ${samples.length} samples over 600ms: rule stroke stayed off-accent and <=1px; gate fill animated (resting ${restingFill})`];
+}
+
 const CHECKS = [
   { n: 1, title: "edge totals == /api/flow derivation (4 filter sets)", fn: check1 },
   { n: 2, title: "fits the panel at 1600 and 1280: no horizontal scroll, open groups grow it, every node reachable, wheel zooms; 400 has no body scroll", fn: check2, fresh: true },
@@ -1005,6 +1188,8 @@ const CHECKS = [
   { n: 18, title: "live pulses: no long frames, no leg-boundary teleport", fn: check18, fresh: true },
   { n: 19, title: "click gives immediate visual feedback before the refetch resolves", fn: check19, fresh: true },
   { n: 20, title: "drill path: crumbs in click order, a crumb, browser back and Backspace step back; details follow the level", fn: check20, fresh: true },
+  { n: 21, title: "drill path fits and details show the decision's words; popover and feed columns stay in bounds", fn: check21, fresh: true },
+  { n: 22, title: "a fan-out event's flash animates its gate, not the rule that follows neither gate edge", fn: check22, fresh: true },
 ];
 
 // A press released outside the body, below the drag threshold, must end the

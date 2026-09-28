@@ -8,7 +8,7 @@ export const COL_INDEX: Record<DisplayCol, number> = { engine: 0, event: 1, hand
 export interface Hop { name: string; outcome: string; }
 export interface PathLike {           // a FlowPath or a live rec — same field names on the wire
   engine: string; canonical_event: string; native_event: string;
-  router: string; verdict: string; handlers: Hop[] | null;   // wire sends null or []
+  router: string; verdict: string; reason?: string; handlers: Hop[] | null;   // wire sends null or []
 }
 export interface FlowPath extends PathLike { counts: number[]; }
 export interface Facets { engine: Record<string, number>; event: Record<string, number>;

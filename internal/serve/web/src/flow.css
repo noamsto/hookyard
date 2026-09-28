@@ -96,11 +96,13 @@
 .flow-node .hit { fill: transparent; cursor: pointer; }
 .k-pseudo .hit { cursor: default; }
 .flow-node.selected .rule { stroke: var(--accent); stroke-width: 2; }
-/* a pulse's arrival: the event gate and the outcome bar flash, then decay */
+/* a pulse's arrival: the event gate and the outcome bar flash, then decay.
+   a gate node's rule follows neither of the gate's edges, so only a plate
+   with no gate flashes its rule -- the gate itself carries the cue there. */
 @keyframes flow-flash-rule { from { stroke: var(--accent); stroke-width: 2.5px; } to { stroke: var(--border); stroke-width: 1px; } }
 @keyframes flow-flash-gate { from { fill: color-mix(in oklab, var(--accent) 18%, transparent); } to { fill: color-mix(in oklab, var(--fg-dim) 9%, transparent); } }
 @keyframes flow-flash-bar { from { stroke-width: 6px; stroke-opacity: .8; } to { stroke-width: 0; stroke-opacity: 0; } }
-.flow-node.flash .rule { animation: flow-flash-rule 1.5s ease-out; }
+.flow-node.flash:not(:has(.gate)) .rule { animation: flow-flash-rule 1.5s ease-out; }
 .flow-node.flash .gate { animation: flow-flash-gate 1.5s ease-out; }
 .k-outcome.flash .bar { stroke: var(--oc); animation: flow-flash-bar 1.5s ease-out; }
 .flow-body.hl .flow-node:not(.on) { opacity: .35; }

@@ -47,8 +47,9 @@ function isoMicro(ms) {
 
 let seq = 0;
 
-// record builds one stream record. hops: [[handler, outcome], ...].
-export function record({ ts, engine, event = "", native, hops = [], verdict, router = "ok", tool = "" }) {
+// record builds one stream record. hops: [[handler, outcome], ...]. Like the
+// Go writer, it omits reason when empty.
+export function record({ ts, engine, event = "", native, hops = [], verdict, router = "ok", tool = "", reason }) {
   seq++;
   return {
     v: 1,
@@ -62,16 +63,21 @@ export function record({ ts, engine, event = "", native, hops = [], verdict, rou
     tool_name: tool,
     verdict,
     enforced: verdict === "deny",
+    ...(reason ? { reason } : {}),
     router,
     router_ms: 3,
     handlers: hops.map(([name, outcome], i) => ({ name, outcome, ms: 2 + i })),
   };
 }
 
+// RM_DENY_REASON is the top-level reason on TODAY_PATHS' first entry (the
+// claude-code pre_tool call whose guards.rm hop denies).
+export const RM_DENY_REASON = "e2e: rm -rf outside the worktree is denied";
+
 // TODAY_PATHS are the live day's call shapes; `n` copies of each are written.
 // The burst reuses them so every burst call runs through drawn nodes.
 export const TODAY_PATHS = [
-  { n: 3, engine: "claude-code", event: "pre_tool", native: "PreToolUse", tool: "Bash", verdict: "deny",
+  { n: 3, engine: "claude-code", event: "pre_tool", native: "PreToolUse", tool: "Bash", verdict: "deny", reason: RM_DENY_REASON,
     hops: [["guards.rm", "deny"], ["guards.git-push", "allow"], ["guards.sudo", "allow"], ["aeye-lint", "advise"], ["notify", "dispatched"]] },
   { n: 2, engine: "claude-code", event: "pre_tool", native: "PreToolUse", tool: "Bash", verdict: "deny",
     hops: [["guards.rm", "allow"], ["guards.git-push", "deny"], ["guards.chmod", "abstain"], ["notify", "dispatched"]] },
