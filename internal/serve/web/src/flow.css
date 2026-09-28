@@ -2,10 +2,23 @@
    color-mix() of them, so the dark default and the prefers-color-scheme:
    light override both apply without a colour literal of its own. */
 
-.flow-panel .panel-header { flex-wrap: wrap; }
+.flow-panel .panel-header { flex-wrap: wrap; align-items: center; row-gap: 6px; padding: 6px 12px; }
 .flow-meta { font-variant-numeric: tabular-nums; }
-.flow-decisions { display: inline-flex; gap: 12px; margin-left: 4px; }
-.flow-decisions .dec { color: var(--oc); }
+/* the decision counts double as the way into each outcome */
+.flow-decisions { display: inline-flex; flex-wrap: wrap; gap: 6px; margin-left: 4px; }
+.flow-decisions .dec {
+  color: var(--oc);
+  background: color-mix(in oklab, var(--oc) 14%, transparent);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 2px 9px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+/* a phone has no pointer to hover or shift-click with: the hint only costs height */
+@media (max-width: 700px) { .flow-hint { display: none; } }
+.flow-decisions .dec:hover { border-color: var(--oc); }
+.flow-decisions .dec[aria-pressed="true"] { background: var(--oc); color: var(--bg-panel); }
 .flow-decisions .dec b { font-weight: 700; }
 .flow-error { color: var(--c-error); }
 .flow-error:empty { display: none; }
@@ -17,6 +30,12 @@
   color: var(--fg-dim);
   white-space: nowrap;
 }
+.flow-zoom { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.flow-zoom button { border: none; border-radius: 0; padding: 3px 9px; }
+.flow-zoom button + button { border-left: 1px solid var(--border); }
+.flow-details-toggle { padding: 3px 10px; }
+.flow-details-toggle[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.flow-details-toggle[hidden] { display: none; }
 .flow-hint { margin: 6px 12px 0; }
 
 /* outcome -> colour, from the known outcome list only */

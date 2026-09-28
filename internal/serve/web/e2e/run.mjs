@@ -836,10 +836,14 @@ async function check14(page, env) {
     for (let i = 0; i < 6; i++) await page.wheel(wp.x, wp.y, 120);
     await sleep(300);
     const scrolled = await page.evaluate("scrollY");
+    // In the flow view the graph fills the window and the day's counts are
+    // hidden, so the page may have nothing below it to scroll to; when it
+    // does, the wheel must reach it.
+    const scrollable = await page.evaluate("document.documentElement.scrollHeight - innerHeight > 1");
     const stillFit = await view(page);
     assert(stillFit.fitted && stillFit.k === 1, "wheel-down on a fitted graph changed the view: " + JSON.stringify(stillFit));
-    assert(scrolled > 0, "wheel-down on a fitted graph did not scroll the page");
-    lines.push(`wheel-down on the fitted graph scrolled the page (scrollY ${scrolled.toFixed(0)}) and left it fitted`);
+    assert(!scrollable || scrolled > 0, "wheel-down on a fitted graph did not scroll the page");
+    lines.push(scrollable ? `wheel-down on the fitted graph scrolled the page (scrollY ${scrolled.toFixed(0)}) and left it fitted` : "wheel-down on the fitted graph left it fitted (the page had nothing below to scroll to)");
 
     // Band tooltips keep a constant 12 px offset from the band at any zoom.
     await page.evaluate("scrollTo(0, 0)");
@@ -920,6 +924,66 @@ async function check15(page, env) {
   return lines;
 }
 
+// The drill path: each click narrows the level and adds a crumb in click
+// order; a crumb steps back to its level, the browser's back button walks the
+// path, Backspace pops a level, and the details panel follows the level.
+const TRAIL = `(() => ({ chips: __e2e.chips(), order: [...new URLSearchParams(location.search).keys()].filter((k) => k !== "day" && k !== "view"),
+  details: !document.getElementById("flow-details").hidden,
+  title: document.querySelector("#flow-details .dt-title")?.textContent ?? null }))()`;
+
+async function expectTrail(page, chips, what) {
+  const want = JSON.stringify(chips);
+  try {
+    await page.waitFor(`JSON.stringify(__e2e.chips()) === ${JSON.stringify(want)} && __e2e.settled()`, 5000, what);
+  } catch {
+    throw new CheckFailed(what + ": want chips " + want + ", got " + JSON.stringify(await page.evaluate(TRAIL)));
+  }
+  await sleep(150);
+  return page.evaluate(TRAIL);
+}
+
+async function check20(page, env) {
+  const lines = [];
+  await setViewport(page, 1280, 800);
+  try {
+    await openFlow(page, env.base);
+    let t = await page.evaluate(TRAIL);
+    assert(t.chips.length === 0 && !t.details, "a fresh page is not at the root: " + JSON.stringify(t));
+
+    await clickNode(page, "outcome", "deny");
+    t = await expectTrail(page, ["handler outcome: deny"], "click deny");
+    await page.waitFor(`!document.getElementById("flow-details").hidden && document.querySelector("#flow-details .dt-title")?.textContent === "deny"`, 5000, "details for deny");
+    lines.push("click deny -> crumb 'handler outcome: deny', details panel on deny");
+
+    await clickNode(page, "engine", "claude-code");
+    t = await expectTrail(page, ["handler outcome: deny", "engine: claude-code"], "click claude-code");
+    assert(JSON.stringify(t.order) === JSON.stringify(["outcome", "engine"]), "URL does not keep the drill order: " + JSON.stringify(t.order));
+    await page.waitFor(`document.querySelector("#flow-details .dt-title")?.textContent === "claude-code"`, 5000, "details follow the level");
+    lines.push("click claude-code -> second crumb, URL keeps the order (outcome, engine), details on claude-code");
+
+    const crumb = await page.evaluate(`__e2e.hit(document.querySelector("#filter-chips .crumb-go"))`);
+    assert(crumb.ok, "first crumb not hit-testable");
+    await page.click(crumb.x, crumb.y);
+    await expectTrail(page, ["handler outcome: deny"], "first crumb");
+    lines.push("first crumb -> back to level 1");
+
+    await page.evaluate("history.back()");
+    await expectTrail(page, ["handler outcome: deny", "engine: claude-code"], "browser back");
+    lines.push("browser back -> level 2 again");
+
+    await page.evaluate("document.activeElement?.blur()");
+    await page.key(KEYS.backspace);
+    await expectTrail(page, ["handler outcome: deny"], "Backspace");
+    await page.key(KEYS.backspace);
+    t = await expectTrail(page, [], "Backspace to the root");
+    await page.waitFor(`document.getElementById("flow-details").hidden`, 3000, "details closed at the root");
+    lines.push("Backspace twice -> root, details panel closed");
+  } finally {
+    await page.send("Emulation.clearDeviceMetricsOverride");
+  }
+  return lines;
+}
+
 const CHECKS = [
   { n: 1, title: "edge totals == /api/flow derivation (4 filter sets)", fn: check1 },
   { n: 2, title: "fits the panel at 1600 and 1280: no horizontal scroll, open groups grow it, every node reachable, wheel zooms; 400 has no body scroll", fn: check2, fresh: true },
@@ -940,6 +1004,7 @@ const CHECKS = [
   { n: 17, title: "engine→outcome single pulse travel time ~5s", fn: check17, fresh: true },
   { n: 18, title: "live pulses: no long frames, no leg-boundary teleport", fn: check18, fresh: true },
   { n: 19, title: "click gives immediate visual feedback before the refetch resolves", fn: check19, fresh: true },
+  { n: 20, title: "drill path: crumbs in click order, a crumb, browser back and Backspace step back; details follow the level", fn: check20, fresh: true },
 ];
 
 // A press released outside the body, below the drag threshold, must end the

@@ -10,3 +10,6 @@ export declare function eventLabel(rec: PathLike): string;
 export declare function toggleFilter(field: string, value: string, additive?: boolean): void;
 export declare function activeFilters(): Filters;
 export declare function syncState(): { day: string; live: boolean } | null;
+export declare function filterTrail(): [string, string][];
+export declare function backTo(n: number): void;
+export declare function popFilter(): void;

@@ -118,6 +118,19 @@ function debounce(fn, ms) {
 // add-selects never carry selection themselves — they only append to this.
 const filterState = { engine: [], event: [], handler: [], outcome: [], verdict: [], session: "" };
 
+// trail is the same values as filterState's arrays, in the order they were
+// added: the drill path. Each step narrows the one before it, so a crumb is a
+// way back to its level. It is kept in lockstep with filterState by
+// setTrail, and the URL carries it in this order, so a reload or a shared
+// link keeps the path.
+let trail = [];
+
+function setTrail(next) {
+  trail = next;
+  for (const field of FIELDS) filterState[field] = [];
+  for (const [field, value] of trail) filterState[field].push(value);
+}
+
 // activeFilters returns a deep copy for callers outside this module (the
 // flow view reads it to know which nodes are already filtered-in).
 export function activeFilters() {
@@ -126,78 +139,139 @@ export function activeFilters() {
   return f;
 }
 
+// filterTrail is the drill path, oldest step first, as [field, value] pairs.
+export function filterTrail() {
+  return trail.map(([field, value]) => [field, value]);
+}
+
 // filterParams is the one place filterState becomes a query string, shared
-// by the SSE URL, the events fetch and the URL bar mirror.
+// by the SSE URL, the events fetch and the URL bar mirror. Values go out in
+// trail order; the server reads them as sets, so the order is only for the
+// URL's sake.
 export function filterParams() {
   const params = new URLSearchParams();
-  for (const field of FIELDS) {
-    for (const v of filterState[field]) params.append(field, v);
-  }
+  for (const [field, value] of trail) params.append(field, value);
   if (filterState.session) params.set("session", filterState.session);
   return params;
 }
 
-// applyFiltersFromParams loads filterState from the URL. A value not among a
-// field's current select options still lands in the state and still shows as
-// a chip — the state is the truth, not the options.
+// applyFiltersFromParams loads filterState from the URL, in the URL's order.
+// A value not among a field's current select options still lands in the
+// state and still shows as a chip — the state is the truth, not the options.
 function applyFiltersFromParams(params) {
-  for (const field of FIELDS) filterState[field] = params.getAll(field).filter(Boolean);
+  const next = [];
+  for (const [field, value] of params) {
+    if (!FIELDS.includes(field) || !value) continue;
+    if (!next.some(([f, v]) => f === field && v === value)) next.push([field, value]);
+  }
+  setTrail(next);
   filterState.session = params.get("session") || "";
   sessionInput.value = filterState.session;
 }
 
-function updateURL() {
+// updateURL mirrors the state to the address bar. push is set for a change
+// the operator made to the drill path, so the browser's back button steps
+// back up it; day switches and bookkeeping replace in place.
+function updateURL(push) {
   const params = filterParams();
   if (state.day) params.set("day", state.day);
   const view = new URLSearchParams(location.search).get("view");
   if (view) params.set("view", view);
   const qs = params.toString();
-  history.replaceState(null, "", qs ? "?" + qs : location.pathname);
+  const url = qs ? "?" + qs : location.pathname;
+  if (push && url !== location.search && !(url === location.pathname && !location.search)) history.pushState(null, "", url);
+  else history.replaceState(null, "", url);
 }
 
 function clearFilters() {
-  for (const field of FIELDS) filterState[field] = [];
+  setTrail([]);
   filterState.session = "";
   sessionInput.value = "";
-  onFiltersChanged();
+  onFiltersChanged(true);
 }
 
 // toggleFilter is the one mutator shared by the filter-chip × buttons and
 // flow.js's node clicks: active → remove; else additive → append; else
-// replace the field's values with just this one.
+// replace the field's values with just this one, at the field's first step.
 export function toggleFilter(field, value, additive) {
-  const values = filterState[field];
-  const idx = values.indexOf(value);
-  if (idx !== -1) values.splice(idx, 1);
-  else if (additive) values.push(value);
-  else filterState[field] = [value];
-  onFiltersChanged();
+  const idx = trail.findIndex(([f, v]) => f === field && v === value);
+  let next;
+  if (idx !== -1) next = trail.filter((_, i) => i !== idx);
+  else if (additive) next = trail.concat([[field, value]]);
+  else {
+    const at = trail.findIndex(([f]) => f === field);
+    next = trail.filter(([f]) => f !== field);
+    next.splice(at === -1 ? next.length : at, 0, [field, value]);
+  }
+  setTrail(next);
+  onFiltersChanged(true);
 }
 
+// backTo keeps the first n steps of the drill path; popFilter drops the last.
+export function backTo(n) {
+  if (n >= trail.length) return;
+  setTrail(trail.slice(0, Math.max(0, n)));
+  onFiltersChanged(true);
+}
+
+export function popFilter() {
+  if (trail.length) backTo(trail.length - 1);
+}
+
+// renderChips draws the drill path: one crumb per step, in trail order. The
+// crumb's label goes back to that level; its × removes just that value.
 function renderChips() {
   filterChipsEl.textContent = "";
-  for (const field of FIELDS) {
-    for (const value of filterState[field]) {
-      const chip = document.createElement("span");
-      chip.className = "fchip";
-      const label = document.createElement("span");
-      label.textContent = FIELD_LABELS[field] + ": " + value;
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "fchip-remove";
-      remove.textContent = "×";
-      remove.setAttribute("aria-label", "remove " + FIELD_LABELS[field] + ": " + value);
-      remove.addEventListener("click", () => toggleFilter(field, value));
-      chip.appendChild(label);
-      chip.appendChild(remove);
-      filterChipsEl.appendChild(chip);
+  trail.forEach(([field, value], i) => {
+    if (i > 0) {
+      const sep = document.createElement("span");
+      sep.className = "crumb-sep";
+      sep.textContent = "›";
+      sep.setAttribute("aria-hidden", "true");
+      filterChipsEl.appendChild(sep);
     }
-  }
+    const last = i === trail.length - 1;
+    const chip = document.createElement("span");
+    chip.className = "fchip crumb" + (last ? " current" : "");
+    chip.dataset.field = field;
+    if (field === "outcome" || field === "verdict") chip.dataset.o = value;
+    const label = document.createElement("button");
+    label.type = "button";
+    label.className = "crumb-go";
+    label.textContent = FIELD_LABELS[field] + ": " + value;
+    if (last) label.setAttribute("aria-current", "step");
+    label.title = last ? "the current level" : "back to this level";
+    label.addEventListener("click", () => backTo(i + 1));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "fchip-remove";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", "remove " + FIELD_LABELS[field] + ": " + value);
+    remove.addEventListener("click", () => toggleFilter(field, value));
+    chip.appendChild(label);
+    chip.appendChild(remove);
+    filterChipsEl.appendChild(chip);
+  });
+  const any = trail.length > 0;
+  el("trail-back").hidden = !any;
+  el("trail-root").classList.toggle("current", !any);
+  el("clear-filters").hidden = !any && !filterState.session;
+  document.body.classList.toggle("filtered", any);
+  markTrailOverflow();
 }
 
-function onFiltersChanged() {
+// markTrailOverflow flags a path too long for the bar: its oldest crumbs
+// slide out on the left, and the class fades that edge so the cut shows.
+function markTrailOverflow() {
+  let need = 0;
+  for (const c of filterChipsEl.children) need += c.offsetWidth + 4;
+  filterChipsEl.classList.toggle("overflowing", need > filterChipsEl.clientWidth + 1);
+}
+window.addEventListener("resize", debounce(markTrailOverflow, 100));
+
+function onFiltersChanged(push) {
   renderChips();
-  updateURL();
+  updateURL(push);
   if (state.day === state.today) {
     // Reopening the stream runs the one connect sequence (reset -> backfill),
     // which is also how the new filters reach /api/events — there is no
@@ -206,6 +280,30 @@ function onFiltersChanged() {
   } else {
     loadEvents(state.day);
   }
+}
+
+// The browser's back and forward buttons walk the drill path.
+window.addEventListener("popstate", () => {
+  const params = new URLSearchParams(location.search);
+  applyFiltersFromParams(params);
+  const day = params.get("day");
+  renderChips();
+  if (day && day !== state.day) {
+    fillDaySelect([...daySelect.options].map((o) => o.value), day);
+    selectDay(day);
+  } else {
+    onFiltersChanged(false);
+  }
+});
+
+// ---------- focus mode ----------
+
+// Focus mode hides the chrome so the flow graph gets the whole window. The
+// graph sizes itself from the window, so a resize event re-fits it.
+function setFocus(on) {
+  document.body.classList.toggle("focus", on);
+  el("focus-toggle").setAttribute("aria-pressed", String(on));
+  window.dispatchEvent(new Event("resize"));
 }
 
 // ---------- connection indicator ----------
@@ -227,10 +325,21 @@ function fmtMS(ms) {
   return ms + "ms";
 }
 
+// Outcomes that decided something, most consequential first. They are drawn
+// in their outcome colour; everything else stays quiet. Class names and
+// data-o values come only from this list and OUTCOME_OPTIONS, never the wire.
+const DECISIONS = ["router-error", "error", "timeout", "deny", "ask", "advise", "allow"];
+
+function outcomeKey(o) {
+  return OUTCOME_OPTIONS.includes(o) || VERDICT_OPTIONS.includes(o) ? o : "other";
+}
+
 function buildChip(h) {
   const node = chipTemplate.content.cloneNode(true);
   const chip = node.querySelector(".chip");
-  chip.classList.add("badge--" + h.outcome);
+  chip.dataset.o = outcomeKey(h.outcome);
+  if (DECISIONS.includes(h.outcome)) chip.classList.add("chip--loud");
+  chip.title = h.name + " · " + h.outcome + " · " + fmtMS(h.ms);
   node.querySelector(".chip-name").textContent = h.name;
   node.querySelector(".chip-ms").textContent = fmtMS(h.ms);
   return node;
@@ -281,10 +390,13 @@ function buildRow(entry) {
   const main = node.querySelector(".row-main");
 
   if (rec.truncated) li.classList.add("truncated");
+  li.dataset.o = outcomeKey(rec.verdict);
+  if (DECISIONS.includes(rec.verdict)) li.classList.add("row--loud");
 
   node.querySelector(".c-time").textContent = fmtTime(rec.ts);
   node.querySelector(".c-engine").textContent = rec.engine;
   node.querySelector(".c-key").textContent = rec.key;
+  node.querySelector(".c-key").title = rec.key;
   node.querySelector(".c-event").textContent = eventLabel(rec);
   node.querySelector(".c-tool").textContent = rec.tool_name || "—";
 
@@ -292,7 +404,9 @@ function buildRow(entry) {
   verdictEl.textContent = rec.verdict;
   verdictEl.className = "c-verdict badge badge--" + rec.verdict;
 
-  node.querySelector(".c-enforced").textContent = rec.enforced ? "E" : "";
+  const enforced = node.querySelector(".c-enforced");
+  enforced.textContent = rec.enforced ? "E" : "";
+  if (rec.enforced) enforced.title = "enforced: the engine acted on this verdict";
 
   const handlers = rec.handlers || [];
   const chips = node.querySelector(".c-handlers");
@@ -349,7 +463,7 @@ function trimFeed() {
 }
 
 function updateFeedMeta() {
-  feedCountEl.textContent = rowCount + (rowCount === 1 ? " row" : " rows");
+  feedCountEl.textContent = "· " + rowCount.toLocaleString("en-US") + (rowCount === 1 ? " row" : " rows");
   feedWindowedEl.hidden = !windowedFlag;
 }
 
@@ -431,36 +545,132 @@ async function loadEvents(day) {
   emitSync({ day, live: day === state.today });
 }
 
-// Verdicts that decided something: drawn in their outcome colour. Class
-// names come only from this list, never from the wire.
-const DECISIONS = ["router-error", "error", "timeout", "deny", "ask", "advise", "allow"];
+// renderStats draws the day's counts: the call total, the verdict mix as one
+// bar and a table (split by enforced), the slowest handlers with a bar each,
+// and router status and truncation on one line. Unfiltered by design: it
+// describes the whole day, whatever the drill path.
+const SLOW_ROWS = 10;
+let slowExpanded = false;
 
 function renderStats(snap) {
   lastStats = snap;
-  statsDayEl.textContent = snap.day + " · " + snap.calls + " calls";
+  statsDayEl.textContent = snap.day;
+  statsBodyEl.textContent = "";
 
-  const grids = [];
+  const total = document.createElement("div");
+  total.className = "sb-total";
+  const big = document.createElement("span");
+  big.className = "sb-big";
+  big.textContent = snap.calls.toLocaleString("en-US");
+  const unit = document.createElement("span");
+  unit.className = "dim";
+  unit.textContent = snap.calls === 1 ? "call" : "calls";
+  total.append(big, unit);
+  statsBodyEl.appendChild(total);
 
-  const verdictRows = Object.entries(snap.verdicts || {}).sort((a, b) => b[1].total - a[1].total);
-  grids.push(statGrid(["verdict", "calls"], verdictRows.map(([v, c]) => ({
-    cells: [v, String(c.total)],
+  const verdictRows = Object.entries(snap.verdicts || {}).sort((a, b) => {
+    const la = DECISIONS.indexOf(a[0]), lb = DECISIONS.indexOf(b[0]);
+    if ((la === -1) !== (lb === -1)) return la === -1 ? 1 : -1;
+    return la !== lb && la !== -1 ? la - lb : b[1].total - a[1].total;
+  });
+
+  // The mix bar: decisions get a floor width so a single deny among
+  // thousands of abstains is still a visible sliver.
+  if (snap.calls > 0) {
+    const bar = document.createElement("div");
+    bar.className = "sb-mix";
+    bar.setAttribute("role", "img");
+    bar.setAttribute("aria-label", "verdict mix: " + verdictRows.map(([v, c]) => c.total + " " + v).join(", "));
+    for (const [v, c] of verdictRows) {
+      const seg = document.createElement("span");
+      seg.dataset.o = outcomeKey(v);
+      if (DECISIONS.includes(v)) seg.classList.add("loud");
+      seg.style.flexGrow = String(c.total);
+      seg.style.minWidth = DECISIONS.includes(v) ? "3px" : "0";
+      seg.title = c.total + " " + v;
+      bar.appendChild(seg);
+    }
+    statsBodyEl.appendChild(bar);
+  }
+
+  statsBodyEl.appendChild(statGrid(["verdict", "calls", "enforced"], verdictRows.map(([v, c]) => ({
+    cells: [v, c.total.toLocaleString("en-US"), c.enforced ? c.enforced.toLocaleString("en-US") : "—"],
     cls: DECISIONS.includes(v) ? "v-" + v : "",
     title: c.enforced + " enforced / " + c.unenforced + " unenforced",
   }))));
 
-  const handlerRows = (snap.handlers || []).slice().sort((a, b) => (b.total_ms / Math.max(b.calls, 1)) - (a.total_ms / Math.max(a.calls, 1)));
-  grids.push(statGrid(["slowest handler", "mean ms", "max ms"], handlerRows.map((h) => ({
-    cells: [h.name, String(Math.round(h.total_ms / Math.max(h.calls, 1))), String(h.max_ms)],
-    title: h.name + " · " + h.calls + " calls",
-  }))));
+  const handlerRows = (snap.handlers || []).map((h) => ({ ...h, mean: h.total_ms / Math.max(h.calls, 1) }))
+    .sort((a, b) => b.mean - a.mean);
+  const maxMean = Math.max(1, ...handlerRows.map((h) => h.mean));
+  const slow = document.createElement("div");
+  slow.className = "sb-slow";
+  const head = document.createElement("div");
+  head.className = "sb-slow-head";
+  for (const [t, cls] of [["slowest handlers", ""], ["mean", "n"], ["max ms", "n"]]) {
+    const h = document.createElement("span");
+    h.className = "h" + (cls ? " " + cls : "");
+    h.textContent = t;
+    head.appendChild(h);
+  }
+  slow.appendChild(head);
+  if (handlerRows.length === 0) {
+    const empty = document.createElement("span");
+    empty.className = "dim sb-empty";
+    empty.textContent = "none yet";
+    slow.appendChild(empty);
+  }
+  for (const h of slowExpanded ? handlerRows : handlerRows.slice(0, SLOW_ROWS)) {
+    const row = document.createElement("div");
+    row.className = "sb-slow-row";
+    row.title = h.name + " · " + h.calls + " calls";
+    const name = document.createElement("span");
+    name.className = "sb-slow-name";
+    const label = document.createElement("span");
+    label.textContent = h.name;
+    const track = document.createElement("span");
+    track.className = "sb-track";
+    const fill = document.createElement("span");
+    fill.className = "sb-fill" + (h.max_ms >= 1000 ? " slow" : "");
+    fill.style.width = Math.max(2, Math.round(Math.sqrt(h.mean / maxMean) * 100)) + "%";
+    track.appendChild(fill);
+    name.append(label, track);
+    const mean = document.createElement("span");
+    mean.className = "n";
+    mean.textContent = String(Math.round(h.mean));
+    const max = document.createElement("span");
+    max.className = "n dim";
+    max.textContent = String(h.max_ms);
+    row.append(name, mean, max);
+    slow.appendChild(row);
+  }
+  if (handlerRows.length > SLOW_ROWS) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "sb-more";
+    more.textContent = slowExpanded ? "show the top " + SLOW_ROWS : "show all " + handlerRows.length;
+    more.addEventListener("click", () => {
+      slowExpanded = !slowExpanded;
+      renderStats(lastStats);
+    });
+    slow.appendChild(more);
+  }
+  statsBodyEl.appendChild(slow);
 
+  const foot = document.createElement("div");
+  foot.className = "sb-foot dim";
   const routerRows = Object.entries(snap.router || {}).sort((a, b) => b[1] - a[1]);
-  grids.push(statGrid(["router status", "calls"], routerRows.map(([status, n]) => ({ cells: [status, String(n)] }))));
-
-  grids.push(statGrid(["truncated", "records"], [{ cells: ["records", String(snap.truncated)] }]));
-
-  statsBodyEl.textContent = "";
-  for (const g of grids) statsBodyEl.appendChild(g);
+  for (const [status, n] of routerRows) {
+    const s = document.createElement("span");
+    s.textContent = "router " + status + " " + n.toLocaleString("en-US");
+    if (status === "ok") s.className = "sb-ok";
+    else s.className = "v-error";
+    foot.appendChild(s);
+  }
+  const tr = document.createElement("span");
+  tr.textContent = "truncated " + snap.truncated;
+  if (snap.truncated > 0) tr.className = "v-timeout";
+  foot.appendChild(tr);
+  statsBodyEl.appendChild(foot);
 
   if (tableCache) renderTable(tableCache, snap);
 }
@@ -701,11 +911,20 @@ function handleDayFrame(data) {
 document.addEventListener("keydown", (ev) => {
   const tag = document.activeElement && document.activeElement.tagName;
   const typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+  if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
   if (ev.key === "/" && !typing) {
     ev.preventDefault();
     sessionInput.focus();
   } else if (ev.key === "Escape") {
-    clearFilters();
+    if (document.body.classList.contains("focus")) setFocus(false);
+    else if (!el("filters").hidden) closeFilterPop();
+    else clearFilters();
+  } else if (ev.key === "Backspace" && (!typing || (ev.target === sessionInput && !sessionInput.value))) {
+    if (!trail.length) return;
+    ev.preventDefault();
+    popFilter();
+  } else if (ev.key === "f" && !typing) {
+    setFocus(!document.body.classList.contains("focus"));
   }
 });
 
@@ -720,15 +939,38 @@ for (const field of FIELDS) {
     const value = select.value;
     select.value = "";
     if (!value) return;
-    if (!filterState[field].includes(value)) filterState[field].push(value);
-    onFiltersChanged();
+    if (!filterState[field].includes(value)) setTrail(trail.concat([[field, value]]));
+    closeFilterPop();
+    onFiltersChanged(true);
   });
 }
 sessionInput.addEventListener("input", debounce(() => {
   filterState.session = sessionInput.value.trim();
-  onFiltersChanged();
+  onFiltersChanged(false);
 }, 150));
 el("clear-filters").addEventListener("click", clearFilters);
+el("trail-root").addEventListener("click", () => backTo(0));
+el("trail-back").addEventListener("click", popFilter);
+el("focus-toggle").addEventListener("click", () => setFocus(!document.body.classList.contains("focus")));
+el("focus-exit").addEventListener("click", () => setFocus(false));
+
+// The add-selects live in a small popover under "+ filter": the drill path
+// is how filters are usually made, so the selects stay out of the way.
+const filterPop = el("filters");
+const filterAddToggle = el("filter-add-toggle");
+function closeFilterPop() {
+  filterPop.hidden = true;
+  filterAddToggle.setAttribute("aria-expanded", "false");
+}
+filterAddToggle.addEventListener("click", () => {
+  const open = filterPop.hidden;
+  filterPop.hidden = !open;
+  filterAddToggle.setAttribute("aria-expanded", String(open));
+  if (open) el("f-engine").focus();
+});
+document.addEventListener("click", (ev) => {
+  if (!filterPop.hidden && !ev.target.closest(".filter-add")) closeFilterPop();
+});
 daySelect.addEventListener("change", () => selectDay(daySelect.value));
 loadOlderBtn.addEventListener("click", loadOlder);
 
