@@ -116,8 +116,8 @@ export class Details {
         for (const i of idx) {
           const h = hops[i];
           if (!h || !isLoud(h.outcome)) continue;
-          // message/advice only cover start/panic failures; a decision's words
-          // live on the call's own reason, and only for the winning outcome.
+          // A run records a message only when it failed to run; a decision's
+          // words go to the call's reason, shared by the runs with its verdict.
           const text = h.message || h.advice || (h.outcome === e.rec.verdict ? e.rec.reason : "") || "";
           runs.push({
             ts: e.rec.ts, engine: e.rec.engine, event: e.rec.canonical_event || e.rec.native_event || "—",

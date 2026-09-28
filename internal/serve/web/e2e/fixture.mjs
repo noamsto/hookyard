@@ -47,9 +47,8 @@ function isoMicro(ms) {
 
 let seq = 0;
 
-// record builds one stream record. hops: [[handler, outcome], ...]. reason
-// mirrors the Go writer's Record.Reason (json:"reason,omitempty"): the key
-// is omitted from the line when reason is not given.
+// record builds one stream record. hops: [[handler, outcome], ...]. Like the
+// Go writer, it omits reason when empty.
 export function record({ ts, engine, event = "", native, hops = [], verdict, router = "ok", tool = "", reason }) {
   seq++;
   return {

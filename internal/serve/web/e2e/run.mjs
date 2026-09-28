@@ -988,14 +988,8 @@ function errMsg(err) {
   return err instanceof CheckFailed ? err.message : (err.stack ?? String(err));
 }
 
-// Pins five behaviours that fail on the real record today (fixes land
-// later): filter chips and the first crumb stay inside #filter-chips at the
-// drilled guards.rm level; a "latest decisions" card shows the call's own
-// reason text; the mobile filters popover stays inside the viewport; the
-// feed header columns line up with the row columns once the feed scrolls;
-// and a past-day, call-free level's details drop the live-only wording.
-// Every sub-check runs from its own fresh navigation so a–e fail
-// independently; failures are collected, not thrown on first hit.
+// Each sub-check (a–e) navigates afresh and failures are collected, so one
+// broken part doesn't hide the others.
 async function check21(page, env) {
   const lines = [];
   const problems = [];
