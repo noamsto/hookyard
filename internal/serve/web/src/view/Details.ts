@@ -116,9 +116,12 @@ export class Details {
         for (const i of idx) {
           const h = hops[i];
           if (!h || !isLoud(h.outcome)) continue;
+          // message/advice only cover start/panic failures; a decision's words
+          // live on the call's own reason, and only for the winning outcome.
+          const text = h.message || h.advice || (h.outcome === e.rec.verdict ? e.rec.reason : "") || "";
           runs.push({
             ts: e.rec.ts, engine: e.rec.engine, event: e.rec.canonical_event || e.rec.native_event || "—",
-            handler: h.name, outcome: h.outcome, text: h.message || h.advice || "",
+            handler: h.name, outcome: h.outcome, text,
           });
         }
       }
@@ -173,6 +176,7 @@ export class Details {
       return;
     }
     const { snap, totals } = frame;
+    const live = syncState()?.live ?? true; // window counts only apply to today; a past day is whole-day
 
     // outcome mix
     const outs: [string, number][] = [];
@@ -184,7 +188,7 @@ export class Details {
     outs.sort((a, b) => bySeverity(a[0], b[0]));
     const sec1 = this.section(p, "outcomes · branches");
     sec1.title = "click one to drill into it";
-    if (outs.length === 0) htmlEl("p", "dt-empty dim", "no traffic on this level in the window", sec1);
+    if (outs.length === 0) htmlEl("p", "dt-empty dim", "no traffic on this level" + (live ? " in the window" : " this day"), sec1);
     const max = Math.max(1, ...outs.map(([, n]) => n));
     for (const [o, n] of outs) {
       const row = htmlEl("button", "dt-out", "", sec1);
@@ -221,7 +225,7 @@ export class Details {
       .slice(0, 8);
     const sec2 = this.section(p, (byEngine ? "engines" : "handlers") + " on this level");
     sec2.title = "click one to drill into it";
-    if (shown.length === 0) htmlEl("p", "dt-empty dim", "none in the window", sec2);
+    if (shown.length === 0) htmlEl("p", "dt-empty dim", live ? "none in the window" : "none this day", sec2);
     for (const r of shown) {
       const row = htmlEl("button", "dt-row", "", sec2);
       row.type = "button";
@@ -240,7 +244,12 @@ export class Details {
     const sec3 = this.section(p, "latest decisions");
     sec3.classList.add("dt-recent");
     if (this.recent === null) htmlEl("p", "dt-empty dim", "loading…", sec3);
-    else if (this.recent.length === 0) htmlEl("p", "dt-empty dim", "only quiet traffic on this level today", sec3);
+    else if (this.recent.length === 0) {
+      const msg = counts.calls === 0
+        ? "no calls on this level"
+        : "only quiet traffic on this level" + (live ? " today" : " this day");
+      htmlEl("p", "dt-empty dim", msg, sec3);
+    }
     for (const r of this.recent ?? []) {
       const card = htmlEl("div", "dt-card", "", sec3);
       const top = htmlEl("div", "dt-card-top", "", card);

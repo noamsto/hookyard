@@ -238,9 +238,10 @@ function renderChips() {
     const label = document.createElement("button");
     label.type = "button";
     label.className = "crumb-go";
-    label.textContent = FIELD_LABELS[field] + ": " + value;
+    const fullLabel = FIELD_LABELS[field] + ": " + value;
+    label.textContent = fullLabel;
     if (last) label.setAttribute("aria-current", "step");
-    label.title = last ? "the current level" : "back to this level";
+    label.title = last ? fullLabel + " — the current level" : fullLabel + " — back to this level";
     label.addEventListener("click", () => backTo(i + 1));
     const remove = document.createElement("button");
     remove.type = "button";

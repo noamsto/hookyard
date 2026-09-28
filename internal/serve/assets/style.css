@@ -255,9 +255,10 @@ body.filtered .trail { border-color: color-mix(in oklab, var(--accent) 45%, var(
 .crumb-root { color: var(--fg-dim); }
 .crumb-root.current { color: var(--fg); background: var(--border) !important; }
 
-/* Crumbs keep their full labels; when the path outgrows the bar, the
-   oldest steps slide out of view on the left (← and "all calls" still
-   reach them). */
+/* Crumbs shrink (ellipsis) to fit the bar, older ones giving way first and
+   further than the current step. Once even that isn't enough, the
+   .overflowing mask fades the oldest steps off the left edge (← and "all
+   calls" still reach them). */
 .filter-chips {
   display: flex;
   align-items: center;
@@ -284,7 +285,8 @@ body.filtered .trail { border-color: color-mix(in oklab, var(--accent) 45%, var(
   gap: 0;
   border-radius: 4px;
   white-space: nowrap;
-  flex-shrink: 0;
+  flex-shrink: 3;
+  min-width: 44px;
 }
 .fchip .crumb-go {
   color: var(--fg-dim);
@@ -292,7 +294,7 @@ body.filtered .trail { border-color: color-mix(in oklab, var(--accent) 45%, var(
   text-overflow: ellipsis;
   min-width: 0;
 }
-.fchip.current { background: var(--border); }
+.fchip.current { background: var(--border); flex-shrink: 1; }
 .fchip.current .crumb-go { color: var(--fg); }
 .fchip[data-o="deny"] .crumb-go { color: var(--c-deny); }
 .fchip[data-o="ask"] .crumb-go { color: var(--c-ask); }
@@ -393,6 +395,9 @@ body[data-view="flow"].details-open .body { grid-template-columns: minmax(0, 1fr
   .body, body[data-view="flow"].details-open .body { grid-template-columns: minmax(0, 1fr); }
   .topbar { flex-wrap: wrap; }
   .trail { order: 10; flex-basis: 100%; }
+  /* the trail wraps below, so + filter sits near the left edge: anchor
+     the popover there instead of off the right side of the viewport. */
+  .filter-pop { left: 0; right: auto; }
 }
 
 .panel {
@@ -462,6 +467,9 @@ body[data-view="flow"].details-open .body { grid-template-columns: minmax(0, 1fr
   letter-spacing: .05em;
   text-transform: uppercase;
   flex-shrink: 0;
+  /* reserve the same gutter .feed's scrollbar takes, so columns don't drift */
+  scrollbar-gutter: stable;
+  overflow: hidden;
 }
 .feed-cols > span { overflow: hidden; white-space: nowrap; }
 
@@ -472,6 +480,7 @@ body[data-view="flow"].details-open .body { grid-template-columns: minmax(0, 1fr
   flex: 1 1 auto;
   min-height: 120px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .feed-footer {
