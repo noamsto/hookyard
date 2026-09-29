@@ -25,7 +25,7 @@ var scaledBudget = Budget{Deadline: 2 * time.Second, Handler: time.Second}
 func writeHandler(t *testing.T, dir, id, body string) manifest.Handler {
 	t.Helper()
 	path := filepath.Join(dir, id)
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatalf("write handler %s: %v", id, err)
 	}
 	return manifest.Handler{ID: id, Exec: path}
@@ -320,7 +320,7 @@ func pollSentinel(t *testing.T, path string, want []byte, timeout time.Duration)
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if b, err := os.ReadFile(path); err == nil && len(b) >= len(want) {
+		if b, err := os.ReadFile(path); err == nil && len(b) >= len(want) { //nolint:gosec // test reads a path under t.TempDir
 			return b
 		}
 		time.Sleep(5 * time.Millisecond)

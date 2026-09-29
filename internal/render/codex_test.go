@@ -46,7 +46,7 @@ func writeCodexFixture(t *testing.T, content string) string {
 
 func readFile(t *testing.T, path string) string {
 	t.Helper()
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // test reads a path under t.TempDir
 	if err != nil {
 		t.Fatal(err)
 	}

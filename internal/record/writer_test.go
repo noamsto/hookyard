@@ -16,7 +16,7 @@ func testEvent() Event {
 
 func lineCount(t *testing.T, path string) int {
 	t.Helper()
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // test reads a path under t.TempDir
 	if err != nil {
 		t.Fatalf("open %s: %v", path, err)
 	}

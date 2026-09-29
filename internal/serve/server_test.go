@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -56,6 +57,7 @@ func runTestServer(t *testing.T, ctx context.Context, opts Options) string {
 	}
 
 	srv := &http.Server{
+		ReadHeaderTimeout: 10 * time.Second,
 		Handler: middleware(&serveMux{
 			stateDir: absDir,
 			hub:      hub,
@@ -75,7 +77,7 @@ func runTestServer(t *testing.T, ctx context.Context, opts Options) string {
 	t.Cleanup(func() {
 		select {
 		case err := <-hubErr:
-			if err != nil && err != context.Canceled {
+			if err != nil && !errors.Is(err, context.Canceled) {
 				t.Errorf("hub run: %v", err)
 			}
 		case <-time.After(5 * time.Second):
@@ -133,8 +135,7 @@ func TestListenAddressIsLoopback(t *testing.T) {
 
 func TestHostGuard(t *testing.T) {
 	stateDir := t.TempDir()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	base := runTestServer(t, ctx, serveOpts(t, stateDir))
 
@@ -167,8 +168,7 @@ func TestHostGuard(t *testing.T) {
 
 func TestMethodNotAllowed(t *testing.T) {
 	stateDir := t.TempDir()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	base := runTestServer(t, ctx, serveOpts(t, stateDir))
 
@@ -203,8 +203,7 @@ func TestEventsHonorsLimitAndFilter(t *testing.T) {
 	}
 	writeDayFile(t, stateDir, day, lines)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	base := runTestServer(t, ctx, serveOpts(t, stateDir))
 
@@ -255,8 +254,7 @@ func TestFlowEndpointDefaultsDayAndFilters(t *testing.T) {
 	opts := serveOpts(t, stateDir)
 	opts.Now = func() time.Time { return now }
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	base := runTestServer(t, ctx, opts)
 
 	resp := get(t, base+"/api/flow")
@@ -312,8 +310,7 @@ func TestFlowEndpointOutcomeFilter(t *testing.T) {
 	opts := serveOpts(t, stateDir)
 	opts.Now = func() time.Time { return now }
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	base := runTestServer(t, ctx, opts)
 
 	resp := get(t, base+"/api/flow?outcome=deny&day="+day)
@@ -355,8 +352,7 @@ func TestEventsEndpointOutcomeFilterCarriesHits(t *testing.T) {
 	}
 	writeDayFile(t, stateDir, day, lines)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	base := runTestServer(t, ctx, serveOpts(t, stateDir))
 
 	resp := get(t, fmt.Sprintf("%s/api/events?day=%s&outcome=deny", base, day))
@@ -391,8 +387,7 @@ func TestFlowEndpointIgnoresWindowForPastDay(t *testing.T) {
 	opts := serveOpts(t, stateDir)
 	opts.Now = func() time.Time { return now }
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	base := runTestServer(t, ctx, opts)
 
 	resp := get(t, base+"/api/flow?day="+pastDay+"&window=10")
@@ -430,8 +425,7 @@ func TestEventsBeforeParamPagesOlderRecords(t *testing.T) {
 	}
 	writeDayFile(t, stateDir, day, lines)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	base := runTestServer(t, ctx, serveOpts(t, stateDir))
 
@@ -474,8 +468,7 @@ func TestDaysEndpoint(t *testing.T) {
 	writeDayFile(t, stateDir, "2026-09-10", []string{recLine(t, record.Record{SessionID: "x"})})
 	writeDayFile(t, stateDir, "2026-09-09", []string{recLine(t, record.Record{SessionID: "y"})})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	base := runTestServer(t, ctx, serveOpts(t, stateDir))
 
@@ -507,8 +500,7 @@ func TestDaysEndpoint(t *testing.T) {
 func TestEndpointsSerializeListsAsArraysOnEmptyStateDir(t *testing.T) {
 	stateDir := t.TempDir()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	base := runTestServer(t, ctx, serveOpts(t, stateDir))
 
@@ -567,8 +559,7 @@ func TestTableEndpoint(t *testing.T) {
 		Engines: []string{"codex"},
 	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	base := runTestServer(t, ctx, serveOpts(t, stateDir))
 
@@ -625,8 +616,7 @@ func TestStatsOlderDay(t *testing.T) {
 		recLine(t, record.Record{Engine: "codex", SessionID: "s2", Verdict: "deny"}),
 	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	base := runTestServer(t, ctx, serveOpts(t, stateDir))
 
@@ -653,8 +643,7 @@ func TestStatsOlderDay(t *testing.T) {
 
 func TestNoAccessControlAllowOrigin(t *testing.T) {
 	stateDir := t.TempDir()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	base := runTestServer(t, ctx, serveOpts(t, stateDir))
 
@@ -710,8 +699,7 @@ func TestFlowBundleEmbedded(t *testing.T) {
 	}
 
 	stateDir := t.TempDir()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	base := runTestServer(t, ctx, serveOpts(t, stateDir))
 
 	resp := get(t, base+"/static/flow/flow.js")
@@ -727,8 +715,7 @@ func TestFlowBundleEmbedded(t *testing.T) {
 func TestEndToEndStreamArrives(t *testing.T) {
 	stateDir := t.TempDir()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	base := runTestServer(t, ctx, serveOpts(t, stateDir))
 

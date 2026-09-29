@@ -205,7 +205,7 @@ func TestPiDanglingExtensionReportsAnUnreadableEntryAsUnknown(t *testing.T) {
 		t.Fatal(err)
 	}
 	// t.TempDir's own cleanup cannot descend into a mode-0 directory.
-	t.Cleanup(func() { _ = os.Chmod(sealed, 0o700) })
+	t.Cleanup(func() { _ = os.Chmod(sealed, 0o700) }) //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 
 	settings := filepath.Join(dir, "settings.json")
 	raw, err := json.Marshal(map[string]any{"extensions": []string{extension}})
@@ -293,7 +293,7 @@ func findAllByCheck(t *testing.T, findings []Finding, check string) []Finding {
 func writeLauncherScript(t *testing.T, dir, body string) string {
 	t.Helper()
 	path := filepath.Join(dir, "pi-real")
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	return path
@@ -366,7 +366,7 @@ func TestPiLauncherFindingsSkipsACompiledBinary(t *testing.T) {
 	// fails if the binary check is skipped.
 	body := "\x00\x01\x02export PI_AGENT_HOOKS=/opt/example/guard.js"
 	target := filepath.Join(dir, "pi-real")
-	if err := os.WriteFile(target, []byte(body), 0o755); err != nil {
+	if err := os.WriteFile(target, []byte(body), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	withPiOnPath(t, target)
@@ -496,15 +496,15 @@ func pluginHandler(id, exec string) manifest.Handler {
 func piBuildPackageFixture(t *testing.T, root string, handlers []manifest.Handler) string {
 	t.Helper()
 	extensionsDir := filepath.Join(root, "extensions")
-	if err := os.MkdirAll(extensionsDir, 0o755); err != nil {
+	if err := os.MkdirAll(extensionsDir, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	extension := filepath.Join(extensionsDir, "hookyard.ts")
-	if err := os.WriteFile(extension, []byte("export default {};\n"), 0o644); err != nil {
+	if err := os.WriteFile(extension, []byte("export default {};\n"), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	tableDir := filepath.Join(root, "hookyard")
-	if err := os.MkdirAll(tableDir, 0o755); err != nil {
+	if err := os.MkdirAll(tableDir, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	if err := manifest.WritePluginTable(filepath.Join(tableDir, "table.json"), handlers); err != nil {
@@ -515,7 +515,7 @@ func piBuildPackageFixture(t *testing.T, root string, handlers []manifest.Handle
 
 func writePiSettingsExtensions(t *testing.T, path string, extensions []string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	raw, err := json.Marshal(map[string]any{"extensions": extensions})
@@ -605,18 +605,18 @@ func TestPiDoubleFireUnknownWhenPackageTableUnreadable(t *testing.T) {
 
 	pkgRoot := filepath.Join(dir, "pkg")
 	extensionsDir := filepath.Join(pkgRoot, "extensions")
-	if err := os.MkdirAll(extensionsDir, 0o755); err != nil {
+	if err := os.MkdirAll(extensionsDir, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	extension := filepath.Join(extensionsDir, "hookyard.ts")
-	if err := os.WriteFile(extension, []byte("export default {};\n"), 0o644); err != nil {
+	if err := os.WriteFile(extension, []byte("export default {};\n"), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	tableDir := filepath.Join(pkgRoot, "hookyard")
-	if err := os.MkdirAll(tableDir, 0o755); err != nil {
+	if err := os.MkdirAll(tableDir, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(tableDir, "table.json"), []byte("not valid json"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(tableDir, "table.json"), []byte("not valid json"), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 
@@ -639,11 +639,11 @@ func TestPiDoubleFireIgnoresANonHookyardExtensionsEntry(t *testing.T) {
 	writeTable(t, stateDir, []manifest.Handler{aeyeScript("guard/one", "/nix/store/x/guard.sh")})
 
 	otherDir := filepath.Join(dir, "other-extension", "extensions")
-	if err := os.MkdirAll(otherDir, 0o755); err != nil {
+	if err := os.MkdirAll(otherDir, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	other := filepath.Join(otherDir, "unrelated.ts")
-	if err := os.WriteFile(other, []byte("export default {};\n"), 0o644); err != nil {
+	if err := os.WriteFile(other, []byte("export default {};\n"), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 
@@ -774,10 +774,10 @@ func TestPiBridgeDriftUnknownWhenDataCannotBeParsed(t *testing.T) {
 	writeTable(t, stateDir, []manifest.Handler{piHandler("guard/one", "post_tool", "/nix/store/x/guard.sh")})
 
 	bridge := filepath.Join(dir, "pi", "bin", "hookyard-bridge.ts")
-	if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(bridge, []byte("const DATA = {not valid json};\n"), 0o644); err != nil {
+	if err := os.WriteFile(bridge, []byte("const DATA = {not valid json};\n"), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 
@@ -796,11 +796,11 @@ func TestPiBridgeDriftUnknownWhenDataCannotBeParsed(t *testing.T) {
 func TestPiBridgeExecFailsOnAWhitespaceSplitInvocation(t *testing.T) {
 	root := t.TempDir()
 	binDir := filepath.Join(root, "my dir", "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
+	if err := os.MkdirAll(binDir, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	router := filepath.Join(binDir, "hookyard")
-	if err := os.WriteFile(router, []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(router, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	piDir := filepath.Join(root, "pi")
@@ -850,10 +850,10 @@ func TestPiBridgeExecUnknownWhenTheBridgeCannotBeRead(t *testing.T) {
 	}
 
 	bridge := filepath.Join(dir, "pi", "bin", "hookyard-bridge.ts")
-	if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(bridge, []byte("const DATA = {not valid json};\n"), 0o644); err != nil {
+	if err := os.WriteFile(bridge, []byte("const DATA = {not valid json};\n"), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	if f := piBridgeExec(bridge); f.Status != Unknown {
@@ -870,10 +870,10 @@ func TestPiBridgeExecIgnoresABuildModePackagesRelativeBin(t *testing.T) {
 		t.Fatal(err)
 	}
 	bridge := filepath.Join(t.TempDir(), "extensions", "hookyard.ts")
-	if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(bridge, source, 0o644); err != nil {
+	if err := os.WriteFile(bridge, source, 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 

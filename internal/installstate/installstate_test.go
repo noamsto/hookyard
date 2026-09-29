@@ -79,7 +79,7 @@ func TestReadReceiptMalformedJSONIsNotErrNotExist(t *testing.T) {
 func TestReadWitnessMalformedJSONIsNotErrNotExist(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "witness.json")
-	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	_, err := ReadWitness(path)

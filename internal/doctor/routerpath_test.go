@@ -18,7 +18,7 @@ import (
 func writeRouterBinary(t *testing.T, root string, executable bool) string {
 	t.Helper()
 	binDir := filepath.Join(root, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
+	if err := os.MkdirAll(binDir, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	path := filepath.Join(binDir, "hookyard")
@@ -98,7 +98,7 @@ func TestRouterPathFailWhenNotExecutable(t *testing.T) {
 func TestRouterPathFailWhenDangling(t *testing.T) {
 	root := t.TempDir()
 	binDir := filepath.Join(root, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
+	if err := os.MkdirAll(binDir, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	router := filepath.Join(binDir, "hookyard")
@@ -119,11 +119,11 @@ func TestRouterPathFailWhenDangling(t *testing.T) {
 func TestRouterPathFailWhenADirectory(t *testing.T) {
 	root := t.TempDir()
 	binDir := filepath.Join(root, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
+	if err := os.MkdirAll(binDir, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	router := filepath.Join(binDir, "hookyard")
-	if err := os.MkdirAll(router, 0o755); err != nil {
+	if err := os.MkdirAll(router, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	config := claudeConfig(t, root, routedCommand(router, vocab.ClaudeCode, filepath.Join(root, "state")))
@@ -156,7 +156,7 @@ func TestRouterPathUnknownWhenConfigUnreadable(t *testing.T) {
 	// deterministically, regardless of the process's privilege level —
 	// unlike chmod 0000, which root ignores.
 	config := filepath.Join(root, "settings.json")
-	if err := os.Mkdir(config, 0o755); err != nil {
+	if err := os.Mkdir(config, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 

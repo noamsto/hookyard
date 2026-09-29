@@ -787,7 +787,7 @@ func capturedResponses(t *testing.T, marker string) [][]byte {
 		t.Fatal(err)
 	}
 	var found [][]byte
-	for _, line := range strings.Split(string(raw), "\n") {
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		if !strings.Contains(line, marker) {
 			continue
 		}

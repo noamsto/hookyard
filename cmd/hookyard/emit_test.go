@@ -50,7 +50,7 @@ func TestRenderClaudeOverlayKeepsForeignFieldsAndStripsStaleRows(t *testing.T) {
   }
 }`
 	basePath := filepath.Join(dir, "base.json")
-	if err := os.WriteFile(basePath, []byte(base), 0o644); err != nil {
+	if err := os.WriteFile(basePath, []byte(base), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 

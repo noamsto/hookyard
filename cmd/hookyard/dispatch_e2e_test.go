@@ -50,7 +50,7 @@ func dispatchHandler(t *testing.T, dir, sidPath, sentinelPath string) manifest.H
 		"ps -o sid= -p $$ > \"" + sidPath + "\"\n" +
 		"sleep " + strconv.Itoa(int(dispatchSleep/time.Second)) + "\n" +
 		"cat > \"" + sentinelPath + "\"\n"
-	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatalf("write handler: %v", err)
 	}
 	return manifest.Handler{
@@ -70,7 +70,7 @@ func dispatchWaitForContent(t *testing.T, path string, within time.Duration) []b
 	t.Helper()
 	deadline := time.Now().Add(within)
 	for {
-		if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
+		if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 { //nolint:gosec // test reads a path under t.TempDir
 			return raw
 		}
 		if time.Now().After(deadline) {
@@ -125,7 +125,7 @@ func dispatchEchoHandler(t *testing.T, dir, sentinelPath string) manifest.Handle
 	const id = "large-payload-probe"
 	path := filepath.Join(dir, id)
 	body := "#!/bin/sh\ncat > \"" + sentinelPath + "\"\n"
-	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatalf("write handler: %v", err)
 	}
 	return manifest.Handler{
@@ -143,11 +143,11 @@ func dispatchEchoHandler(t *testing.T, dir, sentinelPath string) manifest.Handle
 // caller can check it round-trips rather than just counting bytes.
 func dispatchEnlargeFixture(t *testing.T, fixture string) (enlarged []byte, padding string) {
 	t.Helper()
-	var native map[string]json.RawMessage
+	native := map[string]json.RawMessage{}
 	if err := json.Unmarshal([]byte(fixture), &native); err != nil {
 		t.Fatalf("decode fixture: %v", err)
 	}
-	var toolInput map[string]json.RawMessage
+	toolInput := map[string]json.RawMessage{}
 	if err := json.Unmarshal(native["tool_input"], &toolInput); err != nil {
 		t.Fatalf("decode tool_input: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestDispatchedHandlerReceivesPayloadPastThePipeBuffer(t *testing.T) {
 
 	enlarged, padding := dispatchEnlargeFixture(t, readFixture(t, "claude-PostToolUse.json"))
 
-	cmd := exec.Command(bin, dispatchArgs("claude-code", stateDir)...)
+	cmd := exec.Command(bin, dispatchArgs("claude-code", stateDir)...) //nolint:gosec // test runs a binary or script it built itself
 	cmd.Stdin = bytes.NewReader(enlarged)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -239,7 +239,7 @@ func TestDispatchedHandlerReceivesPayloadPastThePipeBuffer(t *testing.T) {
 // keyword with no BSD equivalent.
 func dispatchSessionID(t *testing.T, pid int) string {
 	t.Helper()
-	out, err := exec.Command("ps", "-o", "sid=", "-p", strconv.Itoa(pid)).Output()
+	out, err := exec.Command("ps", "-o", "sid=", "-p", strconv.Itoa(pid)).Output() //nolint:gosec // test runs a binary or script it built itself
 	if err != nil {
 		t.Fatalf("ps -o sid= -p %d: %v", pid, err)
 	}
@@ -264,7 +264,7 @@ func TestDispatchedHandlerSurvivesTheRouterProcessGroup(t *testing.T) {
 	// exec.CommandContext and gives no way to ask for a process group, and the
 	// group is the whole experiment. Setpgid, not Setsid — the router must be
 	// killable as a group or the kill below proves nothing.
-	cmd := exec.Command(bin, dispatchArgs("claude-code", stateDir)...)
+	cmd := exec.Command(bin, dispatchArgs("claude-code", stateDir)...) //nolint:gosec // test runs a binary or script it built itself
 	cmd.Stdin = strings.NewReader(fixture)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -353,7 +353,7 @@ func TestDispatchedHandlerSurvivesTheRouterProcessGroup(t *testing.T) {
 		if runtime.GOOS != "linux" {
 			t.Skip("ps -o sid= is a procps keyword with no BSD equivalent")
 		}
-		raw, err := os.ReadFile(sidPath)
+		raw, err := os.ReadFile(sidPath) //nolint:gosec // test reads a path under t.TempDir
 		if err != nil {
 			t.Fatalf("read handler session id: %v", err)
 		}

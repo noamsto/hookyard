@@ -27,7 +27,7 @@ func TestPiBridgeTemplateMentionsEveryFixturePayloadKey(t *testing.T) {
 	}
 
 	for _, path := range matches {
-		raw, err := os.ReadFile(path)
+		raw, err := os.ReadFile(path) //nolint:gosec // test reads a path under t.TempDir
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -316,7 +316,7 @@ func TestWritePiOnAnEmptyPlanStillStripsAStaleMarkerEvenWithNoNewEntries(t *test
 func TestWritePiOnAnEmptyPlanRemovesAnOrphanedBridgeEvenWithNoMarkerToStrip(t *testing.T) {
 	path := piSettings(t, `{"model":"kimi-k2"}`)
 	bridge := PiBridgePath(path)
-	if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(bridge, []byte("// orphaned by a crashed install\n"), 0o600); err != nil {
@@ -471,9 +471,9 @@ func TestPiPluginBridgeRendersARelativeRootAndNoInstallPath(t *testing.T) {
 func spliced(t *testing.T, source string) string {
 	t.Helper()
 	const prefix = "const DATA = "
-	for _, line := range strings.Split(source, "\n") {
-		if strings.HasPrefix(line, prefix) {
-			return strings.TrimSuffix(strings.TrimPrefix(line, prefix), ";")
+	for line := range strings.SplitSeq(source, "\n") {
+		if after, ok := strings.CutPrefix(line, prefix); ok {
+			return strings.TrimSuffix(after, ";")
 		}
 	}
 	t.Fatalf("no %q line in the written bridge:\n%s", prefix, source)
@@ -548,9 +548,10 @@ func TestWritePiBridgeMode(t *testing.T) {
 	t.Run("preserves an existing bridge's mode", func(t *testing.T) {
 		path := piSettings(t, "{}")
 		bridge := PiBridgePath(path)
-		if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 			t.Fatal(err)
 		}
+		//nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		if err := os.WriteFile(bridge, []byte("// stale\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}

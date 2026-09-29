@@ -399,7 +399,7 @@ func withClaudeOnPath(t *testing.T, target string) {
 func writeClaudeLauncher(t *testing.T, dir, body string) string {
 	t.Helper()
 	path := filepath.Join(dir, "claude-real")
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	return path

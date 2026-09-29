@@ -101,7 +101,7 @@ func PiBridgePath(settingsPath string) string {
 // plan with no marker rows to strip has nothing to add and nothing to remove,
 // so it takes no rename at all and leaves the file exactly as Pi last wrote it.
 func WritePi(settingsPath string, entries []Entry, piVersion string) error {
-	raw, err := os.ReadFile(settingsPath)
+	raw, err := os.ReadFile(settingsPath) //nolint:gosec // path is operator config or derived from the state dir, never request input
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}

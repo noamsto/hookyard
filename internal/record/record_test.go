@@ -312,6 +312,9 @@ func TestHandlerMessageRoundTrip(t *testing.T) {
 		t.Fatalf("unmarshal handlers: %v", err)
 	}
 
+	if len(handlers) != 2 {
+		t.Fatalf("handlers = %d, want 2", len(handlers))
+	}
 	var msg string
 	if err := json.Unmarshal(handlers[0]["message"], &msg); err != nil {
 		t.Fatalf("unmarshal message: %v", err)
@@ -351,6 +354,9 @@ func TestNonAdviseHandlerNoDeliveredKey(t *testing.T) {
 	var handlers []map[string]json.RawMessage
 	if err := json.Unmarshal(decoded["handlers"], &handlers); err != nil {
 		t.Fatalf("unmarshal handlers: %v", err)
+	}
+	if len(handlers) != 2 {
+		t.Fatalf("handlers = %d, want 2", len(handlers))
 	}
 	if _, ok := handlers[0]["delivered"]; ok {
 		t.Errorf("non-advise handler has delivered key, want omitted")

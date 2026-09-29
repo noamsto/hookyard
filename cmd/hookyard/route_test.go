@@ -65,7 +65,7 @@ func runPipeline(t *testing.T, opts routeOptions, stdin string) string {
 func handlerScript(t *testing.T, dir, id, body string) manifest.Handler {
 	t.Helper()
 	path := filepath.Join(dir, id)
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatalf("write handler %s: %v", id, err)
 	}
 	return manifest.Handler{
@@ -435,7 +435,7 @@ func codexAdvisoryPayload(t *testing.T, event string) string {
 	if err != nil {
 		t.Fatalf("read codex advisory hook log: %v", err)
 	}
-	for _, line := range strings.Split(string(raw), "\n") {
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		if strings.Contains(line, `"hook_event_name":"`+event+`"`) {
 			return line
 		}
@@ -1116,7 +1116,7 @@ func TestRunRouteBuildModeEscapingSymlinkExecErrors(t *testing.T) {
 		t.Fatalf("create state dir: %v", err)
 	}
 	outside := filepath.Join(t.TempDir(), "outside.sh")
-	if err := os.WriteFile(outside, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+	if err := os.WriteFile(outside, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatalf("write outside script: %v", err)
 	}
 	escaping := filepath.Join(handlersDir, "escaping")

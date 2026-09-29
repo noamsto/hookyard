@@ -50,7 +50,7 @@ func cursorRowCommand(row json.RawMessage) (string, error) {
 // another between versions, and a key-scoped strip would leave the old entry
 // behind under the old key, firing forever and owned by nobody.
 func WriteCursor(path string, entries []Entry) error {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // path is operator config or derived from the state dir, never request input
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}

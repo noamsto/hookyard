@@ -15,11 +15,11 @@ func writeManifest(t *testing.T, body string) string {
 	t.Helper()
 	dir := t.TempDir()
 	exec := filepath.Join(dir, "guard.sh")
-	if err := os.WriteFile(exec, []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(exec, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "hookyard.json")
-	if err := os.WriteFile(path, []byte(strings.ReplaceAll(body, "EXEC", exec)), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(strings.ReplaceAll(body, "EXEC", exec)), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	return path
@@ -408,7 +408,7 @@ func TestLoadAcceptsPiSessionShutdownAndRejectsBeforeAgentStart(t *testing.T) {
 func TestWriteTableThenReadTableRoundTrips(t *testing.T) {
 	dir := t.TempDir()
 	exec := filepath.Join(dir, "guard.sh")
-	if err := os.WriteFile(exec, []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(exec, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "table.json")
@@ -438,7 +438,7 @@ func TestReadTableRejectsEngineNativeMatcherInMatchField(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "table.json")
 	body := `{"handlers":[{"id":"a","exec":"/nonexistent","events":["pre_tool"],"engines":["cursor"],"match":["Shell"]}]}`
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 
@@ -459,7 +459,7 @@ func TestReadTableRejectsNonAbsoluteExec(t *testing.T) {
 		t.Run(exec, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "table.json")
 			body := `{"handlers":[{"id":"a","exec":"` + exec + `","events":["pre_tool"],"engines":["cursor"]}]}`
-			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 				t.Fatal(err)
 			}
 
@@ -479,7 +479,7 @@ func TestReadTableRejectsNonAbsoluteExec(t *testing.T) {
 func TestReadTableAcceptsAbsoluteExec(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "table.json")
 	body := `{"handlers":[{"id":"a","exec":"/opt/hookyard/guard.sh","events":["pre_tool"],"engines":["cursor"]}]}`
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 
@@ -495,7 +495,7 @@ func TestReadTableAcceptsAbsoluteExec(t *testing.T) {
 func TestReadTableAcceptsZeroHandlers(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "table.json")
-	if err := os.WriteFile(path, []byte(`{"handlers":[]}`), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(`{"handlers":[]}`), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 
@@ -515,7 +515,7 @@ func TestReadTableAcceptsClaudeCodeEventOutsideCatalog(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "table.json")
 	body := `{"handlers":[{"id":"a","exec":"/nonexistent/guard","events":["claude-code:Notifcation"],"engines":["claude-code"]}]}`
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 
@@ -534,7 +534,7 @@ func TestReadTableAcceptsNonExistentExecButLoadRejectsIt(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "table.json")
 	body := `{"handlers":[{"id":"a","exec":"/nonexistent/guard","events":["pre_tool"],"engines":["cursor"]}]}`
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 
@@ -554,7 +554,7 @@ func TestReadTableAcceptsNonExistentExecButLoadRejectsIt(t *testing.T) {
 func TestWriteTableLandsFixed0600EvenOverALooserExistingFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "table.json")
-	if err := os.WriteFile(path, []byte(`{"handlers":[]}`), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(`{"handlers":[]}`), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 
@@ -629,7 +629,7 @@ func TestYardReadersRejectNonEmptyCommands(t *testing.T) {
 func writeFile(t *testing.T, dir, name, body string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	return path
@@ -826,7 +826,7 @@ func TestReadPluginTableRejectsAbsoluteExec(t *testing.T) {
 
 func TestResolvePluginExec(t *testing.T) {
 	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, "handlers"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(root, "handlers"), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	guard := writeFile(t, filepath.Join(root, "handlers"), "guard.sh", "#!/bin/sh\n")
@@ -881,11 +881,11 @@ func TestResolvePluginExec(t *testing.T) {
 
 func TestCheckPluginExecs(t *testing.T) {
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "guard.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "guard.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	writeFile(t, root, "plain.sh", "#!/bin/sh\n")
-	if err := os.Mkdir(filepath.Join(root, "dir"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(root, "dir"), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 
@@ -902,11 +902,11 @@ func TestCheckPluginExecs(t *testing.T) {
 
 func TestCheckCommandExecs(t *testing.T) {
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "guard.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "guard.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	writeFile(t, root, "plain.sh", "#!/bin/sh\n")
-	if err := os.Mkdir(filepath.Join(root, "dir"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(root, "dir"), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	outside := writeFile(t, t.TempDir(), "evil.sh", "#!/bin/sh\n")
@@ -946,10 +946,10 @@ func TestLoadBuildTimeAcceptsExecUnderAPresentStoreRoot(t *testing.T) {
 	store := t.TempDir()
 	t.Setenv("NIX_STORE", store)
 	exec := filepath.Join(store, "abc-jq", "bin", "jq")
-	if err := os.MkdirAll(filepath.Dir(exec), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(exec), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(exec, []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(exec, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 
@@ -962,7 +962,7 @@ func TestLoadBuildTimeRejectsMissingExecUnderAPresentStoreRoot(t *testing.T) {
 	store := t.TempDir()
 	t.Setenv("NIX_STORE", store)
 	root := filepath.Join(store, "abc-jq")
-	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	exec := filepath.Join(root, "bin", "jq") // never created
@@ -980,10 +980,10 @@ func TestLoadBuildTimeRejectsNonExecutableModeUnderAPresentStoreRoot(t *testing.
 	store := t.TempDir()
 	t.Setenv("NIX_STORE", store)
 	exec := filepath.Join(store, "abc-jq", "bin", "jq")
-	if err := os.MkdirAll(filepath.Dir(exec), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(exec), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(exec, []byte("#!/bin/sh\n"), 0o644); err != nil {
+	if err := os.WriteFile(exec, []byte("#!/bin/sh\n"), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 
@@ -1000,7 +1000,7 @@ func TestLoadBuildTimeRejectsExecThatIsADirectoryUnderAPresentStoreRoot(t *testi
 	store := t.TempDir()
 	t.Setenv("NIX_STORE", store)
 	exec := filepath.Join(store, "abc-jq", "bin", "jq")
-	if err := os.MkdirAll(exec, 0o755); err != nil {
+	if err := os.MkdirAll(exec, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 
@@ -1053,7 +1053,7 @@ func TestLoadBuildTimeStillRejectsANonExecIssue(t *testing.T) {
 func TestLoadBuildTimeTreatsALookalikeSiblingDirAsNotUnderTheStore(t *testing.T) {
 	parent := t.TempDir()
 	store := filepath.Join(parent, "store")
-	if err := os.Mkdir(store, 0o755); err != nil {
+	if err := os.Mkdir(store, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 	t.Setenv("NIX_STORE", store)

@@ -27,10 +27,10 @@ const manifestBody = `{"handlers":[
 
 func writeFile(t *testing.T, path string, content []byte, mode os.FileMode) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, content, mode); err != nil {
+	if err := os.WriteFile(path, content, mode); err != nil { //nolint:gosec // test-controlled path
 		t.Fatal(err)
 	}
 }
@@ -74,7 +74,7 @@ func TestBuildGolden(t *testing.T) {
 		"bin/hookyard":               filepath.Join(root, "bin", "hookyard"),
 	}
 	for rel, path := range generated {
-		got, err := os.ReadFile(path)
+		got, err := os.ReadFile(path) //nolint:gosec // test reads a path under t.TempDir
 		if err != nil {
 			t.Fatalf("%s: %v", rel, err)
 		}
@@ -83,7 +83,7 @@ func TestBuildGolden(t *testing.T) {
 			writeFile(t, golden, got, 0o644)
 			continue
 		}
-		want, err := os.ReadFile(golden)
+		want, err := os.ReadFile(golden) //nolint:gosec // test reads a path under t.TempDir
 		if err != nil {
 			t.Fatalf("%s: reading golden: %v", rel, err)
 		}
@@ -110,7 +110,7 @@ func TestBuildGolden(t *testing.T) {
 	}
 
 	binPath := filepath.Join(root, "bin", fmt.Sprintf("hookyard-%s-%s", runtime.GOOS, runtime.GOARCH))
-	gotBinary, err := os.ReadFile(binPath)
+	gotBinary, err := os.ReadFile(binPath) //nolint:gosec // test reads a path under t.TempDir
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestBuildKeepsAnExistingPluginJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := os.ReadFile(pluginJSONPath)
+	got, err := os.ReadFile(pluginJSONPath) //nolint:gosec // test reads a path under t.TempDir
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestBuildMergesHooksJSONAndIsIdempotent(t *testing.T) {
 	if err := Build(vocab.ClaudeCode, opts); err != nil {
 		t.Fatal(err)
 	}
-	first, err := os.ReadFile(hooksPath)
+	first, err := os.ReadFile(hooksPath) //nolint:gosec // test reads a path under t.TempDir
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestBuildMergesHooksJSONAndIsIdempotent(t *testing.T) {
 	if err := Build(vocab.ClaudeCode, opts); err != nil {
 		t.Fatal(err)
 	}
-	second, err := os.ReadFile(hooksPath)
+	second, err := os.ReadFile(hooksPath) //nolint:gosec // test reads a path under t.TempDir
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestBuildErrors(t *testing.T) {
 	t.Run("hooks.json is a symlink", func(t *testing.T) {
 		root, manifestPath, binaryPath := setupPlugin(t)
 		hooksPath := filepath.Join(root, "hooks", "hooks.json")
-		if err := os.MkdirAll(filepath.Dir(hooksPath), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(hooksPath), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 			t.Fatal(err)
 		}
 		target := filepath.Join(t.TempDir(), "elsewhere.json")
@@ -303,7 +303,7 @@ func TestPiBuildGolden(t *testing.T) {
 		"bin/hookyard":           filepath.Join(root, "bin", "hookyard"),
 	}
 	for rel, path := range generated {
-		got, err := os.ReadFile(path)
+		got, err := os.ReadFile(path) //nolint:gosec // test reads a path under t.TempDir
 		if err != nil {
 			t.Fatalf("%s: %v", rel, err)
 		}
@@ -312,7 +312,7 @@ func TestPiBuildGolden(t *testing.T) {
 			writeFile(t, golden, got, 0o644)
 			continue
 		}
-		want, err := os.ReadFile(golden)
+		want, err := os.ReadFile(golden) //nolint:gosec // test reads a path under t.TempDir
 		if err != nil {
 			t.Fatalf("%s: reading golden: %v", rel, err)
 		}
@@ -339,7 +339,7 @@ func TestPiBuildGolden(t *testing.T) {
 	}
 
 	binPath := filepath.Join(root, "bin", fmt.Sprintf("hookyard-%s-%s", runtime.GOOS, runtime.GOARCH))
-	gotBinary, err := os.ReadFile(binPath)
+	gotBinary, err := os.ReadFile(binPath) //nolint:gosec // test reads a path under t.TempDir
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +383,7 @@ func TestPiBuildAggregatesCommandsFromEveryManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rendered, err := os.ReadFile(filepath.Join(root, "extensions", "hookyard.ts"))
+	rendered, err := os.ReadFile(filepath.Join(root, "extensions", "hookyard.ts")) //nolint:gosec // test reads a path under t.TempDir
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +404,7 @@ func TestPiBuildMergesPackageJSONAndIsIdempotent(t *testing.T) {
 	if err := Build(vocab.Pi, opts); err != nil {
 		t.Fatal(err)
 	}
-	first, err := os.ReadFile(packageJSONPath)
+	first, err := os.ReadFile(packageJSONPath) //nolint:gosec // test reads a path under t.TempDir
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,7 +431,7 @@ func TestPiBuildMergesPackageJSONAndIsIdempotent(t *testing.T) {
 	if err := Build(vocab.Pi, opts); err != nil {
 		t.Fatal(err)
 	}
-	second, err := os.ReadFile(packageJSONPath)
+	second, err := os.ReadFile(packageJSONPath) //nolint:gosec // test reads a path under t.TempDir
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -651,7 +651,7 @@ func TestLauncherSelectsTheBundledBinary(t *testing.T) {
 	binPath := filepath.Join(dir, "bin", fmt.Sprintf("hookyard-%s-%s", runtime.GOOS, runtime.GOARCH))
 	writeFile(t, binPath, []byte("#!/bin/sh\necho \"args:$*\"; cat\n"), 0o755)
 
-	cmd := exec.Command("sh", launcherPath, "a", "b c")
+	cmd := exec.Command("sh", launcherPath, "a", "b c") //nolint:gosec // test runs a binary or script it built itself
 	cmd.Stdin = strings.NewReader("payload")
 	out, err := cmd.Output()
 	if err != nil {
@@ -670,7 +670,7 @@ func TestLauncherExitsCleanlyOnAnUnsupportedHost(t *testing.T) {
 	fakeUnameDir := t.TempDir()
 	writeFile(t, filepath.Join(fakeUnameDir, "uname"), []byte("#!/bin/sh\necho Plan9\n"), 0o755)
 
-	cmd := exec.Command("sh", launcherPath)
+	cmd := exec.Command("sh", launcherPath) //nolint:gosec // test runs a binary or script it built itself
 	cmd.Env = append(os.Environ(), "PATH="+fakeUnameDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	out, err := cmd.Output()
 	if err != nil {
@@ -689,7 +689,7 @@ func TestLauncherExitsCleanlyWhenTheBinaryIsMissing(t *testing.T) {
 	launcherPath := filepath.Join(dir, "bin", "hookyard")
 	writeFile(t, launcherPath, launcher, 0o755)
 
-	cmd := exec.Command("sh", launcherPath)
+	cmd := exec.Command("sh", launcherPath) //nolint:gosec // test runs a binary or script it built itself
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("launcher should exit 0 when the binary is missing: %v", err)

@@ -14,7 +14,7 @@ import (
 // own, decided by each caller.
 func Write(path string, content []byte, mode fs.FileMode) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // created directories hold engine-readable hook files, so world-traversable 0755 is intended
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, ".hookyard-*")

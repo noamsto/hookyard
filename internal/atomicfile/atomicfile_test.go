@@ -32,7 +32,7 @@ func TestWriteLandsRequestedModeOnNewFile(t *testing.T) {
 	if info.Mode().Perm() != 0o640 {
 		t.Errorf("mode = %v, want 0640", info.Mode().Perm())
 	}
-	got, err := os.ReadFile(path)
+	got, err := os.ReadFile(path) //nolint:gosec // test reads a path under t.TempDir
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestWriteLandsRequestedModeOnNewFile(t *testing.T) {
 func TestWriteReplacesExistingFileInOneRename(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config")
-	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 
@@ -53,7 +53,7 @@ func TestWriteReplacesExistingFileInOneRename(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := os.ReadFile(path)
+	got, err := os.ReadFile(path) //nolint:gosec // test reads a path under t.TempDir
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestWriteLeavesNoTempFileOnFailure(t *testing.T) {
 	path := filepath.Join(dir, "config")
 	// A directory sitting at the destination makes the final rename fail, so
 	// the temp file must be cleaned up rather than left behind.
-	if err := os.Mkdir(path, 0o755); err != nil {
+	if err := os.Mkdir(path, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatal(err)
 	}
 

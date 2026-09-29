@@ -39,7 +39,7 @@ type codexMatcher struct {
 // is used to *validate* the inherited file and to *encode* hookyard's own
 // block, never to re-emit someone else's.
 func WriteCodex(path string, entries []Entry) error {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // path is operator config or derived from the state dir, never request input
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -188,8 +188,8 @@ func splitTOMLSections(content string) (string, []tomlSection) {
 		}
 		raw := content[start:end]
 		header := raw
-		if nl := strings.IndexByte(raw, '\n'); nl >= 0 {
-			header = raw[:nl]
+		if before, _, ok := strings.Cut(raw, "\n"); ok {
+			header = before
 		}
 		sections = append(sections, tomlSection{header: header, raw: raw})
 	}
@@ -206,20 +206,20 @@ func parseHooksArrayHeader(header string) (event string, inner bool, ok bool) {
 		return "", false, false
 	}
 	rest := strings.TrimPrefix(name, "hooks.")
-	if strings.HasSuffix(rest, ".hooks") {
-		event = strings.TrimSuffix(rest, ".hooks")
+	if before, found := strings.CutSuffix(rest, ".hooks"); found {
+		event = before
 		return event, true, event != ""
 	}
 	return rest, false, rest != ""
 }
 
 func sectionHasCommandLine(raw string) bool {
-	nl := strings.IndexByte(raw, '\n')
-	if nl < 0 {
+	_, after, ok := strings.Cut(raw, "\n")
+	if !ok {
 		return false
 	}
-	body := raw[nl+1:]
-	for _, line := range strings.Split(body, "\n") {
+	body := after
+	for line := range strings.SplitSeq(body, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "command") {
 			return true
 		}

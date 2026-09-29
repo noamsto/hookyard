@@ -125,7 +125,7 @@ func TestLiveClaudeCodeRefusesTheDeniedToolCall(t *testing.T) {
 	// never given anywhere to put a Claude Code settings.json, because that
 	// flag no longer exists — emit below is the only path that produces
 	// Claude Code's overlay.
-	install := exec.Command(hookyardBin, "install",
+	install := exec.Command(hookyardBin, "install", //nolint:gosec // test runs a binary or script it built itself
 		"--manifest", manifestPath,
 		"--router-path", hookyardBin,
 		"--state-dir", stateDir,
@@ -151,7 +151,7 @@ func TestLiveClaudeCodeRefusesTheDeniedToolCall(t *testing.T) {
 	// file at all.
 	ctx, cancel := context.WithTimeout(context.Background(), liveE2EBudget)
 	defer cancel()
-	probe := exec.CommandContext(ctx, claudeBin, "-p", "--model", "claude-haiku-4-5-20251001",
+	probe := exec.CommandContext(ctx, claudeBin, "-p", "--model", "claude-haiku-4-5-20251001", //nolint:gosec // test runs a binary or script it built itself
 		"--settings", overlayPath, liveProbePrompt)
 	probe.Dir = projectDir
 	probe.Env = append(os.Environ(), "CLAUDE_CONFIG_DIR="+claudeConfigDir)
@@ -212,7 +212,7 @@ func TestLiveCodexDeliversSessionStartAndPromptSubmitAdvice(t *testing.T) {
 	if err != nil {
 		t.Skip("codex binary not found on PATH")
 	}
-	if out, err := exec.Command(codexBin, "--version").CombinedOutput(); err != nil {
+	if out, err := exec.Command(codexBin, "--version").CombinedOutput(); err != nil { //nolint:gosec // test runs a binary or script it built itself
 		t.Fatalf("codex --version: %v\n%s", err, out)
 	} else {
 		t.Logf("codex --version: %s", out)
@@ -242,7 +242,7 @@ func TestLiveCodexDeliversSessionStartAndPromptSubmitAdvice(t *testing.T) {
 	upsHandler := liveWriteAdviseHandler(t, scratch, "prompt-submit", upsMarker)
 	manifestPath := liveWriteCodexAdvisoryManifest(t, scratch, ssHandler, upsHandler)
 
-	install := exec.Command(hookyardBin, "install",
+	install := exec.Command(hookyardBin, "install", //nolint:gosec // test runs a binary or script it built itself
 		"--manifest", manifestPath,
 		"--router-path", hookyardBin,
 		"--state-dir", stateDir,
@@ -256,7 +256,7 @@ func TestLiveCodexDeliversSessionStartAndPromptSubmitAdvice(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	probe := exec.CommandContext(ctx, codexBin,
+	probe := exec.CommandContext(ctx, codexBin, //nolint:gosec // test runs a binary or script it built itself
 		"--dangerously-bypass-hook-trust",
 		"--dangerously-bypass-approvals-and-sandbox",
 		"-C", work,
@@ -276,7 +276,7 @@ func liveWriteAdviseHandler(t *testing.T, dir, id, marker string) string {
 	t.Helper()
 	path := filepath.Join(dir, id+".sh")
 	script := "#!/bin/sh\nprintf '%s' '{\"hookSpecificOutput\":{\"additionalContext\":\"" + marker + "\"}}'\n"
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatalf("write advise handler: %v", err)
 	}
 	return path
@@ -365,11 +365,11 @@ func codexAdviceMarkerLines(t *testing.T, files []string, marker string) []strin
 	t.Helper()
 	var hits []string
 	for _, path := range files {
-		raw, err := os.ReadFile(path)
+		raw, err := os.ReadFile(path) //nolint:gosec // test reads a path under t.TempDir
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		for _, line := range strings.Split(string(raw), "\n") {
+		for line := range strings.SplitSeq(string(raw), "\n") {
 			if strings.Contains(line, marker) {
 				hits = append(hits, line)
 			}
@@ -426,14 +426,14 @@ func TestLiveCodexDeliversPreToolPostToolAndSubagentAdvice(t *testing.T) {
 	if err != nil {
 		t.Skip("codex binary not found on PATH")
 	}
-	if out, err := exec.Command(codexBin, "--version").CombinedOutput(); err != nil {
+	if out, err := exec.Command(codexBin, "--version").CombinedOutput(); err != nil { //nolint:gosec // test runs a binary or script it built itself
 		t.Fatalf("codex --version: %v\n%s", err, out)
 	} else {
 		t.Logf("codex --version: %s", out)
 	}
 
 	auth := filepath.Join(os.Getenv("HOME"), ".codex", "auth.json")
-	if _, err := os.Stat(auth); err != nil {
+	if _, err := os.Stat(auth); err != nil { //nolint:gosec // test-controlled path
 		t.Skipf("no Codex credentials at %s; run 'codex login' to enable this live test", auth)
 	}
 
@@ -468,7 +468,7 @@ func TestLiveCodexDeliversPreToolPostToolAndSubagentAdvice(t *testing.T) {
 	subHandler := liveWriteAdviseHandler(t, scratch, "subagent-start", subMarker)
 	manifestPath := liveWriteCodexToolAdvisoryManifest(t, scratch, preHandler, postHandler, subHandler)
 
-	install := exec.Command(hookyardBin, "install",
+	install := exec.Command(hookyardBin, "install", //nolint:gosec // test runs a binary or script it built itself
 		"--manifest", manifestPath,
 		"--router-path", hookyardBin,
 		"--state-dir", stateDir,
@@ -482,7 +482,7 @@ func TestLiveCodexDeliversPreToolPostToolAndSubagentAdvice(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
-	probe := exec.CommandContext(ctx, codexBin,
+	probe := exec.CommandContext(ctx, codexBin, //nolint:gosec // test runs a binary or script it built itself
 		"--dangerously-bypass-hook-trust",
 		"--dangerously-bypass-approvals-and-sandbox",
 		"--enable", "multi_agent",
@@ -544,10 +544,10 @@ func liveWriteCodexToolAdvisoryManifest(t *testing.T, dir, preToolExec, postTool
 func liveBuildHookyard(t *testing.T) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "bin", "hookyard")
-	if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatalf("mkdir %s: %v", filepath.Dir(bin), err)
 	}
-	cmd := exec.Command("go", "build", "-o", bin, ".")
+	cmd := exec.Command("go", "build", "-o", bin, ".") //nolint:gosec // test runs a binary or script it built itself
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
@@ -607,7 +607,7 @@ func liveWriteDenyHandler(t *testing.T, dir, firedMarker, reason string) string 
 	script := "#!/bin/sh\n" +
 		"touch " + firedMarker + "\n" +
 		"printf '%s' '{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"" + reason + "\"}}'\n"
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatalf("write deny handler: %v", err)
 	}
 	return path
@@ -674,7 +674,7 @@ func liveWriteClaudeBaseWithOwnHook(t *testing.T, dir, marker string) string {
 // against bugs the CLI's own flag wiring could still have.
 func liveEmitClaudeOverlay(t *testing.T, hookyardBin, root, routerPath, stateDir, basePath string) string {
 	t.Helper()
-	emit := exec.Command(hookyardBin, "emit",
+	emit := exec.Command(hookyardBin, "emit", //nolint:gosec // test runs a binary or script it built itself
 		"--engine", "claude-code",
 		"--router-path", routerPath,
 		"--state-dir", stateDir,
@@ -683,8 +683,7 @@ func liveEmitClaudeOverlay(t *testing.T, hookyardBin, root, routerPath, stateDir
 	out, err := emit.Output()
 	if err != nil {
 		stderr := ""
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 			stderr = string(exitErr.Stderr)
 		}
 		t.Fatalf("hookyard emit: %v\n%s", err, stderr)
@@ -706,7 +705,7 @@ func liveFindBashDenyRecord(t *testing.T, stateDir string) (record.Record, bool)
 	if err != nil {
 		return record.Record{}, false
 	}
-	for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSuffix(string(raw), "\n"), "\n") {
 		if line == "" {
 			continue
 		}
@@ -767,7 +766,7 @@ func TestLiveClaudeCodePluginRefusesTheDeniedToolCall(t *testing.T) {
 	firedMarker := filepath.Join(root, "handler-fired")
 	manifestPath := liveWritePluginDenyHandlerAndManifest(t, root, pluginDir, firedMarker, reasonToken)
 
-	build := exec.Command(hookyardBin, "build",
+	build := exec.Command(hookyardBin, "build", //nolint:gosec // test runs a binary or script it built itself
 		"--engine", "claude-code",
 		"--manifest", manifestPath,
 		"--out", pluginDir,
@@ -779,7 +778,7 @@ func TestLiveClaudeCodePluginRefusesTheDeniedToolCall(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), liveE2EBudget)
 	defer cancel()
-	probe := exec.CommandContext(ctx, claudeBin, "-p", "--model", "claude-haiku-4-5-20251001",
+	probe := exec.CommandContext(ctx, claudeBin, "-p", "--model", "claude-haiku-4-5-20251001", //nolint:gosec // test runs a binary or script it built itself
 		"--plugin-dir", pluginDir, liveProbePrompt)
 	probe.Dir = projectDir
 	probe.Env = append(os.Environ(),
@@ -830,13 +829,13 @@ func liveWritePluginDenyHandlerAndManifest(t *testing.T, manifestDir, pluginDir,
 	t.Helper()
 	handlerRel := filepath.Join("handlers", "deny")
 	handlerPath := filepath.Join(pluginDir, handlerRel)
-	if err := os.MkdirAll(filepath.Dir(handlerPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(handlerPath), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatalf("mkdir %s: %v", filepath.Dir(handlerPath), err)
 	}
 	script := "#!/bin/sh\n" +
 		"touch " + firedMarker + "\n" +
 		"printf '%s' '{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"" + reason + "\"}}'\n"
-	if err := os.WriteFile(handlerPath, []byte(script), 0o700); err != nil {
+	if err := os.WriteFile(handlerPath, []byte(script), 0o700); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatalf("write deny handler: %v", err)
 	}
 
@@ -1103,7 +1102,7 @@ func livePiInstall(t *testing.T, hookyardBin, root string, agentDirs []string, s
 		"--codex-config", filepath.Join(root, "unused-codex", "config.toml"),
 		"--cursor-hooks", filepath.Join(root, "unused-cursor", "hooks.json"),
 	)
-	install := exec.Command(hookyardBin, args...)
+	install := exec.Command(hookyardBin, args...) //nolint:gosec // test runs a binary or script it built itself
 	if out, err := install.CombinedOutput(); err != nil {
 		t.Fatalf("hookyard install: %v\n%s", err, out)
 	}
@@ -1127,7 +1126,7 @@ func TestLivePiRefusesTheDeniedToolCall(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), livePiBudget)
 	defer cancel()
-	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", livePiProbePrompt)
+	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", livePiProbePrompt) //nolint:gosec // test runs a binary or script it built itself
 	probe.Dir = projectDir
 	probe.Env = livePiEnv(agentDir)
 	output, runErr := probe.CombinedOutput()
@@ -1172,7 +1171,7 @@ func TestLivePiRefusesTheDeniedToolCallInASecondSettingsDir(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), livePiBudget)
 	defer cancel()
-	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", livePiProbePrompt)
+	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", livePiProbePrompt) //nolint:gosec // test runs a binary or script it built itself
 	probe.Dir = projectDir
 	probe.Env = livePiEnv(agentDir2)
 	output, runErr := probe.CombinedOutput()
@@ -1214,7 +1213,7 @@ func TestLivePiFailsOpenWhenTheRouterBinaryIsAbsent(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), livePiBudget)
 	defer cancel()
-	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", livePiProbePrompt)
+	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", livePiProbePrompt) //nolint:gosec // test runs a binary or script it built itself
 	probe.Dir = projectDir
 	probe.Env = livePiEnv(agentDir)
 	output, err := probe.CombinedOutput()
@@ -1242,14 +1241,14 @@ func TestLivePiFailsOpenWhenTheRouterBinaryIsAbsent(t *testing.T) {
 func liveWritePiCaptureRouter(t *testing.T, root, captureDir string) string {
 	t.Helper()
 	path := filepath.Join(root, "capture-router", "bin", "hookyard")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
 	}
-	if err := os.MkdirAll(captureDir, 0o755); err != nil {
+	if err := os.MkdirAll(captureDir, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatalf("mkdir %s: %v", captureDir, err)
 	}
 	script := "#!/bin/sh\ncat > " + captureDir + "/$$.json\n"
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatalf("write capture router: %v", err)
 	}
 	return path
@@ -1273,7 +1272,7 @@ func liveReadPiCaptures(t *testing.T, dir string) map[string][]map[string]json.R
 	captures := map[string][]map[string]json.RawMessage{}
 	for _, entry := range entries {
 		capturePath := filepath.Join(dir, entry.Name())
-		raw, err := os.ReadFile(capturePath)
+		raw, err := os.ReadFile(capturePath) //nolint:gosec // test reads a path under t.TempDir
 		if err != nil {
 			t.Fatalf("read %s: %v", capturePath, err)
 		}
@@ -1315,7 +1314,7 @@ func TestLivePiPayloadMatchesTheCommittedFixtureShape(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), livePiBudget)
 	defer cancel()
-	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", livePiProbePrompt)
+	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", livePiProbePrompt) //nolint:gosec // test runs a binary or script it built itself
 	probe.Dir = projectDir
 	probe.Env = livePiEnv(agentDir)
 	output, err := probe.CombinedOutput()
@@ -1358,7 +1357,7 @@ func liveAssertPayloadMatchesFixture(t *testing.T, captures map[string][]map[str
 	}
 
 	fixturePath := filepath.Join("..", "..", "docs", "design", "fixtures", "hook-payloads", fixtureName)
-	fixtureRaw, err := os.ReadFile(fixturePath)
+	fixtureRaw, err := os.ReadFile(fixturePath) //nolint:gosec // test reads a path under t.TempDir
 	if err != nil {
 		t.Fatalf("read %s: %v", fixturePath, err)
 	}
@@ -1431,7 +1430,7 @@ func liveKeySetDiff(got, want map[string]json.RawMessage) string {
 func livePiBuildPluginPackage(t *testing.T, hookyardBin, root string) (pluginRoot, argvCapturePath string) {
 	t.Helper()
 	pluginRoot = filepath.Join(root, "pi-package")
-	if err := os.MkdirAll(pluginRoot, 0o755); err != nil {
+	if err := os.MkdirAll(pluginRoot, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatalf("mkdir %s: %v", pluginRoot, err)
 	}
 	writeBuildFile(t, filepath.Join(pluginRoot, "handlers", "guard.sh"), "#!/bin/sh\n", 0o755)
@@ -1439,7 +1438,7 @@ func livePiBuildPluginPackage(t *testing.T, hookyardBin, root string) (pluginRoo
 	writeBuildFile(t, manifestPath, `{"handlers":[`+
 		`{"id":"e2e-pi-plugin","exec":"handlers/guard.sh","events":["pre_tool"],"engines":["pi"],"match":["Bash"]}]}`, 0o644)
 
-	build := exec.Command(hookyardBin, "build",
+	build := exec.Command(hookyardBin, "build", //nolint:gosec // test runs a binary or script it built itself
 		"--engine", "pi",
 		"--manifest", manifestPath,
 		"--out", pluginRoot,
@@ -1456,7 +1455,7 @@ func livePiBuildPluginPackage(t *testing.T, hookyardBin, root string) (pluginRoo
 	argvCapturePath = filepath.Join(root, "plugin-router-argv.txt")
 	binaryPath := filepath.Join(pluginRoot, "bin", fmt.Sprintf("hookyard-%s-%s", runtime.GOOS, runtime.GOARCH))
 	script := "#!/bin/sh\necho \"$@\" > " + argvCapturePath + "\ncat > /dev/null\n"
-	if err := os.WriteFile(binaryPath, []byte(script), 0o755); err != nil {
+	if err := os.WriteFile(binaryPath, []byte(script), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatalf("overwrite bundled binary %s: %v", binaryPath, err)
 	}
 	return pluginRoot, argvCapturePath
@@ -1470,11 +1469,11 @@ func livePiBuildPluginPackage(t *testing.T, hookyardBin, root string) (pluginRoo
 func livePiRegisterExtension(t *testing.T, agentDir, extensionPath string) {
 	t.Helper()
 	settingsPath := filepath.Join(agentDir, "settings.json")
-	raw, err := os.ReadFile(settingsPath)
+	raw, err := os.ReadFile(settingsPath) //nolint:gosec // test reads a path under t.TempDir
 	if err != nil {
 		t.Fatalf("read %s: %v", settingsPath, err)
 	}
-	var settings map[string]any
+	settings := map[string]any{}
 	if err := json.Unmarshal(raw, &settings); err != nil {
 		t.Fatalf("%s is not valid JSON: %v", settingsPath, err)
 	}
@@ -1498,7 +1497,7 @@ func TestLivePiBuiltPackageInvokesTheRouterWithPluginRoot(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), livePiBudget)
 	defer cancel()
-	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", livePiProbePrompt)
+	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", livePiProbePrompt) //nolint:gosec // test runs a binary or script it built itself
 	probe.Dir = projectDir
 	probe.Env = livePiEnv(agentDir)
 	output, err := probe.CombinedOutput()
@@ -1506,7 +1505,7 @@ func TestLivePiBuiltPackageInvokesTheRouterWithPluginRoot(t *testing.T) {
 		t.Fatalf("pi run: %v\n--- pi output ---\n%s", err, output)
 	}
 
-	argv, err := os.ReadFile(argvCapturePath)
+	argv, err := os.ReadFile(argvCapturePath) //nolint:gosec // test reads a path under t.TempDir
 	if err != nil {
 		t.Fatalf("the built package's router was never invoked: %v\n--- pi output ---\n%s", err, output)
 	}
@@ -1865,7 +1864,7 @@ func livePiWriteAdvisoryHandler(t *testing.T, dir, name, firedMarker, body strin
 	script := "#!/bin/sh\n" +
 		"touch " + firedMarker + "\n" +
 		"printf '%s' '" + body + "'\n"
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatalf("write advisory handler: %v", err)
 	}
 	return path
@@ -1907,7 +1906,7 @@ func TestLivePiDeliversAStandalonePreToolAdvisoryWithTheCallsResult(t *testing.T
 
 	ctx, cancel := context.WithTimeout(context.Background(), livePiAdvisoryBudget)
 	defer cancel()
-	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", "--no-session", livePiAdvisoryPrompt)
+	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", "--no-session", livePiAdvisoryPrompt) //nolint:gosec // test runs a binary or script it built itself
 	probe.Dir = projectDir
 	probe.Env = livePiEnv(agentDir)
 	output, err := probe.CombinedOutput()
@@ -1966,7 +1965,7 @@ func TestLivePiDeliversAPreToolAdvisoryWhenTheToolFails(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), livePiAdvisoryBudget)
 	defer cancel()
-	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", "--no-session", livePiAdvisoryPrompt)
+	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", "--no-session", livePiAdvisoryPrompt) //nolint:gosec // test runs a binary or script it built itself
 	probe.Dir = projectDir
 	probe.Env = livePiEnv(agentDir)
 	output, err := probe.CombinedOutput()
@@ -2013,7 +2012,7 @@ func TestLivePiOrdersPreAndPostToolAdvisoriesOnOneCall(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), livePiAdvisoryBudget)
 	defer cancel()
-	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", "--no-session", livePiAdvisoryPrompt)
+	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", "--no-session", livePiAdvisoryPrompt) //nolint:gosec // test runs a binary or script it built itself
 	probe.Dir = projectDir
 	probe.Env = livePiEnv(agentDir)
 	output, err := probe.CombinedOutput()
@@ -2084,7 +2083,7 @@ func TestLivePiDeliversADenyAdvisoryOnlyThroughTheReason(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), livePiAdvisoryBudget)
 	defer cancel()
-	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", "--no-session", livePiAdvisoryPrompt)
+	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", "--no-session", livePiAdvisoryPrompt) //nolint:gosec // test runs a binary or script it built itself
 	probe.Dir = projectDir
 	probe.Env = livePiEnv(agentDir)
 	output, err := probe.CombinedOutput()
@@ -2198,7 +2197,7 @@ func livePiWriteTurnEndDenyHandler(t *testing.T, dir, firedMarker, captureFile, 
 		"echo >> " + captureFile + "\n" +
 		"touch " + firedMarker + "\n" +
 		"printf '%s' '{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"" + reason + "\"}}'\n"
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		t.Fatalf("write turn_end deny handler: %v", err)
 	}
 	return path
@@ -2252,7 +2251,7 @@ func liveReadAllRecords(t *testing.T, stateDir string) []record.Record {
 		t.Fatalf("read stream file: %v", err)
 	}
 	var recs []record.Record
-	for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSuffix(string(raw), "\n"), "\n") {
 		if line == "" {
 			continue
 		}
@@ -2274,12 +2273,12 @@ func liveReadAllRecords(t *testing.T, stateDir string) []record.Record {
 // why stop_hook_active is read from under "native" rather than top-level.
 func livePiReadHandlerStdinCaptures(t *testing.T, path string) []bool {
 	t.Helper()
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // test reads a path under t.TempDir
 	if err != nil {
 		t.Fatalf("read handler stdin capture %s: %v", path, err)
 	}
 	var out []bool
-	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(raw)), "\n") {
 		if line == "" {
 			continue
 		}
@@ -2324,7 +2323,7 @@ func TestLivePiTurnEndDenyForcesExactlyOneContinuation(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), livePiAdvisoryBudget)
 	defer cancel()
-	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", "--no-session", livePiAdvisoryPrompt)
+	probe := exec.CommandContext(ctx, piBin, "-p", "--approve", "--no-session", livePiAdvisoryPrompt) //nolint:gosec // test runs a binary or script it built itself
 	probe.Dir = projectDir
 	probe.Env = livePiEnv(agentDir)
 	output, err := probe.CombinedOutput()
@@ -2473,7 +2472,7 @@ func TestLiveClaudeCodeStopDenyForcesExactlyOneContinuation(t *testing.T) {
 	handlerPath := livePiWriteTurnEndDenyHandler(t, root, firedMarker, stdinCapture, reasonTok)
 	manifestPath := liveWriteClaudeStopManifest(t, root, handlerPath)
 
-	install := exec.Command(hookyardBin, "install",
+	install := exec.Command(hookyardBin, "install", //nolint:gosec // test runs a binary or script it built itself
 		"--manifest", manifestPath,
 		"--router-path", hookyardBin,
 		"--state-dir", stateDir,
@@ -2490,7 +2489,7 @@ func TestLiveClaudeCodeStopDenyForcesExactlyOneContinuation(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), liveE2EBudget)
 	defer cancel()
-	probe := exec.CommandContext(ctx, claudeBin, "-p", "--model", "claude-haiku-4-5-20251001",
+	probe := exec.CommandContext(ctx, claudeBin, "-p", "--model", "claude-haiku-4-5-20251001", //nolint:gosec // test runs a binary or script it built itself
 		"--settings", overlayPath, "Reply with exactly: ok")
 	probe.Dir = projectDir
 	probe.Env = append(os.Environ(), "CLAUDE_CONFIG_DIR="+claudeConfigDir)
@@ -2540,7 +2539,7 @@ func TestLiveClaudeCodeStopDenyForcesExactlyOneContinuation(t *testing.T) {
 	}
 	found := false
 	for _, p := range matches {
-		raw, readErr := os.ReadFile(p)
+		raw, readErr := os.ReadFile(p) //nolint:gosec // test reads a path under t.TempDir
 		if readErr != nil {
 			continue
 		}
@@ -2588,7 +2587,7 @@ func TestLiveCodexStopDenyForcesExactlyOneContinuation(t *testing.T) {
 	if err != nil {
 		t.Skip("codex binary not found on PATH")
 	}
-	if out, err := exec.Command(codexBin, "--version").CombinedOutput(); err != nil {
+	if out, err := exec.Command(codexBin, "--version").CombinedOutput(); err != nil { //nolint:gosec // test runs a binary or script it built itself
 		t.Fatalf("codex --version: %v\n%s", err, out)
 	} else {
 		t.Logf("codex --version: %s", out)
@@ -2629,7 +2628,7 @@ func TestLiveCodexStopDenyForcesExactlyOneContinuation(t *testing.T) {
 	handler := livePiWriteTurnEndDenyHandler(t, scratch, firedMarker, stdinCapture, reasonTok)
 	manifest := liveWriteCodexStopManifest(t, scratch, handler)
 
-	install := exec.Command(hookyardBin, "install",
+	install := exec.Command(hookyardBin, "install", //nolint:gosec // test runs a binary or script it built itself
 		"--manifest", manifest,
 		"--router-path", hookyardBin,
 		"--state-dir", stateDir,
@@ -2643,7 +2642,7 @@ func TestLiveCodexStopDenyForcesExactlyOneContinuation(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
-	probe := exec.CommandContext(ctx, codexBin,
+	probe := exec.CommandContext(ctx, codexBin, //nolint:gosec // test runs a binary or script it built itself
 		"--dangerously-bypass-hook-trust",
 		"--dangerously-bypass-approvals-and-sandbox",
 		"-C", work,

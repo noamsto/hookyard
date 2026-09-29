@@ -106,12 +106,7 @@ func (f Filter) Match(r record.Record) bool {
 	if !f.callMatch(r) {
 		return false
 	}
-	for _, b := range branches(r) {
-		if f.branchMatch(b) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(branches(r), f.branchMatch)
 }
 
 // Hits returns the indices into r.Handlers of r's matching branches, in
