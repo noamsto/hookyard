@@ -86,7 +86,7 @@ func ScanDay(stateDir, day string, end int64, limit int, f Filter) (EventsRespon
 		return resp, nil
 	}
 	path := filepath.Join(record.StreamDir(stateDir), day+".jsonl")
-	file, err := os.Open(path)
+	file, err := os.Open(path) //nolint:gosec // day is checked against validDayPattern above
 	if os.IsNotExist(err) {
 		return resp, nil
 	}
@@ -208,7 +208,7 @@ func ScanAll(stateDir, day string, visit func(Entry)) (int64, error) {
 		return 0, nil
 	}
 	path := filepath.Join(record.StreamDir(stateDir), day+".jsonl")
-	file, err := os.Open(path)
+	file, err := os.Open(path) //nolint:gosec // day is checked against validDayPattern above
 	if os.IsNotExist(err) {
 		return 0, nil
 	}

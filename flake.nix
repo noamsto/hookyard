@@ -104,6 +104,15 @@
             enable = true;
             stages = ["pre-push"];
           };
+          nilaway = {
+            enable = true;
+            name = "nilaway";
+            entry = "${pkgs.nilaway}/bin/nilaway -include-pkgs=github.com/noamsto/hookyard ./...";
+            language = "system";
+            types = ["go"];
+            pass_filenames = false;
+            stages = ["pre-push"];
+          };
           statix.enable = true;
           deadnix.enable = true;
           alejandra.enable = true;
@@ -125,6 +134,7 @@
               pkgs.gopls
               pkgs.gotools
               pkgs.golangci-lint
+              pkgs.nilaway
               pkgs.d2
               # For running the bridge's `node --check` by hand, and for the
               # bridge runtime tests, which skip when node is absent.

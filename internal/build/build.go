@@ -122,7 +122,7 @@ func claudeCode(opts Options) error {
 		return err
 	}
 
-	base, err := os.ReadFile(hooksPath)
+	base, err := os.ReadFile(hooksPath) //nolint:gosec // path is operator config or derived from the state dir, never request input
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			return err
@@ -270,7 +270,7 @@ func pi(opts Options) error {
 
 	// Everything below is read/validation, completed before the first write
 	// so a failure here never leaves a partial build on disk.
-	existing, err := os.ReadFile(packageJSONPath)
+	existing, err := os.ReadFile(packageJSONPath) //nolint:gosec // path is operator config or derived from the state dir, never request input
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			return err

@@ -75,6 +75,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	srv := &http.Server{
+		ReadHeaderTimeout: 10 * time.Second,
 		Handler: middleware(&serveMux{
 			stateDir: absDir,
 			hub:      hub,
@@ -83,7 +84,7 @@ func Run(ctx context.Context, opts Options) error {
 		BaseContext: func(_ net.Listener) context.Context { return ctx },
 	}
 
-	go func() {
+	go func() { //nolint:gosec // ctx is already cancelled here; Shutdown needs a fresh one to drain
 		<-ctx.Done()
 		_ = srv.Shutdown(context.Background())
 	}()

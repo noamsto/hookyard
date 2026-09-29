@@ -321,11 +321,11 @@ func addForeignPreToolUseHook(t *testing.T, hooksPath string) {
 	if err != nil {
 		t.Fatalf("read %s: %v", hooksPath, err)
 	}
-	var root map[string]json.RawMessage
+	root := map[string]json.RawMessage{}
 	if err := json.Unmarshal(raw, &root); err != nil {
 		t.Fatalf("parse %s: %v", hooksPath, err)
 	}
-	var hooks map[string]json.RawMessage
+	hooks := map[string]json.RawMessage{}
 	if err := json.Unmarshal(root["hooks"], &hooks); err != nil {
 		t.Fatalf("parse %s hooks key: %v", hooksPath, err)
 	}

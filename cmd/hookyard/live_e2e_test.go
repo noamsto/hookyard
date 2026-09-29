@@ -369,7 +369,7 @@ func codexAdviceMarkerLines(t *testing.T, files []string, marker string) []strin
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		for _, line := range strings.Split(string(raw), "\n") {
+		for line := range strings.SplitSeq(string(raw), "\n") {
 			if strings.Contains(line, marker) {
 				hits = append(hits, line)
 			}
@@ -683,8 +683,7 @@ func liveEmitClaudeOverlay(t *testing.T, hookyardBin, root, routerPath, stateDir
 	out, err := emit.Output()
 	if err != nil {
 		stderr := ""
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 			stderr = string(exitErr.Stderr)
 		}
 		t.Fatalf("hookyard emit: %v\n%s", err, stderr)
@@ -706,7 +705,7 @@ func liveFindBashDenyRecord(t *testing.T, stateDir string) (record.Record, bool)
 	if err != nil {
 		return record.Record{}, false
 	}
-	for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSuffix(string(raw), "\n"), "\n") {
 		if line == "" {
 			continue
 		}
@@ -1474,7 +1473,7 @@ func livePiRegisterExtension(t *testing.T, agentDir, extensionPath string) {
 	if err != nil {
 		t.Fatalf("read %s: %v", settingsPath, err)
 	}
-	var settings map[string]any
+	settings := map[string]any{}
 	if err := json.Unmarshal(raw, &settings); err != nil {
 		t.Fatalf("%s is not valid JSON: %v", settingsPath, err)
 	}
@@ -2252,7 +2251,7 @@ func liveReadAllRecords(t *testing.T, stateDir string) []record.Record {
 		t.Fatalf("read stream file: %v", err)
 	}
 	var recs []record.Record
-	for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSuffix(string(raw), "\n"), "\n") {
 		if line == "" {
 			continue
 		}
@@ -2279,7 +2278,7 @@ func livePiReadHandlerStdinCaptures(t *testing.T, path string) []bool {
 		t.Fatalf("read handler stdin capture %s: %v", path, err)
 	}
 	var out []bool
-	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(raw)), "\n") {
 		if line == "" {
 			continue
 		}

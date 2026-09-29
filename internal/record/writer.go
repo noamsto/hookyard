@@ -62,7 +62,7 @@ func (w *Writer) Append(e Event) error {
 	_, statErr := os.Stat(path)
 	newDay := os.IsNotExist(statErr)
 
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600) //nolint:gosec // path is operator config or derived from the state dir, never request input
 	if err != nil {
 		return fmt.Errorf("record: %w", err)
 	}
@@ -106,7 +106,7 @@ func EnsureStateDir(dir string) error {
 			return err
 		}
 	}
-	return os.Chmod(dir, 0o700)
+	return os.Chmod(dir, 0o700) //nolint:gosec // 0700 is the owner-only directory mode; the 0600 ceiling applies to files
 }
 
 // sweep removes stream files whose date is more than retentionDays before

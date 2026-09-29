@@ -471,9 +471,9 @@ func TestPiPluginBridgeRendersARelativeRootAndNoInstallPath(t *testing.T) {
 func spliced(t *testing.T, source string) string {
 	t.Helper()
 	const prefix = "const DATA = "
-	for _, line := range strings.Split(source, "\n") {
-		if strings.HasPrefix(line, prefix) {
-			return strings.TrimSuffix(strings.TrimPrefix(line, prefix), ";")
+	for line := range strings.SplitSeq(source, "\n") {
+		if after, ok := strings.CutPrefix(line, prefix); ok {
+			return strings.TrimSuffix(after, ";")
 		}
 	}
 	t.Fatalf("no %q line in the written bridge:\n%s", prefix, source)

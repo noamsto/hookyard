@@ -143,11 +143,11 @@ func dispatchEchoHandler(t *testing.T, dir, sentinelPath string) manifest.Handle
 // caller can check it round-trips rather than just counting bytes.
 func dispatchEnlargeFixture(t *testing.T, fixture string) (enlarged []byte, padding string) {
 	t.Helper()
-	var native map[string]json.RawMessage
+	native := map[string]json.RawMessage{}
 	if err := json.Unmarshal([]byte(fixture), &native); err != nil {
 		t.Fatalf("decode fixture: %v", err)
 	}
-	var toolInput map[string]json.RawMessage
+	toolInput := map[string]json.RawMessage{}
 	if err := json.Unmarshal(native["tool_input"], &toolInput); err != nil {
 		t.Fatalf("decode tool_input: %v", err)
 	}

@@ -1,6 +1,9 @@
 package serve
 
-import "sort"
+import (
+	"maps"
+	"sort"
+)
 
 // Accumulator holds SPEC 4.5's cumulative counters for one day. It is fed
 // records in offset order and never rescans: Add's monotonic-offset guard is
@@ -99,9 +102,7 @@ func (a *Accumulator) Snapshot() Snapshot {
 	}
 
 	router := make(map[string]int64, len(a.router))
-	for k, v := range a.router {
-		router[k] = v
-	}
+	maps.Copy(router, a.router)
 
 	return Snapshot{
 		Day:       a.day,

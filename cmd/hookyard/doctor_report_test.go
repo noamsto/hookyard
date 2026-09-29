@@ -92,7 +92,7 @@ func TestRenderDoctorJSONSchemaAndNoANSI(t *testing.T) {
 
 func TestDoctorDetailBoundsLongCommaSegment(t *testing.T) {
 	detail := doctorDetail(strings.Repeat("/very-long-path-segment", 8)+", /短い", 0)
-	for _, line := range strings.Split(detail, "\n") {
+	for line := range strings.SplitSeq(detail, "\n") {
 		if utf8.RuneCountInString(line) > 88 {
 			t.Fatalf("detail line length = %d, want at most 88: %q", len(line), line)
 		}

@@ -40,6 +40,9 @@ func TestPluginPlanCommandCarriesTheMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(entries) == 0 {
+		t.Fatal("no plugin entries planned")
+	}
 	if got := entries[0].Command; !strings.Contains(got, Marker) {
 		t.Errorf("command %q does not contain marker %q", got, Marker)
 	}
@@ -61,6 +64,9 @@ func TestPluginPlanEntriesRenderIntoValidClaudeSettings(t *testing.T) {
 	entries, err := PluginPlan(handlers, vocab.ClaudeCode)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no plugin entries planned")
 	}
 	doc, err := ClaudeSettings(nil, entries)
 	if err != nil {

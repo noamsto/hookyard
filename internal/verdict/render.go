@@ -111,6 +111,7 @@ func Render(in Input) Rendered {
 				return renderTurnEnd(in, renderPiDeny)
 			case vocab.ClaudeCode, vocab.Codex:
 				return renderTurnEnd(in, renderStopBlock)
+			case vocab.Cursor:
 			}
 			return Rendered{Enforced: in.Verdict == Abstain}
 		}
@@ -137,6 +138,7 @@ func Render(in Input) Rendered {
 			return renderCodexAdvisoryOnly(in)
 		case vocab.Pi:
 			return renderPiAdvisoryOnly(in)
+		case vocab.Cursor:
 		}
 	}
 	return Rendered{Enforced: in.Verdict == Abstain}

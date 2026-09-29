@@ -57,7 +57,7 @@ func runHandler(ctx context.Context, h manifest.Handler, payload []byte, budget 
 	defer cancel()
 
 	out := &capWriter{limit: MaxHandlerOutput, kill: cancel}
-	cmd := exec.CommandContext(ctx, h.Exec)
+	cmd := exec.CommandContext(ctx, h.Exec) //nolint:gosec // exec is the handler the operator registered in the manifest, run by design
 	cmd.Stdin = bytes.NewReader(payload)
 	cmd.Stdout = out
 	// Stderr stays nil, so the handler's own stderr goes to /dev/null: §8 keeps
@@ -125,6 +125,7 @@ func classify(stdout []byte) (outcome string, v verdict.Verdict, reason, advice 
 	switch decision := verdict.Verdict(arm.PermissionDecision); decision {
 	case verdict.Allow, verdict.Ask, verdict.Deny:
 		return outcomeFor(decision), decision, arm.PermissionDecisionReason, arm.AdditionalContext
+	case verdict.Abstain:
 	}
 	if arm.AdditionalContext != "" {
 		return record.OutcomeAdvise, verdict.Abstain, "", arm.AdditionalContext
@@ -143,6 +144,7 @@ func outcomeFor(v verdict.Verdict) string {
 		return record.OutcomeAsk
 	case verdict.Deny:
 		return record.OutcomeDeny
+	case verdict.Abstain:
 	}
 	return record.OutcomeAbstain
 }

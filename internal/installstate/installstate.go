@@ -80,7 +80,7 @@ func WriteReceipt(stateDir string, r Receipt) error {
 // internal/doctor's tableHandlers already draws for the handler table.
 func ReadReceipt(stateDir string) (Receipt, error) {
 	path := ReceiptPath(stateDir)
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // path is operator config or derived from the state dir, never request input
 	if err != nil {
 		return Receipt{}, err
 	}
@@ -95,7 +95,7 @@ func ReadReceipt(stateDir string) (Receipt, error) {
 // receipt, a witness is not in stateDir — it names its generation, not
 // hookyard's install output — so the caller supplies the full path.
 func ReadWitness(path string) (Witness, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // path is operator config or derived from the state dir, never request input
 	if err != nil {
 		return Witness{}, err
 	}

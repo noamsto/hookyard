@@ -223,7 +223,7 @@ func resolveClaudeSources(p Paths, dir string) claudeSources {
 	}
 
 	for _, v := range p.ClaudeSettingsFlags {
-		if raw, err := os.ReadFile(v); err == nil {
+		if raw, err := os.ReadFile(v); err == nil { //nolint:gosec // path is operator config or derived from the state dir, never request input
 			c.overlays = append(c.overlays, claudeSource{name: v, raw: raw})
 			continue
 		}
@@ -240,7 +240,7 @@ func resolveClaudeSources(p Paths, dir string) claudeSources {
 	// worth naming; only a file that is there and unreadable is.
 	for _, name := range []string{"settings.json", "settings.local.json"} {
 		path := filepath.Join(dir, ".claude", name)
-		if raw, err := os.ReadFile(path); err == nil {
+		if raw, err := os.ReadFile(path); err == nil { //nolint:gosec // path is operator config or derived from the state dir, never request input
 			c.checkout = append(c.checkout, claudeSource{name: path, raw: raw})
 		} else if !os.IsNotExist(err) {
 			c.unresolved = append(c.unresolved, fmt.Sprintf("%s (%v)", path, err))
@@ -466,7 +466,7 @@ var codexEventPattern = regexp.MustCompile(`route --registered-for codex --event
 
 func codexRegistration(path string) Finding {
 	f := Finding{Engine: vocab.Codex, Check: "hookyard registered", Detail: path}
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // path is operator config or derived from the state dir, never request input
 	if err != nil {
 		f.Status = Fail
 		f.Detail = fmt.Sprintf("%s: %v", path, err)
@@ -569,7 +569,7 @@ func competingWriter(stateDir, hooksPath string) Finding {
 		f.Detail = "no handlers in the table, so no foreign entry can double-register one"
 		return f
 	}
-	raw, err := os.ReadFile(hooksPath)
+	raw, err := os.ReadFile(hooksPath) //nolint:gosec // path is operator config or derived from the state dir, never request input
 	if err != nil {
 		f.Status = Unknown
 		f.Detail = fmt.Sprintf("cannot read %s: %v", hooksPath, err)
@@ -906,7 +906,7 @@ func piDoubleFire(stateDir, settingsPath string) Finding {
 func piBridgeDrift(stateDir, bridgePath string) Finding {
 	f := Finding{Engine: vocab.Pi, Check: "bridge matches handler table", Detail: bridgePath}
 
-	raw, err := os.ReadFile(bridgePath)
+	raw, err := os.ReadFile(bridgePath) //nolint:gosec // path is operator config or derived from the state dir, never request input
 	if err != nil {
 		if os.IsNotExist(err) {
 			// danglingExtensions/registration() above already report a
@@ -1017,7 +1017,7 @@ func piBridgeDrift(stateDir, bridgePath string) Finding {
 func piBridgeExec(bridgePath string) Finding {
 	f := Finding{Engine: vocab.Pi, Check: "bridge invocation is executable", Detail: bridgePath}
 
-	raw, err := os.ReadFile(bridgePath)
+	raw, err := os.ReadFile(bridgePath) //nolint:gosec // path is operator config or derived from the state dir, never request input
 	if err != nil {
 		if os.IsNotExist(err) {
 			// danglingExtensions/registration() above already report a
@@ -1336,7 +1336,7 @@ func claudeLauncherSettings() ([]string, string) {
 
 func registration(engine vocab.Engine, path string) Finding {
 	f := Finding{Engine: engine, Check: "hookyard registered", Detail: path}
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // path is operator config or derived from the state dir, never request input
 	if err != nil {
 		f.Status = Fail
 		f.Detail = fmt.Sprintf("%s: %v", path, err)
@@ -1401,11 +1401,11 @@ type piBridgeShape struct {
 // Unknown, not Fail, the same absence-vs-unreadability split danglingExtensions
 // already draws for a missing extensions[] target.
 func recoverPiBridgeData(raw []byte) (piBridgeShape, bool) {
-	idx := bytes.Index(raw, []byte(piBridgeDataAnchor))
-	if idx == -1 {
+	_, after, ok := bytes.Cut(raw, []byte(piBridgeDataAnchor))
+	if !ok {
 		return piBridgeShape{}, false
 	}
-	line := raw[idx+len(piBridgeDataAnchor):]
+	line := after
 	if end := bytes.IndexByte(line, '\n'); end != -1 {
 		line = line[:end]
 	}
@@ -1423,7 +1423,7 @@ func recoverPiBridgeData(raw []byte) (piBridgeShape, bool) {
 // state-dir symlink fails at exec, before any hookyard code runs, so there is
 // nothing running to write a record for streamFindings to read.
 func routerPath(engine vocab.Engine, configPath string) Finding {
-	raw, err := os.ReadFile(configPath)
+	raw, err := os.ReadFile(configPath) //nolint:gosec // path is operator config or derived from the state dir, never request input
 	if err != nil {
 		return Finding{
 			Engine: engine,
@@ -1546,7 +1546,7 @@ func recoverStateDir(p Paths, claude claudeSources) []string {
 		filepath.Join(p.CodexHome, "config.toml"),
 		filepath.Join(p.CursorHome, "hooks.json"),
 	} {
-		raw, err := os.ReadFile(path)
+		raw, err := os.ReadFile(path) //nolint:gosec // path is operator config or derived from the state dir, never request input
 		if err != nil {
 			continue
 		}
@@ -1580,7 +1580,7 @@ func recoverStateDir(p Paths, claude claudeSources) []string {
 }
 
 func readJSON(path string, into any) error {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // path is operator config or derived from the state dir, never request input
 	if err != nil {
 		return err
 	}
@@ -1614,7 +1614,7 @@ func streamFindings(stateDir string, disagreement []string, now time.Time) []Fin
 	}
 
 	path := record.StreamPath(stateDir, now)
-	file, err := os.Open(path)
+	file, err := os.Open(path) //nolint:gosec // path is operator config or derived from the state dir, never request input
 	if os.IsNotExist(err) {
 		f.Status = Unknown
 		f.Detail = "no events recorded yet today"

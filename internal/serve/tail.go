@@ -156,7 +156,7 @@ func (t *Tailer) tick(ctx context.Context, c *tailCursor, out chan<- TailEvent) 
 	}
 
 	if c.file == nil {
-		file, err := os.Open(path)
+		file, err := os.Open(path) //nolint:gosec // path is operator config or derived from the state dir, never request input
 		if err != nil {
 			return true
 		}

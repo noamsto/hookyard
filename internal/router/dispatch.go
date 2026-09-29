@@ -36,7 +36,7 @@ func dispatch(h manifest.Handler, payload []byte) HandlerResult {
 	// exec.Command, never exec.CommandContext: the router's deadline must not be
 	// able to kill a handler the router has promised not to wait for. Wait is
 	// never called for the same reason.
-	cmd := exec.Command(h.Exec)
+	cmd := exec.Command(h.Exec) //nolint:gosec // exec is the handler the operator registered in the manifest, run by design
 	cmd.Stdin = stdin
 	// The load-bearing line. When an engine gives up on the router at its 5 s
 	// emitted timeout it signals the router's process group, and a child in that
@@ -85,21 +85,21 @@ func stageStdin(payload []byte) (*os.File, error) {
 	}
 	if _, err := f.Write(payload); err != nil {
 		_ = f.Close()
-		_ = os.Remove(f.Name())
+		_ = os.Remove(f.Name()) //nolint:gosec // path is the router's own CreateTemp file
 		return nil, err
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(f.Name())
+		_ = os.Remove(f.Name()) //nolint:gosec // path is the router's own CreateTemp file
 		return nil, err
 	}
 	// Reopening read-only is not ceremony: CreateTemp's handle sits at EOF after
 	// the write and fork/exec shares that file offset, so handing it to the child
 	// directly would deliver an immediate EOF and zero bytes. It also denies the
 	// child a writable handle on its own stdin.
-	stdin, err := os.Open(f.Name())
+	stdin, err := os.Open(f.Name()) //nolint:gosec // path is the router's own CreateTemp file
 	// Unlinking before Start leaves nothing on disk whether the child finishes,
 	// crashes, or is still running an hour later.
-	_ = os.Remove(f.Name())
+	_ = os.Remove(f.Name()) //nolint:gosec // path is the router's own CreateTemp file
 	if err != nil {
 		return nil, err
 	}

@@ -245,7 +245,7 @@ func TestDaysNewestFirst(t *testing.T) {
 func TestScanDayWindowedPaging(t *testing.T) {
 	stateDir := t.TempDir()
 	day := "2026-09-10"
-	var lines []string
+	lines := make([]string, 0, 30)
 	for i := range 30 {
 		lines = append(lines, recLine(t, record.Record{SessionID: fmt.Sprintf("s%02d", i)}))
 	}
@@ -263,7 +263,7 @@ func TestScanDayWindowedPaging(t *testing.T) {
 	sawWindowed := false
 	var prevEnd int64
 	end := int64(0)
-	for page := 0; page < 30; page++ {
+	for page := range 30 {
 		resp, err := ScanDay(stateDir, day, end, 100, Filter{})
 		if err != nil {
 			t.Fatalf("ScanDay page %d: %v", page, err)

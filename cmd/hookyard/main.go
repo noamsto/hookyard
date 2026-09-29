@@ -461,7 +461,7 @@ func renderClaudeOverlay(routerPath, stateDir, base string) ([]byte, error) {
 	}
 	var baseBytes []byte
 	if base != "" {
-		baseBytes, err = os.ReadFile(base)
+		baseBytes, err = os.ReadFile(base) //nolint:gosec // path is operator config or derived from the state dir, never request input
 		if err != nil {
 			return nil, err
 		}
@@ -610,7 +610,10 @@ func runDoctor(args []string) error {
 
 func stdoutIsTerminal() bool {
 	info, err := os.Stdout.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
 
 type doctorGroup struct {

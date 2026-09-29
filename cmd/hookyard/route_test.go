@@ -435,7 +435,7 @@ func codexAdvisoryPayload(t *testing.T, event string) string {
 	if err != nil {
 		t.Fatalf("read codex advisory hook log: %v", err)
 	}
-	for _, line := range strings.Split(string(raw), "\n") {
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		if strings.Contains(line, `"hook_event_name":"`+event+`"`) {
 			return line
 		}

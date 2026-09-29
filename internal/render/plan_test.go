@@ -85,6 +85,9 @@ func TestBuildPlanOmitsMatcherWhenAHandlerWatchesEveryTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(plan[vocab.Cursor]) == 0 {
+		t.Fatal("no cursor entries planned")
+	}
 	if got := plan[vocab.Cursor][0].Matcher; got != "" {
 		t.Errorf("want no matcher once a handler watches every tool, got %q", got)
 	}

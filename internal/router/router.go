@@ -165,12 +165,12 @@ collect:
 	// already computed a deny has produced one. Discarding it would be the
 	// permissive choice on a security path.
 	elapsed := time.Since(started)
-	for i := range outcomes {
+	for i, h := range handlers {
 		if filled[i] {
 			continue
 		}
 		outcomes[i] = HandlerResult{
-			ID:      handlers[i].ID,
+			ID:      h.ID,
 			Outcome: record.OutcomeTimeout,
 			Elapsed: elapsed,
 			Verdict: verdict.Abstain,

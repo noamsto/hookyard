@@ -105,7 +105,7 @@ func Load(path string) (*Manifest, error) {
 // time; LoadBuildTime cannot, because a build sandbox does not see every
 // exec a real activation would (see validateExecBuildTime).
 func loadAbsolute(path string, extra func(where string, h Handler) error) (*Manifest, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // path is operator config or derived from the state dir, never request input
 	if err != nil {
 		return nil, err
 	}
@@ -330,6 +330,8 @@ func validateCatalog(where string, h Handler) error {
 				return fmt.Errorf("%s: event %q is not a Pi event hookyard routes (want one of %s)",
 					where, event, strings.Join(vocab.PiCatalog, ", "))
 			}
+		case vocab.Codex, vocab.Cursor:
+			// No catalog to check against (see above).
 		}
 	}
 	return nil
@@ -533,7 +535,7 @@ func validateExecBuildTime(where string, h Handler) error {
 // check is left to the caller: loadStatic dedupes one file, not a caller's
 // whole --manifest list.
 func loadStatic(path string, form ExecForm) (*Manifest, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // path is operator config or derived from the state dir, never request input
 	if err != nil {
 		return nil, err
 	}
@@ -620,7 +622,7 @@ func ReadPluginTable(path string) ([]Handler, error) {
 }
 
 func readTable(path string, form ExecForm) ([]Handler, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // path is operator config or derived from the state dir, never request input
 	if err != nil {
 		return nil, err
 	}
