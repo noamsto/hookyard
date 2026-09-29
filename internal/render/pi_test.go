@@ -27,7 +27,7 @@ func TestPiBridgeTemplateMentionsEveryFixturePayloadKey(t *testing.T) {
 	}
 
 	for _, path := range matches {
-		raw, err := os.ReadFile(path) //nolint:gosec // test reads a path under t.TempDir
+		raw, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -316,7 +316,7 @@ func TestWritePiOnAnEmptyPlanStillStripsAStaleMarkerEvenWithNoNewEntries(t *test
 func TestWritePiOnAnEmptyPlanRemovesAnOrphanedBridgeEvenWithNoMarkerToStrip(t *testing.T) {
 	path := piSettings(t, `{"model":"kimi-k2"}`)
 	bridge := PiBridgePath(path)
-	if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(bridge, []byte("// orphaned by a crashed install\n"), 0o600); err != nil {
@@ -548,10 +548,9 @@ func TestWritePiBridgeMode(t *testing.T) {
 	t.Run("preserves an existing bridge's mode", func(t *testing.T) {
 		path := piSettings(t, "{}")
 		bridge := PiBridgePath(path)
-		if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+		if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		//nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 		if err := os.WriteFile(bridge, []byte("// stale\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}

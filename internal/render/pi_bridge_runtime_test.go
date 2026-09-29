@@ -174,7 +174,7 @@ func (r *piBridgeRun) router(t *testing.T, name, body string) string {
 // router path the scratch directory's own name could never produce.
 func (r *piBridgeRun) routerAt(t *testing.T, path, body string) string {
 	t.Helper()
-	if err := os.WriteFile(path, []byte("#!"+r.node+"\n"+body+"\n"), 0o700); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.WriteFile(path, []byte("#!"+r.node+"\n"+body+"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -192,7 +192,7 @@ func (r *piBridgeRun) capturingRouter(t *testing.T) (router, capturePath string)
 
 func piCapturedPayload(t *testing.T, capturePath string) map[string]json.RawMessage {
 	t.Helper()
-	raw, err := os.ReadFile(capturePath) //nolint:gosec // test reads a path under t.TempDir
+	raw, err := os.ReadFile(capturePath)
 	if err != nil {
 		t.Fatalf("the router recorded no payload: %v", err)
 	}
@@ -304,7 +304,7 @@ func (r *piBridgeRun) drive(t *testing.T, steps []piBridgeStep, argv ...string) 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, r.node, append([]string{"harness.mjs", scriptPath}, argv...)...) //nolint:gosec // test runs a binary or script it built itself
+	cmd := exec.CommandContext(ctx, r.node, append([]string{"harness.mjs", scriptPath}, argv...)...)
 	cmd.Dir = r.dir
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -1068,7 +1068,7 @@ func TestPiBridgeStripsSecretBearingFlagsFromArgv(t *testing.T) {
 	router, capturePath := run.capturingRouter(t)
 	run.install(t, EmittedTimeoutSeconds*1000, piEntry("tool_call", "", router))
 
-	const secret = "sk-probe-must-not-travel" //nolint:gosec // test fixture, not a credential
+	const secret = "sk-probe-must-not-travel"
 	assertPiAllows(t, run.fire(t, "tool_call", piToolCall("bash", nil),
 		"/probe/sessions/probe.jsonl",
 		"--api-key", secret, "--api-key="+secret,
@@ -1186,7 +1186,7 @@ func TestPiBridgeResolvesAgainstItsRootAndAppendsPluginRoot(t *testing.T) {
 
 	assertPiAllows(t, run.fire(t, "tool_call", piToolCall("bash", nil)))
 
-	raw, err := os.ReadFile(capturePath) //nolint:gosec // test reads a path under t.TempDir
+	raw, err := os.ReadFile(capturePath)
 	if err != nil {
 		t.Fatalf("the router never ran, so the relative bin did not resolve against the root: %v", err)
 	}
@@ -1249,7 +1249,7 @@ func piAwaitCommandCapture(t *testing.T, capturePath string) piCommandCapture {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		raw, err := os.ReadFile(capturePath) //nolint:gosec // test reads a path under t.TempDir
+		raw, err := os.ReadFile(capturePath)
 		if err == nil {
 			var captured piCommandCapture
 			if err := json.Unmarshal(raw, &captured); err != nil {
@@ -1388,7 +1388,7 @@ func TestPiBridgeStripsSecretBearingEnvVarsFromCommandSpawn(t *testing.T) {
 		Env map[string]*string `json:"env"`
 	}
 	for {
-		raw, err := os.ReadFile(capturePath) //nolint:gosec // test reads a path under t.TempDir
+		raw, err := os.ReadFile(capturePath)
 		if err == nil {
 			if jsonErr := json.Unmarshal(raw, &captured); jsonErr != nil {
 				t.Fatalf("the exec recorded %s, which is not a capture: %v", raw, jsonErr)
@@ -1475,7 +1475,7 @@ func (r *piBridgeRun) denyingCaptureRouter(t *testing.T, reason string) (router,
 
 func piCapturedPayloads(t *testing.T, capturePath string) []map[string]json.RawMessage {
 	t.Helper()
-	raw, err := os.ReadFile(capturePath) //nolint:gosec // test reads a path under t.TempDir
+	raw, err := os.ReadFile(capturePath)
 	if err != nil {
 		t.Fatalf("the router recorded no payload: %v", err)
 	}

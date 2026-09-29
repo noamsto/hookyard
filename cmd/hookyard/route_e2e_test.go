@@ -33,7 +33,7 @@ const e2eBudget = 10 * time.Second
 func buildRouteBinary(t *testing.T) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "hookyard")
-	cmd := exec.Command("go", "build", "-tags", "netgo", "-o", bin, ".") //nolint:gosec // test runs a binary or script it built itself
+	cmd := exec.Command("go", "build", "-tags", "netgo", "-o", bin, ".")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
@@ -49,7 +49,7 @@ func runRouteBinary(t *testing.T, bin string, env []string, stdin string, args .
 	ctx, cancel := context.WithTimeout(context.Background(), e2eBudget)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // test runs a binary or script it built itself
+	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Stdin = strings.NewReader(stdin)
 	cmd.Env = env
 	var out, stderr bytes.Buffer
@@ -81,7 +81,7 @@ func routeArgs(engine, event, stateDir string) []string {
 func e2eHandler(t *testing.T, dir, id, engine, event, body string) manifest.Handler {
 	t.Helper()
 	path := filepath.Join(dir, id)
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
 		t.Fatalf("write handler %s: %v", id, err)
 	}
 	return manifest.Handler{
@@ -116,7 +116,7 @@ func e2eAdvise(t *testing.T, dir, engine, event, advice string) manifest.Handler
 
 func readFixture(t *testing.T, name string) string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(e2eFixtureDir, name)) //nolint:gosec // test reads a path under t.TempDir
+	raw, err := os.ReadFile(filepath.Join(e2eFixtureDir, name))
 	if err != nil {
 		t.Fatalf("read fixture %s: %v", name, err)
 	}

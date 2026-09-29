@@ -27,12 +27,12 @@ const testRouterPath = "/nix/store/abc/bin/hookyard"
 func writeTestManifest(t *testing.T, dir string) string {
 	t.Helper()
 	exec := filepath.Join(dir, "guard.sh")
-	if err := os.WriteFile(exec, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.WriteFile(exec, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	body := `{"handlers":[{"id":"a","exec":"` + exec + `","events":["pre_tool"],"engines":["cursor"],"match":["Bash"]}]}`
 	path := filepath.Join(dir, "hookyard.json")
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -40,7 +40,7 @@ func writeTestManifest(t *testing.T, dir string) string {
 
 func readFile(t *testing.T, path string) string {
 	t.Helper()
-	raw, err := os.ReadFile(path) //nolint:gosec // test reads a path under t.TempDir
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestRunInstallLeavesTheTableBehindWhenAnEngineWriterFails(t *testing.T) {
 	stateDir := filepath.Join(dir, "state")
 	codex := filepath.Join(dir, "config.toml")
 	cursor := filepath.Join(dir, "cursor-target")
-	if err := os.Mkdir(cursor, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.Mkdir(cursor, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	pi := []string{filepath.Join(dir, "pi-settings.json")}
@@ -89,7 +89,7 @@ func TestRunInstallTightensAPreexistingStateDir(t *testing.T) {
 	dir := t.TempDir()
 	manifestPath := writeTestManifest(t, dir)
 	stateDir := filepath.Join(dir, "state")
-	if err := os.Mkdir(stateDir, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.Mkdir(stateDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	codex := filepath.Join(dir, "config.toml")
@@ -490,7 +490,7 @@ func TestRunInstallRefusesASymlinkedPiBridgeBeforeWritingAnything(t *testing.T) 
 	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
 	bridge := render.PiBridgePath(pi[0])
-	if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.MkdirAll(filepath.Dir(bridge), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	target := filepath.Join(dir, "managed-elsewhere.ts")
@@ -602,13 +602,13 @@ func TestRunInstallDryRunSucceedsAgainstASymlinkedDestination(t *testing.T) {
 func writeAllEnginesManifest(t *testing.T, dir string) string {
 	t.Helper()
 	exec := filepath.Join(dir, "guard.sh")
-	if err := os.WriteFile(exec, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.WriteFile(exec, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	body := `{"handlers":[{"id":"a","exec":"` + exec + `","events":["pre_tool"],` +
 		`"engines":["claude-code","codex","cursor","pi"],"match":["Bash"]}]}`
 	path := filepath.Join(dir, "hookyard.json")
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -633,13 +633,13 @@ func TestInstallAllowEmptyStripsHookyardRowsFromEveryConfig(t *testing.T) {
 	cursor := filepath.Join(dir, "hooks.json")
 	pi := []string{filepath.Join(dir, "pi-settings.json")}
 
-	if err := os.WriteFile(codex, []byte("[mcp_servers.context7]\ncommand = \"context7-mcp\"\n"), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.WriteFile(codex, []byte("[mcp_servers.context7]\ncommand = \"context7-mcp\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cursor, []byte(`{"version":1,"hooks":{"preToolUse":[{"command":"/usr/bin/foreign-cursor-hook"}]}}`), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.WriteFile(cursor, []byte(`{"version":1,"hooks":{"preToolUse":[{"command":"/usr/bin/foreign-cursor-hook"}]}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(pi[0], []byte(`{"extensions":["/usr/lib/foreign-pi-extension.ts"]}`), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.WriteFile(pi[0], []byte(`{"extensions":["/usr/lib/foreign-pi-extension.ts"]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -827,13 +827,12 @@ func TestInstallReceiptCompleteOnSuccess(t *testing.T) {
 func TestInstallReceiptIncompleteOnExecStat(t *testing.T) {
 	dir := t.TempDir()
 	exec := filepath.Join(dir, "guard.sh")
-	//nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
 	if err := os.WriteFile(exec, []byte("#!/bin/sh\n"), 0o644); err != nil { // not executable
 		t.Fatal(err)
 	}
 	body := `{"handlers":[{"id":"a","exec":"` + exec + `","events":["pre_tool"],"engines":["cursor"],"match":["Bash"]}]}`
 	manifestPath := filepath.Join(dir, "hookyard.json")
-	if err := os.WriteFile(manifestPath, []byte(body), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.WriteFile(manifestPath, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	stateDir := filepath.Join(dir, "state")
@@ -867,7 +866,7 @@ func TestInstallReceiptIncompleteAfterTableWrite(t *testing.T) {
 	manifestPath := writeAllEnginesManifest(t, dir)
 	stateDir := filepath.Join(dir, "state")
 	codex := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(codex, []byte("not = [valid toml\n"), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.WriteFile(codex, []byte("not = [valid toml\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cursor := filepath.Join(dir, "hooks.json")

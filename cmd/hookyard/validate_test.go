@@ -17,7 +17,7 @@ func writeValidateManifest(t *testing.T, id, exec string) string {
 	dir := t.TempDir()
 	body := `{"handlers":[{"id":"` + id + `","exec":"` + exec + `","events":["pre_tool"],"engines":["cursor"]}]}`
 	path := filepath.Join(dir, "hookyard.json")
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -42,7 +42,7 @@ func TestValidateBuildTimeRejectsMissingExecUnderAPresentStoreRoot(t *testing.T)
 	store := t.TempDir()
 	t.Setenv("NIX_STORE", store)
 	root := filepath.Join(store, "abc-jq")
-	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	exec := filepath.Join(root, "bin", "jq") // never created
@@ -71,7 +71,7 @@ func TestValidatePlainRejectsWhatBuildTimeWouldSkipOrCatch(t *testing.T) {
 	}
 
 	root := filepath.Join(store, "abc-jq")
-	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	presentRootExec := filepath.Join(root, "bin", "jq") // never created

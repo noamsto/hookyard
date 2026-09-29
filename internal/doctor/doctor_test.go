@@ -23,7 +23,7 @@ func TestCursorWorkspaceTrustFailureHasExactFix(t *testing.T) {
 	// LookPath must find cursor-agent for the trust check to reach its Fail
 	// arm, so point PATH at a stub rather than whatever the host has.
 	stub := filepath.Join(t.TempDir(), "cursor-agent")
-	if err := os.WriteFile(stub, nil, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.WriteFile(stub, nil, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", filepath.Dir(stub))

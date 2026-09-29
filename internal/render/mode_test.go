@@ -49,7 +49,7 @@ func TestWritersMode(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name+"/preserves an existing file's mode", func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config")
-			if err := os.WriteFile(path, []byte(tc.fixture), 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+			if err := os.WriteFile(path, []byte(tc.fixture), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			if err := tc.write(path); err != nil {

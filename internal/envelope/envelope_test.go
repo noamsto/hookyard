@@ -126,7 +126,7 @@ func TestDecodeEveryFixture(t *testing.T) {
 
 	for name, w := range tests {
 		t.Run(name, func(t *testing.T) {
-			f, err := os.Open(filepath.Join(fixtureDir, name)) //nolint:gosec // test reads a path under t.TempDir
+			f, err := os.Open(filepath.Join(fixtureDir, name))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -774,7 +774,7 @@ func TestReadPayloadRejectsOneByteOverCap(t *testing.T) {
 
 func decodeFixtureAs(t *testing.T, name string, engine vocab.Engine) *Envelope {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(fixtureDir, name)) //nolint:gosec // test reads a path under t.TempDir
+	raw, err := os.ReadFile(filepath.Join(fixtureDir, name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -787,7 +787,7 @@ func decodeFixtureAs(t *testing.T, name string, engine vocab.Engine) *Envelope {
 
 func decodeFixture(t *testing.T, name string) *Envelope {
 	t.Helper()
-	f, err := os.Open(filepath.Join(fixtureDir, name)) //nolint:gosec // test reads a path under t.TempDir
+	f, err := os.Open(filepath.Join(fixtureDir, name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -801,7 +801,7 @@ func decodeFixture(t *testing.T, name string) *Envelope {
 
 func readNative(t *testing.T, name string) map[string]json.RawMessage {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(fixtureDir, name)) //nolint:gosec // test reads a path under t.TempDir
+	raw, err := os.ReadFile(filepath.Join(fixtureDir, name))
 	if err != nil {
 		t.Fatal(err)
 	}

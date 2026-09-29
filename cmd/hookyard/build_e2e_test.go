@@ -88,7 +88,7 @@ func commandFor(t *testing.T, doc []byte, event, toolName string) string {
 func setupE2EPluginSources(t *testing.T) (out, manifestPath string) {
 	t.Helper()
 	out = filepath.Join(t.TempDir(), "plugin root")
-	if err := os.MkdirAll(out, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.MkdirAll(out, 0o755); err != nil {
 		t.Fatalf("mkdir plugin root: %v", err)
 	}
 	writeBuildFile(t, filepath.Join(out, "handlers", "deny"), e2eDenyHandlerScript, 0o755)
@@ -105,7 +105,7 @@ func runHookyardBuild(t *testing.T, bin, manifestPath, out string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), e2eBudget)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, "build", //nolint:gosec // test runs a binary or script it built itself
+	cmd := exec.CommandContext(ctx, bin, "build",
 		"--engine", "claude-code",
 		"--manifest", manifestPath,
 		"--out", out,
@@ -146,7 +146,7 @@ func runBuiltCommand(t *testing.T, command, agentCwd, pluginRoot, stateDir, stdi
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), e2eBudget)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // test runs a binary or script it built itself
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = agentCwd
 	cmd.Env = []string{
 		"CLAUDE_PLUGIN_ROOT=" + pluginRoot,
@@ -220,7 +220,7 @@ func TestBuildE2EThroughBuiltHooks(t *testing.T) {
 		assertStaticBinary(t, bundledBinaryPath(out))
 	})
 
-	doc, err := os.ReadFile(filepath.Join(out, "hooks", "hooks.json")) //nolint:gosec // test reads a path under t.TempDir
+	doc, err := os.ReadFile(filepath.Join(out, "hooks", "hooks.json"))
 	if err != nil {
 		t.Fatalf("read hooks.json: %v", err)
 	}
@@ -294,14 +294,14 @@ func TestBuildE2EThroughBuiltHooks(t *testing.T) {
 		addForeignPreToolUseHook(t, hooksPath)
 
 		runHookyardBuild(t, bin, manifestPath, out)
-		first, err := os.ReadFile(hooksPath) //nolint:gosec // test reads a path under t.TempDir
+		first, err := os.ReadFile(hooksPath)
 		if err != nil {
 			t.Fatalf("read hooks.json after rebuild: %v", err)
 		}
 		assertForeignHookKeptOnce(t, first)
 
 		runHookyardBuild(t, bin, manifestPath, out)
-		second, err := os.ReadFile(hooksPath) //nolint:gosec // test reads a path under t.TempDir
+		second, err := os.ReadFile(hooksPath)
 		if err != nil {
 			t.Fatalf("read hooks.json after second rebuild: %v", err)
 		}
@@ -317,7 +317,7 @@ func TestBuildE2EThroughBuiltHooks(t *testing.T) {
 // data inside hooks.json — this test never execs it.
 func addForeignPreToolUseHook(t *testing.T, hooksPath string) {
 	t.Helper()
-	raw, err := os.ReadFile(hooksPath) //nolint:gosec // test reads a path under t.TempDir
+	raw, err := os.ReadFile(hooksPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", hooksPath, err)
 	}
@@ -349,7 +349,7 @@ func addForeignPreToolUseHook(t *testing.T, hooksPath string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(hooksPath, newRoot, 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.WriteFile(hooksPath, newRoot, 0o644); err != nil {
 		t.Fatalf("write %s: %v", hooksPath, err)
 	}
 }
@@ -387,7 +387,7 @@ func assertForeignHookKeptOnce(t *testing.T, doc []byte) {
 func TestBuildE2EMissingHandlerStillDenies(t *testing.T) {
 	bin := buildRouteBinary(t)
 	out := filepath.Join(t.TempDir(), "plugin root")
-	if err := os.MkdirAll(out, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.MkdirAll(out, 0o755); err != nil {
 		t.Fatalf("mkdir plugin root: %v", err)
 	}
 	writeBuildFile(t, filepath.Join(out, "handlers", "deny"), e2eDenyHandlerScript, 0o755)
@@ -405,7 +405,7 @@ func TestBuildE2EMissingHandlerStillDenies(t *testing.T) {
 		t.Fatalf("remove %s: %v", goneScript, err)
 	}
 
-	doc, err := os.ReadFile(filepath.Join(out, "hooks", "hooks.json")) //nolint:gosec // test reads a path under t.TempDir
+	doc, err := os.ReadFile(filepath.Join(out, "hooks", "hooks.json"))
 	if err != nil {
 		t.Fatalf("read hooks.json: %v", err)
 	}

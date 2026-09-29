@@ -70,7 +70,7 @@ func TestAppendPermissionBitsRestrictiveUmask(t *testing.T) {
 func TestAppendTightensPreexistingDir(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "hookyard")
 	streamDir := filepath.Join(stateDir, "stream")
-	if err := os.MkdirAll(streamDir, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.MkdirAll(streamDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 
@@ -97,7 +97,7 @@ func TestAppendTightensPreexistingStreamFile(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(path, nil, 0o644); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -159,7 +159,7 @@ func TestConcurrentAppendsAcrossProcesses(t *testing.T) {
 	errs := make([]error, numProcs)
 	for i := range numProcs {
 		wg.Go(func() {
-			cmd := exec.Command(binary, "-test.run=^TestConcurrentAppendWorker$") //nolint:gosec // test re-execs its own test binary
+			cmd := exec.Command(binary, "-test.run=^TestConcurrentAppendWorker$")
 			cmd.Env = append(os.Environ(),
 				concurrentAppendWorkerEnv+"=1",
 				"HOOKYARD_STATE_DIR="+stateDir,
@@ -179,7 +179,7 @@ func TestConcurrentAppendsAcrossProcesses(t *testing.T) {
 	}
 
 	path := StreamPath(stateDir, time.Now())
-	f, err := os.Open(path) //nolint:gosec // test reads a path under t.TempDir
+	f, err := os.Open(path)
 	if err != nil {
 		t.Fatalf("open %s: %v", path, err)
 	}

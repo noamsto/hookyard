@@ -15,7 +15,7 @@ import (
 func withCodexOnPath(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "codex"), nil, 0o755); err != nil { //nolint:gosec // test fixture under t.TempDir; the mode is part of the scenario
+	if err := os.WriteFile(filepath.Join(dir, "codex"), nil, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
