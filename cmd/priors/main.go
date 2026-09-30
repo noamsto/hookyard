@@ -133,11 +133,13 @@ func resolveIdentity(cwd, engine, session string) (identity, error) {
 			engine = "claude"
 		}
 	}
+	// The engine's own id beats a caller-asserted one, which could name
+	// another session with a clean record and so launder gate 2.
+	if id := os.Getenv("CLAUDE_CODE_SESSION_ID"); claude && engine == "claude" && id != "" {
+		session = id
+	}
 	if session == "" {
 		session = os.Getenv("PRIORS_SESSION")
-	}
-	if session == "" && claude && engine == "claude" {
-		session = os.Getenv("CLAUDE_CODE_SESSION_ID")
 	}
 	host, _ := os.Hostname()
 	if host == "" {

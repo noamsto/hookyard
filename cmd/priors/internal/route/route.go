@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -63,7 +64,7 @@ func ParseURL(raw string) (host, owner, repo string, sshLike bool, err error) {
 		}
 		switch strings.ToLower(scheme) {
 		case "https", "http", "git":
-		case "ssh":
+		case "ssh", "git+ssh", "ssh+git":
 			sshLike = true
 		default:
 			return "", "", "", false, fmt.Errorf("unsupported remote scheme %q", scheme)
@@ -114,8 +115,17 @@ func (r remote) matches(entries []string) bool {
 // Resolve classifies the repo containing cwd (spec §6).
 func Resolve(ctx context.Context, cwd string, cfg config.Config, r Resolver) Session {
 	dir, err := gitOut(ctx, cwd, "rev-parse", "--show-toplevel")
-	if err != nil || dir == "" {
-		return Session{Class: ClassNoRepo}
+	if err != nil {
+		// Only git's own verdict means no repo: a repo git cannot read (broken
+		// config, safe.directory, timeout, no git) must not write as personal.
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && strings.Contains(string(exit.Stderr), "not a git repository") {
+			return Session{Class: ClassNoRepo}
+		}
+		return Session{Class: ClassUnresolvable}
+	}
+	if dir == "" {
+		return Session{Class: ClassUnresolvable}
 	}
 	sshHost := r.SSHHost
 	if sshHost == nil {
@@ -124,14 +134,19 @@ func Resolve(ctx context.Context, cwd string, cfg config.Config, r Resolver) Ses
 	resolved := map[string]string{}
 
 	remotes := map[string]remote{}
+	opaque := false
 	names, _ := gitOut(ctx, dir, "remote")
 	for name := range strings.FieldsSeq(names) {
 		raw, err := gitOut(ctx, dir, "remote", "get-url", name)
 		if err != nil {
+			opaque = true
 			continue
 		}
 		host, owner, repo, sshLike, err := ParseURL(raw)
 		if err != nil {
+			if !isLocalPath(raw) {
+				opaque = true
+			}
 			continue
 		}
 		rem := remote{hosts: []string{host}, owner: owner, repo: repo}
@@ -155,21 +170,35 @@ func Resolve(ctx context.Context, cwd string, cfg config.Config, r Resolver) Ses
 	} else {
 		s.Repo = repoName(commonDirName(ctx, dir))
 	}
+	all := slices.Collect(maps.Values(remotes))
 	switch {
-	case slices.ContainsFunc(slices.Collect(maps.Values(remotes)), func(rem remote) bool { return rem.matches(cfg.WorkOrgs) }):
+	case slices.ContainsFunc(all, func(rem remote) bool { return rem.matches(cfg.WorkOrgs) }):
 		s.Class = ClassWork
-	case !hasOrigin:
+	case !hasOrigin, opaque:
+		s.Class = ClassUnresolvable
+	case slices.ContainsFunc(all, func(rem remote) bool {
+		return !rem.matches(cfg.PersonalOrgs) && isWorkOwner(rem.owner, cfg.WorkOrgs)
+	}):
 		s.Class = ClassUnresolvable
 	case origin.matches(cfg.PersonalOrgs):
 		s.Class = ClassPersonal
-	case isWorkOwner(origin.owner, cfg.WorkOrgs):
-		s.Class = ClassUnresolvable
 	case cfg.Profile == "work":
 		s.Class = ClassUnresolvable
 	default:
 		s.Class = ClassPersonal
 	}
 	return s
+}
+
+// isLocalPath reports whether an unparsable remote URL is plainly a path on
+// this host, which says nothing about whose code the repo holds.
+func isLocalPath(raw string) bool {
+	for _, p := range []string{"/", "./", "../", "file://"} {
+		if strings.HasPrefix(raw, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func isWorkOwner(owner string, workOrgs []string) bool {
@@ -194,7 +223,10 @@ func commonDirName(ctx context.Context, dir string) string {
 func gitOut(ctx context.Context, dir string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...).Output() //nolint:gosec // fixed git subcommands; only the directory and a remote name vary
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...) //nolint:gosec // fixed git subcommands; only the directory and a remote name vary
+	// Resolve matches git's English "not a git repository".
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	out, err := cmd.Output()
 	return strings.TrimSpace(string(out)), err
 }
 

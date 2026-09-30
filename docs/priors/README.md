@@ -31,6 +31,10 @@ personal_orgs  = ["github.com/you"]
 # push         = false
 ```
 
+`work_orgs` is required on every host. `personal_store`, `work_store` and
+`state_dir` must be absolute once `~/` is expanded, and none may be the same
+as, or nested inside, another (the default state dir included).
+
 A session's store is picked from its repo's `origin` org (§4.2): a work-org
 repo reads both stores and writes work; any other repo reads the personal
 store only.

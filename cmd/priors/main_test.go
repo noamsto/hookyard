@@ -330,6 +330,44 @@ func TestAddParsesFrontmatterOnStdinAndFlagsOverride(t *testing.T) {
 	}
 }
 
+// TestAddClaudeSessionIDWins: inside Claude Code the engine's own session id
+// is gate 2's subject, so a caller cannot borrow another session's clean
+// record through --session or PRIORS_SESSION.
+func TestAddClaudeSessionIDWins(t *testing.T) {
+	for name, extra := range map[string]struct {
+		args []string
+		env  []string
+	}{
+		"--session":      {args: []string{"--session", "sess-1"}},
+		"PRIORS_SESSION": {env: []string{"PRIORS_SESSION=sess-1"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sb := newSandbox(t, "personal")
+			repo := sb.repo(personalRemote)
+			sb.record("sess-1")
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			args := append([]string{"add", "--name", "claude-fact", "--description", "d", "--type", "project", "--cwd", repo}, extra.args...)
+			cmd := sb.command(ctx, args...)
+			cmd.Env = append(cmd.Env, append([]string{"CLAUDECODE=1", "CLAUDE_CODE_SESSION_ID=engine-sess"}, extra.env...)...)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("priors add: %v", err)
+			}
+			path := filepath.Join(sb.state, "local", "personal", "demo", "claude-fact.md")
+			if want := "flagged personal " + path + ": provenance:no-tool-record\n"; string(out) != want {
+				t.Fatalf("stdout %q, want %q", out, want)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantContains(t, "fact file", string(raw), "session: engine-sess")
+		})
+	}
+}
+
 func TestAddFlagsUnknownSessionAndListFlaggedShowsReasons(t *testing.T) {
 	sb := newSandbox(t, "personal")
 	repo := sb.repo(personalRemote)
@@ -673,7 +711,7 @@ func TestLintDirWithKind(t *testing.T) {
 func writeStoreIndex(t *testing.T, sb *sandbox, dir string) {
 	t.Helper()
 	cfg := filepath.Join(t.TempDir(), "config.toml")
-	sb.writeFile(cfg, fmt.Sprintf("profile = \"personal\"\npersonal_store = %q\nstate_dir = %q\n", dir, filepath.Join(t.TempDir(), "state")))
+	sb.writeFile(cfg, fmt.Sprintf("profile = \"personal\"\npersonal_store = %q\nstate_dir = %q\nwork_orgs = [\"github.com/factify-inc\"]\n", dir, filepath.Join(t.TempDir(), "state")))
 	if res := sb.run("", "index", "--write", "--config", cfg); res.code != 0 {
 		t.Fatalf("index --write: %s", res.stderr)
 	}

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -64,7 +65,7 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 		return Result{}, err
 	}
 
-	if findings := lint.FactRules(store.Entry{Rel: f.Name + ".md", Fact: f}, d.Rules); len(findings) > 0 {
+	if findings := lint.FactRules(store.Entry{Rel: f.Name + ".md", Fact: f, Raw: data}, d.Rules); len(findings) > 0 {
 		return Result{}, refusal(findings)
 	}
 	ids, err := d.Scanner.ScanText(ctx, string(data))
@@ -96,7 +97,7 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 		if err != nil {
 			return Result{}, err
 		}
-		candidate := store.Entry{Root: checkout, Rel: filepath.ToSlash(rel), Fact: f}
+		candidate := store.Entry{Root: checkout, Rel: filepath.ToSlash(rel), Fact: f, Raw: data}
 		opts := lint.Options{Store: dest.Store, WorkOrgs: cfg.WorkOrgs, WorkNames: cfg.WorkNames, Rules: d.Rules}
 		if findings := lint.Candidate(ctx, checkout, candidate, opts); len(findings) > 0 {
 			return Result{}, refusal(findings)
@@ -104,7 +105,7 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 	}
 
 	flags := gate.Provenance(cfg.RecordDir(), req.SessionID, req.External)
-	flags = append(flags, gate.Content(f.Text())...)
+	flags = append(flags, gate.Content(string(data))...)
 	flags = append(flags, gate.Size(len(data))...)
 
 	res := Result{Store: dest.Store}
@@ -127,6 +128,9 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 		res.Path = root.PathFor(f, "")
 		res.Outcome = "published"
 	}
+	if err := confineDir(root.Path, filepath.Dir(res.Path)); err != nil {
+		return Result{}, err
+	}
 	if data, err = f.Marshal(); err != nil {
 		return Result{}, err
 	}
@@ -139,7 +143,7 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 	}
 
 	if res.Outcome == "published" && cfg.CommitEnabled() {
-		res.Warning = publish(ctx, cfg, root.Path, res.Path, f.Name)
+		res.Warning = publish(ctx, cfg, root.Path, f.Name)
 	}
 	return res, nil
 }
@@ -192,23 +196,65 @@ func checkDuplicate(cfg config.Config, dest route.Dest, name string) error {
 	return nil
 }
 
-// publish commits the fact and the index to dir when dir is itself a git
-// work tree's top level, and pushes when configured. It returns a warning, or
-// "" on success or when dir is not a repo of its own.
-func publish(ctx context.Context, cfg config.Config, dir, path, name string) string {
+// confineDir refuses a destination directory that a symlink could steer out
+// of root: a store commit can plant "repo -> ../elsewhere", and MkdirAll and
+// the write would follow it.
+func confineDir(root, dir string) error {
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || !filepath.IsLocal(rel) {
+		return fmt.Errorf("%s is not inside the store %s", dir, root)
+	}
+	existing := root
+	for seg := range strings.SplitSeq(rel, string(filepath.Separator)) {
+		p := filepath.Join(existing, seg)
+		info, err := os.Lstat(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to write through the symlink %s", p)
+		}
+		existing = p
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	resolved, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return err
+	}
+	if inside, err := filepath.Rel(resolvedRoot, resolved); err != nil || !filepath.IsLocal(inside) {
+		return fmt.Errorf("%s resolves outside the store %s", dir, root)
+	}
+	return nil
+}
+
+// publish commits the whole checkout when dir is itself a git work tree's top
+// level, and pushes when configured: MEMORY.md is regenerated from every fact
+// on disk, so committing less could leave HEAD's index naming a file HEAD
+// lacks. It returns a warning, or "" on success or when dir is not a repo.
+func publish(ctx context.Context, cfg config.Config, dir, name string) string {
 	top, err := runGit(ctx, dir, gitTimeout, "rev-parse", "--show-toplevel")
-	if err != nil || !sameDir(strings.TrimSpace(top), dir) {
+	if err != nil {
+		if strings.Contains(top, "not a git repository") {
+			return ""
+		}
+		return gitWarning("git rev-parse", top, err)
+	}
+	if !sameDir(strings.TrimSpace(top), dir) {
 		return ""
 	}
-	rel, err := filepath.Rel(dir, path)
-	if err != nil {
-		return "commit skipped: " + err.Error()
-	}
-	rel = filepath.ToSlash(rel)
-	if out, err := runGit(ctx, dir, gitTimeout, "add", "--", rel, store.IndexFile); err != nil {
+	if out, err := runGit(ctx, dir, gitTimeout, "add", "-A", "--", "."); err != nil {
 		return gitWarning("git add", out, err)
 	}
-	if out, err := runGit(ctx, dir, gitTimeout, "commit", "-q", "-m", "priors: add "+name, "--", rel, store.IndexFile); err != nil {
+	if out, err := runGit(ctx, dir, gitTimeout, "commit", "-q", "-m", "priors: add "+name); err != nil {
 		return gitWarning("git commit", out, err)
 	}
 	if cfg.Push {
@@ -229,7 +275,8 @@ func runGit(ctx context.Context, dir string, timeout time.Duration, args ...stri
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...) //nolint:gosec // dir is the configured store checkout; args are fixed git subcommands and store-relative paths
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	// publish matches git's English "not a git repository".
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

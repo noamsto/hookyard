@@ -60,6 +60,9 @@ func Load(path string) (Config, error) {
 	if c.WorkOrgs, err = normalizeOrgs("work_orgs", c.WorkOrgs); err != nil {
 		return Config{}, err
 	}
+	if len(c.WorkOrgs) == 0 {
+		return Config{}, fmt.Errorf("%s: work_orgs is required on every host", path)
+	}
 	if c.PersonalOrgs, err = normalizeOrgs("personal_orgs", c.PersonalOrgs); err != nil {
 		return Config{}, err
 	}
@@ -68,7 +71,46 @@ func Load(path string) (Config, error) {
 			return Config{}, err
 		}
 	}
+	if err := c.checkDirs(); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
 	return c, nil
+}
+
+// checkDirs requires absolute store and state paths and keeps them apart: a
+// store nested in another, or in the state dir, would publish one layer's
+// files through another's checkout.
+func (c Config) checkDirs() error {
+	type dir struct{ key, path string }
+	dirs := []dir{{"personal_store", c.PersonalStore}}
+	if c.WorkStore != "" {
+		dirs = append(dirs, dir{"work_store", c.WorkStore})
+	}
+	if c.StateDir != "" {
+		dirs = append(dirs, dir{"state_dir", c.StateDir})
+	}
+	for _, d := range dirs {
+		if !filepath.IsAbs(d.path) {
+			return fmt.Errorf("%s must be an absolute path, got %q", d.key, d.path)
+		}
+	}
+	if c.StateDir == "" {
+		dirs = append(dirs, dir{"the default state dir", c.State()})
+	}
+	for i, a := range dirs {
+		for _, b := range dirs[i+1:] {
+			if within(a.path, b.path) || within(b.path, a.path) {
+				return fmt.Errorf("%s (%s) and %s (%s) must not be the same or nested", a.key, a.path, b.key, b.path)
+			}
+		}
+	}
+	return nil
+}
+
+// within reports whether p is dir or lies under it.
+func within(p, dir string) bool {
+	rel, err := filepath.Rel(dir, p)
+	return err == nil && filepath.IsLocal(rel)
 }
 
 // State is where priors keeps its local layer, quarantine and locks.

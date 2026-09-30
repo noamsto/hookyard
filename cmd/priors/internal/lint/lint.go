@@ -76,17 +76,41 @@ func FactRules(e store.Entry, rules gate.Rules) []Finding {
 	if m.Scope != "repo" && m.Scope != "global" || m.Scope == "repo" && len(m.Repos) == 0 {
 		add("scope", "metadata.scope must be global, or repo with at least one repos entry")
 	}
-	if ids := rules.Match(f.Text()); len(ids) > 0 {
-		add("secret", "matches secret rule(s): "+strings.Join(ids, ", "))
+	text, err := fileText(e)
+	switch {
+	case err != nil:
+		add("secret", "fact cannot be serialised for the secret check")
+	default:
+		if ids := rules.Match(text); len(ids) > 0 {
+			add("secret", "matches secret rule(s): "+strings.Join(ids, ", "))
+		}
 	}
 	return out
+}
+
+// fileText is what the text rules read: the whole file, frontmatter
+// included, since an unknown key reaches every reader of the file too. An
+// entry not yet written is read as it would be written.
+func fileText(e store.Entry) (string, error) {
+	if len(e.Raw) > 0 {
+		return string(e.Raw), nil
+	}
+	b, err := e.Fact.Marshal()
+	return string(b), err
 }
 
 // Store checks every fact under root and the store as a whole.
 func Store(ctx context.Context, root store.Root, opts Options) []Finding {
 	entries, walkErrs := root.Walk()
 	var out []Finding
+	links := symlinks(root.Path)
+	for _, rel := range links {
+		out = append(out, Finding{File: rel, Rule: "outside-tree", Msg: "symlink in the store tree"})
+	}
 	for _, we := range walkErrs {
+		if slices.Contains(links, we.Rel) {
+			continue
+		}
 		if _, err := root.Confine(we.Rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			out = append(out, Finding{File: we.Rel, Rule: "outside-tree", Msg: "file resolves outside the store tree"})
 			continue
@@ -133,6 +157,28 @@ func Candidate(_ context.Context, root store.Root, e store.Entry, opts Options) 
 	}
 	out = append(out, c.refs(e)...)
 	sortFindings(out)
+	return out
+}
+
+// symlinks lists every symlink under dir but inside .git. Walk follows none
+// of them, so a symlinked directory would otherwise be invisible to lint while
+// a write through it lands outside the store.
+func symlinks(dir string) []string {
+	var out []string
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil //nolint:nilerr // Walk reports unreadable paths; this pass only looks for links
+		}
+		if d.IsDir() && d.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		if d.Type()&fs.ModeSymlink != 0 && path != dir {
+			if rel, err := filepath.Rel(dir, path); err == nil {
+				out = append(out, filepath.ToSlash(rel))
+			}
+		}
+		return nil
+	})
 	return out
 }
 
@@ -230,7 +276,9 @@ func (c checker) refs(e store.Entry) []Finding {
 		}
 	}
 	for _, repo := range f.Metadata.Repos {
-		if !fact.NameRE.MatchString(repo) || repo == c.creates {
+		// The local layer and the quarantine file by learned repo, so their
+		// directories say nothing about a repos entry.
+		if c.root.Kind != store.KindCheckout || !fact.NameRE.MatchString(repo) || repo == c.creates {
 			continue
 		}
 		if info, err := os.Stat(filepath.Join(c.root.Path, repo)); err != nil || !info.IsDir() {
@@ -250,9 +298,15 @@ func (c checker) refs(e store.Entry) []Finding {
 			}
 		}
 	}
-	for _, t := range c.workTerms {
-		if t.re.MatchString(f.Text()) {
-			add("work-name", "names configured work entry "+fmt.Sprintf("%q", t.label))
+	if len(c.workTerms) > 0 {
+		text, err := fileText(e)
+		if err != nil {
+			add("work-name", "fact cannot be serialised for the work-name check")
+		}
+		for _, t := range c.workTerms {
+			if err == nil && t.re.MatchString(text) {
+				add("work-name", "names configured work entry "+fmt.Sprintf("%q", t.label))
+			}
 		}
 	}
 	return out
@@ -277,10 +331,14 @@ func (c checker) gates(ctx context.Context, entries []store.Entry) []Finding {
 	if err != nil {
 		out = append(out, Finding{File: ".", Rule: "gate:secret-unavailable", Msg: err.Error()})
 	}
-	for _, e := range entries {
-		if ids := byFile[filepath.FromSlash(e.Rel)]; len(ids) > 0 {
-			out = append(out, Finding{File: e.Rel, Rule: "gate:secret", Msg: "scanner matched rule(s): " + strings.Join(ids, ", ")})
+	for file, ids := range byFile {
+		rel := filepath.ToSlash(file)
+		if rel == ".git" || strings.HasPrefix(rel, ".git/") {
+			continue
 		}
+		out = append(out, Finding{File: rel, Rule: "gate:secret", Msg: "scanner matched rule(s): " + strings.Join(ids, ", ")})
+	}
+	for _, e := range entries {
 		if e.Archived {
 			continue
 		}
@@ -305,7 +363,7 @@ func (c checker) scan(ctx context.Context) (map[string][]string, error) {
 // flagReasons are the gate-3 and gate-4 reasons e trips, in the form stored in
 // metadata.flags.
 func flagReasons(e store.Entry) []string {
-	return append(gate.Content(e.Fact.Text()), gate.Size(int(e.Size))...)
+	return append(gate.Content(string(e.Raw)), gate.Size(int(e.Size))...)
 }
 
 // MoveFlagged moves the checkout's facts that trip a content or size gate into

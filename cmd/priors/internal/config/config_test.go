@@ -93,6 +93,45 @@ func TestLoadRejects(t *testing.T) {
 	}
 }
 
+func TestLoadValidatesStoresAndOrgs(t *testing.T) {
+	home := isolate(t)
+	const orgs = "work_orgs = [\"github.com/w\"]\n"
+	accepted := map[string]string{
+		"minimal":                 "profile = \"personal\"\npersonal_store = \"/m/personal\"\n" + orgs,
+		"tilde paths":             "profile = \"work\"\npersonal_store = \"~/p\"\nwork_store = \"~/w\"\nstate_dir = \"~/s\"\n" + orgs,
+		"siblings share a prefix": "profile = \"work\"\npersonal_store = \"/m/store\"\nwork_store = \"/m/store-work\"\nstate_dir = \"/m/store-state\"\n" + orgs,
+	}
+	for name, body := range accepted {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(writeConfig(t, body)); err != nil {
+				t.Errorf("Load(%q): %v", body, err)
+			}
+		})
+	}
+	rejected := map[string]string{
+		"no personal store":               "profile = \"work\"\n" + orgs,
+		"relative personal store":         "profile = \"work\"\npersonal_store = \"memory/p\"\n" + orgs,
+		"relative work store":             "profile = \"work\"\npersonal_store = \"/m/p\"\nwork_store = \"memory/w\"\n" + orgs,
+		"relative state dir":              "profile = \"work\"\npersonal_store = \"/m/p\"\nstate_dir = \"state\"\n" + orgs,
+		"no work orgs":                    "profile = \"personal\"\npersonal_store = \"/m/p\"\n",
+		"empty work orgs":                 "profile = \"personal\"\npersonal_store = \"/m/p\"\nwork_orgs = []\n",
+		"stores equal":                    "profile = \"work\"\npersonal_store = \"/m/s\"\nwork_store = \"/m/s/\"\n" + orgs,
+		"work inside personal":            "profile = \"work\"\npersonal_store = \"/m/p\"\nwork_store = \"/m/p/w\"\n" + orgs,
+		"personal inside work":            "profile = \"work\"\npersonal_store = \"/m/w/p\"\nwork_store = \"/m/w\"\n" + orgs,
+		"state inside personal":           "profile = \"work\"\npersonal_store = \"/m/p\"\nstate_dir = \"/m/p/.state\"\n" + orgs,
+		"personal inside state":           "profile = \"work\"\npersonal_store = \"/m/s/p\"\nstate_dir = \"/m/s\"\n" + orgs,
+		"work inside state":               "profile = \"work\"\npersonal_store = \"/m/p\"\nwork_store = \"/m/s/w\"\nstate_dir = \"/m/s\"\n" + orgs,
+		"default state inside home store": "profile = \"work\"\npersonal_store = \"" + home + "\"\n" + orgs,
+	}
+	for name, body := range rejected {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(writeConfig(t, body)); err == nil {
+				t.Errorf("Load accepted %q", body)
+			}
+		})
+	}
+}
+
 func TestLoadNamesTheUnknownKey(t *testing.T) {
 	isolate(t)
 	_, err := Load(writeConfig(t, "profile = \"work\"\nwork_path = \"x\"\n"))

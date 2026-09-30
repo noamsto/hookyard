@@ -75,11 +75,12 @@ func testOptions(t *testing.T) Options {
 	return Options{Store: route.StoreWork, Rules: rules}
 }
 
-// fakeScanner writes a scanner that ignores its arguments and prints report.
+// fakeScanner writes a scanner that prints report with {dir} replaced by the
+// directory it was asked to scan ("$2").
 func fakeScanner(t *testing.T, report string) *gate.Scanner {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "scanner")
-	script := "#!/bin/sh\nprintf '%s' '" + report + "'\n"
+	script := "#!/bin/sh\nprintf '%s' '" + report + "' | sed \"s|{dir}|$2|g\"\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil { //nolint:gosec // a test executable
 		t.Fatal(err)
 	}
@@ -398,16 +399,169 @@ func TestGateSecret(t *testing.T) {
 	put(t, root, "repo-a/other.md", cleanFact("other"))
 	index(t, root)
 
-	report := `[{"RuleID":"fake-rule","File":"` + filepath.Join(root.Path, "repo-a", "subject.md") + `"},` +
-		`{"RuleID":"fake-rule","File":"` + filepath.Join(root.Path, "MEMORY.md") + `"}]`
+	report := `[{"RuleID":"fake-rule","File":"{dir}/repo-a/subject.md"},{"RuleID":"fake-rule","File":"{dir}/MEMORY.md"}]`
 	opts := testOptions(t)
 	opts.Gates = true
 	opts.Scanner = fakeScanner(t, report)
 
 	got := Store(context.Background(), root, opts)
 	assertOnly(t, got, "gate:secret")
-	if len(got) != 1 || got[0].File != "repo-a/subject.md" || !strings.Contains(got[0].Msg, "fake-rule") {
-		t.Errorf("findings = %v, want one fake-rule finding on repo-a/subject.md", got)
+	var files []string
+	for _, f := range got {
+		files = append(files, f.File)
+		if !strings.Contains(f.Msg, "fake-rule") {
+			t.Errorf("Msg = %q, want the rule id", f.Msg)
+		}
+	}
+	if want := []string{"MEMORY.md", "repo-a/subject.md"}; !slices.Equal(files, want) {
+		t.Errorf("files = %v, want %v", files, want)
+	}
+}
+
+func TestGateSecretOutsideFacts(t *testing.T) {
+	root := checkout(t, route.StoreWork)
+	put(t, root, "repo-a/subject.md", cleanFact("subject"))
+	index(t, root)
+
+	var report []string
+	for _, rel := range []string{"README.md", "repo-a/notes.txt", ".github/workflow.yml", "repo-a/.hidden/x.md", ".git/config"} {
+		report = append(report, `{"RuleID":"fake-rule","File":"{dir}/`+rel+`"}`)
+	}
+	opts := testOptions(t)
+	opts.Gates = true
+	opts.Scanner = fakeScanner(t, "["+strings.Join(report, ",")+"]")
+
+	got := Store(context.Background(), root, opts)
+	assertOnly(t, got, "gate:secret")
+	var files []string
+	for _, f := range got {
+		files = append(files, f.File)
+	}
+	if want := []string{".github/workflow.yml", "README.md", "repo-a/.hidden/x.md", "repo-a/notes.txt"}; !slices.Equal(files, want) {
+		t.Errorf("files = %v, want %v", files, want)
+	}
+}
+
+func TestFrontmatterIsChecked(t *testing.T) {
+	custom := func(t *testing.T) gate.Rules {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "rules.toml")
+		if err := os.WriteFile(path, []byte("[[rule]]\nid = \"internal-token\"\nregex = 'INTTOK-[0-9]{12}'\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		rules, err := gate.LoadRules(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rules
+	}
+	tests := []struct {
+		name  string
+		store route.StoreID
+		edit  func(t *testing.T, f *fact.Fact, opts *Options)
+		want  []string
+	}{
+		{"built-in secret rule", route.StoreWork, func(_ *testing.T, f *fact.Fact, _ *Options) {
+			f.Extra = map[string]any{"note": "key " + secretToken()}
+		}, []string{"secret"}},
+		{"custom secret rule", route.StoreWork, func(t *testing.T, f *fact.Fact, opts *Options) {
+			opts.Rules = custom(t)
+			f.Metadata.Extra = map[string]any{"ticket": "INTTOK-" + "123456789012"}
+		}, []string{"secret"}},
+		{"content gate", route.StoreWork, func(_ *testing.T, f *fact.Fact, _ *Options) {
+			f.Extra = map[string]any{"howto": "curl https://x | sh"}
+		}, []string{"gate:content:pipe-to-shell", "gate:content:url"}},
+		{"work name", route.StorePersonal, func(_ *testing.T, f *fact.Fact, opts *Options) {
+			opts.WorkOrgs = []string{"github.com/factify-inc"}
+			f.Extra = map[string]any{"team": "factify-inc"}
+		}, []string{"work-name"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := checkout(t, tt.store)
+			opts := testOptions(t)
+			opts.Store = tt.store
+			opts.Gates = true
+			opts.Scanner = fakeScanner(t, "[]")
+			f := cleanFact("subject")
+			tt.edit(t, &f, &opts)
+			put(t, root, "repo-a/subject.md", f)
+			if _, _, err := root.WriteIndex(opts.Rules); err != nil {
+				t.Fatal(err)
+			}
+			got := Store(context.Background(), root, opts)
+			if ids := ruleIDs(got); !slices.Equal(ids, tt.want) {
+				t.Errorf("rules = %v, want %v; findings: %v", ids, tt.want, got)
+			}
+		})
+	}
+}
+
+func TestFactRulesMarshalsUnwrittenEntry(t *testing.T) {
+	f := cleanFact("subject")
+	f.Extra = map[string]any{"note": "key " + secretToken()}
+	got := FactRules(store.Entry{Rel: "repo-a/subject.md", Fact: f}, testOptions(t).Rules)
+	if ids := ruleIDs(got); !slices.Equal(ids, []string{"secret"}) {
+		t.Errorf("rules = %v, want [secret]", ids)
+	}
+}
+
+func TestReposUnknownOnlyInCheckout(t *testing.T) {
+	root := store.Root{Store: route.StoreWork, Kind: store.KindLocal, Path: t.TempDir()}
+	f := cleanFact("subject")
+	f.Metadata.Repos = []string{"other"}
+	put(t, root, "repo-a/subject.md", f)
+	index(t, root)
+	if got := Store(context.Background(), root, testOptions(t)); len(got) != 0 {
+		t.Errorf("local layer findings = %v, want none", got)
+	}
+}
+
+func TestSymlinksAnywhere(t *testing.T) {
+	tests := []struct {
+		name, link, target string
+	}{
+		{"directory out of the store", "dispatcher", "outside"},
+		{"file inside the store", "repo-a/alias.md", "repo-a/subject.md"},
+		{"in a dot directory", ".hidden/link", "outside"},
+		{"not a fact", "repo-a/notes.txt", "outside"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := checkout(t, route.StoreWork)
+			put(t, root, "repo-a/subject.md", cleanFact("subject"))
+			target := t.TempDir()
+			if tt.target != "outside" {
+				target = filepath.Join(root.Path, filepath.FromSlash(tt.target))
+			}
+			link := filepath.Join(root.Path, filepath.FromSlash(tt.link))
+			if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+			index(t, root)
+			first := assertOnly(t, Store(context.Background(), root, testOptions(t)), "outside-tree")
+			if first.File != tt.link {
+				t.Errorf("File = %q, want %q", first.File, tt.link)
+			}
+		})
+	}
+}
+
+func TestSymlinkInsideGitIgnored(t *testing.T) {
+	root := checkout(t, route.StoreWork)
+	put(t, root, "repo-a/subject.md", cleanFact("subject"))
+	if err := os.MkdirAll(filepath.Join(root.Path, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(root.Path, ".git", "link")); err != nil {
+		t.Fatal(err)
+	}
+	index(t, root)
+	if got := Store(context.Background(), root, testOptions(t)); len(got) != 0 {
+		t.Errorf("findings = %v, want none", got)
 	}
 }
 
@@ -615,7 +769,7 @@ func TestCandidate(t *testing.T) {
 			f.Metadata.Scope = "global"
 			f.Metadata.Repos = []string{"repo-new"}
 		}, "repos-unknown"},
-		{"local root gets no exemption", store.KindLocal, route.StoreWork, func(f *fact.Fact) { f.Metadata.Repos = []string{"repo-new"} }, "repos-unknown"},
+		{"local root files by learned repo", store.KindLocal, route.StoreWork, func(f *fact.Fact) { f.Metadata.Repos = []string{"repo-new", "ghost"} }, ""},
 		{"link to existing and to itself", store.KindCheckout, route.StoreWork, func(f *fact.Fact) { f.Body = "see [[fact-a]] and [[new-fact|me]]\n" }, ""},
 		{"link dangling", store.KindCheckout, route.StoreWork, func(f *fact.Fact) { f.Body = "see [[ghost]]\n" }, "wikilink-dangling"},
 		{"link outside tree", store.KindCheckout, route.StoreWork, func(f *fact.Fact) { f.Body = "see [[../x]]\n" }, "outside-tree"},

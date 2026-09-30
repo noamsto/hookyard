@@ -25,6 +25,8 @@ func TestParseURL(t *testing.T) {
 		{raw: "git@gh-work:o/r", host: "gh-work", owner: "o", repo: "r", sshLike: true},
 		{raw: "gh-work:o/r.git", host: "gh-work", owner: "o", repo: "r", sshLike: true},
 		{raw: "git://example.org/o/r.git", host: "example.org", owner: "o", repo: "r"},
+		{raw: "git+ssh://git@github.com/o/r.git", host: "github.com", owner: "o", repo: "r", sshLike: true},
+		{raw: "ssh+git://git@gh-work/o/r", host: "gh-work", owner: "o", repo: "r", sshLike: true},
 		{raw: "https://gitlab.com/Group/Sub/Repo.git", host: "gitlab.com", owner: "group", repo: "repo"},
 		{raw: "file:///x", wantErr: true},
 		{raw: "/srv/git/o/r.git", wantErr: true},
@@ -142,6 +144,12 @@ func TestResolve(t *testing.T) {
 		{"work owner under unresolved alias", "personal", map[string]string{"origin": "git@gh-other:factify-inc/x"}, ClassUnresolvable, "x"},
 		{"neither list on work host", "work", map[string]string{"origin": "https://github.com/someone/x"}, ClassUnresolvable, "x"},
 		{"neither list on personal host", "personal", map[string]string{"origin": "https://github.com/someone/x"}, ClassPersonal, "x"},
+		{"upstream work over git+ssh", "personal", map[string]string{"origin": "git@github.com:noamsto/fork.git", "upstream": "git+ssh://git@github.com/factify-inc/z.git"}, ClassWork, "fork"},
+		{"upstream work owner under unresolved alias", "personal", map[string]string{"origin": "git@github.com:noamsto/fork.git", "upstream": "gh-other:factify-inc/z.git"}, ClassUnresolvable, "fork"},
+		{"upstream work owner under another host", "personal", map[string]string{"origin": "https://github.com/noamsto/fork", "upstream": "https://gitlab.com/factify-inc/z"}, ClassUnresolvable, "fork"},
+		{"upstream unparsable", "personal", map[string]string{"origin": "https://github.com/noamsto/fork", "upstream": "weird/relative/path"}, ClassUnresolvable, "fork"},
+		{"upstream local absolute path", "personal", map[string]string{"origin": "https://github.com/noamsto/fork", "upstream": "/some/local/path"}, ClassPersonal, "fork"},
+		{"upstream local relative and file paths", "personal", map[string]string{"origin": "https://github.com/noamsto/fork", "a": "./a", "b": "../b", "c": "file:///srv/c.git"}, ClassPersonal, "fork"},
 		{"origin repo name normalised", "personal", map[string]string{"origin": "https://github.com/noamsto/My_Repo.js.git"}, ClassPersonal, "my-repo-js"},
 	}
 	for _, tt := range tests {
@@ -174,6 +182,26 @@ func TestResolveNoRepo(t *testing.T) {
 	got := Resolve(t.Context(), t.TempDir(), workCfg("work"), stubResolver)
 	if want := (Session{Class: ClassNoRepo}); got != want {
 		t.Errorf("Resolve = %+v, want %+v", got, want)
+	}
+}
+
+func TestResolveBrokenRepoIsUnresolvable(t *testing.T) {
+	isolateGit(t)
+	dir := newRepo(t, "clone", map[string]string{"origin": "https://github.com/noamsto/x"})
+	cfgPath := filepath.Join(dir, ".git", "config")
+	f, err := os.OpenFile(cfgPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("[core\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got := Resolve(t.Context(), dir, workCfg("personal"), stubResolver)
+	if got.Class != ClassUnresolvable {
+		t.Errorf("Resolve = %+v, want class %q", got, ClassUnresolvable)
 	}
 }
 
