@@ -85,8 +85,12 @@ func put(t *testing.T, root store.Root, rel string, f fact.Fact) {
 
 func index(t *testing.T, roots ...store.Root) {
 	t.Helper()
+	rules, err := gate.LoadRules("")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, r := range roots {
-		if _, err := r.WriteIndex(); err != nil {
+		if _, _, err := r.WriteIndex(rules); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -203,6 +207,10 @@ func TestWorkSessionReadsWorkThenPersonal(t *testing.T) {
 func TestPersonalOnlySessions(t *testing.T) {
 	e := newEnv(t)
 	seedStores(t, e)
+	for _, dir := range []string{"repo-a", "_norepo", "mystery", "acme-app"} {
+		put(t, e.localWork, dir+"/w-local-"+strings.TrimPrefix(dir, "_")+".md", mk("w-local-"+strings.TrimPrefix(dir, "_"), "work local", "global"))
+	}
+	index(t, e.localWork)
 	personalProfile := e
 	personalProfile.cfg.Profile = "personal"
 
@@ -223,7 +231,7 @@ func TestPersonalOnlySessions(t *testing.T) {
 			if len(blocks) != 1 || !strings.Contains(blocks[0].header, "personal store") {
 				t.Fatalf("want exactly the personal block:\n%s", out)
 			}
-			for _, name := range []string{"w-global", "w-own", "work store"} {
+			for _, name := range []string{"w-global", "w-own", "w-local", "work store"} {
 				if strings.Contains(out, name) {
 					t.Errorf("output leaks %q:\n%s", name, out)
 				}
@@ -315,14 +323,33 @@ func TestLocalLayer(t *testing.T) {
 	}
 }
 
+// TestRedactionRuleExcludesFact indexes the fact clean and then plants the
+// token, since WriteIndex would keep a fact that already holds it out of the
+// index.
 func TestRedactionRuleExcludesFact(t *testing.T) {
-	e := newEnv(t)
 	token := "gh" + "p_" + strings.Repeat("Ab1", 12)
+	for _, where := range []string{"body", "frontmatter"} {
+		t.Run(where, func(t *testing.T) {
+			testRedactionExcludes(t, token, func(f *fact.Fact) {
+				if where == "body" {
+					f.Body = "value: " + token + "\n"
+				} else {
+					f.Metadata.OriginSessionID = token
+				}
+			})
+		})
+	}
+}
+
+func testRedactionExcludes(t *testing.T, token string, plant func(*fact.Fact)) {
+	t.Helper()
+	e := newEnv(t)
 	leaky := mk("leaky", "has a secret", "global")
-	leaky.Body = "value: " + token + "\n"
 	put(t, e.personal, "_global/leaky.md", leaky)
 	put(t, e.personal, "_global/clean.md", mk("clean", "no secret", "global"))
 	index(t, e.personal)
+	plant(&leaky)
+	put(t, e.personal, "_global/leaky.md", leaky)
 
 	out, reports := e.assemble(personalSession)
 	if strings.Contains(out, "leaky") || !strings.Contains(out, "[clean]") {

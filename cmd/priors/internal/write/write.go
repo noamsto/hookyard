@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/atomicfile"
@@ -82,7 +81,7 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 	if dest.Quarantine {
 		lockName = "quarantine"
 	}
-	unlock, err := lock(filepath.Join(cfg.State(), "locks", lockName+".lock"))
+	unlock, err := store.Lock(cfg, lockName)
 	if err != nil {
 		return Result{}, err
 	}
@@ -134,7 +133,7 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 	if err := atomicfile.Write(res.Path, data, 0o644); err != nil {
 		return Result{}, err
 	}
-	if _, err := root.WriteIndex(); err != nil {
+	if _, _, err := root.WriteIndex(d.Rules); err != nil {
 		_ = os.Remove(res.Path)
 		return Result{}, err
 	}
@@ -191,24 +190,6 @@ func checkDuplicate(cfg config.Config, dest route.Dest, name string) error {
 		}
 	}
 	return nil
-}
-
-// lock takes an exclusive flock on path. It serialises writers across
-// processes, so a duplicate-name check, the write, the index and the commit
-// see one consistent destination.
-func lock(path string) (func(), error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // the state dir is the user's own; 0755 matches the rest of it
-		return nil, err
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600) //nolint:gosec // path is built from the configured state dir and a fixed name
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil { //nolint:gosec // a file descriptor fits in an int
-		_ = f.Close()
-		return nil, fmt.Errorf("lock %s: %w", path, err)
-	}
-	return func() { _ = f.Close() }, nil
 }
 
 // publish commits the fact and the index to dir when dir is itself a git

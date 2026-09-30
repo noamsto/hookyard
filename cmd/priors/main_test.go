@@ -160,13 +160,18 @@ func (sb *sandbox) repo(remote string) string {
 	return dir
 }
 
+func (sb *sandbox) command(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, binPath, args...)
+	cmd.Env = sb.childEnv()
+	cmd.Dir = sb.dir
+	return cmd
+}
+
 func (sb *sandbox) run(stdin string, args ...string) result {
 	sb.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, binPath, args...)
-	cmd.Env = sb.childEnv()
-	cmd.Dir = sb.dir
+	cmd := sb.command(ctx, args...)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
@@ -877,4 +882,231 @@ func TestFailOpenMatrix(t *testing.T) {
 			}
 		}
 	})
+}
+
+func globalFact(name string) fact.Fact {
+	f := newFact(name, "", "project")
+	f.Metadata.Scope = "global"
+	f.Metadata.Repos = nil
+	return f
+}
+
+func TestSymlinkedFactNeverRead(t *testing.T) {
+	sb := newSandbox(t, "work")
+	repo := sb.repo(personalRemote)
+	target := sb.putFact(sb.work, "app/fact.md", globalFact("work-only-fact"))
+	sb.mkdir(filepath.Join(sb.personal, "_global"))
+	if err := os.Symlink(target, filepath.Join(sb.personal, "_global", "x.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	list := sb.run("", "list", "--cwd", repo)
+	wantExit(t, list, 0)
+	if strings.Contains(list.stdout, "work-only-fact") {
+		t.Errorf("list shows a work fact through a personal symlink:\n%s", list.stdout)
+	}
+	wantContains(t, "list stderr", list.stderr, "skipped personal/_global/x.md: ")
+
+	show := sb.run("", "show", "work-only-fact", "--cwd", repo)
+	wantExit(t, show, 1)
+	if strings.Contains(show.stdout, "work-only-fact") {
+		t.Errorf("show printed a work fact through a personal symlink:\n%s", show.stdout)
+	}
+
+	written := sb.run("", "index", "--write")
+	wantExit(t, written, 1)
+	wantContains(t, "index --write stderr", written.stderr, "skipped _global/x.md: ")
+	index, err := os.ReadFile(filepath.Join(sb.personal, "MEMORY.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(index), "work-only-fact") {
+		t.Errorf("personal MEMORY.md lists a work fact:\n%s", index)
+	}
+}
+
+func TestShowAppliesInsideStoreFilter(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.putFact(sb.personal, "elsewhere/other-repo-fact.md", newFact("other-repo-fact", "elsewhere", "project"))
+
+	res := sb.run("", "show", "other-repo-fact", "--cwd", repo)
+	wantExit(t, res, 1)
+	if res.stdout != "" {
+		t.Errorf("show printed another repo's fact:\n%s", res.stdout)
+	}
+}
+
+func TestReadCommandsMatchRulesOnRawBytes(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	token := "gh" + "p_" + strings.Repeat("a1", 18)
+	leaky := newFact("leaky-fact", "demo", "project")
+	leaky.Metadata.OriginSessionID = token
+	sb.putFact(sb.personal, "demo/leaky-fact.md", leaky)
+	sb.putFact(sb.personal, "demo/clean-fact.md", newFact("clean-fact", "demo", "project"))
+
+	show := sb.run("", "show", "leaky-fact", "--cwd", repo)
+	wantExit(t, show, 1)
+	if show.stdout != "" {
+		t.Errorf("show printed a fact holding a token:\n%s", show.stdout)
+	}
+	wantContains(t, "show stderr", show.stderr, "excluded personal/demo/leaky-fact.md: rule github-token")
+
+	list := sb.run("", "list", "--cwd", repo)
+	wantExit(t, list, 0)
+	wantContains(t, "list", list.stdout, "clean-fact")
+	if strings.Contains(list.stdout, "leaky-fact") {
+		t.Errorf("list shows a fact holding a token:\n%s", list.stdout)
+	}
+	wantContains(t, "list stderr", list.stderr, "excluded personal/demo/leaky-fact.md: rule github-token")
+
+	written := sb.run("", "index", "--write")
+	wantExit(t, written, 0)
+	wantContains(t, "index --write stderr", written.stderr, "excluded demo/leaky-fact.md: rule github-token")
+
+	for _, res := range []result{show, list, written} {
+		if strings.Contains(res.stdout+res.stderr, token) {
+			t.Errorf("output leaks the token:\n%s\n%s", res.stdout, res.stderr)
+		}
+	}
+}
+
+func TestListReportsProblems(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.writeFile(filepath.Join(sb.personal, "demo", "broken.md"), "no frontmatter\n")
+
+	res := sb.run("", "list", "--cwd", repo)
+	wantExit(t, res, 0)
+	wantContains(t, "list stderr", res.stderr, "skipped personal/demo/broken.md: ")
+
+	sb.personal = filepath.Join(sb.dir, "absent")
+	sb.writeConfig()
+	res = sb.run("", "list", "--cwd", repo)
+	wantExit(t, res, 0)
+	wantContains(t, "list stderr", res.stderr, sb.personal+" does not exist")
+
+	sb.writeConfig(`rules = "/nonexistent/rules.toml"`)
+	wantExit(t, sb.run("", "list", "--cwd", repo), 1)
+}
+
+func TestIndexWriteFailsOnBrokenFact(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	sb.putFact(sb.personal, "demo/good-fact.md", newFact("good-fact", "demo", "project"))
+	sb.writeFile(filepath.Join(sb.personal, "demo", "broken.md"), "no frontmatter\n")
+
+	res := sb.run("", "index", "--write")
+	wantExit(t, res, 1)
+	wantContains(t, "index --write stderr", res.stderr, "skipped demo/broken.md: ")
+	index, err := os.ReadFile(filepath.Join(sb.personal, "MEMORY.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantContains(t, "MEMORY.md", string(index), "[good-fact](demo/good-fact.md)")
+}
+
+// holdLock takes the flock a priors writer takes and returns its release.
+func holdLock(t *testing.T, path string) func() {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	return func() { _ = f.Close() }
+}
+
+// wantBlockedByLock runs priors while the named lock is held and checks it
+// only finishes once the lock is released.
+func wantBlockedByLock(t *testing.T, sb *sandbox, lock string, args ...string) result {
+	t.Helper()
+	release := holdLock(t, filepath.Join(sb.state, "locks", lock+".lock"))
+	defer release()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := sb.command(ctx, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		t.Fatalf("priors %v finished while the %s lock was held: %v\n%s", args, lock, err, stderr.String())
+	case <-time.After(500 * time.Millisecond):
+	}
+	release()
+	res := result{}
+	if err := <-done; err != nil {
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) {
+			t.Fatal(err)
+		}
+		res.code = exit.ExitCode()
+	}
+	res.stdout, res.stderr = stdout.String(), stderr.String()
+	return res
+}
+
+func TestIndexWriteTakesStoreLock(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	sb.putFact(sb.personal, "demo/a-fact.md", newFact("a-fact", "demo", "project"))
+
+	res := wantBlockedByLock(t, sb, "personal", "index", "--write")
+	wantExit(t, res, 0)
+	wantContains(t, "index --write", res.stdout, "wrote "+filepath.Join(sb.personal, "MEMORY.md"))
+}
+
+func TestIndexWriteTakesQuarantineLock(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	sb.putFact(filepath.Join(sb.state, "quarantine"), "app/q-fact.md", newFact("q-fact", "app", "project"))
+	sb.indexWrite()
+	sb.putFact(filepath.Join(sb.state, "quarantine"), "app/q2-fact.md", newFact("q2-fact", "app", "project"))
+
+	res := wantBlockedByLock(t, sb, "quarantine", "index", "--write")
+	wantExit(t, res, 0)
+	wantContains(t, "index --write", res.stdout, "wrote "+filepath.Join(sb.state, "quarantine", "MEMORY.md"))
+}
+
+func TestLintMoveFlaggedTakesStoreLock(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	flagged := newFact("linky-fact", "demo", "project")
+	flagged.Body = "see https://example.com/docs for details\n"
+	sb.putFact(sb.personal, "demo/linky-fact.md", flagged)
+	sb.indexWrite()
+
+	res := wantBlockedByLock(t, sb, "personal", "lint", "--move-flagged")
+	wantExit(t, res, 0)
+	wantContains(t, "lint --move-flagged", res.stdout, "moved demo/linky-fact.md")
+}
+
+func TestIndexWithCwdIgnoresOpenStdin(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.putFact(sb.personal, "demo/indexed-fact.md", newFact("indexed-fact", "demo", "project"))
+	sb.indexWrite()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = w.Close() }()
+	defer func() { _ = r.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := sb.command(ctx, "index", "--cwd", repo)
+	cmd.Stdin = r
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantContains(t, "index", additionalContext(t, string(out)), "[indexed-fact](demo/indexed-fact.md)")
 }

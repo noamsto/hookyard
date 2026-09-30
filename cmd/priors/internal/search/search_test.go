@@ -556,3 +556,49 @@ func TestRgCanceledContextIsAnError(t *testing.T) {
 		t.Errorf("err = %v, want context.Canceled", err)
 	}
 }
+
+func TestRedactionMatchesRawFileBytes(t *testing.T) {
+	needRg(t)
+	cfg := newConfig(t)
+	co := store.CheckoutRoot(cfg, route.StorePersonal)
+	leaky := newFact("leaky", "shared topic", "hookyard")
+	leaky.Metadata.OriginSessionID = "gh" + "p_" + strings.Repeat("a1", 18)
+	put(t, co, "hookyard/leaky.md", leaky)
+
+	hits, reports, err := Run(context.Background(), Rg{}, []store.Root{co}, personalSession("hookyard"),
+		Query{Terms: []string{"shared topic"}}, builtinRules(t))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 0 {
+		t.Errorf("hits = %v, want none: the token sits in the frontmatter", names(hits))
+	}
+	if want := []string{"excluded personal/hookyard/leaky.md: rule github-token"}; !slices.Equal(reports, want) {
+		t.Errorf("reports = %v, want %v", reports, want)
+	}
+}
+
+func TestRgUnreadableFileKeepsOtherMatches(t *testing.T) {
+	needRg(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root reads mode-000 files")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "hit.md"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	locked := filepath.Join(dir, "locked.md")
+	if err := os.WriteFile(locked, []byte("needle\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Rg{}.Candidates(context.Background(), []string{dir}, "needle")
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{filepath.Join(dir, "hit.md")}; !slices.Equal(got, want) {
+		t.Errorf("candidates = %v, want %v", got, want)
+	}
+}

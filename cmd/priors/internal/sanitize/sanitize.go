@@ -41,14 +41,20 @@ var confusables = map[rune]rune{
 	0x03b1: 'a', 0x03b2: 'b', 0x03b5: 'e', 0x03b9: 'i', 0x03ba: 'k',
 	0x03bd: 'v', 0x03bf: 'o', 0x03c1: 'p', 0x03c4: 't', 0x03c5: 'u',
 	0x03c7: 'x',
-	// Latin lookalikes that NFKC leaves alone
+	// Latin and IPA lookalikes that NFKC leaves alone
 	0x0131: 'i', 0x017f: 's',
+	0x0251: 'a', 0x0252: 'a', 0x0299: 'b', 0x1d04: 'c', 0x1d05: 'd',
+	0x1d07: 'e', 0x0261: 'g', 0x0262: 'g', 0x029c: 'h', 0x026a: 'i',
+	0x0269: 'i', 0x1d0a: 'j', 0x1d0b: 'k', 0x029f: 'l', 0x1d0d: 'm',
+	0x0274: 'n', 0x1d0f: 'o', 0x1d18: 'p', 0x0280: 'r', 0xa731: 's',
+	0x1d1b: 't', 0x1d1c: 'u', 0x1d20: 'v', 0x1d21: 'w', 0x028f: 'y',
+	0x1d22: 'z',
 }
 
 var beginLine = regexp.MustCompile(`^===== BEGIN (priors-[0-9a-f]{16}) =====$`)
 
 // Text is safe for multi-line output: NFKC-normalised, stripped of control,
-// bidi, zero-width and tag characters, and with fence and attribution
+// format and variation-selector characters, and with fence and attribution
 // imitations escaped line by line. Newlines and tabs are kept.
 func Text(s string) string {
 	s = strings.Map(keepRune, norm.NFKC.String(s))
@@ -132,18 +138,18 @@ func nonEmpty(lines []string) []string {
 	return out
 }
 
-// keepRune drops control, bidi, zero-width and tag characters.
+// keepRune drops control, format (bidi, zero-width, soft hyphen, invisible
+// operators, tags) and variation-selector characters.
 func keepRune(r rune) rune {
 	switch {
 	case r == '\n', r == '\t':
 		return r
 	case r < 0x20, r >= 0x7f && r <= 0x9f:
 		return -1
-	case r == 0x061c, r == 0x200e, r == 0x200f,
-		r >= 0x202a && r <= 0x202e,
-		r >= 0x2066 && r <= 0x2069,
-		r >= 0x200b && r <= 0x200d, r == 0x2060, r == 0xfeff,
-		r >= 0xe0000 && r <= 0xe007f:
+	case unicode.Is(unicode.Cf, r),
+		r >= 0xe0000 && r <= 0xe007f,
+		r >= 0xfe00 && r <= 0xfe0f,
+		r >= 0xe0100 && r <= 0xe01ef:
 		return -1
 	}
 	return r

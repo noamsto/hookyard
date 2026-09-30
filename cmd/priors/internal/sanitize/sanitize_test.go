@@ -221,3 +221,24 @@ func TestUnfenceRejects(t *testing.T) {
 		})
 	}
 }
+
+func TestTextEscapesLatinLookalikes(t *testing.T) {
+	tests := []string{
+		"[hookyard " + string(rune(0x0251)) + "dvisory]",
+		"[" + string(rune(0x029c)) + "ookyard advisory]",
+	}
+	for _, in := range tests {
+		if got := Text(in); got != "(quoted: hookyardadvisory)" {
+			t.Errorf("Text(%q) = %q, want (quoted: hookyardadvisory)", in, got)
+		}
+	}
+}
+
+func TestTextStripsFormatAndVariationSelectors(t *testing.T) {
+	for _, r := range []rune{0xfe0f, 0x00ad, 0x2062, 0x2061, 0x180e, 0xfff9, 0xfe00, 0xe0100} {
+		in := "a" + string(r) + "b"
+		if got := Text(in); got != "ab" {
+			t.Errorf("Text(%q) = %q, want %q", in, got, "ab")
+		}
+	}
+}

@@ -61,7 +61,7 @@ func putRaw(t *testing.T, root store.Root, rel string, b []byte) {
 
 func index(t *testing.T, root store.Root) {
 	t.Helper()
-	if _, err := root.WriteIndex(); err != nil {
+	if _, _, err := root.WriteIndex(testOptions(t).Rules); err != nil {
 		t.Fatal(err)
 	}
 }

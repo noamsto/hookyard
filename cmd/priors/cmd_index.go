@@ -6,11 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
@@ -53,7 +56,7 @@ func cmdIndex(args []string, s streams) int {
 	}
 	res := runHook(func(ctx context.Context) hookResult {
 		var input envelope
-		if isPiped(s.in) {
+		if *cwd == "" && isPiped(s.in) {
 			var err error
 			if input, err = readEnvelope(s.in); err != nil {
 				return hookResult{}
@@ -172,37 +175,75 @@ func readEnvelope(r io.Reader) (envelope, error) {
 	return input, nil
 }
 
+// indexGroup is the roots one lock covers.
+type indexGroup struct {
+	lock  string
+	roots []store.Root
+}
+
 // writeIndexes regenerates every index priors owns on this host. A local layer
-// or quarantine that does not exist yet has nothing to index.
+// or quarantine that does not exist yet has nothing to index. A fact the walk
+// had to skip fails the run, so a broken fact cannot silently drop out.
 func writeIndexes(cfgPath string, s streams) int {
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
 		s.errln("config:", err)
 		return 2
 	}
+	rules, err := gate.LoadRules(cfg.Rules)
+	if err != nil {
+		s.errln("refused: redaction rule set unavailable:", err)
+		return 1
+	}
 	ids := []route.StoreID{route.StorePersonal}
 	if cfg.WorkPresent() {
 		ids = append(ids, route.StoreWork)
 	}
-	var roots []store.Root
+	var groups []indexGroup
 	for _, id := range ids {
-		roots = append(roots, store.CheckoutRoot(cfg, id))
+		g := indexGroup{lock: string(id), roots: []store.Root{store.CheckoutRoot(cfg, id)}}
 		if local := store.LocalRoot(cfg, id); dirExists(local.Path) {
-			roots = append(roots, local)
+			g.roots = append(g.roots, local)
 		}
+		groups = append(groups, g)
 	}
 	if q := store.QuarantineRoot(cfg); dirExists(q.Path) {
-		roots = append(roots, q)
+		groups = append(groups, indexGroup{lock: "quarantine", roots: []store.Root{q}})
 	}
-	for _, root := range roots {
-		changed, err := root.WriteIndex()
+	code := 0
+	for _, g := range groups {
+		skipped, err := writeGroup(cfg, rules, g, s)
 		if err != nil {
-			s.errf("%s: %v\n", root.Path, err)
+			s.errln(err)
 			return 1
+		}
+		if skipped {
+			code = 1
+		}
+	}
+	return code
+}
+
+// writeGroup regenerates g's indexes under g's lock and reports whether the
+// walk skipped any file.
+func writeGroup(cfg config.Config, rules gate.Rules, g indexGroup, s streams) (skipped bool, err error) {
+	unlock, err := store.Lock(cfg, g.lock)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+	for _, root := range g.roots {
+		changed, reports, err := root.WriteIndex(rules)
+		for _, r := range reports {
+			s.errf("%s: %s\n", root.Path, r)
+			skipped = skipped || strings.HasPrefix(r, "skipped ")
+		}
+		if err != nil {
+			return skipped, fmt.Errorf("%s: %w", root.Path, err)
 		}
 		if changed {
 			s.outln("wrote", filepath.Join(root.Path, store.IndexFile))
 		}
 	}
-	return 0
+	return skipped, nil
 }

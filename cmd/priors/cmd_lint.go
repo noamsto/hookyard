@@ -77,7 +77,13 @@ func cmdLint(args []string, s streams) int {
 	for _, t := range targets {
 		opts := lint.Options{Store: t.id, WorkOrgs: workOrgs, WorkNames: workNames, Rules: rules, Scanner: scanner, Gates: true}
 		if *moveFlagged && t.hasLocal {
+			unlock, err := store.Lock(cfg, string(t.id))
+			if err != nil {
+				s.errln("move-flagged:", err)
+				return 1
+			}
 			moved, err := lint.MoveFlagged(ctx, t.checkout, t.local, opts)
+			unlock()
 			for _, rel := range moved {
 				s.outln("moved", rel)
 			}

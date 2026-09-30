@@ -3,7 +3,9 @@ package main
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"slices"
 	"strings"
@@ -59,6 +61,11 @@ func cmdList(args []string, s streams) int {
 		s.errln("config:", err)
 		return 2
 	}
+	rules, err := gate.LoadRules(cfg.Rules)
+	if err != nil {
+		s.errln("refused: redaction rule set unavailable:", err)
+		return 1
+	}
 	id, err := resolveIdentity(*cwd, "", "")
 	if err != nil {
 		s.errln(err)
@@ -73,11 +80,15 @@ func cmdList(args []string, s streams) int {
 		if *storeID != "" && string(root.Store) != *storeID || *flagged && root.Kind != store.KindLocal {
 			continue
 		}
-		for _, e := range visibleEntries(root, sess, wantRepo) {
+		for _, e := range visibleEntries(root, sess, wantRepo, s) {
 			f := e.Fact
 			if !*all && (e.Archived || f.Metadata.SupersededBy != "") ||
 				*typ != "" && f.Metadata.Type != *typ ||
 				*stale && !isStale(f, now) {
+				continue
+			}
+			if ids := rules.Match(string(e.Raw)); len(ids) > 0 {
+				s.errf("excluded %s/%s: rule %s\n", root.Store, e.Rel, strings.Join(ids, ","))
 				continue
 			}
 			rows = append(rows, listRow(e))
@@ -94,10 +105,26 @@ func readRoots(cfg config.Config, sess route.Session) []store.Root {
 	return store.ReadRoots(cfg, route.ReadStores(sess, cfg))
 }
 
+// walk is root.Walk with a missing checkout and every skipped file reported
+// on stderr.
+func walk(root store.Root, s streams) []store.Entry {
+	if root.Kind == store.KindCheckout {
+		if _, err := os.Stat(root.Path); errors.Is(err, fs.ErrNotExist) {
+			s.errf("%s store root %s does not exist\n", root.Store, root.Path)
+			return nil
+		}
+	}
+	entries, errs := root.Walk()
+	for _, we := range errs {
+		s.errf("skipped %s/%s: %v\n", root.Store, we.Rel, we.Err)
+	}
+	return entries
+}
+
 // visibleEntries are the root's facts the session may see: a checkout's that
 // apply to repo, a local layer's learned in the session's repo.
-func visibleEntries(root store.Root, sess route.Session, repo string) []store.Entry {
-	entries, _ := root.Walk()
+func visibleEntries(root store.Root, sess route.Session, repo string, s streams) []store.Entry {
+	entries := walk(root, s)
 	return slices.DeleteFunc(entries, func(e store.Entry) bool {
 		if root.Kind == store.KindLocal {
 			return !localApplies(e.Rel, sess)
@@ -150,39 +177,32 @@ func cmdShow(args []string, s streams) int {
 	}
 	sess := sessionAt(context.Background(), id.cwd, cfg)
 
-	e, found := findFact(readRoots(cfg, sess), sess, names[0])
+	e, found := findFact(readRoots(cfg, sess), sess, names[0], s)
 	if !found {
 		s.errf("no fact named %q\n", names[0])
 		return 1
 	}
-	label := string(e.Root.Store) + "/" + e.Rel
-	if ids := rules.Match(e.Fact.Text()); len(ids) > 0 {
-		s.errf("excluded %s: rule %s\n", label, strings.Join(ids, ","))
-		return 1
-	}
-	path, err := e.Root.Confine(e.Rel)
-	if err != nil {
-		s.errln(err)
-		return 1
-	}
-	raw, err := os.ReadFile(path) //nolint:gosec // confined to the store root above
-	if err != nil {
-		s.errln(err)
+	if ids := rules.Match(string(e.Raw)); len(ids) > 0 {
+		s.errf("excluded %s/%s: rule %s\n", e.Root.Store, e.Rel, strings.Join(ids, ","))
 		return 1
 	}
 	header := sanitize.Header(string(e.Root.Store) + " store · " + e.Rel)
-	s.outText(sanitize.Fence(header, sanitize.Text(string(raw)), sanitize.NewDelimiter()))
+	s.outText(sanitize.Fence(header, sanitize.Text(string(e.Raw)), sanitize.NewDelimiter()))
 	return 0
 }
 
-// findFact is the first fact called name, checkout before local layer within
-// each store, a live fact before an archived one.
-func findFact(roots []store.Root, sess route.Session, name string) (store.Entry, bool) {
+// findFact is the first fact called name the session may see, checkout before
+// local layer within each store, a live fact before an archived one.
+func findFact(roots []store.Root, sess route.Session, name string, s streams) (store.Entry, bool) {
 	for _, root := range roots {
 		var archived *store.Entry
-		entries, _ := root.Walk()
+		entries := walk(root, s)
 		for i, e := range entries {
-			if e.Fact.Name != name || root.Kind == store.KindLocal && !localApplies(e.Rel, sess) {
+			if e.Fact.Name != name {
+				continue
+			}
+			if root.Kind == store.KindLocal && !localApplies(e.Rel, sess) ||
+				root.Kind == store.KindCheckout && !checkoutApplies(e.Fact, sess.Repo) {
 				continue
 			}
 			if !e.Archived {

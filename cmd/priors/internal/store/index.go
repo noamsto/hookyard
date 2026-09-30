@@ -12,6 +12,7 @@ import (
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/atomicfile"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
+	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 	"github.com/noamsto/hookyard/cmd/priors/internal/sanitize"
 )
 
@@ -31,11 +32,12 @@ var (
 	indexLineRE = regexp.MustCompile(`^- \[([^\]]+)\]\(([^)]+)\) —(?: |$)`)
 )
 
-// IndexLines is the index body for entries: live facts, newest first, cut to
-// MaxIndexLines lines and MaxIndexBytes bytes. Lines are built from the
-// parsed fact rather than sanitized whole, because sanitizing is not
-// idempotent and would rewrite a name that merely resembles a fence token.
-func IndexLines(entries []Entry) []string {
+// IndexLines is the index body for entries: live facts, newest first, cut so
+// that the root's whole MEMORY.md, frame included, fits MaxIndexLines lines
+// and MaxIndexBytes bytes. Lines are built from the parsed fact rather than
+// sanitized whole, because sanitizing is not idempotent and would rewrite a
+// name that merely resembles a fence token.
+func (r Root) IndexLines(entries []Entry) []string {
 	live := make([]Entry, 0, len(entries))
 	for _, e := range entries {
 		if !e.Archived && e.Fact.Metadata.SupersededBy == "" && indexable(e.Fact.Name, e.Rel) {
@@ -52,11 +54,14 @@ func IndexLines(entries []Entry) []string {
 		return strings.Compare(a.Rel, b.Rel)
 	})
 
+	frame := r.indexFile("", sanitize.NewDelimiter())
+	maxLines := MaxIndexLines - strings.Count(frame, "\n")
+	maxBytes := MaxIndexBytes - len(frame)
 	var lines []string
 	size := 0
 	for _, e := range live {
 		line := indexLine(e)
-		if len(lines) == MaxIndexLines || size+len(line)+1 > MaxIndexBytes {
+		if len(lines) == maxLines || size+len(line)+1 > maxBytes {
 			break
 		}
 		lines = append(lines, line)
@@ -87,20 +92,39 @@ func ParseIndexLine(line string) (name, rel string, ok bool) {
 	return m[1], m[2], true
 }
 
+// Unredacted drops the entries whose file bytes match a redaction rule and
+// reports each one by path and rule id, never by its text.
+func Unredacted(entries []Entry, rules gate.Rules) (kept []Entry, reports []string) {
+	for _, e := range entries {
+		if ids := rules.Match(string(e.Raw)); len(ids) > 0 {
+			reports = append(reports, fmt.Sprintf("excluded %s: rule %s", e.Rel, strings.Join(ids, ",")))
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return kept, reports
+}
+
 // WriteIndex regenerates MEMORY.md and reports whether the file changed. An
 // index that already holds exactly the wanted lines is left untouched, so
-// regenerating is idempotent and does not dirty a git checkout.
-func (r Root) WriteIndex() (changed bool, err error) {
+// regenerating is idempotent and does not dirty a git checkout. The reports
+// name each file the walk skipped and each fact the rules kept out.
+func (r Root) WriteIndex(rules gate.Rules) (changed bool, reports []string, err error) {
 	if r.Path == "" {
-		return false, errors.New("store has no path")
+		return false, nil, errors.New("store has no path")
 	}
-	entries, _ := r.Walk()
-	lines := IndexLines(entries)
+	entries, errs := r.Walk()
+	for _, e := range errs {
+		reports = append(reports, fmt.Sprintf("skipped %s: %v", e.Rel, e.Err))
+	}
+	entries, excluded := Unredacted(entries, rules)
+	reports = append(reports, excluded...)
+	lines := r.IndexLines(entries)
 
 	path := filepath.Join(r.Path, IndexFile)
 	if b, err := os.ReadFile(path); err == nil { //nolint:gosec // path is the store's own MEMORY.md
 		if have, ok := sanitize.Unfence(string(b)); ok && slices.Equal(have, lines) {
-			return false, nil
+			return false, reports, nil
 		}
 	}
 
@@ -108,11 +132,14 @@ func (r Root) WriteIndex() (changed bool, err error) {
 	if len(lines) > 0 {
 		body = strings.Join(lines, "\n") + "\n"
 	}
-	content := indexMarker + sanitize.Fence(sanitize.Header(r.label()), body, sanitize.NewDelimiter())
-	if err := atomicfile.Write(path, []byte(content), 0o644); err != nil {
-		return false, err
+	if err := atomicfile.Write(path, []byte(r.indexFile(body, sanitize.NewDelimiter())), 0o644); err != nil {
+		return false, reports, err
 	}
-	return true, nil
+	return true, reports, nil
+}
+
+func (r Root) indexFile(body, delim string) string {
+	return indexMarker + sanitize.Fence(sanitize.Header(r.label()), body, delim)
 }
 
 func (r Root) label() string {

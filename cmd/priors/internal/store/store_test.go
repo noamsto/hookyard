@@ -120,13 +120,22 @@ func TestWalkSymlinks(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	writeFact(t, root, "repo/real.md", newFact("real", "d", ""))
+	if err := os.Symlink(filepath.Join(root.Path, "repo", "real.md"), filepath.Join(root.Path, "repo", "inside.md")); err != nil {
+		t.Fatal(err)
+	}
+
 	entries, errs := root.Walk()
 
-	if got, want := rels(entries), []string{"repo/linked.md"}; !slices.Equal(got, want) {
-		t.Errorf("entries = %v, want %v (symlinked file kept, symlinked dir not followed)", got, want)
+	if got, want := rels(entries), []string{"repo/real.md"}; !slices.Equal(got, want) {
+		t.Errorf("entries = %v, want %v (no symlinked file or dir followed)", got, want)
 	}
-	if len(errs) != 0 {
-		t.Errorf("errs = %+v", errs)
+	var errRels []string
+	for _, e := range errs {
+		errRels = append(errRels, e.Rel)
+	}
+	if want := []string{"repo/inside.md", "repo/linked.md"}; !slices.Equal(errRels, want) {
+		t.Errorf("errs = %+v, want one per symlinked file %v", errs, want)
 	}
 }
 

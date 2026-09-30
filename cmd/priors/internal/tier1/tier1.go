@@ -112,15 +112,15 @@ func (a *assembler) rootLines(root store.Root, applies func(rel string, f fact.F
 		if !ok || seen[name] {
 			continue
 		}
-		f, ok := a.load(root, rel)
+		f, raw, ok := a.load(root, rel)
 		if !ok || f.Metadata.SupersededBy != "" || f.Name != name || !applies(rel, f) {
 			continue
 		}
-		if ids := a.rules.Match(f.Text()); len(ids) > 0 {
+		if ids := a.rules.Match(string(raw)); len(ids) > 0 {
 			a.reportf("excluded %s/%s: rule %s", root.Store, rel, strings.Join(ids, ","))
 			continue
 		}
-		rendered := store.IndexLines([]store.Entry{{Root: root, Rel: rel, Fact: f}})
+		rendered := root.IndexLines([]store.Entry{{Root: root, Rel: rel, Fact: f}})
 		if len(rendered) == 0 {
 			continue
 		}
@@ -130,35 +130,35 @@ func (a *assembler) rootLines(root store.Root, applies func(rel string, f fact.F
 	return out
 }
 
-// load reads the fact an index line points at. Anything that is not a
-// regular file inside the root is skipped unopened: opening a FIFO would hang
-// session start.
-func (a *assembler) load(root store.Root, rel string) (fact.Fact, bool) {
+// load reads the fact an index line points at, and its raw bytes. Anything
+// that is not a regular file inside the root is skipped unopened: opening a
+// FIFO would hang session start.
+func (a *assembler) load(root store.Root, rel string) (fact.Fact, []byte, bool) {
 	abs, err := root.Confine(rel)
 	if err != nil {
 		a.reportf("skipped %s/%s: %v", root.Store, rel, err)
-		return fact.Fact{}, false
+		return fact.Fact{}, nil, false
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
 		a.reportf("skipped %s/%s: %v", root.Store, rel, err)
-		return fact.Fact{}, false
+		return fact.Fact{}, nil, false
 	}
 	if !info.Mode().IsRegular() {
 		a.reportf("skipped %s/%s: not a regular file", root.Store, rel)
-		return fact.Fact{}, false
+		return fact.Fact{}, nil, false
 	}
 	b, err := os.ReadFile(abs) //nolint:gosec // abs was confined to the store root above
 	if err != nil {
 		a.reportf("skipped %s/%s: %v", root.Store, rel, err)
-		return fact.Fact{}, false
+		return fact.Fact{}, nil, false
 	}
 	f, err := fact.Parse(b)
 	if err != nil {
 		a.reportf("skipped %s/%s: %v", root.Store, rel, err)
-		return fact.Fact{}, false
+		return fact.Fact{}, nil, false
 	}
-	return f, true
+	return f, b, true
 }
 
 func flag(line string, flagged bool) string {

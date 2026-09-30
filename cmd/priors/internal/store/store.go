@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
@@ -39,11 +40,13 @@ type Root struct {
 	Path  string
 }
 
-// Entry is one parsed fact file. Rel uses '/' separators.
+// Entry is one parsed fact file. Rel uses '/' separators; Raw is the file's
+// bytes as read.
 type Entry struct {
 	Root     Root
 	Rel      string
 	Fact     fact.Fact
+	Raw      []byte
 	Size     int64
 	Archived bool
 }
@@ -80,9 +83,9 @@ func ReadRoots(cfg config.Config, stores []route.StoreID) []Root {
 }
 
 // Walk parses every fact under the root, sorted by Rel. Root-level files and
-// dot directories are not facts, and a symlinked directory is not followed
-// (a symlinked file is listed; Confine is how a caller checks where it
-// leads). A missing root is an empty one.
+// dot directories are not facts. No symlink is followed: a symlinked or
+// otherwise non-regular fact file is a WalkErr. A missing root is an empty
+// one.
 func (r Root) Walk() ([]Entry, []WalkErr) {
 	if r.Path == "" {
 		return nil, nil
@@ -123,10 +126,10 @@ func (r Root) Walk() ([]Entry, []WalkErr) {
 	return entries, errs
 }
 
-// readEntry stats before reading so a FIFO posing as a fact cannot hang the
-// walk.
+// readEntry lstats before reading: a symlink could pull another store's fact
+// into this one, and a FIFO posing as a fact would hang the walk.
 func readEntry(r Root, path, rel string) (Entry, error) {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -142,7 +145,7 @@ func readEntry(r Root, path, rel string) (Entry, error) {
 		return Entry{}, err
 	}
 	top, _, _ := strings.Cut(rel, "/")
-	return Entry{Root: r, Rel: rel, Fact: f, Size: int64(len(b)), Archived: top == archiveDir}, nil
+	return Entry{Root: r, Rel: rel, Fact: f, Raw: b, Size: int64(len(b)), Archived: top == archiveDir}, nil
 }
 
 // FindByName is the first fact called name; a live one wins over an archived
@@ -213,4 +216,24 @@ func (r Root) PathFor(f fact.Fact, learnedRepo string) string {
 		dir = f.Metadata.Repos[0]
 	}
 	return filepath.Join(r.Path, dir, f.Name+".md")
+}
+
+// Lock takes the exclusive flock called name ("personal", "work" or
+// "quarantine") under the state dir. It serialises writers across processes,
+// so a duplicate-name check, the write, the index and the commit see one
+// consistent destination.
+func Lock(cfg config.Config, name string) (unlock func(), err error) {
+	path := filepath.Join(cfg.State(), "locks", name+".lock")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // the state dir is the user's own; 0755 matches the rest of it
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600) //nolint:gosec // path is built from the configured state dir and a fixed name
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil { //nolint:gosec // a file descriptor fits in an int
+		_ = f.Close()
+		return nil, fmt.Errorf("lock %s: %w", path, err)
+	}
+	return func() { _ = f.Close() }, nil
 }

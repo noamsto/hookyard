@@ -87,6 +87,10 @@ func Store(ctx context.Context, root store.Root, opts Options) []Finding {
 	entries, walkErrs := root.Walk()
 	var out []Finding
 	for _, we := range walkErrs {
+		if _, err := root.Confine(we.Rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			out = append(out, Finding{File: we.Rel, Rule: "outside-tree", Msg: "file resolves outside the store tree"})
+			continue
+		}
 		out = append(out, Finding{File: we.Rel, Rule: "parse", Msg: "not a readable fact file"})
 	}
 
@@ -210,11 +214,7 @@ func (c checker) entry(e store.Entry) []Finding {
 	if first, ok := c.names[e.Fact.Name]; ok && e.Fact.Name != "" && first != e.Rel {
 		out = append(out, Finding{File: e.Rel, Rule: "duplicate-name", Msg: "name is also used by " + first})
 	}
-	out = append(out, c.refs(e)...)
-	if _, err := c.root.Confine(e.Rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		out = append(out, Finding{File: e.Rel, Rule: "outside-tree", Msg: "file resolves outside the store tree"})
-	}
-	return out
+	return append(out, c.refs(e)...)
 }
 
 // refs checks what e's text and metadata point at: other facts, repo
@@ -259,7 +259,8 @@ func (c checker) refs(e store.Entry) []Finding {
 }
 
 func (c checker) index(entries []store.Entry) []Finding {
-	want := store.IndexLines(entries)
+	kept, _ := store.Unredacted(entries, c.opts.Rules)
+	want := c.root.IndexLines(kept)
 	have, err := c.root.ReadIndex()
 	switch {
 	case err != nil && len(want) > 0:
@@ -311,7 +312,7 @@ func flagReasons(e store.Entry) []string {
 // the local layer, flagged and proposed, and regenerates both indexes. It
 // returns the moved facts' paths in the checkout. A name already present in
 // local refuses the whole move so that nothing is half-moved.
-func MoveFlagged(ctx context.Context, root, local store.Root, _ Options) ([]string, error) {
+func MoveFlagged(ctx context.Context, root, local store.Root, opts Options) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -359,10 +360,10 @@ func MoveFlagged(ctx context.Context, root, local store.Root, _ Options) ([]stri
 		}
 		moved = append(moved, m.rel)
 	}
-	if _, err := root.WriteIndex(); err != nil {
+	if _, _, err := root.WriteIndex(opts.Rules); err != nil {
 		return moved, err
 	}
-	if _, err := local.WriteIndex(); err != nil {
+	if _, _, err := local.WriteIndex(opts.Rules); err != nil {
 		return moved, err
 	}
 	return moved, nil

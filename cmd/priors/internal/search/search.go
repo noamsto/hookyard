@@ -57,11 +57,15 @@ func (r Rg) Candidates(ctx context.Context, roots []string, term string) ([]stri
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, ctxErr
 	}
-	if err != nil {
-		var exit *exec.ExitError
-		if errors.As(err, &exit) && exit.ExitCode() == 1 {
-			return nil, nil
-		}
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+	case errors.As(err, &exit) && exit.ExitCode() == 1:
+		return nil, nil
+	// rg exits 2 when any file was unreadable, even though the paths it
+	// printed did match.
+	case errors.As(err, &exit) && exit.ExitCode() == 2 && len(out) > 0:
+	default:
 		return nil, fmt.Errorf("rg: %w", err)
 	}
 	var paths []string
@@ -128,7 +132,7 @@ func Run(ctx context.Context, b Backend, roots []store.Root, s route.Session, q 
 			if !ok || !visible(e, s, q, terms) {
 				continue
 			}
-			if ids := rules.Match(e.Fact.Text()); len(ids) > 0 {
+			if ids := rules.Match(string(e.Raw)); len(ids) > 0 {
 				reports = append(reports, fmt.Sprintf("excluded %s/%s: rule %s", root.Store, e.Rel, strings.Join(ids, ",")))
 				continue
 			}
@@ -189,6 +193,7 @@ func load(root store.Root, path string) (e store.Entry, ok bool, report string) 
 		Root:     root,
 		Rel:      rel,
 		Fact:     f,
+		Raw:      data,
 		Size:     int64(len(data)),
 		Archived: strings.HasPrefix(rel, archivePrefix),
 	}, true, ""
