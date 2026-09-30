@@ -80,6 +80,7 @@ call, so the index has to be curated rather than open-upload.
 
 The cross-engine memory layer ([memory-layer.md](design/memory-layer.md)) is a
 consumer of hookyard's advisory contract. It is not a feature of the router.
-It ships as its own binary with its own manifest once its open trust and
-secrets decisions are made. §11 of that document covers what that means for
-hookyard.
+It starts inside this repo as a separate binary on the same `exec` handler
+contract any third-party hook uses, and moves to its own repo if it grows. The
+secrets and work/personal questions are decided; its trust model is the
+remaining decision before it is built.

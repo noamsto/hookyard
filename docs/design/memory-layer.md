@@ -12,9 +12,10 @@ That stays until the trust model (§4.4) is decided.
   secrets and work/personal boundary (§4.8), settled by decision 1 plus
   write-time redaction.
 - *Pending.* Decision 5, `recall`, awaiting the hands-on evaluation in #124.
-- *Proposed, needs owner sign-off.* Tier 2 moves out of v0, behind §7's recall
-  A/B (§4.4).
-- *Open, the last blocker.* The trust model — three options in §4.4.
+- *Proposed, needs owner sign-off.* Decision 7: tier 2 moves out of v0, behind
+  §7's recall A/B (§4.4).
+- *Open, the last blocker.* Decision 6, the trust model — three options in
+  §4.4.
 
 **Scope:** a memory store shared by Claude Code, Codex, Cursor and Pi, delivered
 through hookyard's existing advisory contract, fed by the crew bus and sessions.
@@ -1115,34 +1116,61 @@ hookyard gaps behind it (§4.7, §5).
 
 ---
 
-## 9. Open decisions
+## 9. Decisions
 
-These block implementation and are the author's calls, not the design's:
+Decided by the owner on 2026-09-30 unless marked. Decision 6 is the one that
+blocks implementation: the status line's "do not implement" stays until it is
+made.
 
-1. **Store placement.** One global repo cloned everywhere (recommended: matches
-   the pointer-index shape and lets a fact be found from any cwd) versus
-   per-repo `.agents/memory/` (matches Claude's existing per-repo scoping, but
-   loses every cross-repo lesson).
-2. **Migrate or start fresh.** 52 topic files exist, 15 of them byte-identical
-   duplicates and six carrying a `type` outside §4.1's set. Migrating means adding
-   `scope`/`repos`/`verified` frontmatter to files Claude wrote.
-3. **Two writers, one corpus.** If Claude Code keeps writing to
-   `~/.claude/projects/<project>/memory/` while this store grows, the corpus
-   forks. The options are: symlink Claude's path at the store, stop Claude's
-   auto-memory, or accept the fork and consolidate at reap time. **This is the
-   one with a real cost either way** and it should be decided before any file
-   moves.
-4. **`priors` as its own repo, or a `hookyard priors` subcommand.** The design
-   argues for a separate binary (§5) — hookyard's thin router is a stated
-   property and the store has a different schema cadence — but a subcommand
-   would mean one binary installed machine-wide instead of two.
-5. **Whether to adopt `recall` at all (§2.3).** Three shapes: use it as-is for
-   session continuity and build §4 only for durable facts (recommended);
-   contribute a `pi`/`codex` adapter to it and skip §4 entirely — much cheaper,
-   but it does not close failure mode 2, because the dispatcher still never
-   learns from its own outcomes; or both. Note the collision if both ship: they
-   want the same `session_start` budget, so §4.4's tier 1 and recall's
-   `context.md` would compete for it, and the index should shrink or be dropped.
+1. **Store placement — decided: two stores, keyed by repo org** (§4.2). A
+   personal store on every host, a work store on work-profile hosts only; a
+   work-org session reads both, every other session personal only. This
+   replaces the earlier choice between one global repo cloned everywhere and
+   per-repo `.agents/memory/`: the global repo's cross-repo reach survives
+   inside each store, as its `_global/` directory and `scope: global`.
+2. **Migrate — decided, with dedup.** Re-counted on `tp-g5`, 2026-09-30: 451
+   topic files and 20 `MEMORY.md` indexes; 0 byte-identical duplicates; every
+   `type` inside §4.1's closed set (project 284, reference 94, feedback 67,
+   user 3) and 3 files with no `type`; by `name`, 2 cross-directory
+   near-duplicate pairs and 1 within one directory. The earlier "52 files, 15
+   byte-identical, six off-vocabulary" was taken on another host or date and
+   cannot be reproduced here. The corpus is per host, so byte-identical
+   duplicates appear when hosts' corpora merge — which is where the mechanical
+   dedup pays. Byte-identical files are removed mechanically; near-duplicates,
+   found without an embedder (§4.9), are proposed for a merge a human
+   approves. Migration runs per host and adds §4.1's fields to the files Claude
+   wrote, each file routed by §4.2 to its target store (206 to the work store)
+   — under option C, into that store's local layer until reviewed.
+3. **Native memories — decided: each engine keeps its own.** The importer
+   (§4.9) sweeps them into the canonical store at `crew reap`, or by hand with
+   `priors import`, and its double-injection rule keeps an engine from being
+   shown its own fact twice. This replaces the earlier three options — symlink
+   Claude's path at the store, stop Claude's auto memory, or accept the fork
+   and consolidate at reap time — by making the third mechanical: the fork is
+   accepted, and the import closes it.
+4. **Packaging — decided: a separate package and binary inside hookyard**
+   (§5): `cmd/priors` with its own manifest, on the `exec` handler contract,
+   importing no `internal/` package, so splitting it into its own repo is
+   moving files. This replaces the choice between its own repo and a
+   `hookyard priors` subcommand, and keeps memory out of the router (§5).
+5. **`recall` — pending** the hands-on evaluation in #124; no verdict here.
+   The shapes under evaluation, kept as context (§2.3): use it as-is for
+   session continuity and build §4 only for durable facts; contribute a
+   `pi`/`codex` adapter to it and skip §4 entirely — much cheaper, but it does
+   not close failure mode 2, because the dispatcher still never learns from
+   its own outcomes; or both. If both ship they want the same `session_start`
+   budget, so §4.4's tier 1 and recall's `context.md` would compete for it, and
+   the index would have to shrink or be dropped.
+6. **Trust model — open, the last blocker** (§4.4). Which facts are injected,
+   and the path a write takes before it reaches another host: A, fence and
+   inject everything; B, inject reviewed facts only; C, host-local until
+   reviewed. Recommended: **C**. It is the owner's call, and it decides what
+   `proposed` means for distillation (§4.3b), the importer (§4.9) and the
+   migration (decision 2).
+7. **Tier 2 — proposed, needs owner sign-off** (§4.4). Out of v0, behind §7's
+   recall A/B: v0 ships tiers 1 and 3, and tier 2 — with the hookyard gaps
+   behind it (§4.7, §5, workstream 7 below) — is built only if the A/B shows
+   its delta.
 
 ---
 
@@ -1150,98 +1178,26 @@ These block implementation and are the author's calls, not the design's:
 
 | # | workstream | repo | delivers |
 | --- | --- | --- | --- |
-| 1 | store layout, `priors` v0 (`add`/`list`/`search`/`lint`), git repo, index generation | `priors` | tier 1 + tier 3 on all four engines |
-| 2 | nix-config wiring: install, clone on every host, `AGENTS.md` include line | nix-config | reach without any hookyard change |
-| 3 | migrate or seed the corpus (decision 2/3) | — | content to actually retrieve |
-| 4 | hookyard: `prompt_submit` advisory slot + Pi bridge `input` reply + fixtures | hookyard | tier 2 on Claude and Pi (Codex already has tier 2 via #101) |
-| 5 | dispatcher: judge consults `priors`; `crew reap` distillation proposals | dispatcher | closes failure mode 2 |
-| 6 | optional: Obsidian as a viewer over the checkout; Bases table for the stale sweep | nix-config | §4.6 curation, if it earns it |
+| 0 | settle the trust model (§4.4, decision 6) — blocks every workstream below that writes a fact | — (the owner) | the path every write takes |
+| 1 | the two store repos; `priors` v0 (`add`/`list`/`show`/`search`/`lint`/`index`), write-time redaction (§4.3), §4.2's routing and read rule | hookyard (`cmd/priors`) | tier 1 + tier 3 on all four engines |
+| 2 | nix-config wiring: install, clone per §4.2, the work-org list on every host, `AGENTS.md` include line | nix-config | reach with no hookyard change |
+| 3 | importer v0 (Claude; Codex behind the schema pin, §4.9) and the per-host migration with dedup proposals (decision 2) | hookyard (`priors`) | content to actually retrieve |
+| 4 | usage log and promotion/demotion: `post_tool → priors touch`, `fire_and_forget` (§4.6) | hookyard (`priors`) | strengthening and forgetting |
+| 5 | dispatcher: `crew reap` runs the import, then distillation proposals; the judge consults `priors` | dispatcher | closes failure mode 2 |
+| 6 | Obsidian as a viewer, one vault per store; Bases table for the stale sweep (§4.8 step 1) | nix-config | §4.6 curation, if it earns it |
+| 7 | *gated:* hookyard `prompt_submit` advisory slot for Claude and Pi + Pi bridge `input` reply + fixtures — only if §7's A/B passes (decision 7) | hookyard | tier 2 on Claude and Pi (Codex already has the slot via #101) |
+| 8 | *later:* a command to drain the quarantine (§4.2); cross-host usage aggregation (§4.6); the `hookyard serve` memory view (§4.8 step 2) | hookyard (`priors`, `serve`) | — |
 
-Workstreams 1–3 are worth doing regardless of how the rest lands, and 4 is
-independent of 5.
-
----
-
-## 11. Product-direction review (2026-09-24)
-
-A review of this proposal against hookyard's roadmap ([roadmap.md](../roadmap.md)):
-public hook distribution, team mode and running without Nix. It adds nothing
-to §4's mechanics. It sharpens three open decisions and corrects one
-statement that is now stale.
-
-### 11.1 Keep memory out of the router
-
-§5 and decision 4 already lean toward a separate `priors` binary. This review
-makes that a firm recommendation. hookyard's pitch to a security team is a
-small, auditable router that sees every tool call. A memory store inside it
-would enlarge the thing that team must trust, and it would tie the router's
-release cadence to the store's schema. Keep the split §4.7 describes:
-`priors` is an `exec` handler with its own manifest. hookyard's only changes
-are the advisory slots listed there. That also makes `priors` the first
-major handler built on hookyard's public contract, which shows the contract
-is enough for someone else to build on.
-
-The router also makes memory safer. A `pre_tool` guard can check writes into
-the store, and the event record shows which memory was injected into which
-session. Both work only if memory stays a handler the router observes.
-
-### 11.2 The trust model (§4.4) is the gate for anything shared
-
-Injected memory reaches the model as instructions. On one machine, a bad fact
-misleads one person's sessions. Once the store is shared, whether through the
-§4.8 git sync across hosts or a team repo in hookyard's team mode, one bad or
-tampered fact is injected into every session, on every engine, for everyone
-who pulls. Shared memory is a prompt-injection channel with a fan-out.
-
-So the trust decision has to settle at least these before a store is shared
-beyond one person:
-
-- **Fencing.** Every injected block is attributed and framed as untrusted
-  reference data, the way §2.3 reads `recall` and the Pi bridge's
-  `[hookyard advisory]` prefix already do. §4.4 requires attribution. This
-  review asks for untrusted-data framing too.
-- **Provenance.** Each fact records who or what wrote it (which engine, which
-  session, which host). The index can then be filtered by author and a
-  compromised writer can be purged.
-- **A review gate on shared writes.** Agent-written facts land on one machine
-  unreviewed. A fact reaches a shared store only through a reviewed commit,
-  the same way the roadmap's team policy repo works. §4.3's write path should
-  say which path a fact takes.
-
-### 11.3 The secrets and work/personal boundary (§4.8) blocks team use
-
-A fact learned in a work repo must not surface in a personal session, and a
-fact containing a secret must not be written at all. That makes redaction at
-write time a requirement, not best-effort. Scope enforced at read time
-(`scope`/`repos`, §4.2) is the second line of defence, not the only one.
-hookyard's roadmap puts the same redaction requirement on `hookyard export`.
-One shared redaction rule set would serve both.
-
-### 11.4 Generalise before it is public
-
-The proposal is written around one fleet: `crew`, `dispatcher`,
-`ratings.jsonl`, named hosts. That is a strength as evidence and a barrier
-for an outside reader. Before the memory layer appears on hookyard's public
-roadmap as more than a pointer, it needs a general version: the store, the
-tiers and the advisory wiring, described for any single developer, with this
-fleet kept as the worked example. Workstreams 2 and 5 in §10 are specific to
-this fleet and stay that way.
-
-### 11.5 Stale in §4.7: Codex now has advisory slots
-
-§4.7's reach matrix says Codex's channel "exists upstream, hookyard denies it."
-Since #101, `internal/verdict/capability.go` gives Codex an advisory slot on
-`session_start` and `prompt_submit`, with the delivery probe in
-`fixtures/codex-advisory/`. Codex now has the tier 2 slot that Claude Code and
-Pi still lack. §4.7's "file-only" framing for Codex was already flagged as
-possibly wrong, and is now wrong. The first hookyard gap in §4.7 narrows to
-Claude Code and Pi.
-
-### 11.6 Order
-
-1. hookyard runs without Nix (roadmap stage 1). Without it, a memory layer
-   delivered through hookyard reaches only Nix users.
-2. Settle §4.4 (with 11.2) and §4.8 (with 11.3).
-3. `priors` v0 on one machine: §10 workstreams 1 and 3, then 4.
-4. Sharing, whether across hosts or across a team, only after the trust
-   model holds on one machine.
+**Order.** For anyone outside this fleet, hookyard running without Nix
+(roadmap stage 1) comes first: without it, a memory layer delivered through
+hookyard reaches only Nix users. Then workstream 0, because every workstream
+that writes a fact takes the path it chooses. Then `priors` v0 on one machine,
+workstreams 1–4; the recall A/B runs on that machine's migrated corpus and
+decides whether 7 is built at all. Reaching further — the stores cloned to
+more hosts, or a store shared with a team in hookyard's team mode — waits until
+the trust model holds on that one machine. And before the memory layer is more
+than a pointer on hookyard's public roadmap, it gets a general version: the
+store, the tiers and the advisory wiring described for any single developer,
+with this fleet kept as the worked example. Workstreams 2 and 5 are specific to
+this fleet and stay that way; outside it, `priors import` by hand stands in for
+`crew reap` (§4.9).
