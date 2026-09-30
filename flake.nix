@@ -60,6 +60,7 @@
           diagrams = import ./nix/checks/diagrams.nix {inherit pkgs;};
           pi-bridge = import ./nix/checks/pi_bridge.nix {inherit pkgs;};
           flow-bundle = import ./nix/checks/flow-bundle.nix {inherit pkgs;};
+          priors = config.packages.priors;
         };
 
         treefmt = {
@@ -92,7 +93,8 @@
           # (docs/design/memory-layer.md §5): built from this repo but not
           # router code, so it is its own package, not part of hookyard's.
           priors = let
-            runtimeDeps = [pkgs.git pkgs.ripgrep pkgs.betterleaks];
+            # ssh resolves host aliases when routing a repo to its store.
+            runtimeDeps = [pkgs.git pkgs.ripgrep pkgs.betterleaks pkgs.openssh];
           in
             pkgs.buildGoModule {
               pname = "priors";
@@ -101,7 +103,12 @@
               inherit vendorHash;
               subPackages = ["cmd/priors"];
               nativeBuildInputs = [pkgs.makeWrapper];
-              nativeCheckInputs = runtimeDeps ++ [pkgs.openssh];
+              nativeCheckInputs = runtimeDeps;
+              # subPackages alone would test only cmd/priors; the gates,
+              # routing and store live in its internal packages.
+              preCheck = ''
+                subPackages=cmd/priors/...
+              '';
               # A hook runs with the engine's PATH, not the user's shell's, so
               # the tools the gates and search shell out to travel with it.
               postInstall = ''

@@ -64,8 +64,10 @@ The flagging gates are provenance (the session fetched web or MCP content,
 or its tool calls are not in hookyard's event record), content (URLs,
 `curl | sh`, hook bypasses, shell commands, "always/never" aimed at tools,
 override phrasing) and a size cap of 8 KiB. Gate 2 learns the session from
-`--session`, else `PRIORS_SESSION`, else Claude Code's
-`CLAUDE_CODE_SESSION_ID`; with no session a fact is flagged.
+Claude Code's `CLAUDE_CODE_SESSION_ID`, else `--session`, else
+`PRIORS_SESSION`; with no session a fact is flagged. It sees tool names
+only: hookyard's event record carries no command text, so an issue or PR
+read through a shell (`gh issue view`, `curl`) does not flag the session.
 
 `list`, `show` and `search` fence what they print as reference data, with a
 delimiter drawn per call.
