@@ -11,8 +11,10 @@ That stays until the trust model (§4.4) is decided.
   and an importer for native memories (§4.9, §9), and packaging (§5). The
   secrets and work/personal boundary (§4.8), settled by decision 1 plus
   write-time redaction.
-- *Pending.* Decision 5, `recall`, awaiting the hands-on evaluation in #124,
-  whose outcome could still replace §4 (decision 5's second shape).
+- *Pending.* Decision 5, session continuity — originating issue #124, now
+  awaiting [PR #126](https://github.com/noamsto/hookyard/pull/126) and
+  [#127](https://github.com/noamsto/hookyard/issues/127). No option is chosen,
+  and the outcome could still replace §4 (decision 5's second shape).
 - *Proposed, needs owner sign-off.* Decision 7: tier 2 moves out of v0, behind
   §7's recall A/B (§4.4).
 - *Open, the last blocker.* Decision 6, the trust model — three options in
@@ -606,6 +608,14 @@ lowest priority upward.
 
 The 8 K total is the ceiling if tier 2 passes its gate (below); in v0 only
 tier 1 injects, so the ceiling there is tier 1's 4 K.
+
+**Per-source caps.** [PR #126](https://github.com/noamsto/hookyard/pull/126)
+measured one session-continuity digest at 8190 B, 9056 B with its fence: a
+digest alone can exceed the 8 K total. So tier 1 and the session-continuity
+tool (decision 5) each get their own cap inside the total, for example tier 1
+4 K plus the continuity tool 4 K, and a source over its cap is truncated inside
+its own fence rather than crowding out the other. This holds whichever tool
+[#127](https://github.com/noamsto/hookyard/issues/127) picks.
 
 Tier 1 is cheap and unconditional, and it is what makes the system work when
 everything else fails — a session with a broken retrieval backend still sees the
@@ -1261,9 +1271,9 @@ hookyard gaps behind it (§4.7, §5).
 - no Obsidian Sync, no vault-as-store;
 - no MCP server — explicitly, because a worker cannot see one;
 - no conversation-transcript digest. That is §2.3's territory, and `recall`
-  already does it for Claude Code and opencode at zero model tokens; the cheaper
-  move for the other two engines is an adapter on its `--harness` seam, not a
-  second implementation here.
+  already does it for Claude Code and opencode at zero model tokens; whether
+  the other engines get it by an adapter or by another tool is decision 5,
+  still open, and either way it is not a second implementation here.
 
 ---
 
@@ -1305,14 +1315,19 @@ made.
    importing no `internal/` package, so splitting it into its own repo is
    moving files. This replaces the choice between its own repo and a
    `hookyard priors` subcommand, and keeps memory out of the router (§5).
-5. **`recall` — pending** the hands-on evaluation in #124; no verdict here.
-   The shapes under evaluation, kept as context (§2.3): use it as-is for
-   session continuity and build §4 only for durable facts; contribute a
-   `pi`/`codex` adapter to it and skip §4 entirely — much cheaper, but it does
-   not close failure mode 2, because the dispatcher still never learns from
-   its own outcomes; or both. If both ship they want the same `session_start`
-   budget, so §4.4's tier 1 and recall's `context.md` would compete for it, and
-   the index would have to shrink or be dropped.
+5. **Session continuity — pending; no option is chosen.** Evaluated in
+   [PR #126](https://github.com/noamsto/hookyard/pull/126), whose
+   recommendation, "adopt and contribute adapters", the owner has not
+   accepted, and being re-compared against alternatives in
+   [#127](https://github.com/noamsto/hookyard/issues/127), which will revise
+   that verdict. This document does not commit to `recall` or any other tool.
+   What the choice decides (§2.3): whether session continuity ("where were
+   we?") comes from an existing tool while §4 covers only durable facts, or
+   whether §4 is skipped in favour of adapters on the tool — much cheaper, but
+   it does not close failure mode 2, because the dispatcher still never learns
+   from its own outcomes; or both. Whichever tool wins shares the
+   `session_start` budget with tier 1, so §4.4's per-source caps apply and the
+   index may have to shrink or be dropped.
 6. **Trust model — open, the last blocker** (§4.4). Which facts are injected,
    and the path a write takes before it reaches another host: A, fence and
    inject everything; B, inject reviewed facts only; C, host-local until

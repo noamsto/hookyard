@@ -82,5 +82,5 @@ consumer of hookyard's advisory contract. It is not a feature of the router.
 It starts inside this repo as a separate binary on the same `exec` handler
 contract any third-party hook uses, and moves to its own repo if it grows. The
 secrets and work/personal questions are decided; its trust model is the
-remaining decision before it is built, and the evaluation of `recall` in #124
-could still replace the design with an adapter to that tool.
+remaining decision before it is built, and the session-continuity choice in
+#126/#127 is still open and could change the design.
