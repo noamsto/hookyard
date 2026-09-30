@@ -493,7 +493,7 @@ Three writers, one corpus in two stores. None is "every turn".
 operations, not a new tool surface:
 
 ```
-priors add  --type lesson --scope repo --repo dispatcher --stdin
+priors add  --type project --scope repo --repo dispatcher --stdin
 priors list [--repo R] [--type T] [--stale]
 priors show <name>
 ```
@@ -513,10 +513,10 @@ this corpus is written a few facts at a time by an agent already in the loop.
 already written to `~/.local/share/crew/ratings.jsonl`. A distillation step may
 propose one fact per discovered regularity (e.g. engine/model/tier combinations
 with `rework_count` above a threshold *and* a consistent cause) and write it as
-a `type: project` draft marked `confidence: proposed`. Proposals are not
-injected until a human or a later run confirms them (§4.6) — the failure mode
-worth avoiding is an unverified statistical claim becoming a standing
-instruction.
+a `type: project` draft marked `confidence: proposed`. What a `proposed` fact
+may do on arrival — whether it is injected, and on which hosts — is the trust
+decision (§4.4). Whichever option is taken, the failure mode worth avoiding is
+an unverified statistical claim becoming a standing instruction.
 
 **c. The importer (mechanical).** Engines keep their native memory (the
 owner's decision 3); at `crew reap`, or by hand with `priors import`, an
@@ -547,28 +547,104 @@ lowest priority upward.
 
 | tier | trigger | source | budget | truncation |
 | --- | --- | --- | --- | --- |
-| **1** | `session_start` | `MEMORY.md` pointer index (repo + global) | 4 K chars | from the middle |
-| **2** | `prompt_submit` | ranked `priors search "<prompt>"` → top 3 | 2.5 K chars | from the start |
+| **1** | `session_start` | `MEMORY.md` index(es) per §4.2's read rule | 4 K chars | from the middle |
+| **2** | `prompt_submit` — **gated, not v0** | ranked `priors search "<prompt>"` → top 3 | 2.5 K chars | from the start |
 | **3** | any time | agent runs `priors search` / `rg` / reads a file | unbounded | — |
 | | | **total injected** | **8 K chars** | |
 
+The 8 K total is the ceiling if tier 2 passes its gate (below); in v0 only
+tier 1 injects, so the ceiling there is tier 1's 4 K.
+
 Tier 1 is cheap and unconditional, and it is what makes the system work when
 everything else fails — a session with a broken retrieval backend still sees the
-index. Tier 2 is where the measured edge lives (§2.1), and it is the tier that
-*does not work today* (§5, hookyard). Tier 3 is the escape hatch, and is the
-reason R1 matters: the agent can always grep.
+index. Tier 2 is where the measured edge lives (§2.1), and it is the tier
+hookyard cannot yet deliver on Claude Code or Pi (§4.7). Tier 3 is the escape
+hatch, and is the reason R1 matters: the agent can always grep.
 
-Tier 2 must be bounded and must fail open:
+**Two indexes.** Each store generates its own index (§4.1), so a work-org
+session has two to inject. Tier 1 injects both, each attributed with the store
+it came from. The 4 K-char budget goes to the session's own store — work —
+first, and the personal index takes what remains; each index keeps its own
+200-line/25 KB cap. A session in any other repo, or an unresolvable one, gets
+the personal index alone, with the whole budget.
+
+**Tier 2 is a measured gate** — *proposed, needs owner sign-off.* §7 names its
+recall A/B as the only thing that would justify tier 2's complexity: the
+expected delta concentrates in facts that are not in the tier-1 index window.
+Proposed: v0 ships tiers 1 and 3, and tier 2 is built only if the A/B, run on
+the migrated corpus, shows that delta. Until then the hookyard `prompt_submit`
+work — the slot and Pi bridge gaps in §4.7, their rows in §5, their workstream
+in §10 — is conditional on the result, not a prerequisite. This turns PR #83's
+tier-2 item from a blocker into a gate with a measurement behind it.
+
+If built, tier 2 must be bounded and must fail open:
 
 - hard timeout **800 ms** (well inside hookyard's 4300 ms handler cap, and
   ~26× Pi-memory's 30 ms BM25 target);
 - on timeout, empty result, missing index, or any non-zero exit: **inject
   nothing**, log the miss to the event record, and continue. A retrieval that
   cannot answer is indistinguishable from a store that has nothing;
-- the injected block is attributed in its own text, exactly as the Pi bridge
-  already does with `[hookyard advisory] ` — an unattributed block reaches the
-  model looking like a prompt injection, which is a finding from hookyard's own
-  `internal/render/pi_bridge.ts:123-126` probe.
+- the injected block is attributed in its own text, as the Pi bridge already
+  does with `[hookyard advisory] ` — an unattributed block reaches the model
+  looking like a prompt injection, which is a finding from hookyard's own
+  `internal/render/pi_bridge.ts:123-126` probe. Attribution is one of the rules
+  common to every option of the trust model below, which also sets how the
+  block is framed and which facts it may carry — for tier 1 as for tier 2.
+
+#### The trust model — open, the last blocker
+
+Injected memory reaches the model as instructions. On one host with one writer,
+a bad fact misleads that host's sessions — the exposure Claude's auto memory
+already has. This design removes the "one host": the personal store is cloned
+on every host and the work store on every work host (§4.2), and agents,
+distillation (§4.3b) and the importer (§4.9) all write into them, so the store
+*is* shared from v0. One bad or tampered fact then reaches every session, on
+every engine, on every host that pulls — and, in hookyard's team mode,
+everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
+
+**Common to every option**, and not up for decision:
+
+- **Attribution and untrusted-data framing.** Every injected block names its
+  store and is framed as reference data, not instructions — §2.3's reading:
+  advice is meant to be acted on, recalled memory is not. `recall` already
+  fences this way; the Pi bridge's `[hookyard advisory]` prefix is the
+  attribution half.
+- **Provenance on every fact** — §4.1's `provenance:` block (engine, session,
+  host) — so the index can be filtered by writer and a compromised writer's
+  facts purged.
+- **Write-time redaction and §4.2's routing** (§4.3), before any path below.
+
+What differs is which facts are injected, and the path a write takes before it
+reaches another host:
+
+| option | what gets injected | path a write takes to another host | cost |
+| --- | --- | --- | --- |
+| **A. Fence and inject everything** | every fact the read rule allows, fenced | direct commit and push | a tampered fact still reaches every session; fencing lowers compliance, it does not remove it |
+| **B. Reviewed-only injection** | `confidence: reviewed` facts only; `proposed` facts — agent-written, imported, distilled — reachable only by search (tier 3), fenced | a human-reviewed commit flips `proposed` → `reviewed` | a fresh lesson helps no session until it is reviewed; migration starts with every fact `proposed` (451 on `tp-g5`) and nothing injected |
+| **C. Host-local until reviewed** | `reviewed` facts from the synced checkouts, plus this host's own `proposed` facts from an unsynced local layer, all fenced | none until review: reviewed promotion moves a fact from the local layer into its store's checkout and commits it | a third per-host location to manage; a lesson learned on one host still waits for review before another host sees it |
+
+Under C the local layer is split per store, like the checkouts:
+`$XDG_STATE_HOME/priors/local/personal/` and
+`$XDG_STATE_HOME/priors/local/work/`, outside both checkouts and never
+synced. A write is routed by §4.2's write rule first, then lands in that
+store's local layer; §4.2's quarantine still takes a work-org fact on a host
+with no work store. §4.2's read rule applies to the local layers exactly as to
+the checkouts, so a personal-repo session never reads `local/work/`. Reviewed
+promotion moves a fact from `local/<store>/` into that same store's checkout
+only, never across stores — moving a work fact to personal stays the separate
+human act of §4.2.
+
+**Recommendation: C.** It reproduces today's exposure exactly — Claude already
+injects its own unreviewed facts on the host that wrote them, and nowhere else
+— and it adds no cross-host path until a human reviews. Migration is a no-op
+for exposure: each host's imported Claude facts sit in that host's local layer,
+reaching no host they did not reach before. A and B each fail one half of that:
+A adds the fan-out at once, B takes away injection the host has today.
+
+**This is the owner's decision**, and this document does not make it. What
+`proposed` means for injection — and so what distillation's proposals (§4.3b)
+and the importer's facts (§4.9) do on arrival — follows from it. The status
+line's "do not implement" stays until it is made.
 
 ### 4.5 Retrieval backend: one interface, three implementations
 
