@@ -64,7 +64,12 @@ type sandbox struct {
 
 func newSandbox(t *testing.T, profile string) *sandbox {
 	t.Helper()
-	dir := t.TempDir()
+	// Resolved because priors reports store paths resolved, and the temp dir
+	// may sit behind a symlink (macOS /var).
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	sb := &sandbox{
 		t:          t,
 		dir:        dir,
@@ -330,16 +335,18 @@ func TestAddParsesFrontmatterOnStdinAndFlagsOverride(t *testing.T) {
 	}
 }
 
-// TestAddClaudeSessionIDWins: inside Claude Code the engine's own session id
+// TestAddEngineIdentityWins: inside Claude Code the engine's own session id
 // is gate 2's subject, so a caller cannot borrow another session's clean
-// record through --session or PRIORS_SESSION.
-func TestAddClaudeSessionIDWins(t *testing.T) {
-	for name, extra := range map[string]struct {
-		args []string
-		env  []string
+// record by asserting an identity; one that tries is flagged.
+func TestAddEngineIdentityWins(t *testing.T) {
+	for name, c := range map[string]struct {
+		args, env  []string
+		conflicted bool
 	}{
-		"--session":      {args: []string{"--session", "sess-1"}},
-		"PRIORS_SESSION": {env: []string{"PRIORS_SESSION=sess-1"}},
+		"--engine codex --session":  {args: []string{"--engine", "codex", "--session", "sess-1"}, conflicted: true},
+		"PRIORS_ENGINE codex":       {env: []string{"PRIORS_ENGINE=codex", "PRIORS_SESSION=sess-1"}, conflicted: true},
+		"--engine claude --session": {args: []string{"--engine", "claude", "--session", "sess-1"}, conflicted: true},
+		"bare":                      {},
 	} {
 		t.Run(name, func(t *testing.T) {
 			sb := newSandbox(t, "personal")
@@ -348,24 +355,133 @@ func TestAddClaudeSessionIDWins(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			args := append([]string{"add", "--name", "claude-fact", "--description", "d", "--type", "project", "--cwd", repo}, extra.args...)
+			args := append([]string{"add", "--name", "claude-fact", "--description", "d", "--type", "project", "--cwd", repo}, c.args...)
 			cmd := sb.command(ctx, args...)
-			cmd.Env = append(cmd.Env, append([]string{"CLAUDECODE=1", "CLAUDE_CODE_SESSION_ID=engine-sess"}, extra.env...)...)
+			cmd.Env = append(cmd.Env, append([]string{"CLAUDECODE=1", "CLAUDE_CODE_SESSION_ID=engine-sess"}, c.env...)...)
 			out, err := cmd.Output()
 			if err != nil {
 				t.Fatalf("priors add: %v", err)
 			}
 			path := filepath.Join(sb.state, "local", "personal", "demo", "claude-fact.md")
-			if want := "flagged personal " + path + ": provenance:no-tool-record\n"; string(out) != want {
-				t.Fatalf("stdout %q, want %q", out, want)
+			stdout := string(out)
+			if !strings.HasPrefix(stdout, "flagged personal "+path+": ") {
+				t.Fatalf("stdout %q, want the fact flagged at %s", stdout, path)
+			}
+			wantContains(t, "stdout", stdout, "provenance:no-tool-record")
+			if got := strings.Contains(stdout, "provenance:asserted-identity"); got != c.conflicted {
+				t.Errorf("asserted-identity flag = %v, want %v: %q", got, c.conflicted, stdout)
 			}
 			raw, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantContains(t, "fact file", string(raw), "session: engine-sess")
+			wantContains(t, "fact file", string(raw), "session: engine-sess", "engine: claude")
 		})
 	}
+}
+
+func TestResolveIdentity(t *testing.T) {
+	type want struct {
+		engine, session string
+		conflict        bool
+	}
+	cases := []struct {
+		name                    string
+		env                     map[string]string
+		flagEngine, flagSession string
+		want                    want
+	}{
+		{name: "engine env, nothing asserted",
+			env:  map[string]string{"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "engine-sess"},
+			want: want{"claude", "engine-sess", false}},
+		{name: "engine env, agreeing flags",
+			env:        map[string]string{"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "engine-sess"},
+			flagEngine: "claude", flagSession: "engine-sess",
+			want: want{"claude", "engine-sess", false}},
+		{name: "engine env, other engine flag",
+			env:        map[string]string{"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "engine-sess"},
+			flagEngine: "codex",
+			want:       want{"claude", "engine-sess", true}},
+		{name: "engine env, other session flag",
+			env:         map[string]string{"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "engine-sess"},
+			flagSession: "sess-1",
+			want:        want{"claude", "engine-sess", true}},
+		{name: "engine env, other PRIORS_ENGINE",
+			env:  map[string]string{"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "engine-sess", "PRIORS_ENGINE": "codex"},
+			want: want{"claude", "engine-sess", true}},
+		{name: "engine env, other PRIORS_SESSION",
+			env:  map[string]string{"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "engine-sess", "PRIORS_SESSION": "sess-1"},
+			want: want{"claude", "engine-sess", true}},
+		{name: "marker without id",
+			env:         map[string]string{"CLAUDECODE": "1"},
+			flagSession: "sess-1",
+			want:        want{"claude", "sess-1", false}},
+		{name: "id without marker",
+			env:        map[string]string{"CLAUDE_CODE_SESSION_ID": "engine-sess"},
+			flagEngine: "codex", flagSession: "sess-1",
+			want: want{"codex", "sess-1", false}},
+		{name: "no engine env, PRIORS values",
+			env:  map[string]string{"PRIORS_ENGINE": "codex", "PRIORS_SESSION": "sess-1"},
+			want: want{"codex", "sess-1", false}},
+		{name: "no engine env, flags beat PRIORS values",
+			env:        map[string]string{"PRIORS_ENGINE": "codex", "PRIORS_SESSION": "sess-1"},
+			flagEngine: "cursor", flagSession: "sess-2",
+			want: want{"cursor", "sess-2", false}},
+		{name: "nothing",
+			want: want{"unknown", "", false}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for _, k := range []string{"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "PRIORS_ENGINE", "PRIORS_SESSION"} {
+				t.Setenv(k, c.env[k])
+			}
+
+			id, err := resolveIdentity(t.TempDir(), c.flagEngine, c.flagSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if got := (want{id.engine, id.session, id.conflict}); got != c.want {
+				t.Errorf("identity = %+v, want %+v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestSymlinkedStoreBehavesLikeItsTarget: a store configured through a
+// symlink is indexed, listed and linted as the directory it names.
+func TestSymlinkedStoreBehavesLikeItsTarget(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.record("sess-1")
+	sb.putFact(sb.personal, "demo/old-fact.md", newFact("old-fact", "demo", "project"))
+	sb.putFact(sb.personal, "demo/bad-fact.md", newFact("bad-fact", "demo", "bogus"))
+	sb.indexWrite()
+	direct := sb.run("", "lint")
+
+	target := sb.personal
+	sb.personal = filepath.Join(sb.dir, "personal-link")
+	if err := os.Symlink(target, sb.personal); err != nil {
+		t.Fatal(err)
+	}
+	sb.writeConfig()
+
+	if linked := sb.run("", "lint"); direct.stdout == "" || linked != direct {
+		t.Errorf("lint through the symlink = %+v, want the direct result %+v", linked, direct)
+	}
+
+	res := sb.run("", "add", "--name", "new-fact", "--description", "d", "--type", "project", "--cwd", repo, "--session", "sess-1")
+	wantExit(t, res, 0)
+	wantContains(t, "add", res.stdout, "published personal "+filepath.Join(target, "demo", "new-fact.md"))
+	index, err := os.ReadFile(filepath.Join(target, "MEMORY.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantContains(t, "MEMORY.md", string(index), "old-fact", "new-fact")
+
+	listed := sb.run("", "list", "--cwd", repo)
+	wantExit(t, listed, 0)
+	wantContains(t, "list", listed.stdout, "demo/old-fact.md", "demo/new-fact.md")
 }
 
 func TestAddFlagsUnknownSessionAndListFlaggedShowsReasons(t *testing.T) {

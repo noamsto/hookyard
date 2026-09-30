@@ -1,6 +1,6 @@
 // Package write is priors' write path: a fact is completed, checked, routed,
 // gated and written to a store checkout, its local layer or the quarantine,
-// and a published fact is committed to the checkout.
+// and a published fact's checkout is committed.
 package write
 
 import (
@@ -9,12 +9,12 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/atomicfile"
+	"github.com/noamsto/hookyard/cmd/priors/internal/commit"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
@@ -23,31 +23,29 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
 )
 
-const (
-	gitTimeout  = 10 * time.Second
-	pushTimeout = 30 * time.Second
-	maxGitOut   = 200
-)
-
 // Request is one fact to add and who is adding it. Session is where the
 // session runs; SessionID, Engine and Host become the fact's provenance.
-// External marks a session that ingested external content.
+// External marks a session that ingested external content; IdentityConflict
+// marks an asserted session identity the caller could not corroborate.
 type Request struct {
 	Fact                    fact.Fact
 	Session                 route.Session
 	SessionID, Engine, Host string
 	External                bool
+	IdentityConflict        bool
 }
 
 // Result says where the fact landed. Outcome is "published", "flagged" or
 // "quarantined"; Path is the fact file. Reasons are the flag reasons, led by
 // the quarantine's reason for a quarantined fact. Warning reports a publish
-// (commit or push) that failed after the fact was written.
+// (commit or push) that failed after the fact was written. Reports are the
+// index regeneration's, naming each file it skipped or kept out.
 type Result struct {
 	Outcome, Path string
 	Store         route.StoreID
 	Reasons       []string
 	Warning       string
+	Reports       []string
 }
 
 type Deps struct {
@@ -105,6 +103,9 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 	}
 
 	flags := gate.Provenance(cfg.RecordDir(), req.SessionID, req.External)
+	if req.IdentityConflict {
+		flags = append(flags, "provenance:asserted-identity")
+	}
 	flags = append(flags, gate.Content(string(data))...)
 	flags = append(flags, gate.Size(len(data))...)
 
@@ -137,13 +138,15 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 	if err := atomicfile.Write(res.Path, data, 0o644); err != nil {
 		return Result{}, err
 	}
-	if _, _, err := root.WriteIndex(d.Rules); err != nil {
+	_, reports, err := root.WriteIndex(d.Rules)
+	if err != nil {
 		_ = os.Remove(res.Path)
 		return Result{}, err
 	}
+	res.Reports = reports
 
-	if res.Outcome == "published" && cfg.CommitEnabled() {
-		res.Warning = publish(ctx, cfg, root.Path, f.Name)
+	if res.Outcome == "published" {
+		res.Warning = commit.Checkout(ctx, cfg, root, d.Rules, d.Scanner, cfg.WorkOrgs, cfg.WorkNames, "priors: add "+f.Name)
 	}
 	return res, nil
 }
@@ -234,60 +237,4 @@ func confineDir(root, dir string) error {
 		return fmt.Errorf("%s resolves outside the store %s", dir, root)
 	}
 	return nil
-}
-
-// publish commits the whole checkout when dir is itself a git work tree's top
-// level, and pushes when configured: MEMORY.md is regenerated from every fact
-// on disk, so committing less could leave HEAD's index naming a file HEAD
-// lacks. It returns a warning, or "" on success or when dir is not a repo.
-func publish(ctx context.Context, cfg config.Config, dir, name string) string {
-	top, err := runGit(ctx, dir, gitTimeout, "rev-parse", "--show-toplevel")
-	if err != nil {
-		if strings.Contains(top, "not a git repository") {
-			return ""
-		}
-		return gitWarning("git rev-parse", top, err)
-	}
-	if !sameDir(strings.TrimSpace(top), dir) {
-		return ""
-	}
-	if out, err := runGit(ctx, dir, gitTimeout, "add", "-A", "--", "."); err != nil {
-		return gitWarning("git add", out, err)
-	}
-	if out, err := runGit(ctx, dir, gitTimeout, "commit", "-q", "-m", "priors: add "+name); err != nil {
-		return gitWarning("git commit", out, err)
-	}
-	if cfg.Push {
-		if out, err := runGit(ctx, dir, pushTimeout, "push", "-q"); err != nil {
-			return gitWarning("git push", out, err)
-		}
-	}
-	return ""
-}
-
-func sameDir(a, b string) bool {
-	ra, errA := filepath.EvalSymlinks(a)
-	rb, errB := filepath.EvalSymlinks(b)
-	return errA == nil && errB == nil && ra == rb
-}
-
-func runGit(ctx context.Context, dir string, timeout time.Duration, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...) //nolint:gosec // dir is the configured store checkout; args are fixed git subcommands and store-relative paths
-	// publish matches git's English "not a git repository".
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
-	out, err := cmd.CombinedOutput()
-	return string(out), err
-}
-
-func gitWarning(what, out string, err error) string {
-	msg := strings.Join(strings.Fields(out), " ")
-	if len(msg) > maxGitOut {
-		msg = strings.ToValidUTF8(msg[:maxGitOut], "") + "…"
-	}
-	if msg == "" {
-		return fmt.Sprintf("%s failed: %v", what, err)
-	}
-	return fmt.Sprintf("%s failed: %v: %s", what, err, msg)
 }

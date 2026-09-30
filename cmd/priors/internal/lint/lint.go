@@ -368,11 +368,12 @@ func flagReasons(e store.Entry) []string {
 
 // MoveFlagged moves the checkout's facts that trip a content or size gate into
 // the local layer, flagged and proposed, and regenerates both indexes. It
-// returns the moved facts' paths in the checkout. A name already present in
-// local refuses the whole move so that nothing is half-moved.
-func MoveFlagged(ctx context.Context, root, local store.Root, opts Options) ([]string, error) {
+// returns the moved facts' paths in the checkout and the index regeneration's
+// reports, each led by its root's path. A name already present in local
+// refuses the whole move so that nothing is half-moved.
+func MoveFlagged(ctx context.Context, root, local store.Root, opts Options) (moved, reports []string, err error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	entries, _ := root.Walk()
 	type move struct {
@@ -389,10 +390,10 @@ func MoveFlagged(ctx context.Context, root, local store.Root, opts Options) ([]s
 		}
 		f := e.Fact
 		if !fact.NameRE.MatchString(f.Name) {
-			return nil, fmt.Errorf("%s: cannot move a fact whose name is not a valid name", e.Rel)
+			return nil, nil, fmt.Errorf("%s: cannot move a fact whose name is not a valid name", e.Rel)
 		}
 		if _, exists := local.FindByName(f.Name); exists || seen[f.Name] {
-			return nil, fmt.Errorf("%s: a fact named %q already exists in the local layer", e.Rel, f.Name)
+			return nil, nil, fmt.Errorf("%s: a fact named %q already exists in the local layer", e.Rel, f.Name)
 		}
 		seen[f.Name] = true
 
@@ -400,31 +401,34 @@ func MoveFlagged(ctx context.Context, root, local store.Root, opts Options) ([]s
 		f.Metadata.Confidence = "proposed"
 		data, err := f.Marshal()
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", e.Rel, err)
+			return nil, nil, fmt.Errorf("%s: %w", e.Rel, err)
 		}
 		moves = append(moves, move{e.Rel, local.PathFor(f, learnedRepo(f)), data})
 	}
 	if len(moves) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
-	moved := make([]string, 0, len(moves))
+	moved = make([]string, 0, len(moves))
 	for _, m := range moves {
 		if err := atomicfile.Write(m.dest, m.data, 0o644); err != nil {
-			return moved, err
+			return moved, nil, err
 		}
 		if err := os.Remove(filepath.Join(root.Path, filepath.FromSlash(m.rel))); err != nil {
-			return moved, err
+			return moved, nil, err
 		}
 		moved = append(moved, m.rel)
 	}
-	if _, _, err := root.WriteIndex(opts.Rules); err != nil {
-		return moved, err
+	for _, r := range []store.Root{root, local} {
+		_, rootReports, err := r.WriteIndex(opts.Rules)
+		for _, rep := range rootReports {
+			reports = append(reports, r.Path+": "+rep)
+		}
+		if err != nil {
+			return moved, reports, err
+		}
 	}
-	if _, _, err := local.WriteIndex(opts.Rules); err != nil {
-		return moved, err
-	}
-	return moved, nil
+	return moved, reports, nil
 }
 
 // learnedRepo is the directory a moved fact files under in the local layer; a

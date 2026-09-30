@@ -443,15 +443,57 @@ func (f stubBackend) Candidates(ctx context.Context, roots []string, term string
 	return f(ctx, roots, term)
 }
 
-func TestBackendErrorIsReturned(t *testing.T) {
+func TestBackendErrorOnEveryRootIsReturned(t *testing.T) {
 	boom := errors.New("boom")
 	b := stubBackend(func(context.Context, []string, string) ([]string, error) { return nil, boom })
-	roots := []store.Root{{Store: route.StorePersonal, Kind: store.KindCheckout, Path: t.TempDir()}}
+	roots := []store.Root{
+		{Store: route.StorePersonal, Kind: store.KindCheckout, Path: t.TempDir()},
+		{Store: route.StorePersonal, Kind: store.KindLocal, Path: t.TempDir()},
+	}
 
 	_, _, err := Run(context.Background(), b, roots, personalSession("hookyard"), Query{Terms: []string{"x"}}, builtinRules(t))
 
 	if !errors.Is(err, boom) {
 		t.Errorf("err = %v, want it to wrap boom", err)
+	}
+}
+
+func TestBackendErrorOnOneRootKeepsTheOthers(t *testing.T) {
+	cfg := newConfig(t)
+	broken := store.CheckoutRoot(cfg, route.StorePersonal)
+	good := store.CheckoutRoot(cfg, route.StoreWork)
+	put(t, good, "hookyard/b.md", newFact("b", "shared topic", "hookyard"))
+	b := stubBackend(func(_ context.Context, roots []string, _ string) ([]string, error) {
+		if roots[0] == broken.Path {
+			return nil, errors.New("boom")
+		}
+		return []string{filepath.Join(good.Path, "hookyard", "b.md")}, nil
+	})
+
+	hits, reports, err := Run(context.Background(), b, []store.Root{broken, good}, personalSession("hookyard"),
+		Query{Terms: []string{"shared topic"}}, builtinRules(t))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"b"}; !slices.Equal(names(hits), want) {
+		t.Errorf("hits = %v, want %v", names(hits), want)
+	}
+	if len(reports) != 1 || !strings.Contains(reports[0], "personal checkout") || !strings.Contains(reports[0], "boom") {
+		t.Errorf("reports = %v, want one naming the personal checkout and its error", reports)
+	}
+}
+
+func TestRgMissingBinaryFailsTheSearch(t *testing.T) {
+	cfg := newConfig(t)
+	roots := checkAndLocal(cfg, route.StorePersonal)
+	put(t, roots[0], "hookyard/a.md", newFact("a", "shared topic", "hookyard"))
+
+	_, _, err := Run(context.Background(), Rg{Bin: filepath.Join(t.TempDir(), "no-such-rg")}, roots,
+		personalSession("hookyard"), Query{Terms: []string{"shared topic"}}, builtinRules(t))
+
+	if err == nil {
+		t.Error("Run with a missing rg returned nil error")
 	}
 }
 
@@ -490,11 +532,14 @@ func TestCanceledContextStopsBetweenCandidates(t *testing.T) {
 
 func TestRgMissingBinaryIsAnError(t *testing.T) {
 	dir := t.TempDir()
+	missing := filepath.Join(dir, "absent")
 
-	_, err := Rg{Bin: filepath.Join(t.TempDir(), "no-such-rg")}.Candidates(context.Background(), []string{dir}, "x")
+	for _, roots := range [][]string{{dir}, {missing}} {
+		_, err := Rg{Bin: filepath.Join(t.TempDir(), "no-such-rg")}.Candidates(context.Background(), roots, "x")
 
-	if err == nil {
-		t.Error("Candidates with a missing binary returned nil error")
+		if err == nil {
+			t.Errorf("Candidates(%v) with a missing binary returned nil error", roots)
+		}
 	}
 }
 
@@ -579,26 +624,92 @@ func TestRedactionMatchesRawFileBytes(t *testing.T) {
 	}
 }
 
-func TestRgUnreadableFileKeepsOtherMatches(t *testing.T) {
-	needRg(t)
+func lockedFile(t *testing.T, path string) {
+	t.Helper()
 	if os.Geteuid() == 0 {
 		t.Skip("root reads mode-000 files")
 	}
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "hit.md"), []byte("needle\n"), 0o644); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	locked := filepath.Join(dir, "locked.md")
-	if err := os.WriteFile(locked, []byte("needle\n"), 0o000); err != nil {
+	if err := os.WriteFile(path, []byte("shared topic\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRgUnreadableFileKeepsOtherMatches(t *testing.T) {
+	needRg(t)
+	dir := t.TempDir()
+	lockedFile(t, filepath.Join(dir, "locked.md"))
+	if err := os.WriteFile(filepath.Join(dir, "hit.md"), []byte("shared topic\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := Rg{}.Candidates(context.Background(), []string{dir}, "needle")
+	got, err := Rg{}.Candidates(context.Background(), []string{dir}, "shared topic")
+
+	if !errors.Is(err, ErrPartial) {
+		t.Errorf("err = %v, want ErrPartial", err)
+	}
+	if want := []string{filepath.Join(dir, "hit.md")}; !slices.Equal(got, want) {
+		t.Errorf("candidates = %v, want %v", got, want)
+	}
+}
+
+func TestRgUnreadableFileAndNoMatchIsPartial(t *testing.T) {
+	needRg(t)
+	dir := t.TempDir()
+	lockedFile(t, filepath.Join(dir, "locked.md"))
+
+	got, err := Rg{}.Candidates(context.Background(), []string{dir}, "shared topic")
+
+	if !errors.Is(err, ErrPartial) || len(got) != 0 {
+		t.Errorf("candidates = %v, %v; want none, ErrPartial", got, err)
+	}
+}
+
+func TestUnreadableFileInOneRootKeepsOtherRootsHits(t *testing.T) {
+	needRg(t)
+	cfg := newConfig(t)
+	a := store.CheckoutRoot(cfg, route.StorePersonal)
+	b := store.CheckoutRoot(cfg, route.StoreWork)
+	lockedFile(t, filepath.Join(a.Path, "hookyard", "locked.md"))
+	put(t, b, "hookyard/b.md", newFact("b", "shared topic", "hookyard"))
+
+	hits, reports, err := Run(context.Background(), Rg{}, []store.Root{a, b}, personalSession("hookyard"),
+		Query{Terms: []string{"shared topic"}}, builtinRules(t))
 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{filepath.Join(dir, "hit.md")}; !slices.Equal(got, want) {
-		t.Errorf("candidates = %v, want %v", got, want)
+	if want := []string{"b"}; !slices.Equal(names(hits), want) {
+		t.Errorf("hits = %v, want %v", names(hits), want)
+	}
+	wantSkipped(t, reports, "skipped personal/hookyard/locked.md: ")
+}
+
+func TestUnreadableFileInARootKeepsItsOtherHits(t *testing.T) {
+	needRg(t)
+	cfg := newConfig(t)
+	co := store.CheckoutRoot(cfg, route.StorePersonal)
+	lockedFile(t, filepath.Join(co.Path, "hookyard", "locked.md"))
+	put(t, co, "hookyard/ok.md", newFact("ok", "shared topic", "hookyard"))
+
+	hits, reports, err := Run(context.Background(), Rg{}, []store.Root{co}, personalSession("hookyard"),
+		Query{Terms: []string{"shared topic"}}, builtinRules(t))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"ok"}; !slices.Equal(names(hits), want) {
+		t.Errorf("hits = %v, want %v", names(hits), want)
+	}
+	wantSkipped(t, reports, "skipped personal/hookyard/locked.md: ")
+}
+
+// wantSkipped requires reports to be exactly one line, starting with prefix.
+func wantSkipped(t *testing.T, reports []string, prefix string) {
+	t.Helper()
+	if len(reports) != 1 || !strings.HasPrefix(reports[0], prefix) {
+		t.Errorf("reports = %q, want one starting %q", reports, prefix)
 	}
 }

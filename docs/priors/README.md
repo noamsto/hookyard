@@ -33,7 +33,9 @@ personal_orgs  = ["github.com/you"]
 
 `work_orgs` is required on every host. `personal_store`, `work_store` and
 `state_dir` must be absolute once `~/` is expanded, and none may be the same
-as, or nested inside, another (the default state dir included).
+as, or nested inside, another (the default state dir included). Symlinks in
+them are resolved first, so a store behind a symlink behaves as the directory
+it names, and the nesting check sees the real paths.
 
 A session's store is picked from its repo's `origin` org (§4.2): a work-org
 repo reads both stores and writes work; any other repo reads the personal
@@ -68,8 +70,14 @@ The flagging gates are provenance (the session fetched web or MCP content,
 or its tool calls are not in hookyard's event record), content (URLs,
 `curl | sh`, hook bypasses, shell commands, "always/never" aimed at tools,
 override phrasing) and a size cap of 8 KiB. Gate 2 learns the session from
-Claude Code's `CLAUDE_CODE_SESSION_ID`, else `--session`, else
-`PRIORS_SESSION`; with no session a fact is flagged. It sees tool names
+the engine when the engine provides it (inside Claude Code, `CLAUDECODE=1`
+with `CLAUDE_CODE_SESSION_ID`), and that id and engine always win; a
+`--engine`, `--session`, `PRIORS_ENGINE` or `PRIORS_SESSION` that disagrees
+with them does not replace them, and flags the fact
+`provenance:asserted-identity`. Elsewhere the session is `--session`, else
+`PRIORS_SESSION`; with no session a fact is flagged. This binds the id to the
+engine's environment, not to the agent: an agent can still set those
+variables in its own command. It sees tool names
 only: hookyard's event record carries no command text, so an issue or PR
 read through a shell (`gh issue view`, `curl`) does not flag the session.
 

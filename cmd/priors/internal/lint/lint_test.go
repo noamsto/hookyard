@@ -652,7 +652,7 @@ func TestMoveFlagged(t *testing.T) {
 	put(t, root, "repo-a/keeper.md", cleanFact("keeper"))
 	index(t, root)
 
-	moved, err := MoveFlagged(context.Background(), root, local, testOptions(t))
+	moved, _, err := MoveFlagged(context.Background(), root, local, testOptions(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -699,7 +699,7 @@ func TestMoveFlaggedNoRepoAndSize(t *testing.T) {
 	put(t, root, "_global/too-big.md", big)
 	index(t, root)
 
-	moved, err := MoveFlagged(context.Background(), root, local, testOptions(t))
+	moved, _, err := MoveFlagged(context.Background(), root, local, testOptions(t))
 	if err != nil || len(moved) != 1 {
 		t.Fatalf("moved = %v, err = %v", moved, err)
 	}
@@ -724,7 +724,7 @@ func TestMoveFlaggedRefusesExistingName(t *testing.T) {
 	index(t, root)
 	put(t, local, "repo-a/has-url.md", cleanFact("has-url"))
 
-	moved, err := MoveFlagged(context.Background(), root, local, testOptions(t))
+	moved, _, err := MoveFlagged(context.Background(), root, local, testOptions(t))
 	if err == nil || len(moved) != 0 {
 		t.Fatalf("moved = %v, err = %v; want a refusal", moved, err)
 	}
@@ -738,13 +738,31 @@ func TestMoveFlaggedRefusesExistingName(t *testing.T) {
 	}
 }
 
+func TestMoveFlaggedReturnsIndexReports(t *testing.T) {
+	root := checkout(t, route.StorePersonal)
+	local := store.Root{Store: route.StorePersonal, Kind: store.KindLocal, Path: t.TempDir()}
+	flagged := cleanFact("has-url")
+	flagged.Body = "docs at https://example.com/page\n"
+	put(t, root, "repo-a/has-url.md", flagged)
+	putRaw(t, root, "repo-a/broken.md", []byte("no frontmatter\n"))
+
+	moved, reports, err := MoveFlagged(context.Background(), root, local, testOptions(t))
+	if err != nil || len(moved) != 1 {
+		t.Fatalf("moved = %v, err = %v", moved, err)
+	}
+	want := root.Path + ": skipped repo-a/broken.md"
+	if !slices.ContainsFunc(reports, func(r string) bool { return strings.HasPrefix(r, want) }) {
+		t.Errorf("reports = %q, want one starting %q", reports, want)
+	}
+}
+
 func TestMoveFlaggedNothingToMove(t *testing.T) {
 	root := checkout(t, route.StorePersonal)
 	local := store.Root{Store: route.StorePersonal, Kind: store.KindLocal, Path: t.TempDir()}
 	put(t, root, "repo-a/keeper.md", cleanFact("keeper"))
 	index(t, root)
 
-	moved, err := MoveFlagged(context.Background(), root, local, testOptions(t))
+	moved, _, err := MoveFlagged(context.Background(), root, local, testOptions(t))
 	if err != nil || len(moved) != 0 {
 		t.Errorf("moved = %v, err = %v; want nothing", moved, err)
 	}

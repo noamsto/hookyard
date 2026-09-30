@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/noamsto/hookyard/cmd/priors/internal/commit"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
@@ -195,6 +196,8 @@ func writeIndexes(cfgPath string, s streams) int {
 		s.errln("refused: redaction rule set unavailable:", err)
 		return 1
 	}
+	// A missing scanner leaves it zero, which fails the commit closed.
+	scanner, _ := gate.FindScanner(cfg.Scanner)
 	ids := []route.StoreID{route.StorePersonal}
 	if cfg.WorkPresent() {
 		ids = append(ids, route.StoreWork)
@@ -212,7 +215,7 @@ func writeIndexes(cfgPath string, s streams) int {
 	}
 	code := 0
 	for _, g := range groups {
-		skipped, err := writeGroup(cfg, rules, g, s)
+		skipped, err := writeGroup(context.Background(), cfg, rules, scanner, g, s)
 		if err != nil {
 			s.errln(err)
 			return 1
@@ -224,9 +227,9 @@ func writeIndexes(cfgPath string, s streams) int {
 	return code
 }
 
-// writeGroup regenerates g's indexes under g's lock and reports whether the
-// walk skipped any file.
-func writeGroup(cfg config.Config, rules gate.Rules, g indexGroup, s streams) (skipped bool, err error) {
+// writeGroup regenerates g's indexes under g's lock, commits each checkout
+// whose index changed, and reports whether the walk skipped any file.
+func writeGroup(ctx context.Context, cfg config.Config, rules gate.Rules, scanner gate.Scanner, g indexGroup, s streams) (skipped bool, err error) {
 	unlock, err := store.Lock(cfg, g.lock)
 	if err != nil {
 		return false, err
@@ -241,8 +244,14 @@ func writeGroup(cfg config.Config, rules gate.Rules, g indexGroup, s streams) (s
 		if err != nil {
 			return skipped, fmt.Errorf("%s: %w", root.Path, err)
 		}
-		if changed {
-			s.outln("wrote", filepath.Join(root.Path, store.IndexFile))
+		if !changed {
+			continue
+		}
+		s.outln("wrote", filepath.Join(root.Path, store.IndexFile))
+		if root.Kind == store.KindCheckout {
+			if w := commit.Checkout(ctx, cfg, root, rules, scanner, cfg.WorkOrgs, cfg.WorkNames, "priors: regenerate index"); w != "" {
+				s.errf("%s: warning: %s\n", root.Path, w)
+			}
 		}
 	}
 	return skipped, nil

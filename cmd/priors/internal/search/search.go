@@ -26,6 +26,10 @@ const (
 	noRepoDir     = "_norepo"
 )
 
+// ErrPartial is a backend's report that some files could not be searched; the
+// candidates it returns alongside are still good.
+var ErrPartial = errors.New("some files could not be searched")
+
 // Backend lists the files under roots that contain term. Paths are absolute.
 type Backend interface {
 	Candidates(ctx context.Context, roots []string, term string) ([]string, error)
@@ -34,8 +38,19 @@ type Backend interface {
 // Rg is the ripgrep backend. An empty Bin means "rg" on PATH.
 type Rg struct{ Bin string }
 
-// Candidates runs ripgrep over the roots that exist. No match is not an error.
+// Candidates runs ripgrep over the roots that exist. No match is not an error;
+// a file rg could not read is ErrPartial, alongside whatever did match.
 func (r Rg) Candidates(ctx context.Context, roots []string, term string) ([]string, error) {
+	bin := r.Bin
+	if bin == "" {
+		bin = "rg"
+	}
+	// Looked up before the roots are checked, so a missing rg fails even a
+	// root that does not exist and the search reads as unavailable.
+	bin, err := exec.LookPath(bin)
+	if err != nil {
+		return nil, fmt.Errorf("rg: %w", err)
+	}
 	var existing []string
 	for _, root := range roots {
 		if _, err := os.Stat(root); err == nil {
@@ -44,10 +59,6 @@ func (r Rg) Candidates(ctx context.Context, roots []string, term string) ([]stri
 	}
 	if len(existing) == 0 {
 		return nil, nil
-	}
-	bin := r.Bin
-	if bin == "" {
-		bin = "rg"
 	}
 	args := append([]string{
 		"--files-with-matches", "--ignore-case", "--fixed-strings", "--no-messages",
@@ -58,13 +69,13 @@ func (r Rg) Candidates(ctx context.Context, roots []string, term string) ([]stri
 		return nil, ctxErr
 	}
 	var exit *exec.ExitError
+	var partial error
 	switch {
 	case err == nil:
 	case errors.As(err, &exit) && exit.ExitCode() == 1:
 		return nil, nil
-	// rg exits 2 when any file was unreadable, even though the paths it
-	// printed did match.
-	case errors.As(err, &exit) && exit.ExitCode() == 2 && len(out) > 0:
+	case errors.As(err, &exit) && exit.ExitCode() == 2:
+		partial = ErrPartial
 	default:
 		return nil, fmt.Errorf("rg: %w", err)
 	}
@@ -79,7 +90,7 @@ func (r Rg) Candidates(ctx context.Context, roots []string, term string) ([]stri
 		}
 		paths = append(paths, p)
 	}
-	return paths, nil
+	return paths, partial
 }
 
 // Query is what to search for and how to narrow it. Every term must match. Repo
@@ -99,8 +110,10 @@ type Hit struct{ Entry store.Entry }
 
 // Run searches roots, which the caller has already limited to what the session
 // may read and ordered checkout before local, so that a checkout copy wins
-// over a local one of the same name. The reports name files that were skipped
-// without ever quoting their content.
+// over a local one of the same name. The reports name files and roots that
+// were skipped without ever quoting their content. A root the backend could
+// not search is reported and passed over; only a search in which no root could
+// be searched at all is an error.
 func Run(ctx context.Context, b Backend, roots []store.Root, s route.Session, q Query, rules gate.Rules) ([]Hit, []string, error) {
 	if len(q.Terms) == 0 {
 		return nil, nil, errors.New("search: no terms")
@@ -112,13 +125,23 @@ func Run(ctx context.Context, b Backend, roots []store.Root, s route.Session, q 
 
 	var hits []Hit
 	var reports []string
+	var firstErr error
+	failed := 0
 	for _, root := range roots {
 		paths, err := b.Candidates(ctx, []string{root.Path}, q.Terms[0])
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, nil, ctxErr
 		}
-		if err != nil {
-			return nil, nil, fmt.Errorf("search %s: %w", root.Path, err)
+		switch {
+		case errors.Is(err, ErrPartial):
+			reports = append(reports, unsearched(root, paths)...)
+		case err != nil:
+			reports = append(reports, fmt.Sprintf("unsearched %s %s: %v", root.Store, root.Kind, err))
+			if firstErr == nil {
+				firstErr = fmt.Errorf("search %s: %w", root.Path, err)
+			}
+			failed++
+			continue
 		}
 		slices.Sort(paths)
 		for _, path := range paths {
@@ -140,6 +163,10 @@ func Run(ctx context.Context, b Backend, roots []store.Root, s route.Session, q 
 		}
 	}
 
+	if failed > 0 && failed == len(roots) {
+		return nil, nil, firstErr
+	}
+
 	hits = dedupe(hits)
 	slices.SortStableFunc(hits, func(a, b Hit) int {
 		an, bn := nameMatches(a.Entry.Fact.Name, terms), nameMatches(b.Entry.Fact.Name, terms)
@@ -159,6 +186,20 @@ func Run(ctx context.Context, b Backend, roots []store.Root, s route.Session, q 
 		limit = defaultLimit
 	}
 	return hits[:min(limit, len(hits))], reports, nil
+}
+
+// unsearched reports the files of root that its walk could not read, except
+// the candidates, which the backend did read and load reports on.
+func unsearched(root store.Root, candidates []string) []string {
+	_, errs := root.Walk()
+	var reports []string
+	for _, we := range errs {
+		if slices.Contains(candidates, filepath.Join(root.Path, filepath.FromSlash(we.Rel))) {
+			continue
+		}
+		reports = append(reports, fmt.Sprintf("skipped %s/%s: %v", root.Store, we.Rel, we.Err))
+	}
+	return reports
 }
 
 // load reads the fact at path if it is a fact file of root. ok is false for

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/noamsto/hookyard/cmd/priors/internal/commit/committest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
@@ -235,6 +236,7 @@ func TestPublished(t *testing.T) {
 	if subject := strings.TrimSpace(git(t, fx.cfg.PersonalStore, "log", "-1", "--format=%s")); subject != "priors: add markdown-store" {
 		t.Errorf("commit subject = %q", subject)
 	}
+	committest.AssertHeadIndexInTree(t, fx.cfg.PersonalStore)
 
 	f := readFact(t, want)
 	m := f.Metadata
@@ -337,6 +339,8 @@ func TestRouting(t *testing.T) {
 			if !indexLists(t, root, "routed-fact") {
 				t.Errorf("%s MEMORY.md does not list the fact", root.Path)
 			}
+			committest.AssertHeadIndexInTree(t, fx.cfg.PersonalStore)
+			committest.AssertHeadIndexInTree(t, fx.cfg.WorkStore)
 		})
 	}
 }
@@ -348,6 +352,7 @@ func TestFlagged(t *testing.T) {
 		reason string
 	}{
 		{"external", func(_ *testing.T, _ fixture, r *Request) { r.External = true }, "provenance:external"},
+		{"asserted identity", func(_ *testing.T, _ fixture, r *Request) { r.IdentityConflict = true }, "provenance:asserted-identity"},
 		{"unknown session", func(_ *testing.T, _ fixture, r *Request) { r.SessionID = "" }, "provenance:unknown-session"},
 		{"web tool", func(t *testing.T, fx fixture, _ *Request) {
 			writeRecord(t, fx.record,
@@ -529,9 +534,20 @@ func TestRefusesSymlinkedDestination(t *testing.T) {
 	}
 }
 
+// head is HEAD's commit, or "" while HEAD is unborn.
+func head(t *testing.T, dir string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "-q", "--verify", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func TestPublishCommitsWholeCheckout(t *testing.T) {
 	fx := setup(t, "work")
-	hook := filepath.Join(fx.cfg.PersonalStore, ".git", "hooks", "pre-commit")
+	dir := fx.cfg.PersonalStore
+	hook := filepath.Join(dir, ".git", "hooks", "pre-commit")
 	if err := os.MkdirAll(filepath.Dir(hook), 0o755); err != nil { //nolint:gosec // test fixture
 		t.Fatal(err)
 	}
@@ -545,26 +561,109 @@ func TestPublishCommitsWholeCheckout(t *testing.T) {
 	if err := os.Remove(hook); err != nil {
 		t.Fatal(err)
 	}
+
+	bad := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(bad, []byte("jotted\n"), 0o644); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
 	res, err = Add(context.Background(), fx.cfg, request("second-fact", personalRepo), fx.deps)
+	if err != nil || !strings.Contains(res.Warning, "notes.txt") {
+		t.Fatalf("second add = %+v, %v; want a warning naming notes.txt", res, err)
+	}
+	if h := head(t, dir); h != "" {
+		t.Fatalf("HEAD = %s, want it unborn while notes.txt is in the checkout", h)
+	}
+	committest.AssertHeadIndexInTree(t, dir)
+
+	if err := os.Remove(bad); err != nil {
+		t.Fatal(err)
+	}
+	res, err = Add(context.Background(), fx.cfg, request("third-fact", personalRepo), fx.deps)
 	if err != nil || res.Warning != "" {
-		t.Fatalf("second add = %+v, %v", res, err)
+		t.Fatalf("third add = %+v, %v", res, err)
 	}
 
-	tree := strings.Fields(git(t, fx.cfg.PersonalStore, "ls-tree", "-r", "--name-only", "HEAD"))
+	tree := strings.Fields(git(t, dir, "ls-tree", "-r", "--name-only", "HEAD"))
 	var listed []string
-	for line := range strings.Lines(git(t, fx.cfg.PersonalStore, "show", "HEAD:"+store.IndexFile)) {
+	for line := range strings.Lines(git(t, dir, "show", "HEAD:"+store.IndexFile)) {
 		if _, rel, ok := store.ParseIndexLine(strings.TrimRight(line, "\n")); ok {
 			listed = append(listed, rel)
 		}
 	}
-	if len(listed) != 2 {
-		t.Errorf("HEAD's MEMORY.md lists %v, want both facts", listed)
+	if len(listed) != 3 {
+		t.Errorf("HEAD's MEMORY.md lists %v, want all three facts", listed)
 	}
-	for _, rel := range listed {
-		if !slices.Contains(tree, rel) {
-			t.Errorf("HEAD's MEMORY.md lists %s, which HEAD does not hold (tree %v)", rel, tree)
+	if slices.Contains(tree, "notes.txt") {
+		t.Error("notes.txt reached HEAD")
+	}
+	committest.AssertHeadIndexInTree(t, dir)
+}
+
+// TestPublishLeavesUngatedFilesOut is a clean add into a checkout that also
+// holds a token file, a work-name fact and a symlink out of the store: none
+// of them, and so not the clean fact either, reaches a commit.
+func TestPublishLeavesUngatedFilesOut(t *testing.T) {
+	fx := setup(t, "work")
+	dir := fx.cfg.PersonalStore
+	token := "AK" + "IA" + "IOSFODNN7EXAMPLE"
+	if err := os.WriteFile(filepath.Join(dir, "token.txt"), []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	leak := request("leak-fact", personalRepo)
+	leak.Fact.Body = "deploys to factify-inc infrastructure\n"
+	f := complete(leak, now)
+	data, err := f.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "hookyard"), 0o755); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "hookyard", "leak-fact.md"), data, 0o644); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/etc/passwd", filepath.Join(dir, "hookyard", "passwd.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Add(context.Background(), fx.cfg, request("clean-fact", personalRepo), fx.deps)
+	if err != nil || res.Outcome != "published" {
+		t.Fatalf("add = %+v, %v", res, err)
+	}
+	for _, p := range []string{"token.txt", "hookyard/leak-fact.md", "hookyard/passwd.md"} {
+		if !strings.Contains(res.Warning, p) {
+			t.Errorf("warning = %q, want it to name %s", res.Warning, p)
 		}
 	}
+	if strings.Contains(res.Warning, token) || strings.Contains(res.Warning, "infrastructure") {
+		t.Errorf("warning %q repeats file content", res.Warning)
+	}
+	if h := head(t, dir); h != "" {
+		t.Errorf("HEAD = %s, want no commit", h)
+	}
+	if files := strings.TrimSpace(git(t, dir, "ls-files")); files != "" {
+		t.Errorf("git index holds %q", files)
+	}
+	committest.AssertHeadIndexInTree(t, dir)
+}
+
+func TestAddReturnsIndexReports(t *testing.T) {
+	fx := setup(t, "work")
+	broken := filepath.Join(fx.cfg.PersonalStore, "hookyard", "broken.md")
+	if err := os.MkdirAll(filepath.Dir(broken), 0o755); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(broken, []byte("no frontmatter\n"), 0o644); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+	res, err := Add(context.Background(), fx.cfg, request("reported-fact", personalRepo), fx.deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(res.Reports, func(r string) bool { return strings.HasPrefix(r, "skipped hookyard/broken.md") }) {
+		t.Errorf("reports = %q, want the skipped broken fact", res.Reports)
+	}
+	committest.AssertHeadIndexInTree(t, fx.cfg.PersonalStore)
 }
 
 func TestPublishWarnsWhenCheckoutUnreadable(t *testing.T) {
@@ -586,6 +685,7 @@ func TestPublishWarnsWhenCheckoutUnreadable(t *testing.T) {
 	if res.Outcome != "published" || res.Warning == "" {
 		t.Errorf("result = %+v, want published with a warning", res)
 	}
+	committest.AssertHeadIndexInTree(t, fx.cfg.PersonalStore)
 }
 
 func TestRedactionRuleRefusalNamesRuleOnly(t *testing.T) {
@@ -621,6 +721,7 @@ func TestDuplicateName(t *testing.T) {
 		if got := files(t, fx.cfg.PersonalStore); !slices.Equal(got, []string{"MEMORY.md", "hookyard/dup-fact.md"}) {
 			t.Errorf("checkout holds %v", got)
 		}
+		committest.AssertHeadIndexInTree(t, fx.cfg.PersonalStore)
 	})
 	t.Run("local layer", func(t *testing.T) {
 		fx := setup(t, "work")
@@ -688,6 +789,10 @@ func TestCommitFailureWarns(t *testing.T) {
 	if len(res.Warning) > 300 {
 		t.Errorf("warning is %d bytes, want it short", len(res.Warning))
 	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	committest.AssertHeadIndexInTree(t, fx.cfg.PersonalStore)
 }
 
 func TestPush(t *testing.T) {
@@ -704,6 +809,7 @@ func TestPush(t *testing.T) {
 	if subject := strings.TrimSpace(git(t, remote, "log", "-1", "--format=%s", "main")); subject != "priors: add pushed-fact" {
 		t.Errorf("remote head subject = %q", subject)
 	}
+	committest.AssertHeadIndexInTree(t, fx.cfg.PersonalStore)
 }
 
 func TestConcurrentAdds(t *testing.T) {
@@ -732,4 +838,5 @@ func TestConcurrentAdds(t *testing.T) {
 	if count := strings.TrimSpace(git(t, fx.cfg.PersonalStore, "rev-list", "--count", "HEAD")); count != fmt.Sprint(n) {
 		t.Errorf("commits = %s, want %d", count, n)
 	}
+	committest.AssertHeadIndexInTree(t, fx.cfg.PersonalStore)
 }

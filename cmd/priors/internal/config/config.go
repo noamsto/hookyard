@@ -3,7 +3,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +28,10 @@ type Config struct {
 	// Commit is a pointer so that unset means true.
 	Commit *bool `toml:"commit"`
 	Push   bool  `toml:"push"`
+
+	// defaultState is the resolved default state dir, set by Load when
+	// state_dir is unset.
+	defaultState string
 }
 
 // DefaultPath is where the config lives when --config is not given.
@@ -71,10 +77,65 @@ func Load(path string) (Config, error) {
 			return Config{}, err
 		}
 	}
+	if err := c.resolveDirs(); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
 	if err := c.checkDirs(); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
 	return c, nil
+}
+
+// resolveDirs replaces each absolute store and state path with its real one,
+// so that a symlinked store reads like the directory it points at and the
+// nesting check sees through symlinks. A relative path is left for checkDirs
+// to reject.
+func (c *Config) resolveDirs() error {
+	if c.StateDir == "" {
+		c.defaultState = stateHome("priors")
+	}
+	for _, d := range []struct {
+		key string
+		p   *string
+	}{
+		{"personal_store", &c.PersonalStore},
+		{"work_store", &c.WorkStore},
+		{"state_dir", &c.StateDir},
+		{"the default state dir", &c.defaultState},
+	} {
+		if !filepath.IsAbs(*d.p) {
+			continue
+		}
+		resolved, err := ResolveDir(*d.p)
+		if err != nil {
+			return fmt.Errorf("%s: %w", d.key, err)
+		}
+		*d.p = resolved
+	}
+	return nil
+}
+
+// ResolveDir is p with every symlink resolved. When p does not exist yet, its
+// longest existing ancestor is resolved and the rest appended. A dangling
+// symlink on the way is an error: the directory it names cannot be told.
+func ResolveDir(p string) (string, error) {
+	var rest []string
+	for cur := filepath.Clean(p); ; cur = filepath.Dir(cur) {
+		resolved, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			return filepath.Join(append([]string{resolved}, rest...)...), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		if _, lerr := os.Lstat(cur); lerr == nil {
+			return "", fmt.Errorf("%s is a dangling symlink", cur)
+		}
+		if filepath.Dir(cur) == cur {
+			return "", err
+		}
+		rest = append([]string{filepath.Base(cur)}, rest...)
+	}
 }
 
 // checkDirs requires absolute store and state paths and keeps them apart: a
@@ -117,6 +178,9 @@ func within(p, dir string) bool {
 func (c Config) State() string {
 	if c.StateDir != "" {
 		return c.StateDir
+	}
+	if c.defaultState != "" {
+		return c.defaultState
 	}
 	return stateHome("priors")
 }

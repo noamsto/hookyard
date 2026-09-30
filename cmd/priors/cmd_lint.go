@@ -6,6 +6,7 @@ import (
 	"os"
 	"slices"
 
+	"github.com/noamsto/hookyard/cmd/priors/internal/commit"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 	"github.com/noamsto/hookyard/cmd/priors/internal/lint"
@@ -43,7 +44,12 @@ func cmdLint(args []string, s streams) int {
 			s.errln("--dir needs --kind personal or work")
 			return 1
 		}
-		targets = []lintTarget{{id: id, checkout: store.Root{Store: id, Kind: store.KindCheckout, Path: *dir}}}
+		path, err := config.ResolveDir(*dir)
+		if err != nil {
+			s.errln("--dir:", err)
+			return 1
+		}
+		targets = []lintTarget{{id: id, checkout: store.Root{Store: id, Kind: store.KindCheckout, Path: path}}}
 	} else {
 		var err error
 		if cfg, err = loadConfig(*cfgPath); err != nil {
@@ -67,8 +73,10 @@ func cmdLint(args []string, s streams) int {
 		s.outln(lint.Finding{File: ".", Rule: "rules", Msg: "redaction rule set unavailable: " + err.Error()})
 		return 1
 	}
+	// A missing scanner leaves sc zero, which fails the commit closed.
+	sc, scanErr := gate.FindScanner(cfg.Scanner)
 	var scanner *gate.Scanner
-	if sc, err := gate.FindScanner(cfg.Scanner); err == nil {
+	if scanErr == nil {
 		scanner = &sc
 	}
 
@@ -82,10 +90,20 @@ func cmdLint(args []string, s streams) int {
 				s.errln("move-flagged:", err)
 				return 1
 			}
-			moved, err := lint.MoveFlagged(ctx, t.checkout, t.local, opts)
+			moved, reports, err := lint.MoveFlagged(ctx, t.checkout, t.local, opts)
+			var warning string
+			if err == nil && len(moved) > 0 {
+				warning = commit.Checkout(ctx, cfg, t.checkout, rules, sc, workOrgs, workNames, "priors: move flagged facts to the local layer")
+			}
 			unlock()
 			for _, rel := range moved {
 				s.outln("moved", rel)
+			}
+			for _, r := range reports {
+				s.errln(r)
+			}
+			if warning != "" {
+				s.errln("warning:", warning)
 			}
 			if err != nil {
 				s.errln("move-flagged:", err)

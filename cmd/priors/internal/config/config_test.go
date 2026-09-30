@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -19,7 +20,7 @@ func writeConfig(t *testing.T, body string) string {
 
 func isolate(t *testing.T) string {
 	t.Helper()
-	home := t.TempDir()
+	home := realPath(t, t.TempDir())
 	t.Setenv("HOME", home)
 	for _, k := range []string{"PRIORS_CONFIG", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "HOOKYARD_STATE_DIR"} {
 		t.Setenv(k, "")
@@ -108,27 +109,137 @@ func TestLoadValidatesStoresAndOrgs(t *testing.T) {
 			}
 		})
 	}
-	rejected := map[string]string{
-		"no personal store":               "profile = \"work\"\n" + orgs,
-		"relative personal store":         "profile = \"work\"\npersonal_store = \"memory/p\"\n" + orgs,
-		"relative work store":             "profile = \"work\"\npersonal_store = \"/m/p\"\nwork_store = \"memory/w\"\n" + orgs,
-		"relative state dir":              "profile = \"work\"\npersonal_store = \"/m/p\"\nstate_dir = \"state\"\n" + orgs,
-		"no work orgs":                    "profile = \"personal\"\npersonal_store = \"/m/p\"\n",
-		"empty work orgs":                 "profile = \"personal\"\npersonal_store = \"/m/p\"\nwork_orgs = []\n",
-		"stores equal":                    "profile = \"work\"\npersonal_store = \"/m/s\"\nwork_store = \"/m/s/\"\n" + orgs,
-		"work inside personal":            "profile = \"work\"\npersonal_store = \"/m/p\"\nwork_store = \"/m/p/w\"\n" + orgs,
-		"personal inside work":            "profile = \"work\"\npersonal_store = \"/m/w/p\"\nwork_store = \"/m/w\"\n" + orgs,
-		"state inside personal":           "profile = \"work\"\npersonal_store = \"/m/p\"\nstate_dir = \"/m/p/.state\"\n" + orgs,
-		"personal inside state":           "profile = \"work\"\npersonal_store = \"/m/s/p\"\nstate_dir = \"/m/s\"\n" + orgs,
-		"work inside state":               "profile = \"work\"\npersonal_store = \"/m/p\"\nwork_store = \"/m/s/w\"\nstate_dir = \"/m/s\"\n" + orgs,
-		"default state inside home store": "profile = \"work\"\npersonal_store = \"" + home + "\"\n" + orgs,
+	rejected := map[string]struct{ body, want string }{
+		"no personal store":               {"profile = \"work\"\n" + orgs, `personal_store must be an absolute path, got ""`},
+		"relative personal store":         {"profile = \"work\"\npersonal_store = \"memory/p\"\n" + orgs, `personal_store must be an absolute path, got "memory/p"`},
+		"relative work store":             {"profile = \"work\"\npersonal_store = \"/m/p\"\nwork_store = \"memory/w\"\n" + orgs, `work_store must be an absolute path, got "memory/w"`},
+		"relative state dir":              {"profile = \"work\"\npersonal_store = \"/m/p\"\nstate_dir = \"state\"\n" + orgs, `state_dir must be an absolute path, got "state"`},
+		"no work orgs":                    {"profile = \"personal\"\npersonal_store = \"/m/p\"\n", "work_orgs is required"},
+		"empty work orgs":                 {"profile = \"personal\"\npersonal_store = \"/m/p\"\nwork_orgs = []\n", "work_orgs is required"},
+		"stores equal":                    {"profile = \"work\"\npersonal_store = \"/m/s\"\nwork_store = \"/m/s/\"\n" + orgs, "personal_store (/m/s) and work_store (/m/s) must not be the same or nested"},
+		"work inside personal":            {"profile = \"work\"\npersonal_store = \"/m/p\"\nwork_store = \"/m/p/w\"\n" + orgs, "personal_store (/m/p) and work_store (/m/p/w) must not"},
+		"personal inside work":            {"profile = \"work\"\npersonal_store = \"/m/w/p\"\nwork_store = \"/m/w\"\n" + orgs, "personal_store (/m/w/p) and work_store (/m/w) must not"},
+		"state inside personal":           {"profile = \"work\"\npersonal_store = \"/m/p\"\nstate_dir = \"/m/p/.state\"\n" + orgs, "personal_store (/m/p) and state_dir (/m/p/.state) must not"},
+		"personal inside state":           {"profile = \"work\"\npersonal_store = \"/m/s/p\"\nstate_dir = \"/m/s\"\n" + orgs, "personal_store (/m/s/p) and state_dir (/m/s) must not"},
+		"work inside state":               {"profile = \"work\"\npersonal_store = \"/m/p\"\nwork_store = \"/m/s/w\"\nstate_dir = \"/m/s\"\n" + orgs, "work_store (/m/s/w) and state_dir (/m/s) must not"},
+		"default state inside home store": {"profile = \"work\"\npersonal_store = \"" + home + "\"\n" + orgs, "personal_store (" + home + ") and the default state dir"},
 	}
-	for name, body := range rejected {
+	for name, c := range rejected {
 		t.Run(name, func(t *testing.T) {
-			if _, err := Load(writeConfig(t, body)); err == nil {
-				t.Errorf("Load accepted %q", body)
+			_, err := Load(writeConfig(t, c.body))
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Errorf("Load(%q) = %v, want an error containing %q", c.body, err, c.want)
 			}
 		})
+	}
+}
+
+func symlink(t *testing.T, target, link string) string {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	return link
+}
+
+func realPath(t *testing.T, p string) string {
+	t.Helper()
+	r, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestLoadResolvesSymlinkedStores(t *testing.T) {
+	isolate(t)
+	personal, work, state := t.TempDir(), t.TempDir(), t.TempDir()
+	links := t.TempDir()
+	body := fmt.Sprintf("profile = \"work\"\npersonal_store = %q\nwork_store = %q\nstate_dir = %q\nwork_orgs = [\"github.com/w\"]\n",
+		symlink(t, personal, filepath.Join(links, "p")),
+		filepath.Join(symlink(t, work, filepath.Join(links, "w")), "not-yet"),
+		symlink(t, state, filepath.Join(links, "s")))
+
+	c, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := []string{c.PersonalStore, c.WorkStore, c.StateDir, c.State()}
+	want := []string{realPath(t, personal), filepath.Join(realPath(t, work), "not-yet"), realPath(t, state), realPath(t, state)}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("resolved = %q, want %q", got, want)
+	}
+}
+
+func TestLoadResolvesTheDefaultStateDir(t *testing.T) {
+	isolate(t)
+	xdg := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", symlink(t, xdg, filepath.Join(t.TempDir(), "xdg")))
+	body := fmt.Sprintf("profile = \"personal\"\npersonal_store = %q\nwork_orgs = [\"github.com/w\"]\n", t.TempDir())
+
+	c, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if want := filepath.Join(realPath(t, xdg), "priors"); c.State() != want {
+		t.Errorf("State() = %q, want %q", c.State(), want)
+	}
+}
+
+func TestLoadRejectsNestingThroughASymlink(t *testing.T) {
+	isolate(t)
+	personal := t.TempDir()
+	if err := os.Mkdir(filepath.Join(personal, "w"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	work := symlink(t, filepath.Join(personal, "w"), filepath.Join(t.TempDir(), "work"))
+	body := fmt.Sprintf("profile = \"work\"\npersonal_store = %q\nwork_store = %q\nstate_dir = %q\nwork_orgs = [\"github.com/w\"]\n",
+		personal, work, t.TempDir())
+
+	_, err := Load(writeConfig(t, body))
+
+	if err == nil || !strings.Contains(err.Error(), "must not be the same or nested") {
+		t.Errorf("err = %v, want a nesting error", err)
+	}
+}
+
+func TestLoadRejectsADanglingSymlinkStore(t *testing.T) {
+	isolate(t)
+	dangling := symlink(t, filepath.Join(t.TempDir(), "absent"), filepath.Join(t.TempDir(), "p"))
+	body := fmt.Sprintf("profile = \"personal\"\npersonal_store = %q\nstate_dir = %q\nwork_orgs = [\"github.com/w\"]\n", dangling, t.TempDir())
+
+	_, err := Load(writeConfig(t, body))
+
+	if err == nil || !strings.Contains(err.Error(), "personal_store") {
+		t.Errorf("err = %v, want an error naming personal_store", err)
+	}
+}
+
+func TestResolveDir(t *testing.T) {
+	real := t.TempDir()
+	links := t.TempDir()
+	link := symlink(t, real, filepath.Join(links, "link"))
+	dangling := symlink(t, filepath.Join(real, "absent"), filepath.Join(links, "dangling"))
+	resolved := realPath(t, real)
+
+	for _, c := range []struct{ in, want string }{
+		{real, resolved},
+		{link, resolved},
+		{link + "/", resolved},
+		{filepath.Join(link, "a", "b"), filepath.Join(resolved, "a", "b")},
+		{"/no-such-root-dir/x", "/no-such-root-dir/x"},
+	} {
+		got, err := ResolveDir(c.in)
+		if err != nil || got != c.want {
+			t.Errorf("ResolveDir(%q) = %q, %v; want %q", c.in, got, err, c.want)
+		}
+	}
+	for _, in := range []string{dangling, filepath.Join(dangling, "sub")} {
+		if got, err := ResolveDir(in); err == nil {
+			t.Errorf("ResolveDir(%q) = %q, want an error for a dangling symlink", in, got)
+		}
 	}
 }
 

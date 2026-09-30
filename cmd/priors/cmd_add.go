@@ -102,16 +102,20 @@ func cmdAdd(args []string, s streams) int {
 	}
 
 	res, err := write.Add(ctx, cfg, write.Request{
-		Fact:      f,
-		Session:   sess,
-		SessionID: id.session,
-		Engine:    id.engine,
-		Host:      id.host,
-		External:  *external,
+		Fact:             f,
+		Session:          sess,
+		SessionID:        id.session,
+		Engine:           id.engine,
+		Host:             id.host,
+		External:         *external,
+		IdentityConflict: id.conflict,
 	}, write.Deps{Rules: rules, Scanner: scanner, Now: time.Now})
 	if err != nil {
 		s.errln("refused:", err)
 		return 1
+	}
+	for _, r := range res.Reports {
+		s.errln(r)
 	}
 	if res.Warning != "" {
 		s.errln("warning:", res.Warning)
