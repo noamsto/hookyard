@@ -319,9 +319,9 @@ recommendation. The candidates were `deja-vu` (Go), `remem` (Rust) and
 pinned, installed isolated, and run against the **same five replayed personal
 transcripts** as §2 (46.6 MB decimal — the five sizes in
 `alternatives/README.md` sum to 46 595 941 B; codenames unchanged; `repo-b` grew
-by 5 640 bytes
-since #126), under the same measurements. Raw numbers and the fake-secret matrix
-are in [`fixtures/recall/alternatives/`](fixtures/recall/alternatives/README.md).
+by 5 640 bytes since #126), under the same measurements. Raw numbers and the
+fake-secret matrix are in
+[`fixtures/recall/alternatives/`](fixtures/recall/alternatives/README.md).
 
 | | `recall` | `deja-vu` | `remem` | `claudemem` | port our own |
 | --- | --- | --- | --- | --- | --- |
