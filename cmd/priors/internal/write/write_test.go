@@ -23,6 +23,11 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
 )
 
+func TestMain(m *testing.M) {
+	committest.UnsetRepoEnv()
+	os.Exit(m.Run())
+}
+
 var (
 	now          = time.Date(2026, 9, 30, 12, 34, 56, 789_000_000, time.UTC)
 	personalRepo = route.Session{Class: route.ClassPersonal, Repo: "hookyard"}

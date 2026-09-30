@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/noamsto/hookyard/cmd/priors/internal/commit/committest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 )
 
@@ -25,6 +26,7 @@ func TestMain(m *testing.M) {
 }
 
 func buildAndRun(m *testing.M) int {
+	committest.UnsetRepoEnv()
 	dir, err := os.MkdirTemp("", "priors-bin-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

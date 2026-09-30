@@ -12,6 +12,13 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 )
 
+func TestMain(m *testing.M) {
+	for _, k := range repoLocatingEnv {
+		_ = os.Unsetenv(k)
+	}
+	os.Exit(m.Run())
+}
+
 func TestParseURL(t *testing.T) {
 	tests := []struct {
 		raw               string
@@ -161,6 +168,20 @@ func TestResolve(t *testing.T) {
 				t.Errorf("Resolve = %+v, want %+v", got, want)
 			}
 		})
+	}
+}
+
+func TestResolveIgnoresInheritedRepoEnv(t *testing.T) {
+	isolateGit(t)
+	dir := newRepo(t, "clone", map[string]string{"origin": "https://github.com/noamsto/x"})
+	outer := newRepo(t, "outer", map[string]string{"origin": "https://github.com/factify-inc/y"})
+	t.Setenv("GIT_DIR", filepath.Join(outer, ".git"))
+	t.Setenv("GIT_WORK_TREE", outer)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(outer, ".git", "index"))
+
+	got := Resolve(t.Context(), dir, workCfg("personal"), stubResolver)
+	if want := (Session{Class: ClassPersonal, Repo: "x", Dir: dir}); got != want {
+		t.Errorf("Resolve = %+v, want %+v", got, want)
 	}
 }
 

@@ -284,7 +284,7 @@ func runGit(ctx context.Context, dir string, timeout time.Duration, stdin io.Rea
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...) //nolint:gosec // dir is the configured store checkout; args are fixed git subcommands
 	// Checkout matches git's English "not a git repository"; literal
 	// pathspecs keep a file named like a glob from staging its neighbours.
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "GIT_LITERAL_PATHSPECS=1")
+	cmd.Env = repoEnv("GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "GIT_LITERAL_PATHSPECS=1")
 	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -292,6 +292,22 @@ func runGit(ctx context.Context, dir string, timeout time.Duration, stdin io.Rea
 		return stdout.String() + stderr.String(), err
 	}
 	return stdout.String(), nil
+}
+
+// repoEnv is os.Environ plus extra, minus the variables git exports into a
+// hook's environment to locate its own repository: left in place they would
+// point every `git -C dir` at that repository instead of dir.
+func repoEnv(extra ...string) []string {
+	env := slices.DeleteFunc(os.Environ(), func(kv string) bool {
+		k, _, _ := strings.Cut(kv, "=")
+		return slices.Contains(repoLocatingEnv, k)
+	})
+	return append(env, extra...)
+}
+
+var repoLocatingEnv = []string{
+	"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_PREFIX", "GIT_NAMESPACE",
 }
 
 func gitWarning(what, out string, err error) string {

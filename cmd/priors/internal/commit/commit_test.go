@@ -17,6 +17,11 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
 )
 
+func TestMain(m *testing.M) {
+	committest.UnsetRepoEnv()
+	os.Exit(m.Run())
+}
+
 const scannerHit = "FAKE-SCANNER-HIT"
 
 // hitScanner reports every scanned file, or stdin, that holds scannerHit.
@@ -179,6 +184,45 @@ func TestCommitsCleanDirtySet(t *testing.T) {
 		t.Errorf("checkout still dirty: %q", out)
 	}
 	committest.AssertHeadIndexInTree(t, fx.dir())
+}
+
+func TestCheckoutIgnoresInheritedRepoEnv(t *testing.T) {
+	fx := setup(t)
+	outer := filepath.Join(t.TempDir(), "outer")
+	writeFile(t, filepath.Join(outer, "keep.txt"), []byte("keep\n"))
+	git(t, outer, "init", "-q")
+	git(t, outer, "add", "-A")
+	git(t, outer, "commit", "-q", "-m", "outer")
+	outerHead := head(t, outer)
+	outerIndex, err := os.ReadFile(filepath.Join(outer, ".git", "index"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeHead := head(t, fx.dir())
+	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+	fx.index(t)
+
+	t.Setenv("GIT_DIR", filepath.Join(outer, ".git"))
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(outer, ".git", "index"))
+	w := fx.checkout(t)
+	_ = os.Unsetenv("GIT_DIR")
+	_ = os.Unsetenv("GIT_INDEX_FILE")
+
+	if w != "" {
+		t.Fatalf("warning = %q", w)
+	}
+	if got := head(t, outer); got != outerHead {
+		t.Errorf("outer HEAD moved: %s -> %s", outerHead, got)
+	}
+	if got, err := os.ReadFile(filepath.Join(outer, ".git", "index")); err != nil || !slices.Equal(got, outerIndex) {
+		t.Errorf("outer index changed (read err %v)", err)
+	}
+	if head(t, fx.dir()) == storeHead {
+		t.Error("the store checkout got no commit")
+	}
+	if out := git(t, fx.dir(), "status", "--porcelain"); out != "" {
+		t.Errorf("store still dirty: %q", out)
+	}
 }
 
 func TestCommitsDeletion(t *testing.T) {
