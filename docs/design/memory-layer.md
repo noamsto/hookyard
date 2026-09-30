@@ -371,7 +371,8 @@ Observed 2026-09-16 (crew 1789561716-857282, PR #205): ...
 
 Three fields are new beyond Claude's. `confidence` (`proposed` | `reviewed`)
 is already used by §4.3b's drafts; what each value means for injection is set
-by §4.4's trust decision. `provenance` records the writing engine, session and
+by §4.4's trust decision, and under its options B and C `reviewed` holds only
+with a human's attestation. `provenance` records the writing engine, session and
 host, which every option in §4.4 needs, so a writer can be filtered or purged.
 `source` appears on imported facts only: the engine, the native `path` (Claude)
 or `thread_id` (Codex), and the `sha256` of the source at import — the keys
@@ -410,16 +411,33 @@ the org of the repo a session runs in.
 
 | store | holds | cloned on |
 | --- | --- | --- |
-| **personal** | personal tooling, the machine, the person; facts from personal-org repos | every host, work hosts included |
+| **personal** | personal tooling, the machine, the person; facts from personal-org repos | every host, work-profile hosts included |
 | **work** | facts learned in work-org repos, tooling facts among them | work-profile hosts only; never a personal host |
 
+**Host kind.** A **work-profile host** is one configured as such — the same
+profile setting that decides whether the work store is cloned — and every other
+host is a **personal host**. The kind is never inferred from whether a work
+checkout exists: a work-profile host whose work clone is missing (a fresh
+bootstrap, a failed clone) quarantines every write bound for work, and never
+writes it personal.
+
 **Resolving the org.** A session's org is the owner of its repo's `origin`
-remote, matched against a **work-org list configured on every host** —
-personal hosts too, so a personal host can recognise a work repo it holds no
-store for. The key is the repo's org, not the machine: a work host can clone a
-personal repo and the reverse, which is the rule the fleet already uses to pick
-Linear or GitHub issues. A session with no repo, or a repo with no `origin`, is
-**unresolvable**.
+remote, matched against **two lists configured on every host** — work orgs and
+personal orgs — personal hosts too, so a personal host can recognise a work
+repo it holds no store for. `origin` is parsed into host and owner: case-folded,
+`.git` stripped, SSH host aliases resolved, and the host compared as well as
+the owner. A repo with several remotes resolves by `origin` only, with one
+exception that fails closed: a fork whose `origin` is personal while another
+remote names a work org counts as work. On a work-profile host an org on
+neither list is **unresolvable**; on a personal host it is personal, being on
+no work list. The key is the repo's org, not the machine: a work-profile host
+can clone a personal repo and the reverse, which is the rule the fleet already
+uses to pick Linear or GitHub issues.
+
+**No repo is not unresolvable.** A live session whose cwd is outside any git
+checkout has **no repo**. A source that *had* a repo that can no longer be
+resolved — a Claude project dir that no longer decodes to a checkout, a checkout
+with no `origin`, a Codex row with no rollout — is **unresolvable**.
 
 **Claude project directories** name a path in a lossy encoding (`/` and `.`
 both become `-`), so a migrated or imported Claude fact is resolved by decoding
@@ -433,20 +451,28 @@ guessed from the name.
 | --- | --- |
 | work-org | work + personal |
 | any other org | personal only |
-| unresolvable | personal only |
+| no repo, or unresolvable | personal only |
 
-On a host with no work store, a work-org session reads personal only — there is
-nothing else on the host to read.
+On a personal host, or a work-profile host whose work clone is missing, a
+work-org session reads personal only — there is nothing else on the host to
+read.
 
 **Write rule** — where a new fact lands:
 
 | session's repo | host | fact lands in |
 | --- | --- | --- |
-| any org not on the work-org list | any | personal |
-| work-org | has a work store | work — **global and tooling facts included**; only a human moves one to personal |
-| work-org | no work store | neither: a host-local quarantine outside both checkouts (`$XDG_STATE_HOME/priors/quarantine/`), reported, never synced, drained only by a human (a later workstream, §10) |
-| unresolvable | has a work store | work |
-| unresolvable | no work store | personal — a host with no work store is a personal host, where the rule has nothing to protect |
+| personal-org | any | personal |
+| on neither list | personal | personal |
+| work-org | work-profile | work — **global and tooling facts included**; only a human moves one to personal |
+| work-org | personal | neither: a host-local quarantine outside both checkouts (`$XDG_STATE_HOME/priors/quarantine/`), reported, never synced, drained only by a human (a later workstream, §10) |
+| no repo | work-profile | work |
+| no repo | personal | personal |
+| unresolvable, incl. an org on neither list | work-profile | work |
+| unresolvable | personal | the quarantine — never personal |
+
+Moving a fact from work to personal — `priors move --to personal`, or draining
+the quarantine — scans it for work-org names, work repo names and internal
+hostnames first, and refuses on a match.
 
 Why the write rule is shaped so:
 
@@ -460,17 +486,27 @@ Why the write rule is shaped so:
   sessions and commits may be public (R9) — while a personal fact misfiled into
   the work store costs one reviewed move.
 - **Unresolvable fails closed in both directions**: it reads the least
-  (personal only) and writes to the most protected store the host has.
-- **Quarantine, not personal, on a host without a work store.** Writing the
-  fact to personal would be a leak by construction, and dropping it would lose
-  it; holding it host-local and reporting it does neither.
+  (personal only) and writes to the most protected place the host has — the
+  work store on a work-profile host, the quarantine on a personal one. It may
+  have been a work repo; a no-repo session was never in one, so it follows the
+  host kind.
+- **Quarantine, not personal, on a personal host.** Writing a work-org or
+  unresolvable fact to personal would be a leak by construction, and dropping
+  it would lose it; holding it host-local and reporting it does neither.
 
 **Two independent layers enforce the boundary.** *Clone placement*: the work
 store is never cloned on a personal host, so no filter bug there can surface a
-work fact. *The read filter*: on a work host, where both stores are present, a
-session in a non-work repo is never given the work store. Where one layer is
-absent the other still holds — a personal host has nothing to filter, and a
-work store cloned where it should not be still meets the read filter.
+work fact. *The read filter*: on a work-profile host, where both stores are
+present, a session in a non-work repo is never given the work store. Where one
+layer is absent the other still holds — a personal host has nothing to filter,
+and a work store cloned where it should not be still meets the read filter.
+On a work-profile host the work checkout still sits on disk, where a
+personal-repo session could `cat` or `rg` it, so the filter there is backed by
+a **`pre_tool` read guard**: when the session's org is not work, it denies reads
+and searches under the work-store path, `local/work/` (§4.4) and the
+quarantine. It guards only the tool calls hookyard sees, and a command that
+hides the path defeats it: clone placement is the only hard wall, and it
+protects personal hosts, not a personal repo on a work-profile host.
 Write-time redaction (§4.3) applies to both stores on top of these.
 
 Inside a store, facts are scoped by repo:
@@ -514,7 +550,11 @@ this corpus is written a few facts at a time by an agent already in the loop.
 already written to `~/.local/share/crew/ratings.jsonl`. A distillation step may
 propose one fact per discovered regularity (e.g. engine/model/tier combinations
 with `rework_count` above a threshold *and* a consistent cause) and write it as
-a `type: project` draft marked `confidence: proposed`. What a `proposed` fact
+a `type: project` draft marked `confidence: proposed`. A proposal is routed by
+the repo of each `ratings.jsonl` row it is drawn from, not by the session
+running `crew reap`; one drawn from rows of more than one store lands in the
+most protected of them — any work-org or unresolvable row sends it to the work
+store, or to the quarantine on a personal host. What a `proposed` fact
 may do on arrival — whether it is injected, and on which hosts — is the trust
 decision (§4.4). Whichever option is taken, the failure mode worth avoiding is
 an unverified statistical claim becoming a standing instruction.
@@ -535,7 +575,16 @@ patterns are one rule set shared with the roadmap's `hookyard export`
 redaction, not a second list to keep in step, and they apply to both stores:
 the store split keeps work facts off personal hosts, redaction keeps secrets
 out of either, and read-time scoping (§4.2) is the second line of defence, not
-the only one. Which path a write then takes before it reaches another host —
+the only one. The same rule set runs in `priors index` and `priors search`,
+where a matching fact is excluded from injection and reported, and each store
+repo's remote runs the lint as a required check, because a client pre-commit
+can be skipped (`--no-verify`) and git hooks are not cloned. A refusal report
+names the rule and the file, **never the matched text**. A missing or
+unparsable rule set **fails closed** on every write path — the opposite of R8's
+read-side fail-open, since a write that cannot be checked cannot be trusted. A
+secret that reaches a pushed store means **rotating the credential**; purging
+history is not the remedy, because every clone already holds it. Which path a
+write then takes before it reaches another host —
 pushed as written, reviewed first, or held on the host that wrote it — is the
 trust decision (§4.4), and each option there names it.
 
@@ -566,8 +615,8 @@ hatch, and is the reason R1 matters: the agent can always grep.
 session has two to inject. Tier 1 injects both, each attributed with the store
 it came from. The 4 K-char budget goes to the session's own store — work —
 first, and the personal index takes what remains; each index keeps its own
-200-line/25 KB cap. A session in any other repo, or an unresolvable one, gets
-the personal index alone, with the whole budget.
+200-line/25 KB cap. A session in any other repo, with no repo, or unresolvable,
+gets the personal index alone, with the whole budget.
 
 **Tier 2 is a measured gate** — *proposed, needs owner sign-off.* §7 names its
 recall A/B as the only thing that would justify tier 2's complexity: the
@@ -597,7 +646,7 @@ If built, tier 2 must be bounded and must fail open:
 Injected memory reaches the model as instructions. On one host with one writer,
 a bad fact misleads that host's sessions — the exposure Claude's auto memory
 already has. This design removes the "one host": the personal store is cloned
-on every host and the work store on every work host (§4.2), and agents,
+on every host and the work store on every work-profile host (§4.2), and agents,
 distillation (§4.3b) and the importer (§4.9) all write into them, so the store
 *is* shared from v0. One bad or tampered fact then reaches every session, on
 every engine, on every host that pulls — and, in hookyard's team mode,
@@ -610,6 +659,14 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
   advice is meant to be acted on, recalled memory is not. `recall` already
   fences this way; the Pi bridge's `[hookyard advisory]` prefix is the
   attribution half.
+- **Injection hygiene.** The fence and attribution wrapper is applied *after*
+  truncation and outside the budget, so truncation can never cut the closing
+  fence. Injected fields have control, bidi and Unicode tag characters
+  stripped, and imitations of the fence or attribution — a fake
+  `[hookyard advisory]` or store header — escaped; each index line is capped;
+  `priors show` and `priors search` fence their own output. A file opened with
+  `cat` or `rg` (tier 3) reaches the model unfenced, so "fenced" below means
+  *through `priors`*.
 - **Provenance on every fact** — §4.1's `provenance:` block (engine, session,
   host) — so the index can be filtered by writer and a compromised writer's
   facts purged.
@@ -621,26 +678,44 @@ reaches another host:
 | option | what gets injected | path a write takes to another host | cost |
 | --- | --- | --- | --- |
 | **A. Fence and inject everything** | every fact the read rule allows, fenced | direct commit and push | a tampered fact still reaches every session; fencing lowers compliance, it does not remove it |
-| **B. Reviewed-only injection** | `confidence: reviewed` facts only; `proposed` facts — agent-written, imported, distilled — reachable only by search (tier 3), fenced | a human-reviewed commit flips `proposed` → `reviewed` | a fresh lesson helps no session until it is reviewed; migration starts with every fact `proposed` (451 on `tp-g5`) and nothing injected |
-| **C. Host-local until reviewed** | `reviewed` facts from the synced checkouts, plus this host's own `proposed` facts from an unsynced local layer, all fenced | none until review: reviewed promotion moves a fact from the local layer into its store's checkout and commits it | a third per-host location to manage; a lesson learned on one host still waits for review before another host sees it |
+| **B. Reviewed-only injection** | `confidence: reviewed` facts only; `proposed` facts — agent-written, imported, distilled — reachable only by search (tier 3), fenced through `priors` | a human-reviewed commit flips `proposed` → `reviewed` | a fresh lesson helps no session until it is reviewed; migration starts with every fact `proposed` (451 on `tp-g5`) and nothing injected |
+| **C. Host-local until reviewed** | `reviewed` facts from the synced checkouts, plus this host's own `proposed` facts learned in the session's repo, from an unsynced local layer, all fenced | none until review: reviewed promotion moves a fact from the local layer into its store's checkout and commits it | a third per-host location to manage; a lesson learned on one host still waits for review before another host sees it |
 
 Under C the local layer is split per store, like the checkouts:
 `$XDG_STATE_HOME/priors/local/personal/` and
 `$XDG_STATE_HOME/priors/local/work/`, outside both checkouts and never
 synced. A write is routed by §4.2's write rule first, then lands in that
-store's local layer; §4.2's quarantine still takes a work-org fact on a host
-with no work store. §4.2's read rule applies to the local layers exactly as to
-the checkouts, so a personal-repo session never reads `local/work/`. Reviewed
-promotion moves a fact from `local/<store>/` into that same store's checkout
-only, never across stores — moving a work fact to personal stays the separate
-human act of §4.2.
+store's local layer; what §4.2 quarantines still goes to the quarantine.
+§4.2's read rule applies to the local layers exactly as to the checkouts, so a
+personal-repo session is never given `local/work/`, and the read guard denies
+its tool calls there. Each local layer has its own per-host, unsynced generated
+index (`$XDG_STATE_HOME/priors/local/<store>/MEMORY.md`), merged into tier 1
+under §4.2's read rule; a checkout's `MEMORY.md` lists only that checkout's
+facts, so no local fact's line is ever committed. A local `proposed` fact is
+injected only into sessions of **the repo it was learned in**, on any engine,
+and its `scope: global` is honoured only after review. Reviewed promotion
+moves a fact from `local/<store>/` into that same store's checkout only, never
+across stores — moving a work fact to personal stays the separate human act of
+§4.2. It commits into the checkout first and deletes the local copy after; if
+both exist, the checkout copy wins by `name`.
 
-**Recommendation: C.** It reproduces today's exposure exactly — Claude already
-injects its own unreviewed facts on the host that wrote them, and nowhere else
-— and it adds no cross-host path until a human reviews. Migration is a no-op
-for exposure: each host's imported Claude facts sit in that host's local layer,
-reaching no host they did not reach before. A and B each fail one half of that:
-A adds the fan-out at once, B takes away injection the host has today.
+**Under B and C, `reviewed` is an attestation, not a field.** A fact's
+`reviewed` state is valid only when a human-held attestation over its `sha256`
+exists — a signed commit or a signed attest entry, under a key agents cannot
+read. `priors index` checks it at generation time, and any change to the body,
+an approved near-duplicate merge included, resets the fact to `proposed`. A
+`pre_tool` guard — the router already sees every tool call (§5) — denies agent
+writes to attestations, to `confidence: reviewed`, and to `priors`'s config and
+state dirs.
+
+**Recommendation: C.** It matches today's per-repo exposure — Claude already
+injects its own unreviewed facts in the repo and on the host that wrote them,
+and nowhere else — widened on the one axis this design exists for: other
+engines in the same repo on the same host. It adds no cross-host path until a
+human reviews. Migration adds no host either: each host's imported Claude
+facts sit in that host's local layer, reaching no host they did not reach
+before. A and B each fail one half of that: A adds the fan-out at once, B takes
+away injection the host has today.
 
 **This is the owner's decision**, and this document does not make it. What
 `proposed` means for injection — and so what distillation's proposals (§4.3b)
@@ -766,7 +841,7 @@ and tested.
 session_start   → priors index      → advisory → tier 1
 prompt_submit   → priors search     → advisory → tier 2   (gated, §4.4)
 post_tool       → priors touch      (fire_and_forget) → local usage log (§4.6)
-(pre_tool reserved for future targeted recall)
+pre_tool        → read and attestation guards → deny (§4.2, §4.4)
 ```
 
 What each engine can actually receive, read off `internal/verdict/capability.go`:
@@ -969,8 +1044,8 @@ change.
 | --- | --- | --- |
 | **hookyard** | *only if tier 2 passes its gate (§4.4):* `prompt_submit` added to `HasAdvisorySlot` for Claude and Pi (Codex already has `session_start` and `prompt_submit` since #101, so needs no hookyard change for tiers 1 and 2); Pi bridge's `input` reply delivered (not discarded); `before_agent_start` registration made a real per-prompt handler | the only router changes this design can require; tier 2 is impossible on Claude and Pi without them (R2, §4.7), and v0 needs none of them |
 | **hookyard** | *only if tier 2 passes its gate (§4.4):* captured `prompt_submit` advisory payload fixtures per engine, per its own evidentiary convention | a claimed-advisory engine with no fixture is a claim, not a capability |
-| **`priors`** (separate package and binary, built from the hookyard repo) | `cmd/priors` and its own tree, with its own manifest, reached through hookyard's `exec` handler contract; it speaks the envelope as JSON like any third-party handler and imports no `internal/` package, so moving it to its own repo is moving files. `add` / `list` / `show` / `search` / `lint` / `index` / `import` / `touch`; both store paths and the work-org list from config; write-time redaction and §4.2's routing; v0 `rg` backend | the owner's decision 4: the router stays small and auditable, and the store keeps a schema cadence of its own; §4.4's fail-open contract lives here |
-| **nix-config** | install `priors` and its manifest, wiring `session_start` to `priors index` and `post_tool` to the `priors touch` usage logger (`fire_and_forget`, §4.6), and `prompt_submit` only if tier 2 passes its gate; clone the personal store on every host incl. `halo` and `mbp`, and the work store on work-profile hosts only (§4.2, §4.8); the work-org list on every host, personal ones included; `AGENTS.md` include line for Codex/Cursor/Pi; optional Obsidian `programs.obsidian.vaults` entries, one vault per store | one manifest, four engines — the pattern `programs.hookyard.manifests` already exists for; clone placement is the first of §4.2's two layers |
+| **`priors`** (separate package and binary, built from the hookyard repo) | `cmd/priors` and its own tree, with its own manifest, reached through hookyard's `exec` handler contract; it speaks the envelope as JSON like any third-party handler and imports no `internal/` package, so moving it to its own repo is moving files. `add` / `list` / `show` / `search` / `lint` / `index` / `import` / `touch`; both store paths, the host profile and both org lists from config; write-time redaction and §4.2's routing; v0 `rg` backend | the owner's decision 4: the router stays small and auditable, and the store keeps a schema cadence of its own; §4.4's fail-open contract lives here |
+| **nix-config** | install `priors` and its manifest, wiring `session_start` to `priors index` and `post_tool` to the `priors touch` usage logger (`fire_and_forget`, §4.6), and `prompt_submit` only if tier 2 passes its gate; clone the personal store on every host incl. `halo` and `mbp`, and the work store on work-profile hosts only (§4.2, §4.8); the host profile and both org lists on every host, personal ones included; `AGENTS.md` include line for Codex/Cursor/Pi; optional Obsidian `programs.obsidian.vaults` entries, one vault per store | one manifest, four engines — the pattern `programs.hookyard.manifests` already exists for; clone placement is the first of §4.2's two layers |
 | **dispatcher** | `crew reap` runs `priors import` (§4.9), then distillation proposals (§4.3b); the judge consults `priors search` before choosing tier/engine/model | closes failure mode 2 — the judge currently decides from a static table while `ratings.jsonl` holds the evidence |
 | **nix-config** | worker MCP profile unchanged (zero servers) | memory must not be the reason a worker grows an MCP dependency (R1) |
 
@@ -980,8 +1055,9 @@ would enlarge what that team must trust and tie the router's release cadence to
 the store's schema, so `priors` lives in the hookyard repo but is not router
 code: it is an `exec` handler with its own manifest, and hookyard's only
 changes are the gated advisory slots above. Kept that way, the router also makes
-memory safer — a `pre_tool` guard can check writes into the store, and the
-event record shows which memory was injected into which session — and both work
+memory safer — `pre_tool` guards deny agent writes to attestations and a
+personal-repo session's reads of the work store (§4.2, §4.4), and the event
+record shows which memory was injected into which session — and both work
 only because memory is a handler the router observes. It also makes `priors`
 the first major handler built on hookyard's public contract, which shows the
 contract is enough for someone else to build on.
@@ -1045,11 +1121,31 @@ Stated so the design can be falsified rather than defended:
   and re-importing an unchanged source is a no-op (§4.9);
 - **routing and the read rule** (§4.2): with both stores present, a
   personal-repo session never receives a work fact — from an index, a search
-  or a local layer; an unresolvable session reads personal only and writes to
-  the work store where the host has one, personal where it has none; a work-org
-  session on a host without a work store quarantines the fact and never writes
-  personal; a Claude project dir that does not decode to a git checkout is
-  unresolvable;
+  or a local layer; host kind comes from the profile setting, so a
+  work-profile host with its work clone missing quarantines a work-bound
+  write; an unresolvable session reads personal only and writes work on a
+  work-profile host and to the quarantine on a personal one, never personal; a
+  no-repo session writes work on a work-profile host and personal on a
+  personal one; an org on neither list routes as unresolvable on a
+  work-profile host and personal on a personal one; a work-org session on a
+  personal host quarantines the fact; `origin` parsing case-folds, strips
+  `.git`, resolves SSH aliases and compares the host, and a fork with a
+  work-org remote counts as work; a Claude project dir that does not decode to
+  a git checkout is unresolvable;
+- **distillation routing** (§4.3b): a proposal drawn from rows of a personal
+  and a work-org repo lands in the work store, or the quarantine on a personal
+  host, whichever session runs `crew reap`;
+- **the read guard** (§4.2): on a work-profile host, a personal-repo session's
+  `cat` of a work fact is denied, as is an `rg` under the work-store path,
+  `local/work/` or the quarantine;
+- **attestation** (§4.4): a `confidence: reviewed` fact with no valid
+  attestation is treated as `proposed`; a body change, an approved merge
+  included, resets an attested fact to `proposed`; an agent's write to an
+  attestation, to `confidence: reviewed`, or under `priors`'s config or state
+  dirs is denied;
+- **injection hygiene** (§4.4): a description carrying a fake fence, a fake
+  `[hookyard advisory]` or store header, or bidi and tag characters reaches
+  the model escaped and stripped, and no truncation cuts the closing fence;
 - **double injection** (§4.9): the canonical copy is skipped only when native
   memory is on, the native source exists and the fact is inside the native
   window; it is injected when native memory is off, the source is gone, the
@@ -1169,7 +1265,7 @@ made.
    migration (decision 2).
 7. **Tier 2 — proposed, needs owner sign-off** (§4.4). Out of v0, behind §7's
    recall A/B: v0 ships tiers 1 and 3, and tier 2 — with the hookyard gaps
-   behind it (§4.7, §5, workstream 7 below) — is built only if the A/B shows
+   behind it (§4.7, §5, workstream 8 below) — is built only if the A/B shows
    its delta.
 
 ---
@@ -1179,25 +1275,27 @@ made.
 | # | workstream | repo | delivers |
 | --- | --- | --- | --- |
 | 0 | settle the trust model (§4.4, decision 6) — blocks every workstream below that writes a fact | — (the owner) | the path every write takes |
-| 1 | the two store repos; `priors` v0 (`add`/`list`/`show`/`search`/`lint`/`index`), write-time redaction (§4.3), §4.2's routing and read rule | hookyard (`cmd/priors`) | tier 1 + tier 3 on all four engines |
-| 2 | nix-config wiring: install, clone per §4.2, the work-org list on every host, `AGENTS.md` include line | nix-config | reach with no hookyard change |
+| 1 | the two store repos, each remote running the lint as a required check (§4.3); `priors` v0 (`add`/`list`/`show`/`search`/`lint`/`index`), write-time redaction (§4.3), §4.2's routing and read rule | hookyard (`cmd/priors`) | tier 1 + tier 3 on all four engines |
+| 2 | nix-config wiring: install, clone per §4.2, the host profile and both org lists on every host, `AGENTS.md` include line | nix-config | reach with no hookyard change |
 | 3 | importer v0 (Claude; Codex behind the schema pin, §4.9) and the per-host migration with dedup proposals (decision 2) | hookyard (`priors`) | content to actually retrieve |
 | 4 | usage log and promotion/demotion: `post_tool → priors touch`, `fire_and_forget` (§4.6) | hookyard (`priors`) | strengthening and forgetting |
-| 5 | dispatcher: `crew reap` runs the import, then distillation proposals; the judge consults `priors` | dispatcher | closes failure mode 2 |
-| 6 | Obsidian as a viewer, one vault per store; Bases table for the stale sweep (§4.8 step 1) | nix-config | §4.6 curation, if it earns it |
-| 7 | *gated:* hookyard `prompt_submit` advisory slot for Claude and Pi + Pi bridge `input` reply + fixtures — only if §7's A/B passes (decision 7) | hookyard | tier 2 on Claude and Pi (Codex already has the slot via #101) |
-| 8 | *later:* a command to drain the quarantine (§4.2); cross-host usage aggregation (§4.6); the `hookyard serve` memory view (§4.8 step 2) | hookyard (`priors`, `serve`) | — |
+| 5 | the `pre_tool` guards: attestation and write guard (§4.4), work-store read guard (§4.2) — before the stores go to a second host | hookyard (`priors`) | the review and read boundaries hold against agents |
+| 6 | dispatcher: `crew reap` runs the import, then distillation proposals; the judge consults `priors` | dispatcher | closes failure mode 2 |
+| 7 | Obsidian as a viewer, one vault per store; Bases table for the stale sweep (§4.8 step 1) | nix-config | §4.6 curation, if it earns it |
+| 8 | *gated:* hookyard `prompt_submit` advisory slot for Claude and Pi + Pi bridge `input` reply + fixtures — only if §7's A/B passes (decision 7) | hookyard | tier 2 on Claude and Pi (Codex already has the slot via #101) |
+| 9 | *later:* a command to drain the quarantine (§4.2); cross-host usage aggregation (§4.6); the `hookyard serve` memory view (§4.8 step 2) | hookyard (`priors`, `serve`) | — |
 
 **Order.** For anyone outside this fleet, hookyard running without Nix
 (roadmap stage 1) comes first: without it, a memory layer delivered through
 hookyard reaches only Nix users. Then workstream 0, because every workstream
 that writes a fact takes the path it chooses. Then `priors` v0 on one machine,
 workstreams 1–4; the recall A/B runs on that machine's migrated corpus and
-decides whether 7 is built at all. Reaching further — the stores cloned to
+decides whether 8 is built at all. Reaching further — the stores cloned to
 more hosts, or a store shared with a team in hookyard's team mode — waits until
-the trust model holds on that one machine. And before the memory layer is more
+the guards (workstream 5) are in and the trust model holds on that one
+machine. And before the memory layer is more
 than a pointer on hookyard's public roadmap, it gets a general version: the
 store, the tiers and the advisory wiring described for any single developer,
-with this fleet kept as the worked example. Workstreams 2 and 5 are specific to
+with this fleet kept as the worked example. Workstreams 2 and 6 are specific to
 this fleet and stay that way; outside it, `priors import` by hand stands in for
 `crew reap` (§4.9).
