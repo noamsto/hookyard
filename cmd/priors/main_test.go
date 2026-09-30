@@ -1,0 +1,880 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
+)
+
+var binPath string
+
+func TestMain(m *testing.M) {
+	os.Exit(buildAndRun(m))
+}
+
+func buildAndRun(m *testing.M) int {
+	dir, err := os.MkdirTemp("", "priors-bin-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	binPath = filepath.Join(dir, "priors")
+	if out, err := exec.Command("go", "build", "-o", binPath, ".").CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "go build: %v\n%s", err, out)
+		return 1
+	}
+	return m.Run()
+}
+
+const (
+	personalRemote = "git@github.com:noamsto/demo.git"
+	workRemote     = "git@github.com:factify-inc/app.git"
+	cleanScanner   = "#!/bin/sh\ncat >/dev/null\necho '[]'\n"
+	dirtyScanner   = "#!/bin/sh\ncat >/dev/null\necho '[{\"RuleID\":\"fake-rule\",\"File\":\"x\"}]'\n"
+)
+
+type result struct {
+	stdout, stderr string
+	code           int
+}
+
+// sandbox is an isolated HOME, state, config and pair of stores that the
+// priors binary runs in. Nothing is inherited from the test process but PATH.
+type sandbox struct {
+	t                              *testing.T
+	dir                            string
+	personal, work, state          string
+	hookyard, gitConfig, sshConfig string
+	configPath, scanner, path      string
+	profile                        string
+}
+
+func newSandbox(t *testing.T, profile string) *sandbox {
+	t.Helper()
+	dir := t.TempDir()
+	sb := &sandbox{
+		t:          t,
+		dir:        dir,
+		personal:   filepath.Join(dir, "personal"),
+		work:       filepath.Join(dir, "work"),
+		state:      filepath.Join(dir, "state", "priors"),
+		hookyard:   filepath.Join(dir, "hookyard"),
+		gitConfig:  filepath.Join(dir, "gitconfig"),
+		sshConfig:  filepath.Join(dir, "ssh_config"),
+		configPath: filepath.Join(dir, "config.toml"),
+		scanner:    filepath.Join(dir, "scanner"),
+		path:       os.Getenv("PATH"),
+		profile:    profile,
+	}
+	sb.writeFile(sb.gitConfig, "[user]\n\tname = Test\n\temail = test@example.com\n[commit]\n\tgpgsign = false\n")
+	sb.writeFile(sb.sshConfig, "")
+	sb.setScanner(cleanScanner)
+	for _, d := range []string{sb.personal, sb.work} {
+		sb.mkdir(d)
+		sb.git(d, "init", "-q")
+	}
+	sb.writeConfig()
+	return sb
+}
+
+func (sb *sandbox) mkdir(dir string) {
+	sb.t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		sb.t.Fatal(err)
+	}
+}
+
+func (sb *sandbox) writeFile(path, content string) {
+	sb.t.Helper()
+	sb.mkdir(filepath.Dir(path))
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		sb.t.Fatal(err)
+	}
+}
+
+func (sb *sandbox) setScanner(script string) {
+	sb.t.Helper()
+	sb.writeFile(sb.scanner, script)
+	if err := os.Chmod(sb.scanner, 0o755); err != nil {
+		sb.t.Fatal(err)
+	}
+}
+
+// writeConfig rewrites the config; extra lines are appended to it.
+func (sb *sandbox) writeConfig(extra ...string) {
+	sb.t.Helper()
+	lines := []string{
+		fmt.Sprintf("profile = %q", sb.profile),
+		fmt.Sprintf("personal_store = %q", sb.personal),
+		fmt.Sprintf("work_store = %q", sb.work),
+		fmt.Sprintf("state_dir = %q", sb.state),
+		`work_orgs = ["github.com/factify-inc"]`,
+		`personal_orgs = ["github.com/noamsto"]`,
+		fmt.Sprintf("ssh_config = %q", sb.sshConfig),
+		fmt.Sprintf("scanner = %q", sb.scanner),
+	}
+	sb.writeFile(sb.configPath, strings.Join(append(lines, extra...), "\n")+"\n")
+}
+
+func (sb *sandbox) childEnv() []string {
+	return []string{
+		"HOME=" + sb.dir,
+		"XDG_STATE_HOME=" + filepath.Join(sb.dir, "xdg-state"),
+		"XDG_CONFIG_HOME=" + filepath.Join(sb.dir, "xdg-config"),
+		"HOOKYARD_STATE_DIR=" + sb.hookyard,
+		"GIT_CONFIG_GLOBAL=" + sb.gitConfig,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"PATH=" + sb.path,
+		"PRIORS_CONFIG=" + sb.configPath,
+	}
+}
+
+func (sb *sandbox) git(dir string, args ...string) {
+	sb.t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = sb.childEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		sb.t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// repo makes a git repo whose origin is remote.
+func (sb *sandbox) repo(remote string) string {
+	sb.t.Helper()
+	dir := sb.t.TempDir()
+	sb.git(dir, "init", "-q")
+	sb.git(dir, "remote", "add", "origin", remote)
+	return dir
+}
+
+func (sb *sandbox) run(stdin string, args ...string) result {
+	sb.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binPath, args...)
+	cmd.Env = sb.childEnv()
+	cmd.Dir = sb.dir
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	res := result{stdout: stdout.String(), stderr: stderr.String()}
+	if err != nil {
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) {
+			sb.t.Fatalf("running priors %v: %v", args, err)
+		}
+		res.code = exit.ExitCode()
+	}
+	return res
+}
+
+// record writes a hookyard event record for session with one Bash tool call.
+func (sb *sandbox) record(session string) {
+	sb.t.Helper()
+	line := fmt.Sprintf(`{"session_id":%q,"canonical_event":"post_tool","tool_name":"Bash"}`+"\n", session)
+	path := filepath.Join(sb.hookyard, "stream", time.Now().UTC().Format(time.DateOnly)+".jsonl")
+	sb.mkdir(filepath.Dir(path))
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		sb.t.Fatal(err)
+	}
+	if _, err := f.WriteString(line); err != nil {
+		sb.t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		sb.t.Fatal(err)
+	}
+}
+
+func today() string { return time.Now().UTC().Format(time.DateOnly) }
+
+func newFact(name, repo, typ string) fact.Fact {
+	return fact.Fact{
+		Name:        name,
+		Description: "description of " + name,
+		Metadata: fact.Metadata{
+			NodeType:   "memory",
+			Type:       typ,
+			Scope:      "repo",
+			Repos:      []string{repo},
+			ValidFrom:  today(),
+			Verified:   today(),
+			Confidence: "proposed",
+			Provenance: &fact.Provenance{Engine: "claude", Session: "s", Host: "h"},
+			Modified:   time.Now().UTC().Format(time.RFC3339Nano),
+		},
+		Body: "body of " + name + "\n",
+	}
+}
+
+// putFact writes f at root/rel and returns the path.
+func (sb *sandbox) putFact(root, rel string, f fact.Fact) string {
+	sb.t.Helper()
+	data, err := f.Marshal()
+	if err != nil {
+		sb.t.Fatal(err)
+	}
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	sb.writeFile(path, string(data))
+	return path
+}
+
+func (sb *sandbox) indexWrite() {
+	sb.t.Helper()
+	if res := sb.run("", "index", "--write"); res.code != 0 {
+		sb.t.Fatalf("index --write: exit %d: %s", res.code, res.stderr)
+	}
+}
+
+func sessionStartEnvelope(cwd string) string {
+	return fmt.Sprintf(`{"engine":"claude-code","canonical_event":"session_start","session_id":"s1","cwd":%q}`, cwd)
+}
+
+// additionalContext is the injected text of a hook reply, which must have
+// exactly the documented shape.
+func additionalContext(t *testing.T, stdout string) string {
+	t.Helper()
+	var reply map[string]map[string]string
+	if err := json.Unmarshal([]byte(stdout), &reply); err != nil {
+		t.Fatalf("stdout is not a hook reply: %v\n%s", err, stdout)
+	}
+	inner, ok := reply["hookSpecificOutput"]
+	if !ok || len(reply) != 1 || len(inner) != 1 {
+		t.Fatalf("unexpected reply shape: %s", stdout)
+	}
+	text, ok := inner["additionalContext"]
+	if !ok || text == "" {
+		t.Fatalf("no additionalContext: %s", stdout)
+	}
+	return text
+}
+
+func wantContains(t *testing.T, what, got string, subs ...string) {
+	t.Helper()
+	for _, s := range subs {
+		if !strings.Contains(got, s) {
+			t.Errorf("%s lacks %q:\n%s", what, s, got)
+		}
+	}
+}
+
+func wantExit(t *testing.T, res result, code int) {
+	t.Helper()
+	if res.code != code {
+		t.Fatalf("exit %d, want %d\nstdout: %s\nstderr: %s", res.code, code, res.stdout, res.stderr)
+	}
+}
+
+func TestAddPublishesWithFlagsAndStdin(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.record("sess-1")
+
+	res := sb.run("the body\n", "add", "--stdin", "--name", "flag-fact", "--description", "from flags",
+		"--type", "project", "--cwd", repo, "--session", "sess-1")
+	wantExit(t, res, 0)
+	path := filepath.Join(sb.personal, "demo", "flag-fact.md")
+	if want := "published personal " + path + "\n"; res.stdout != want {
+		t.Fatalf("stdout %q, want %q", res.stdout, want)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantContains(t, "fact file", string(raw), "from flags", "the body", "repos: [demo]")
+}
+
+func TestAddParsesFrontmatterOnStdinAndFlagsOverride(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.record("sess-1")
+
+	f := newFact("whole-fact", "demo", "reference")
+	f.Description = "from frontmatter"
+	f.Metadata.Verified = ""
+	data, err := f.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := sb.run(string(data), "add", "--stdin", "--description", "from the flag", "--cwd", repo, "--session", "sess-1")
+	wantExit(t, res, 0)
+	raw, err := os.ReadFile(filepath.Join(sb.personal, "demo", "whole-fact.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(raw)
+	wantContains(t, "fact file", got, "from the flag", "type: reference", "body of whole-fact")
+	if strings.Contains(got, "from frontmatter") {
+		t.Errorf("flag did not override the frontmatter description:\n%s", got)
+	}
+}
+
+func TestAddFlagsUnknownSessionAndListFlaggedShowsReasons(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+
+	res := sb.run("", "add", "--name", "unsure-fact", "--description", "no session", "--type", "project", "--cwd", repo)
+	wantExit(t, res, 0)
+	path := filepath.Join(sb.state, "local", "personal", "demo", "unsure-fact.md")
+	want := "flagged personal " + path + ": provenance:unknown-session\n"
+	if res.stdout != want {
+		t.Fatalf("stdout %q, want %q", res.stdout, want)
+	}
+
+	listed := sb.run("", "list", "--flagged", "--cwd", repo)
+	wantExit(t, listed, 0)
+	wantContains(t, "list --flagged", listed.stdout, "personal local demo/unsure-fact.md", "flags: provenance:unknown-session")
+}
+
+func TestAddQuarantinesWorkRepoOnPersonalHost(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(workRemote)
+	sb.record("sess-1")
+
+	res := sb.run("", "add", "--name", "work-fact", "--description", "from work", "--type", "project",
+		"--cwd", repo, "--session", "sess-1")
+	wantExit(t, res, 0)
+	path := filepath.Join(sb.state, "quarantine", "app", "work-fact.md")
+	if !strings.HasPrefix(res.stdout, "quarantined "+path+": work repo on a personal host") {
+		t.Fatalf("stdout %q", res.stdout)
+	}
+}
+
+func TestAddRefusals(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.record("sess-1")
+	base := []string{"add", "--name", "a-fact", "--description", "d", "--cwd", repo, "--session", "sess-1"}
+
+	t.Run("lint failure", func(t *testing.T) {
+		res := sb.run("", append(base, "--type", "bogus")...)
+		wantExit(t, res, 1)
+		wantContains(t, "stderr", res.stderr, "refused:")
+		if res.stdout != "" {
+			t.Errorf("stdout %q", res.stdout)
+		}
+	})
+	t.Run("secret scanner hit", func(t *testing.T) {
+		sb.setScanner(dirtyScanner)
+		defer sb.setScanner(cleanScanner)
+		res := sb.run("", append(base, "--type", "project")...)
+		wantExit(t, res, 1)
+		wantContains(t, "stderr", res.stderr, "refused:", "fake-rule")
+	})
+	t.Run("scanner missing", func(t *testing.T) {
+		good := sb.scanner
+		sb.scanner = "/nonexistent/scanner"
+		sb.writeConfig()
+		defer func() {
+			sb.scanner = good
+			sb.writeConfig()
+		}()
+		res := sb.run("", append(base, "--type", "project")...)
+		wantExit(t, res, 1)
+		wantContains(t, "stderr", res.stderr, "refused: secret scanner unavailable:")
+	})
+	t.Run("rule set missing", func(t *testing.T) {
+		sb.writeConfig(`rules = "/nonexistent/rules.toml"`)
+		defer sb.writeConfig()
+		res := sb.run("", append(base, "--type", "project")...)
+		wantExit(t, res, 1)
+		wantContains(t, "stderr", res.stderr, "refused: redaction rule set unavailable:")
+	})
+	t.Run("no repo", func(t *testing.T) {
+		res := sb.run("", "add", "--name", "a-fact", "--description", "d", "--type", "project",
+			"--cwd", t.TempDir(), "--session", "sess-1")
+		wantExit(t, res, 1)
+		wantContains(t, "stderr", res.stderr, "no repo: pass --repo or --scope global")
+	})
+	t.Run("config error", func(t *testing.T) {
+		sb.writeFile(sb.configPath, "profile = \"bogus\"\n")
+		defer sb.writeConfig()
+		res := sb.run("", append(base, "--type", "project")...)
+		wantExit(t, res, 2)
+	})
+	t.Run("unknown flag", func(t *testing.T) {
+		wantExit(t, sb.run("", "add", "--nope"), 1)
+	})
+}
+
+func TestUnknownSubcommandPrintsUsage(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	res := sb.run("", "frobnicate")
+	wantExit(t, res, 1)
+	wantContains(t, "stderr", res.stderr, "usage: priors")
+}
+
+func TestBareWithoutPipedStdinIsUsageError(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	res := sb.run("")
+	wantExit(t, res, 1)
+	wantContains(t, "stderr", res.stderr, "usage: priors")
+}
+
+func TestWriteRoutingAndReadRule(t *testing.T) {
+	sb := newSandbox(t, "work")
+	personalRepo := sb.repo(personalRemote)
+	workRepo := sb.repo(workRemote)
+	sb.record("sess-p")
+	sb.record("sess-w")
+
+	res := sb.run("", "add", "--name", "personal-fact", "--description", "a personal fact", "--type", "user",
+		"--scope", "global", "--cwd", personalRepo, "--session", "sess-p")
+	wantExit(t, res, 0)
+	wantContains(t, "add from personal repo", res.stdout, "published personal "+filepath.Join(sb.personal, "_global", "personal-fact.md"))
+
+	res = sb.run("", "add", "--name", "work-fact", "--description", "a work fact", "--type", "project",
+		"--cwd", workRepo, "--session", "sess-w")
+	wantExit(t, res, 0)
+	wantContains(t, "add from work repo", res.stdout, "published work "+filepath.Join(sb.work, "app", "work-fact.md"))
+
+	personal := sb.run("", "index", "--text", "--cwd", personalRepo)
+	wantExit(t, personal, 0)
+	wantContains(t, "personal session index", personal.stdout, "personal-fact")
+	if strings.Contains(personal.stdout, "work-fact") {
+		t.Errorf("personal-repo session reads the work fact:\n%s", personal.stdout)
+	}
+
+	work := sb.run("", "index", "--text", "--cwd", workRepo)
+	wantExit(t, work, 0)
+	wantContains(t, "work session index", work.stdout, "personal-fact", "work-fact")
+}
+
+func TestListFilters(t *testing.T) {
+	sb := newSandbox(t, "work")
+	repo := sb.repo(workRemote)
+
+	live := newFact("live-fact", "app", "project")
+	sb.putFact(sb.work, "app/live-fact.md", live)
+	refFact := newFact("reference-fact", "app", "reference")
+	sb.putFact(sb.work, "app/reference-fact.md", refFact)
+	sb.putFact(sb.personal, "_global/personal-global.md", func() fact.Fact {
+		f := newFact("personal-global", "", "user")
+		f.Metadata.Scope = "global"
+		f.Metadata.Repos = nil
+		return f
+	}())
+	other := newFact("other-repo-fact", "elsewhere", "project")
+	sb.putFact(sb.work, "elsewhere/other-repo-fact.md", other)
+	old := newFact("old-fact", "app", "project")
+	old.Metadata.Verified = "2000-01-01"
+	sb.putFact(sb.work, "app/old-fact.md", old)
+	archived := newFact("archived-fact", "app", "project")
+	sb.putFact(sb.work, "_archive/archived-fact.md", archived)
+	superseded := newFact("superseded-fact", "app", "project")
+	superseded.Metadata.SupersededBy = "live-fact"
+	sb.putFact(sb.work, "app/superseded-fact.md", superseded)
+	nullVerified := newFact("unverified-fact", "app", "project")
+	path := sb.putFact(sb.work, "app/unverified-fact.md", nullVerified)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.Replace(string(raw), "verified: "+today(), "verified: null", 1)
+	if edited == string(raw) {
+		t.Fatalf("verified line not found in:\n%s", raw)
+	}
+	sb.writeFile(path, edited)
+
+	list := func(args ...string) string {
+		t.Helper()
+		res := sb.run("", append([]string{"list", "--cwd", repo}, args...)...)
+		wantExit(t, res, 0)
+		return res.stdout
+	}
+
+	t.Run("default", func(t *testing.T) {
+		out := list()
+		wantContains(t, "list", out, "[priors memory · list]", "===== BEGIN priors-",
+			"work app/live-fact.md — project — verified "+today()+" — description of live-fact",
+			"work app/reference-fact.md", "personal _global/personal-global.md")
+		for _, name := range []string{"other-repo-fact", "archived-fact", "superseded-fact"} {
+			if strings.Contains(out, name) {
+				t.Errorf("list shows %s:\n%s", name, out)
+			}
+		}
+	})
+	t.Run("stale", func(t *testing.T) {
+		out := list("--stale")
+		wantContains(t, "list --stale", out, "old-fact", "unverified-fact", "verified never")
+		for _, name := range []string{"live-fact", "reference-fact"} {
+			if strings.Contains(out, name) {
+				t.Errorf("list --stale shows the fresh %s:\n%s", name, out)
+			}
+		}
+	})
+	t.Run("repo", func(t *testing.T) {
+		out := list("--repo", "elsewhere")
+		wantContains(t, "list --repo", out, "other-repo-fact")
+		if strings.Contains(out, "live-fact") {
+			t.Errorf("list --repo elsewhere shows the app's facts:\n%s", out)
+		}
+	})
+	t.Run("type", func(t *testing.T) {
+		out := list("--type", "reference")
+		wantContains(t, "list --type", out, "reference-fact")
+		if strings.Contains(out, "live-fact") || strings.Contains(out, "personal-global") {
+			t.Errorf("list --type reference shows other types:\n%s", out)
+		}
+	})
+	t.Run("store work", func(t *testing.T) {
+		out := list("--store", "work")
+		wantContains(t, "list --store work", out, "work app/live-fact.md")
+		if strings.Contains(out, "personal") {
+			t.Errorf("list --store work shows personal facts:\n%s", out)
+		}
+	})
+	t.Run("all", func(t *testing.T) {
+		wantContains(t, "list --all", list("--all"), "archived-fact", "superseded-fact")
+	})
+	t.Run("nothing to list prints nothing", func(t *testing.T) {
+		if out := list("--type", "feedback"); out != "" {
+			t.Errorf("stdout %q", out)
+		}
+	})
+}
+
+func TestShow(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.putFact(sb.personal, "demo/shown-fact.md", newFact("shown-fact", "demo", "project"))
+
+	res := sb.run("", "show", "shown-fact", "--cwd", repo)
+	wantExit(t, res, 0)
+	wantContains(t, "show", res.stdout, "[priors memory · personal store · demo/shown-fact.md]", "===== BEGIN priors-",
+		"name: shown-fact", "body of shown-fact", "===== END priors-")
+
+	missing := sb.run("", "show", "no-such-fact", "--cwd", repo)
+	wantExit(t, missing, 1)
+	if missing.stdout != "" {
+		t.Errorf("stdout %q", missing.stdout)
+	}
+}
+
+func TestSearch(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	hit := newFact("needle-fact", "demo", "project")
+	hit.Body = "the zebra crossing rule\n"
+	sb.putFact(sb.personal, "demo/needle-fact.md", hit)
+	sb.putFact(sb.personal, "demo/haystack-fact.md", newFact("haystack-fact", "demo", "project"))
+
+	res := sb.run("", "search", "zebra", "--cwd", repo)
+	wantExit(t, res, 0)
+	wantContains(t, "search", res.stdout, "[priors memory · search: zebra]", "===== BEGIN priors-",
+		"personal/demo/needle-fact.md — needle-fact — description of needle-fact")
+	if strings.Contains(res.stdout, "haystack-fact") {
+		t.Errorf("search shows a non-match:\n%s", res.stdout)
+	}
+
+	none := sb.run("", "search", "no-such-term", "--cwd", repo)
+	wantExit(t, none, 0)
+	if none.stdout != "" {
+		t.Errorf("stdout %q", none.stdout)
+	}
+}
+
+func TestSearchWithoutRgFailsOpen(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.putFact(sb.personal, "demo/needle-fact.md", newFact("needle-fact", "demo", "project"))
+
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	if err := os.Symlink(gitBin, filepath.Join(bin, "git")); err != nil {
+		t.Fatal(err)
+	}
+	sb.path = bin
+
+	res := sb.run("", "search", "needle", "--cwd", repo)
+	wantExit(t, res, 0)
+	if res.stdout != "" {
+		t.Errorf("stdout %q", res.stdout)
+	}
+	wantContains(t, "stderr", res.stderr, "search unavailable:")
+}
+
+func TestLintConfiguredStores(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	sb.putFact(sb.personal, "demo/clean-fact.md", newFact("clean-fact", "demo", "project"))
+	sb.indexWrite()
+
+	clean := sb.run("", "lint")
+	wantExit(t, clean, 0)
+	if clean.stdout != "" {
+		t.Errorf("stdout %q", clean.stdout)
+	}
+
+	bad := newFact("bad-fact", "demo", "bogus")
+	sb.putFact(sb.personal, "demo/bad-fact.md", bad)
+	sb.indexWrite()
+	res := sb.run("", "lint")
+	wantExit(t, res, 1)
+	wantContains(t, "lint", res.stdout, "demo/bad-fact.md: type:")
+}
+
+func TestLintDirWithKind(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	// The store-CI form needs no config, only a scanner on PATH.
+	bin := t.TempDir()
+	sb.writeFile(filepath.Join(bin, "betterleaks"), cleanScanner)
+	if err := os.Chmod(filepath.Join(bin, "betterleaks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sb.path = bin + string(os.PathListSeparator) + sb.path
+	sb.writeFile(sb.configPath, "not toml at all = = =\n")
+
+	store := t.TempDir()
+	sb.putFact(store, "demo/clean-fact.md", newFact("clean-fact", "demo", "project"))
+	writeStoreIndex(t, sb, store)
+
+	args := []string{"lint", "--dir", store, "--kind", "personal", "--work-org", "github.com/factify-inc"}
+	wantExit(t, sb.run("", args...), 0)
+
+	leaky := newFact("leaky-fact", "demo", "project")
+	leaky.Body = "deploys to factify-inc infrastructure\n"
+	sb.putFact(store, "demo/leaky-fact.md", leaky)
+	writeStoreIndex(t, sb, store)
+	res := sb.run("", args...)
+	wantExit(t, res, 1)
+	wantContains(t, "lint", res.stdout, "demo/leaky-fact.md: work-name:")
+
+	if res := sb.run("", "lint", "--dir", store); res.code != 1 {
+		t.Errorf("--dir without --kind: exit %d, want 1", res.code)
+	}
+}
+
+// writeStoreIndex regenerates dir's MEMORY.md through a throwaway config
+// that points personal_store at it.
+func writeStoreIndex(t *testing.T, sb *sandbox, dir string) {
+	t.Helper()
+	cfg := filepath.Join(t.TempDir(), "config.toml")
+	sb.writeFile(cfg, fmt.Sprintf("profile = \"personal\"\npersonal_store = %q\nstate_dir = %q\n", dir, filepath.Join(t.TempDir(), "state")))
+	if res := sb.run("", "index", "--write", "--config", cfg); res.code != 0 {
+		t.Fatalf("index --write: %s", res.stderr)
+	}
+}
+
+func TestLintMoveFlagged(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	flagged := newFact("linky-fact", "demo", "project")
+	flagged.Body = "see https://example.com/docs for details\n"
+	sb.putFact(sb.personal, "demo/linky-fact.md", flagged)
+	sb.putFact(sb.personal, "demo/clean-fact.md", newFact("clean-fact", "demo", "project"))
+	sb.indexWrite()
+
+	res := sb.run("", "lint")
+	wantExit(t, res, 1)
+	wantContains(t, "lint", res.stdout, "demo/linky-fact.md: gate:content:url:")
+
+	moved := sb.run("", "lint", "--move-flagged")
+	wantExit(t, moved, 0)
+	wantContains(t, "lint --move-flagged", moved.stdout, "moved demo/linky-fact.md")
+	if _, err := os.Stat(filepath.Join(sb.state, "local", "personal", "demo", "linky-fact.md")); err != nil {
+		t.Errorf("fact not in the local layer: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sb.personal, "demo", "linky-fact.md")); !os.IsNotExist(err) {
+		t.Errorf("fact still in the checkout: %v", err)
+	}
+}
+
+func TestIndexWriteThenHookOutput(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.putFact(sb.personal, "demo/indexed-fact.md", newFact("indexed-fact", "demo", "project"))
+
+	written := sb.run("", "index", "--write")
+	wantExit(t, written, 0)
+	wantContains(t, "index --write", written.stdout, "wrote "+filepath.Join(sb.personal, "MEMORY.md"))
+	again := sb.run("", "index", "--write")
+	wantExit(t, again, 0)
+	if again.stdout != "" {
+		t.Errorf("a second index --write rewrote something: %q", again.stdout)
+	}
+
+	envelope := sessionStartEnvelope(repo)
+	viaIndex := sb.run(envelope, "index")
+	wantExit(t, viaIndex, 0)
+	wantContains(t, "index", additionalContext(t, viaIndex.stdout), "[indexed-fact](demo/indexed-fact.md)")
+
+	viaBare := sb.run(envelope)
+	wantExit(t, viaBare, 0)
+	wantContains(t, "bare", additionalContext(t, viaBare.stdout), "[indexed-fact](demo/indexed-fact.md)")
+
+	other := sb.run(`{"engine":"claude-code","canonical_event":"pre_tool","session_id":"s1","tool_name":"Bash"}`)
+	wantExit(t, other, 0)
+	if other.stdout != "" {
+		t.Errorf("a pre_tool envelope printed %q", other.stdout)
+	}
+}
+
+func TestIndexTextPrintsFencedBlock(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.putFact(sb.personal, "demo/indexed-fact.md", newFact("indexed-fact", "demo", "project"))
+	sb.indexWrite()
+
+	res := sb.run("", "index", "--text", "--cwd", repo)
+	wantExit(t, res, 0)
+	if !strings.HasPrefix(res.stdout, "[priors memory · personal store]") {
+		t.Errorf("not a fenced block:\n%s", res.stdout)
+	}
+	if !regexp.MustCompile(`===== BEGIN priors-[0-9a-f]{16} =====`).MatchString(res.stdout) {
+		t.Errorf("no fence:\n%s", res.stdout)
+	}
+	if strings.Contains(res.stdout, "hookSpecificOutput") {
+		t.Errorf("--text printed JSON:\n%s", res.stdout)
+	}
+}
+
+// failOpenFixture is a personal store with two indexed facts and a session
+// repo, so that a case can break one thing and expect silence.
+type failOpenFixture struct {
+	sb       *sandbox
+	repo     string
+	envelope string
+}
+
+func newFailOpenFixture(t *testing.T) *failOpenFixture {
+	t.Helper()
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.putFact(sb.personal, "demo/alpha-fact.md", newFact("alpha-fact", "demo", "project"))
+	sb.putFact(sb.personal, "demo/beta-fact.md", newFact("beta-fact", "demo", "project"))
+	sb.indexWrite()
+	return &failOpenFixture{sb: sb, repo: repo, envelope: sessionStartEnvelope(repo)}
+}
+
+// modes runs fn once per way the index handler can be invoked.
+func (fx *failOpenFixture) modes() map[string][]string {
+	return map[string][]string{"index": {"index"}, "bare": nil}
+}
+
+func TestFailOpenMatrix(t *testing.T) {
+	isRoot := os.Geteuid() == 0
+
+	silent := map[string]func(t *testing.T, fx *failOpenFixture) (stdin string){
+		"no config file": func(t *testing.T, fx *failOpenFixture) string {
+			if err := os.Remove(fx.sb.configPath); err != nil {
+				t.Fatal(err)
+			}
+			return fx.envelope
+		},
+		"invalid config": func(t *testing.T, fx *failOpenFixture) string {
+			fx.sb.writeFile(fx.sb.configPath, "profile = \"bogus\"\n")
+			return fx.envelope
+		},
+		"missing store dir": func(t *testing.T, fx *failOpenFixture) string {
+			if err := os.RemoveAll(fx.sb.personal); err != nil {
+				t.Fatal(err)
+			}
+			return fx.envelope
+		},
+		"missing MEMORY.md": func(t *testing.T, fx *failOpenFixture) string {
+			if err := os.Remove(filepath.Join(fx.sb.personal, "MEMORY.md")); err != nil {
+				t.Fatal(err)
+			}
+			return fx.envelope
+		},
+		"MEMORY.md mode 000": func(t *testing.T, fx *failOpenFixture) string {
+			if isRoot {
+				t.Skip("root ignores file modes")
+			}
+			if err := os.Chmod(filepath.Join(fx.sb.personal, "MEMORY.md"), 0); err != nil {
+				t.Fatal(err)
+			}
+			return fx.envelope
+		},
+		"garbage MEMORY.md": func(t *testing.T, fx *failOpenFixture) string {
+			fx.sb.writeFile(filepath.Join(fx.sb.personal, "MEMORY.md"), "\x00\x01 garbage \xff\n- [x](y) —\n")
+			return fx.envelope
+		},
+		"missing rules file": func(t *testing.T, fx *failOpenFixture) string {
+			fx.sb.writeConfig(`rules = "/nonexistent/rules.toml"`)
+			return fx.envelope
+		},
+		"garbage envelope": func(t *testing.T, fx *failOpenFixture) string {
+			return "{{{ this is not json"
+		},
+		"envelope that is not an object": func(t *testing.T, fx *failOpenFixture) string {
+			return `["session_start"]`
+		},
+	}
+
+	for name, arrange := range silent {
+		t.Run(name, func(t *testing.T) {
+			fx := newFailOpenFixture(t)
+			for mode, args := range fx.modes() {
+				if res := fx.sb.run(fx.envelope, args...); res.code != 0 || res.stdout == "" {
+					t.Fatalf("%s baseline: exit %d, stdout %q, stderr %q", mode, res.code, res.stdout, res.stderr)
+				}
+			}
+			stdin := arrange(t, fx)
+			for mode, args := range fx.modes() {
+				res := fx.sb.run(stdin, args...)
+				if res.code != 0 || res.stdout != "" {
+					t.Errorf("%s: exit %d, stdout %q, stderr %q; want exit 0 and no output", mode, res.code, res.stdout, res.stderr)
+				}
+			}
+		})
+	}
+
+	t.Run("fact file mode 000 drops only that line", func(t *testing.T) {
+		if isRoot {
+			t.Skip("root ignores file modes")
+		}
+		fx := newFailOpenFixture(t)
+		if err := os.Chmod(filepath.Join(fx.sb.personal, "demo", "alpha-fact.md"), 0); err != nil {
+			t.Fatal(err)
+		}
+		for mode, args := range fx.modes() {
+			res := fx.sb.run(fx.envelope, args...)
+			wantExit(t, res, 0)
+			text := additionalContext(t, res.stdout)
+			wantContains(t, mode+" output", text, "[beta-fact]")
+			if strings.Contains(text, "alpha-fact") {
+				t.Errorf("%s: the unreadable fact was injected:\n%s", mode, text)
+			}
+		}
+	})
+
+	t.Run("MEMORY.md replaced by a FIFO", func(t *testing.T) {
+		fx := newFailOpenFixture(t)
+		index := filepath.Join(fx.sb.personal, "MEMORY.md")
+		if err := os.Remove(index); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Mkfifo(index, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		for mode, args := range fx.modes() {
+			start := time.Now()
+			res := fx.sb.run(fx.envelope, args...)
+			if elapsed := time.Since(start); elapsed > 2*time.Second {
+				t.Errorf("%s took %v on a FIFO index", mode, elapsed)
+			}
+			if res.code != 0 || res.stdout != "" {
+				t.Errorf("%s: exit %d, stdout %q; want exit 0 and no output", mode, res.code, res.stdout)
+			}
+		}
+	})
+}

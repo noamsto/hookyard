@@ -1,0 +1,33 @@
+# Example required check for a priors store repository (personal or work).
+# Copy to .github/workflows/lint.yml in the store repo and make the `lint`
+# job a required status check on its default branch: a client pre-commit can
+# be skipped with --no-verify and git hooks are not cloned, so the remote is
+# where the lint actually holds (docs/design/memory-layer.md §4.3, §4.4).
+#
+# Set STORE_KIND to "personal" or "work". A personal store also passes the
+# work orgs (and any internal names) so a fact naming one fails the check.
+name: lint
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      STORE_KIND: personal
+    steps:
+      - uses: actions/checkout@v5
+      - uses: DeterminateSystems/nix-installer-action@main
+      # priors comes wrapped with git, ripgrep and betterleaks on its PATH,
+      # so the gate:secret scan runs with nothing else to install.
+      - name: priors lint
+        run: |
+          nix run github:noamsto/hookyard#priors -- lint \
+            --dir . --kind "$STORE_KIND" \
+            --work-org github.com/your-work-org
