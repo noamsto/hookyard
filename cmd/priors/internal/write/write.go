@@ -73,7 +73,7 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 		return Result{}, fmt.Errorf("secret scanner unavailable: %w", err)
 	}
 	if len(ids) > 0 {
-		return Result{}, fmt.Errorf("refused by secret scan: %s", strings.Join(ids, ", "))
+		return Result{}, fmt.Errorf("secret scan matched: %s", strings.Join(ids, ", "))
 	}
 
 	dest := route.WriteDest(req.Session, cfg)
@@ -174,7 +174,7 @@ func refusal(findings []lint.Finding) error {
 	for i, f := range findings {
 		msgs[i] = f.String()
 	}
-	return errors.New("refused: " + strings.Join(msgs, "; "))
+	return errors.New(strings.Join(msgs, "; "))
 }
 
 // checkDuplicate refuses a name the destination already holds. A store's
@@ -187,7 +187,7 @@ func checkDuplicate(cfg config.Config, dest route.Dest, name string) error {
 	}
 	for _, r := range roots {
 		if e, ok := r.FindByName(name); ok {
-			return fmt.Errorf("refused: a fact named %q already exists at %s", name, filepath.Join(r.Path, filepath.FromSlash(e.Rel)))
+			return fmt.Errorf("a fact named %q already exists at %s", name, filepath.Join(r.Path, filepath.FromSlash(e.Rel)))
 		}
 	}
 	return nil

@@ -435,7 +435,7 @@ func TestRefusals(t *testing.T) {
 		}, "aws"},
 		{"secret by scanner", func(t *testing.T, fx *fixture, _ *Request) {
 			fx.deps.Scanner = gate.Scanner{Bin: script(t, `printf '%s' '[{"RuleID":"fake"}]'`)}
-		}, "refused by secret scan: fake"},
+		}, "secret scan matched: fake"},
 		{"scanner error", func(t *testing.T, fx *fixture, _ *Request) {
 			fx.deps.Scanner = gate.Scanner{Bin: script(t, "exit 3")}
 		}, "secret scanner unavailable"},
