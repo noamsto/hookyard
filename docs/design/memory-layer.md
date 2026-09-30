@@ -1,7 +1,11 @@
 # The memory layer: cross-harness agent memory
 
-**Status:** design proposal, **under revision — do not implement from this document.**
-That stays until the trust model (§4.4) is decided.
+**Status:** design, **ready to implement except the reviewed-promotion /
+attestation path.** `priors` v0 can be built now for tiers 1 and 3, the stores,
+the lint, redaction and the host-local layer. Promotion of a fact to `reviewed`
+(§4.4's attestation) stays blocked on
+[#130](https://github.com/noamsto/hookyard/issues/130), attestation hardening;
+until it lands every fact stays `proposed` in its host-local layer.
 
 - *Resolved.* The corrections from the independent adversarial review (PR #83,
   whose full findings are on the PR): the corpus counts (§1, now re-counted),
@@ -10,15 +14,15 @@ That stays until the trust model (§4.4) is decided.
   1–4 of 2026-09-30: two stores keyed by repo org (§4.2), migration with dedup
   and an importer for native memories (§4.9, §9), and packaging (§5). The
   secrets and work/personal boundary (§4.8), settled by decision 1 plus
-  write-time redaction.
+  write-time redaction. The owner's decisions 6 and 7 of 2026-09-30: the trust
+  model is option C, host-local until reviewed (§4.4), and tier 2 is out of v0,
+  gated on §7's recall A/B (§4.4).
 - *Pending.* Decision 5, session continuity — originating issue #124, now
-  awaiting [PR #126](https://github.com/noamsto/hookyard/pull/126) and
+  awaiting [PR #126](https://github.com/noamsto/hookyard/pull/126) (which
+  carries #128's deja-vu verdict) and
   [#127](https://github.com/noamsto/hookyard/issues/127). No option is chosen,
   and the outcome could still replace §4 (decision 5's second shape).
-- *Proposed, needs owner sign-off.* Decision 7: tier 2 moves out of v0, behind
-  §7's recall A/B (§4.4).
-- *Open, the last blocker.* Decision 6, the trust model — three options in
-  §4.4, and the attestation that B and C each depend on.
+- *Blocked.* Reviewed promotion and attestation, on #130.
 
 **Scope:** a memory store shared by Claude Code, Codex, Cursor and Pi, delivered
 through hookyard's existing advisory contract, fed by the crew bus and sessions.
@@ -354,8 +358,8 @@ metadata:
   valid_from: 2026-09-16
   superseded_by: null    # a filename, once this stops being true
   verified: 2026-09-16   # when a human or agent last confirmed it still holds
-  confidence: proposed   # proposed | reviewed — meaning set by §4.4's decision
-  provenance:            # who wrote it; every §4.4 option needs it
+  confidence: proposed   # proposed | reviewed — meaning set by §4.4's trust model
+  provenance:            # who wrote it; §4.4 needs it
     engine: claude
     session: 98a49727-b288-4f1c-9e6c-e7453ce01ef6
     host: tp-g5
@@ -375,10 +379,9 @@ Observed 2026-09-16 (crew 1789561716-857282, PR #205): ...
 
 Three fields are new beyond Claude's. `confidence` (`proposed` | `reviewed`)
 is already used by §4.3b's drafts; what each value means for injection is set
-by §4.4's trust decision, and under its options B and C `reviewed` holds only
-with a human's attestation over the file digest (§4.4). `provenance` records
-the writing engine, session and host, which every option in §4.4 needs, so a
-writer can be filtered or purged. `source` appears on imported facts only: the
+by §4.4's trust model (option C), and `reviewed` holds only with a human's
+attestation over the file digest (§4.4). `provenance` records the writing
+engine, session and host, which §4.4 needs, so a writer can be filtered or purged. `source` appears on imported facts only: the
 engine, the native `path` (Claude) or `thread_id` (Codex), and the `sha256` of
 the native source at import — the keys §4.9's dedup and §4.6's use count match
 on, and never the attestation's file digest.
@@ -570,9 +573,12 @@ the repo of each `ratings.jsonl` row it is drawn from, not by the session
 running `crew reap`; one drawn from rows of more than one store lands in the
 most protected of them — any work-org or unresolvable row sends it to the work
 store, or to the quarantine on a personal host. What a `proposed` fact
-may do on arrival — whether it is injected, and on which hosts — is the trust
-decision (§4.4). Whichever option is taken, the failure mode worth avoiding is
-an unverified statistical claim becoming a standing instruction.
+may do on arrival is set by §4.4's option C: it lands `proposed` in the local
+layer of the store it routes to, on the host that ran the distillation, and is
+injected only into sessions of the repo it was drawn from (a proposal drawn
+from more than one repo is injected into none until reviewed). The failure mode
+worth avoiding is an unverified statistical claim becoming a standing
+instruction, and C keeps it on that host until a human reviews it.
 
 **c. The importer (mechanical).** Engines keep their native memory (the
 owner's decision 3); at `crew reap`, or by hand with `priors import`, an
@@ -601,9 +607,8 @@ and on the read path, in `priors index` and `priors search`, it **injects
 nothing** (R8): an unchecked fact is never injected. A
 secret that reaches a pushed store means **rotating the credential**; purging
 history is not the remedy, because every clone already holds it. Which path a
-write then takes before it reaches another host —
-pushed as written, reviewed first, or held on the host that wrote it — is the
-trust decision (§4.4), and each option there names it.
+write then takes before it reaches another host is §4.4's option C: it is held
+in the local layer of the host that wrote it until a reviewed promotion.
 
 ### 4.4 Read path: three tiers, one budget
 
@@ -615,7 +620,7 @@ lowest priority upward.
 | tier | trigger | source | budget | truncation |
 | --- | --- | --- | --- | --- |
 | **1** | `session_start` | `MEMORY.md` index(es) per §4.2's read rule | 4 K chars | from the middle |
-| **2** | `prompt_submit` — **gated, not v0** | ranked `priors search "<prompt>"` → top 3 | 2.5 K chars | from the start |
+| **2** | `prompt_submit` — **gated on §7's A/B, not v0** | ranked `priors search "<prompt>"` → top 3 | 2.5 K chars | from the start |
 | **3** | any time | agent runs `priors search` / `rg` / reads a file | unbounded | — |
 | | | **total injected** | **8 K chars** | |
 
@@ -643,14 +648,15 @@ first, and the personal index takes what remains; each index keeps its own
 200-line/25 KB cap. A session in any other repo, with no repo, or unresolvable,
 gets the personal index alone, with the whole budget.
 
-**Tier 2 is a measured gate** — *proposed, needs owner sign-off.* §7 names its
-recall A/B as the only thing that would justify tier 2's complexity: the
-expected delta concentrates in facts that are not in the tier-1 index window.
-Proposed: v0 ships tiers 1 and 3, and tier 2 is built only if the A/B, run on
-the migrated corpus, shows that delta. Until then the hookyard `prompt_submit`
-work — the slot and Pi bridge gaps in §4.7, their rows in §5, their workstream
-in §10 — is conditional on the result, not a prerequisite. This turns PR #83's
-tier-2 item from a blocker into a gate with a measurement behind it.
+**Tier 2 is a measured gate** — decided by the owner on 2026-09-30 (decision
+7). §7 names its recall A/B as the only thing that would justify tier 2's
+complexity: the expected delta concentrates in facts that are not in the tier-1
+index window. v0 ships tiers 1 and 3, and tier 2 is built only if the A/B, run
+on the migrated corpus, shows that delta. Until then the hookyard
+`prompt_submit` work — the slot and Pi bridge gaps in §4.7, their rows in §5,
+their workstream in §10 — is a conditional later workstream gated on the
+result, not a prerequisite. This turns PR #83's tier-2 item from a blocker
+into a gate with a measurement behind it.
 
 If built, tier 2 must be bounded and must fail open:
 
@@ -663,10 +669,10 @@ If built, tier 2 must be bounded and must fail open:
   does with `[hookyard advisory] ` — an unattributed block reaches the model
   looking like a prompt injection, which is a finding from hookyard's own
   `internal/render/pi_bridge.ts:125-127` probe. Attribution is one of the rules
-  common to every option of the trust model below, which also sets how the
+  common to the trust model below, which also sets how the
   block is framed and which facts it may carry — for tier 1 as for tier 2.
 
-#### The trust model — open, the last blocker
+#### The trust model — option C, host-local until reviewed
 
 Injected memory reaches the model as instructions. On one host with one writer,
 a bad fact misleads that host's sessions — the exposure Claude's auto memory
@@ -677,7 +683,7 @@ distillation (§4.3b) and the importer (§4.9) all write into them, so the store
 every engine, on every host that pulls — and, in hookyard's team mode,
 everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
 
-**Common to every option**, and not up for decision:
+**Common ground**, applying to every injected block:
 
 - **Attribution and untrusted-data framing.** Every injected block names its
   store and is framed as reference data, not instructions — §2.3's reading:
@@ -697,18 +703,29 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
 - **Provenance on every fact** — §4.1's `provenance:` block (engine, session,
   host) — so the index can be filtered by writer and a compromised writer's
   facts purged.
-- **Write-time redaction and §4.2's routing** (§4.3), before any path below.
+- **Write-time redaction and §4.2's routing** (§4.3), before any write lands.
 
-What differs is which facts are injected, and the path a write takes before it
-reaches another host:
+**Chosen: C, host-local until reviewed** (decision 6, the owner, 2026-09-30).
+Sessions get `reviewed` facts from the synced checkouts, plus this host's own
+`proposed` facts learned in the session's repo, from an unsynced local layer,
+all fenced. No write reaches another host until a reviewed promotion, attested
+(below), moves the fact from the local layer into its store's checkout and
+commits it. The cost accepted: a third per-host location to manage, and a
+lesson learned on one host waits for review before another host sees it.
 
-| option | what gets injected | path a write takes to another host | cost |
-| --- | --- | --- | --- |
-| **A. Fence and inject everything** | every fact the read rule allows, fenced | direct commit and push | a tampered fact still reaches every session; fencing lowers compliance, it does not remove it |
-| **B. Reviewed-only injection** | `confidence: reviewed` facts only; `proposed` facts — agent-written, imported, distilled — reachable only by search (tier 3), fenced through `priors` | a human's attestation (below) flips `proposed` → `reviewed` | a fresh lesson helps no session until it is reviewed; migration starts with every fact `proposed` (451 on `tp-g5`) and nothing injected |
-| **C. Host-local until reviewed** | `reviewed` facts from the synced checkouts, plus this host's own `proposed` facts learned in the session's repo, from an unsynced local layer, all fenced | none until review: reviewed promotion, attested (below), moves a fact from the local layer into its store's checkout and commits it | a third per-host location to manage; a lesson learned on one host still waits for review before another host sees it |
+The alternatives considered and rejected:
 
-Under C the local layer is split per store, like the checkouts:
+- **A. Fence and inject everything** — every fact the read rule allows, fenced,
+  written by direct commit and push. Rejected: a tampered fact still reaches
+  every session on every host that pulls; fencing lowers compliance, it does
+  not remove it.
+- **B. Reviewed-only injection** — `confidence: reviewed` facts only, with
+  `proposed` facts reachable by search (tier 3) alone. Rejected: a fresh lesson
+  helps no session until it is reviewed, and migration would start with every
+  fact `proposed` (451 on `tp-g5`) and nothing injected — taking away injection
+  a host has today.
+
+The local layer is split per store, like the checkouts:
 `$XDG_STATE_HOME/priors/local/personal/` and
 `$XDG_STATE_HOME/priors/local/work/`, outside both checkouts and never
 synced. A write is routed by §4.2's write rule first, then lands in that
@@ -726,7 +743,7 @@ across stores — moving a work fact to personal stays the separate human act of
 §4.2. It commits into the checkout first and deletes the local copy after; if
 both exist, the checkout copy wins by `name`.
 
-**Under B and C, `reviewed` is an attestation, not a field.** A fact's
+**Under C, `reviewed` is an attestation, not a field.** A fact's
 `reviewed` state is valid only when an attest entry signs its **file digest**
 (`attested_sha256`): sha256 over the whole fact file's bytes, frontmatter
 included, as the reviewer leaves it with `confidence: reviewed` set. Any later
@@ -748,23 +765,25 @@ indexes (§4.7) and to `priors`'s config and state dirs. It is a tripwire like
 §4.2's read guard — a small deterministic check of the call's paths and text
 that loads neither the rule set nor a store, sees only the tool calls hookyard
 sees, and fails open (R8) — so the key's unreadability, not the guard, is what
-makes attestation hold. The mechanism is part of the open decision below, not
-settled apart from it: B and C each depend on it, and choosing either adopts
-it.
+makes attestation hold. The attestation requirements above stand as decided;
+implementing the promotion and attestation path is blocked on
+[#130](https://github.com/noamsto/hookyard/issues/130) (attestation
+hardening), so `priors` v0 ships with every fact `proposed` in its host-local
+layer until it lands.
 
-**Recommendation: C.** It matches today's per-repo exposure — Claude already
-injects its own unreviewed facts in the repo and on the host that wrote them,
-and nowhere else — widened on the one axis this design exists for: other
-engines in the same repo on the same host. It adds no cross-host path until a
-human reviews. Migration adds no host either: each host's imported Claude
-facts sit in that host's local layer, reaching no host they did not reach
-before. A and B each fail one half of that: A adds the fan-out at once, B takes
-away injection the host has today.
+**Why C.** It matches today's per-repo exposure — Claude already injects its
+own unreviewed facts in the repo and on the host that wrote them, and nowhere
+else — widened on the one axis this design exists for: other engines in the
+same repo on the same host. It adds no cross-host path until a human reviews.
+Migration adds no host either: each host's imported Claude facts sit in that
+host's local layer, reaching no host they did not reach before. A and B each
+fail one half of that: A adds the fan-out at once, B takes away injection the
+host has today.
 
-**This is the owner's decision**, and this document does not make it. What
-`proposed` means for injection — and so what distillation's proposals (§4.3b)
-and the importer's facts (§4.9) do on arrival — follows from it. The status
-line's "do not implement" stays until it is made.
+What `proposed` means for injection follows from C: a `proposed` fact is
+injected only on the host that wrote it, in the repo it was learned in. So
+distillation's proposals (§4.3b) and the importer's facts (§4.9) land
+`proposed` in that host's local layer on arrival.
 
 ### 4.5 Retrieval backend: one interface, three implementations
 
@@ -860,7 +879,7 @@ stays unused there becomes an **archive candidate**, flagged by
 human-approved; nothing is deleted or archived automatically.** The windows and
 counts are v0 defaults to be tuned from the log, not fixed here. Promotion
 decides which facts the index lists; which of those may be injected into a
-session is still §4.4's trust decision.
+session is §4.4's trust model.
 
 **Seeding.** At migration, a fact listed in its native `MEMORY.md` within the
 native cap window (the first 200 lines / 25 KB) starts promoted, so each index
@@ -923,8 +942,9 @@ facts by tier 3 alone. The included `MEMORY.md` is written only by
 `priors index`; it carries tier 1's stripping and escaping (§4.4) and its own
 opening *and* closing fence inside the file, with a delimiter drawn at each
 generation, and the checkout indexes are in the write guard's protected set
-(§4.4). Under B and C the included index is the checkout index, which lists
-reviewed facts only.
+(§4.4). Under C the included index is the checkout index, which lists
+reviewed facts only, so until reviewed promotion lands (#130) that index is
+empty and Cursor gets tier 3 alone.
 
 Three gaps must be closed in **hookyard** — needed only if tier 2 passes its
 gate (§4.4) — and they are the only hookyard changes this design needs:
@@ -961,9 +981,8 @@ work store cloned to the same path on work-profile hosts only. Agents are
 already fluent in git; it provides real three-way merge with ancestry, an
 audit trail, and a headless path that works on `halo` and in CI. Because §4.1
 puts one fact per file, merge conflicts are rare rather than structural. Only
-the checkouts sync: the usage logs (§4.6), the quarantine (§4.2) and, under the
-trust model's option C, the local layers (§4.4) stay on the host that wrote
-them. The work store is held tighter still: its remote is owned by the work
+the checkouts sync: the usage logs (§4.6), the quarantine (§4.2) and the local
+layers (§4.4) never sync and stay on the host that wrote them. The work store is held tighter still: its remote is owned by the work
 org, not a personal account; it is never cloned to a mobile or personal device;
 and its vault (step 1 below) never enables Obsidian Sync.
 
@@ -1075,11 +1094,10 @@ or a `cwd` that is not a git checkout, is unresolvable. Write-time redaction
 (§4.3) runs first: a secret-shaped item is skipped and reported.
 
 **Trust.** Imported facts land as `confidence: proposed`. The importer is a
-write path into stores that are injected fleet-wide, and nothing it reads was
-reviewed. What `proposed` means for injection is §4.4's open decision; under
-the recommended option C, imported facts land in the target store's local
-layer (`$XDG_STATE_HOME/priors/local/<store>/`) on the host whose engine wrote
-them, until reviewed.
+write path, and nothing it reads was reviewed, so it never writes into a synced
+checkout. Under §4.4's option C, imported facts land in the target store's
+local layer (`$XDG_STATE_HOME/priors/local/<store>/`) on the host whose engine
+wrote them, until a reviewed promotion.
 
 **Double injection.** An engine with native memory already injects its own
 copy of a fact, so hookyard injecting the imported copy too would show that
@@ -1338,9 +1356,8 @@ hookyard gaps behind it (§4.7, §5).
 
 ## 9. Decisions
 
-Decided by the owner on 2026-09-30 unless marked. Decision 6 is the one that
-blocks implementation: the status line's "do not implement" stays until it is
-made.
+Decided by the owner on 2026-09-30 unless marked. Decision 5 is pending
+(PR #126); the reviewed-promotion path waits on #130 (status line).
 
 1. **Store placement — decided: two stores, keyed by repo org** (§4.2). A
    personal store on every host, a work store on work-profile hosts only; a
@@ -1360,8 +1377,9 @@ made.
    found without an embedder (§4.9), are proposed for a merge a human
    approves. Migration runs per host and writes a canonical copy of each file
    Claude wrote, with §4.1's fields, leaving the native file untouched (§4.9),
-   each copy routed by §4.2 to its target store (206 to the work store) — under
-   option C, into that store's local layer until reviewed.
+   each copy routed by §4.2 to its target store (206 to the work store) and
+   landing `proposed` in that store's local layer on the host that ran the
+   migration, not injected fleet-wide, until reviewed.
 3. **Native memories — decided: each engine keeps its own.** The importer
    (§4.9) sweeps them into the canonical store at `crew reap`, or by hand with
    `priors import`, and its double-injection rule keeps an engine from being
@@ -1387,18 +1405,20 @@ made.
    from its own outcomes; or both. Whichever tool wins shares the
    `session_start` budget with tier 1, so §4.4's per-source caps apply and the
    index may have to shrink or be dropped.
-6. **Trust model — open, the last blocker** (§4.4). Which facts are injected,
-   and the path a write takes before it reaches another host: A, fence and
-   inject everything; B, inject reviewed facts only; C, host-local until
-   reviewed. Recommended: **C**. It is the owner's call, and it decides what
+6. **Trust model — decided: C, host-local until reviewed** (§4.4; the owner,
+   2026-09-30). Sessions get `reviewed` facts from the synced checkouts, plus
+   this host's own `proposed` facts learned in the session's repo, from an
+   unsynced local layer, all fenced; a reviewed promotion, attested, moves a
+   fact into its store's checkout. A and B were rejected (§4.4). It sets what
    `proposed` means for distillation (§4.3b), the importer (§4.9) and the
-   migration (decision 2). The attestation B and C each depend on — a key
-   separate from commit signing and never readable by an agent, over the whole
-   file's digest — is part of this decision, not settled apart from it.
-7. **Tier 2 — proposed, needs owner sign-off** (§4.4). Out of v0, behind §7's
-   recall A/B: v0 ships tiers 1 and 3, and tier 2 — with the hookyard gaps
-   behind it (§4.7, §5, workstream 8 below) — is built only if the A/B shows
-   its delta.
+   migration (decision 2): all land `proposed` in the host-local layer. The
+   attestation — a key separate from commit signing and never readable by an
+   agent, over the whole file's digest — stands as decided; its
+   implementation is blocked on [#130](https://github.com/noamsto/hookyard/issues/130).
+7. **Tier 2 — decided: out of v0, gated on the A/B** (§4.4; the owner,
+   2026-09-30, approved). v0 ships tiers 1 and 3. Tier 2 — with the hookyard
+   gaps behind it (§4.7, §5, workstream 8 below) — is built only if §7's
+   recall A/B shows a delta.
 
 ---
 
@@ -1406,28 +1426,32 @@ made.
 
 | # | workstream | repo | delivers |
 | --- | --- | --- | --- |
-| 0 | settle the trust model (§4.4, decision 6) — blocks every workstream below that writes a fact | — (the owner) | the path every write takes |
-| 1 | the two store repos, each remote running the lint as a required check (§4.3); `priors` v0 (`add`/`list`/`show`/`search`/`lint`/`index`), write-time redaction (§4.3), §4.2's routing and read rule | hookyard (`cmd/priors`) | tier 1 + tier 3 on all four engines |
+| 1 | the two store repos, each remote running the lint as a required check (§4.3); `priors` v0 (`add`/`list`/`show`/`search`/`lint`/`index`), the host-local layer (§4.4), write-time redaction (§4.3), §4.2's routing and read rule | hookyard (`cmd/priors`) | tier 1 + tier 3 on all four engines (Cursor's include lists reviewed facts, so tier 3 alone until #130); the host-local layer and its per-store indexes |
 | 2 | nix-config wiring: install, clone per §4.2, the host profile and both org lists on every host, the personal index's host-level include in a Cursor-only rule file, never the shared instruction file Claude, Codex and Cursor all read, and no repo-level work include (§4.7) | nix-config | reach with no hookyard change |
 | 3 | importer v0 (Claude; Codex stage-1 rows behind the schema pin, §4.9) and the per-host migration with dedup proposals (decision 2) | hookyard (`priors`) | content to actually retrieve |
 | 4 | usage log and promotion/demotion: `post_tool → priors touch`, `fire_and_forget` (§4.6) | hookyard (`priors`) | strengthening and forgetting |
-| 5 | the attestation check in `priors index` against the key allowlist, and the `pre_tool` tripwires: the write guard (§4.4), before the stores go to a second host; the read guard (§4.2), before the work store is cloned on a host that also runs non-work sessions | hookyard (`priors`) | the review boundary holds by the key; the guards catch what hookyard sees |
+| 5 | the attestation check in `priors index` against the key allowlist, and the `pre_tool` tripwires: the write guard (§4.4), before the stores go to a second host; the read guard (§4.2), before the work store is cloned on a host that also runs non-work sessions | hookyard (`priors`) | the review boundary holds by the key; the guards catch what hookyard sees. The attestation check and the reviewed-promotion path are blocked on [#130](https://github.com/noamsto/hookyard/issues/130); the guards are not |
 | 6 | dispatcher: `crew reap` runs the import, then distillation proposals; the judge consults `priors` | dispatcher | closes failure mode 2 |
 | 7 | Obsidian as a viewer, one vault per store; Bases table for the stale sweep (§4.8 step 1) | nix-config | §4.6 curation, if it earns it |
-| 8 | *gated:* hookyard `prompt_submit` advisory slot for Claude and Pi + Pi bridge `input` reply + fixtures — only if §7's A/B passes (decision 7) | hookyard | tier 2 on Claude and Pi (Codex already has the slot via #101) |
+| 8 | *gated:* hookyard `prompt_submit` advisory slot for Claude and Pi + Pi bridge `input` reply + fixtures — only if §7's A/B passes (decision 7) | hookyard | tier 2 on Claude and Pi (Codex already has the slot via #101); a conditional later workstream, not v0 |
 | 9 | *later:* `priors move --to personal` and a command to drain the quarantine, both behind the work-name scan (§4.2); cross-host usage aggregation under the read rule (§4.6); the `hookyard serve` memory view (§4.8 step 2) | hookyard (`priors`, `serve`) | — |
+
+Workstream 0, settling the trust model (§4.4, decision 6), is **done**: the
+owner chose option C on 2026-09-30, so workstreams that write a fact are
+unblocked, and every fact lands `proposed` in a host-local layer. Building
+starts at workstream 1, which covers the stores, the lint, redaction, the
+local layer and tiers 1 and 3; only the promotion to `reviewed` waits on #130.
 
 **Order.** For anyone outside this fleet, hookyard running without Nix
 (roadmap stage 1) comes first: without it, a memory layer delivered through
-hookyard reaches only Nix users. Then workstream 0, because every workstream
-that writes a fact takes the path it chooses. Then `priors` v0 on one machine,
+hookyard reaches only Nix users. Then `priors` v0 on one machine,
 workstreams 1–4, with workstream 5's read guard in before workstream 2 first
 clones the work store, and so ahead of the migration (3): the first
 work-profile host already holds both stores. Being a tripwire, the guard is
 necessary there, not sufficient. The recall A/B runs on that machine's
 migrated corpus and decides whether 8 is built at all. Reaching further — the
 stores cloned to more hosts, or a store shared with a team in hookyard's team
-mode — waits until the rest of workstream 5 is in and the trust model holds on
+mode — waits until the rest of workstream 5 is in (so, on #130) and the trust model holds on
 that one machine. And before the memory layer is more
 than a pointer on hookyard's public roadmap, it gets a general version: the
 store, the tiers and the advisory wiring described for any single developer,
