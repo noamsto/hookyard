@@ -90,8 +90,7 @@
             };
           };
           # The memory layer's CLI and session_start handler
-          # (docs/design/memory-layer.md §5): built from this repo but not
-          # router code, so it is its own package, not part of hookyard's.
+          # (docs/design/memory-layer.md §5).
           priors = let
             # ssh resolves host aliases when routing a repo to its store.
             runtimeDeps = [pkgs.git pkgs.ripgrep pkgs.betterleaks pkgs.openssh];
