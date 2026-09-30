@@ -1,0 +1,270 @@
+// Package route classifies a session's repo by its git remotes and decides
+// which stores it reads and where its facts are written.
+package route
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"maps"
+	"net/url"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/noamsto/hookyard/cmd/priors/internal/config"
+)
+
+type Class string
+
+const (
+	ClassPersonal     Class = "personal"
+	ClassWork         Class = "work"
+	ClassUnresolvable Class = "unresolvable"
+	ClassNoRepo       Class = "no-repo"
+)
+
+type StoreID string
+
+const (
+	StorePersonal StoreID = "personal"
+	StoreWork     StoreID = "work"
+)
+
+// Session is the repo a session runs in. Repo is empty outside a repo; Dir is
+// the git toplevel.
+type Session struct {
+	Class     Class
+	Repo, Dir string
+}
+
+// Resolver maps an SSH host alias to the hostname it connects to. A nil
+// SSHHost runs ssh -G.
+type Resolver struct {
+	SSHHost func(ctx context.Context, alias string) string
+}
+
+const (
+	gitTimeout = 5 * time.Second
+	sshTimeout = 2 * time.Second
+)
+
+// ParseURL splits a git remote URL into its lower-cased host, owner and repo.
+// sshLike reports whether the host is an SSH host, and so possibly an alias.
+func ParseURL(raw string) (host, owner, repo string, sshLike bool, err error) {
+	var path string
+	if scheme, _, ok := strings.Cut(raw, "://"); ok {
+		u, perr := url.Parse(raw)
+		if perr != nil {
+			return "", "", "", false, perr
+		}
+		switch strings.ToLower(scheme) {
+		case "https", "http", "git":
+		case "ssh":
+			sshLike = true
+		default:
+			return "", "", "", false, fmt.Errorf("unsupported remote scheme %q", scheme)
+		}
+		host, path = u.Hostname(), u.Path
+	} else {
+		// git reads host:path as scp-like only when the colon comes before any
+		// slash; anything else is a local path.
+		hostPart, rest, ok := strings.Cut(raw, ":")
+		if !ok || strings.Contains(hostPart, "/") {
+			return "", "", "", false, fmt.Errorf("not a network remote: %q", raw)
+		}
+		if i := strings.LastIndex(hostPart, "@"); i >= 0 {
+			hostPart = hostPart[i+1:]
+		}
+		host, path, sshLike = hostPart, rest, true
+	}
+	// A leading dash would reach ssh -G as an option.
+	if host == "" || strings.HasPrefix(host, "-") {
+		return "", "", "", false, fmt.Errorf("remote %q has no usable host", raw)
+	}
+	path = strings.TrimSuffix(strings.Trim(path, "/"), ".git")
+	segs := slices.DeleteFunc(strings.Split(path, "/"), func(s string) bool { return s == "" })
+	if len(segs) < 2 {
+		return "", "", "", false, errors.New("remote path needs owner/repo")
+	}
+	return strings.ToLower(host), strings.ToLower(segs[0]), strings.ToLower(segs[len(segs)-1]), sshLike, nil
+}
+
+type remote struct {
+	hosts       []string
+	owner, repo string
+}
+
+// matches reports whether r is one of entries ("host/owner"). An alias counts
+// under its literal host as well as its resolved one: ssh -G may rewrite a real
+// host (github.com → ssh.github.com), and that must not unmatch the org.
+func (r remote) matches(entries []string) bool {
+	for _, e := range entries {
+		host, owner, _ := strings.Cut(e, "/")
+		if owner == r.owner && slices.Contains(r.hosts, host) {
+			return true
+		}
+	}
+	return false
+}
+
+// Resolve classifies the repo containing cwd (spec §6).
+func Resolve(ctx context.Context, cwd string, cfg config.Config, r Resolver) Session {
+	dir, err := gitOut(ctx, cwd, "rev-parse", "--show-toplevel")
+	if err != nil || dir == "" {
+		return Session{Class: ClassNoRepo}
+	}
+	sshHost := r.SSHHost
+	if sshHost == nil {
+		sshHost = func(ctx context.Context, alias string) string { return defaultSSHHost(ctx, cfg.SSHConfig, alias) }
+	}
+	resolved := map[string]string{}
+
+	remotes := map[string]remote{}
+	names, _ := gitOut(ctx, dir, "remote")
+	for name := range strings.FieldsSeq(names) {
+		raw, err := gitOut(ctx, dir, "remote", "get-url", name)
+		if err != nil {
+			continue
+		}
+		host, owner, repo, sshLike, err := ParseURL(raw)
+		if err != nil {
+			continue
+		}
+		rem := remote{hosts: []string{host}, owner: owner, repo: repo}
+		if sshLike {
+			target, ok := resolved[host]
+			if !ok {
+				target = sshHost(ctx, host)
+				resolved[host] = target
+			}
+			if target != host {
+				rem.hosts = append(rem.hosts, target)
+			}
+		}
+		remotes[name] = rem
+	}
+
+	s := Session{Dir: dir}
+	origin, hasOrigin := remotes["origin"]
+	if hasOrigin {
+		s.Repo = repoName(origin.repo)
+	} else {
+		s.Repo = repoName(commonDirName(ctx, dir))
+	}
+	switch {
+	case slices.ContainsFunc(slices.Collect(maps.Values(remotes)), func(rem remote) bool { return rem.matches(cfg.WorkOrgs) }):
+		s.Class = ClassWork
+	case !hasOrigin:
+		s.Class = ClassUnresolvable
+	case origin.matches(cfg.PersonalOrgs):
+		s.Class = ClassPersonal
+	case isWorkOwner(origin.owner, cfg.WorkOrgs):
+		s.Class = ClassUnresolvable
+	case cfg.Profile == "work":
+		s.Class = ClassUnresolvable
+	default:
+		s.Class = ClassPersonal
+	}
+	return s
+}
+
+func isWorkOwner(owner string, workOrgs []string) bool {
+	for _, e := range workOrgs {
+		if _, o, _ := strings.Cut(e, "/"); o == owner {
+			return true
+		}
+	}
+	return false
+}
+
+// commonDirName names the repo after the directory holding its common git dir,
+// so a linked worktree names the main repo rather than itself.
+func commonDirName(ctx context.Context, dir string) string {
+	common, err := gitOut(ctx, dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return filepath.Base(dir)
+	}
+	return filepath.Base(filepath.Dir(common))
+}
+
+func gitOut(ctx context.Context, dir string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...).Output() //nolint:gosec // fixed git subcommands; only the directory and a remote name vary
+	return strings.TrimSpace(string(out)), err
+}
+
+func defaultSSHHost(ctx context.Context, sshConfig, alias string) string {
+	ctx, cancel := context.WithTimeout(ctx, sshTimeout)
+	defer cancel()
+	args := []string{"-G"}
+	if sshConfig != "" {
+		args = append(args, "-F", sshConfig)
+	}
+	out, err := exec.CommandContext(ctx, "ssh", append(args, alias)...).Output() //nolint:gosec // ssh -G only prints config; ParseURL rejects a host that would parse as an option
+	if err != nil {
+		return alias
+	}
+	for line := range strings.Lines(string(out)) {
+		if h, ok := strings.CutPrefix(line, "hostname "); ok {
+			return strings.ToLower(strings.TrimSpace(h))
+		}
+	}
+	return alias
+}
+
+// ReadStores is the ordered list of stores a session reads (spec §6).
+func ReadStores(s Session, cfg config.Config) []StoreID {
+	if s.Class == ClassWork && cfg.WorkPresent() {
+		return []StoreID{StoreWork, StorePersonal}
+	}
+	return []StoreID{StorePersonal}
+}
+
+// Dest is where a session's fact is written: a store, or the host-local
+// quarantine with the reason why.
+type Dest struct {
+	Store      StoreID
+	Quarantine bool
+	Why        string
+}
+
+// WriteDest applies the §4.2 write table.
+func WriteDest(s Session, cfg config.Config) Dest {
+	if s.Class == ClassPersonal {
+		return Dest{Store: StorePersonal}
+	}
+	if cfg.Profile == "work" {
+		if cfg.WorkPresent() {
+			return Dest{Store: StoreWork}
+		}
+		return Dest{Quarantine: true, Why: "work clone missing"}
+	}
+	switch s.Class {
+	case ClassWork:
+		return Dest{Quarantine: true, Why: "work repo on a personal host"}
+	case ClassUnresolvable:
+		return Dest{Quarantine: true, Why: "unresolvable repo on a personal host"}
+	default:
+		return Dest{Store: StorePersonal}
+	}
+}
+
+var nonName = regexp.MustCompile(`[^a-z0-9]+`)
+
+// repoName folds a repo name into the fact-name alphabet, since it becomes a
+// repos: entry and a store directory name.
+func repoName(raw string) string {
+	name := strings.Trim(nonName.ReplaceAllString(strings.ToLower(raw), "-"), "-")
+	if len(name) > 81 {
+		name = strings.TrimRight(name[:81], "-")
+	}
+	if name == "" {
+		return "repo"
+	}
+	return name
+}
