@@ -6,9 +6,11 @@
 what shape. `memory-layer.md` is under revision by another worker and is not
 touched here.
 
-**Verdict:** [adopt and contribute adapters](#9-verdict) — with a capped,
-noise-filtered digest delivered through hookyard, and a Codex adapter deferred
-behind Codex's own `memories` work.
+**Verdict:** [adopt `deja-vu` for session continuity](#9-verdict) — a single Go
+binary that indexes the same transcripts natively for Claude Code, Codex, **Pi**
+and Cursor, with no model and a capped, fenced digest delivered through hookyard.
+`recall` loses the head-to-head in §10; the durable-facts store §4 is still ours
+to build, and `claudemem` is not a session-continuity tool.
 
 `memory-layer.md` §2.3 previously judged `recall` from a source read only. This
 evaluation installs it, replays real Claude Code transcripts through its capture
@@ -18,7 +20,8 @@ output can ride hookyard's `exec` handler.
 
 Fixtures under `docs/design/fixtures/recall/` carry the raw numbers and the
 scrubbed excerpt: `replay-metrics.json`, `redaction-cases.md`,
-`context-sample.md`, `hookyard-exec-wrapper.py`.
+`context-sample.md`, `hookyard-exec-wrapper.py`, and the alternatives comparison
+under `alternatives/`.
 
 ## 1. Install and pinned version
 
@@ -263,31 +266,126 @@ we?", not "what is true about this tooling?".
 
 ## 9. Verdict
 
-**Adopt and contribute adapters.**
+**Adopt `deja-vu` for session continuity; drop the `recall` adapter plan.**
 
-The measurements say the capture half is sound and cheap — zero model tokens,
-sub-second at every size, 52-test suite green, redaction and confinement real —
-and that the Pi/Codex adapters are small because hookyard already plumbs each
-engine's session file and fires the needed events. Pi has no memory at all, so
-an adapter is the highest-value contribution; the opencode adapter is the
-working template. The design's own §9 decision 5 recommendation
-("use it as-is for session continuity, build §4 only for durable facts") holds,
-with three amendments this evaluation adds:
+§10 installs and measures the Go and Rust alternatives the owner asked for
+against the same five replayed personal transcripts. `deja-vu` beats `recall` on
+every axis that matters for the session-continuity half: one Go binary, no model
+tokens and no network, indexes the same 44.4 MB in 2.25 s (24 ms warm), answers
+ten concrete recall questions with the right session ranked first (31–41 ms),
+and injects a 973–1416-byte session digest **fenced as untrusted data** at
+25–221 ms — far inside hookyard's 4.3 s handler budget and the 8 K total. It
+ships **native** Claude Code, Codex, **Pi** and Cursor support, so the Pi
+adapter contribution that was the strongest reason to adopt `recall` is no
+longer needed. Its ingest redactor catches 13 of the 17 fake credential shapes
+against `recall`'s 11.
+
+The three amendments `recall` needed still apply to whatever digest is injected:
 
 - **Cap the digest.** The 31 MB session produced 8190 bytes alone — over the
-  8 K total — so injected `context.md` must be truncated to a per-source budget
-  before it shares tier 1's slot. Without this, §9's "they want the same
-  `session_start` budget" collision is guaranteed, not hypothetical.
+  8 K total — so the injected digest must be truncated to a per-source budget
+  before it shares tier 1's slot.
 - **Filter the summary before injecting.** The extractive top-8 collapses onto
-  repeated agentic boilerplate (`<summary>…</summary>`, raw `<event>{…}</event>`).
-  Keep the deterministic sections (goal, commands, last message, git); either
-  drop or de-duplicate the summarizer output before it reaches the model.
-- **Defer the Codex adapter.** Codex 0.157's `memories`
-  (`stage1_outputs`/`memories_1.sqlite`) and `external_agent_memory_import` are
-  off today but aim at the same "where we left off" ground with LLM quality.
-  Contribute the **Pi** adapter now; re-evaluate Codex when those flags ship.
+  repeated agentic boilerplate; keep the deterministic sections (goal, commands,
+  last message, git) and drop or de-duplicate the summarizer output. `deja-vu`
+  already returns a short, session-anchored digest rather than a TF-IDF summary.
+- **The Codex-adapter deferral is moot.** `deja-vu` already reads Codex natively;
+  the deferral behind Codex's own `memories` work belongs to `recall`, not to the
+  recommended option.
 
-What it means for §9 decision 5: adopt recall for session continuity via a
-hookyard `exec` wrapper, contribute a `pi` adapter upstream, and keep building
-§4 for the durable, cross-repo facts recall deliberately does not hold. It is
-**not** an alternative to §4, and it does not close failure mode 2.
+Caveats, all measured in §10. `deja-vu` is young (`v0.21.4`, effectively one
+maintainer) and indexes every supported harness's transcripts already on disk —
+so in production it would index this fleet's work sessions too, which the owner
+may want to exclude via `deja`'s exclude list. Its redactor still misses
+`github_pat_…`, `glpat-…`, `npm_…` and bare 40-char blobs. `remem` is
+disqualified for this half: its distillation calls a model and it has no Pi
+support. `claudemem` is not a session-continuity tool at all — it is a durable
+notes/session store and belongs to the §4 discussion. A Go port of `recall`'s
+deterministic sections (~400–600 lines, `alternatives/port-our-own.md`) is the
+fallback if indexing on-disk history is unacceptable, but it re-opens the
+transcript-parser maintenance `deja-vu` already carries for thirty-five harnesses.
+
+What it means for §9 decision 5: adopt `deja-vu` for session continuity via a
+hookyard `exec` wrapper, keep building §4 for the durable, cross-repo facts no
+candidate here holds, and revisit only if `deja-vu`'s redaction or stability
+disappoints. It is **not** an alternative to §4, and it does not close failure
+mode 2.
+
+## 10. Comparison: Go and Rust alternatives
+
+The owner asked whether a Go or Rust alternative exists before accepting §9's
+recommendation. The candidates were `deja-vu` (Go), `remem` (Rust) and
+`claudemem` (Go), plus a Go port of `recall`'s deterministic sections. Each was
+pinned, installed isolated, and run against the **same five replayed personal
+transcripts** as §2 (44.4 MB; codenames unchanged; `repo-b` grew by 5 640 bytes
+since #126), under the same measurements. Raw numbers and the fake-secret matrix
+are in [`fixtures/recall/alternatives/`](fixtures/recall/alternatives/README.md).
+
+| | `recall` | `deja-vu` | `remem` | `claudemem` | port our own |
+| --- | --- | --- | --- | --- | --- |
+| **Pinned** | `e65cb1e` v0.4.0-5 | `aeb7045` v0.21.4 | `91e3ee0` v0.6.98 | `ffded1e` v3.0.12 | `recall` `e65cb1e` |
+| **Language / install** | Python plugin, stdlib | Go, `go build` (not in nixpkgs) | Rust, checksummed release binary (not in nixpkgs) | Go, `go build` (not in nixpkgs) | Go, in-repo |
+| **Binary size** | n/a (script) | 21.3 MB | 45.6 MB | 18.3 MB | +~0 |
+| **Model / network** | none | none | **distill spawns `claude`/`codex`** | none (local embeddings) | none |
+| **Quality on the 5 transcripts** | deterministic sections faithful; summary noisy; Bash edits missed | 10/10 sessions ranked #1; 9/10 answers in snippets | raw capture only (154 msgs for repo-a); curated quality **not evaluable** offline | cannot replay transcripts — notes/sessions are authored | would fix recall's misses |
+| **Latency** | `capture` 0.05–0.47 s; `make_context` 0.55 s | index 2.25 s cold / 0.024 s warm; query 31–41 ms; digest 25–221 ms | drain ~1 s; raw search 27–28 ms | session save 68 ms for 5; search 8–11 ms; inject 8 ms | sub-second |
+| **Injected size vs 8 K** | 5 104–8 190 B (overflows) | 973–1 416 B | n/a (no curated context offline) | 994 B | ~2–6 KB |
+| **Redaction (of 17)** | 11 caught | **13 caught** (misses `github_pat_`, `glpat-`, `npm_`, bare 64) | 0 at capture (raw archive holds all 17) | 0 on the manual path | would catch 15 |
+| **Injection fenced** | yes (Claude path) | **yes** (`<deja-recall>` + untrusted preamble) | source-level intent, not exercised | no | yes (if reused) |
+| **Engine coverage** | Claude, opencode; Pi/Codex adapters to write | Claude, Codex, **Pi**, Cursor — native | Claude, Codex, Cursor partial; **no Pi** | Claude skill; Codex/others aspirational | via hookyard per engine |
+| **Hookyard fit** | `exec` wrapper, 5.2 KB, done | `exec` wrapper over `hook-context`/`hook-prompt`, 25–221 ms | owns hooks + MCP; capture needs them | `exec` wrapper over `context inject` | in-process |
+| **Licence / maintenance** | MIT; 752★ | MIT; 1 098★, pushed 2026-09-30 | MIT; 31★ | MIT; 0★, pushed 2026-09-09 | ours |
+
+### Per-candidate notes
+
+**`deja-vu` (Go) — recommended.** Indexes the transcripts each agent already
+writes (35 harnesses), no model, no embeddings, no server; keys stripped at
+ingest. Its `hook-context` digest is short and session-anchored, and both
+`hook-context` and `hook-prompt` print a fenced `<deja-recall>` block a
+hookyard `exec` wrapper can re-emit exactly as the `recall` wrapper does. It is
+the only candidate with native Pi support and a working `where did we leave off`
+answer on the replayed set. Weaknesses: young single-maintainer project; indexes
+all on-disk history (excludable); four redaction misses.
+
+**`remem` (Rust) — not viable for this half.** Its capture and curated recall
+are LLM-driven: `SessionRollup`/`ObservationExtract` call `crate::ai::call_ai`,
+which spawns the host `claude` or `codex` CLI. Under this evaluation's isolation
+rule that model was not configured, so curation could not be evaluated at all.
+The offline half works (a Stop-hook drain wrote 154 raw messages to the
+SQLCipher store; `raw search` answers in ~27 ms), but the raw archive held every
+fake secret verbatim — redaction lives only in the unexercised model path. No Pi
+support, and it demands its own hooks plus an MCP server.
+
+**`claudemem` (Go) — a different tool.** It is a durable notes/session store
+(markdown source of truth, FTS5 + optional vectors), not a transcript indexer
+and not a session-continuity extractor: content is authored by the agent
+(`note add` / `session save`) or a non-mutating hook-event classifier. Its
+`note`/`session` path stores fake secrets verbatim and its `context inject`
+output has no untrusted-data fence. It overlaps §4's durable-facts store, not
+this half of the memory layer; if it is considered at all, size it against §4.
+
+**Port-our-own — fallback only.** A Go port of `recall`'s deterministic
+sections (goal, files, commands, last message, git) is ~400–600 lines including
+the Claude/Codex/Pi parsers; it would fix the Bash-edit file capture, add the
+8 K cap, close the four redaction gaps and drop the noisy summary, but it keeps
+`recall`'s limits — no retrieval, no durable facts — and hands us the transcript
+format drift `deja-vu` already tracks.
+
+### Answers for the alternatives
+
+1. **Pinned / install** — all four pinned above; none is in nixpkgs; `deja-vu`
+   and `claudemem` built from source, `remem` from its checksummed release.
+2. **Quality** — `deja-vu` 10/10 sessions, 9/10 answers; `remem` raw-only
+   (curation needs a model); `claudemem` cannot replay transcripts.
+3. **Latency / size** — `deja-vu` 2.25 s cold index, 31–41 ms query, 973–1 416 B
+   fenced digest; `remem` raw search ~27 ms; `claudemem` 8–11 ms search, 994 B
+   inject.
+4. **Redaction / fence** — matrix above; only `deja-vu` both redacts at ingest
+   and fences its injection.
+5. **Engine coverage** — `deja-vu` native on all four; `remem` no Pi;
+   `claudemem` Claude-skill only.
+6. **Hookyard fit** — `deja-vu`'s CLI digest fits an `exec` wrapper and the
+   4.3 s budget; `remem` demands its own hooks/MCP and a model;
+   `claudemem` needs authored content.
+7. **Licence / maintenance / size** — MIT across all; `deja-vu` the most active
+   and smallest of the two indexers; `claudemem` least active.
