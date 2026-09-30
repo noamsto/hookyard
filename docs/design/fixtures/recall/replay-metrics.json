@@ -43,9 +43,10 @@
     "missed": ["github_fine_grained (github_pat_...)", "linear_api_token (lin_api_...)", "gitlab_pat (glpat-...)", "bare_base64_40", "npm_token (npm_...)", "google_api_key (AIza...)"]
   },
   "hookyard_exec_wrapper": {
-    "note": "a ~12-line handler reading .recall/context.md and printing hookSpecificOutput.additionalContext, run through 'hookyard route --registered-for claude-code --event session_start'",
+    "note": "a ~14-line handler reading .recall/context.md, re-adding recall's BEGIN/END untrusted-data fence (hookyard adds none), and printing hookSpecificOutput.additionalContext; run through 'hookyard route --registered-for claude-code --event session_start'",
     "input_context_bytes": 5104,
-    "route_stdout_bytes": 5777,
+    "additional_context_bytes": 5184,
+    "route_stdout_bytes": 5826,
     "hookyard_max_handler_output_bytes": 65536,
     "hookyard_max_handler_timeout_ms": 4300
   }

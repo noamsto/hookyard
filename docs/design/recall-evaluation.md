@@ -205,7 +205,7 @@ Recall's SessionStart hook prints markdown; a hookyard `exec` handler must print
 `{"hookSpecificOutput":{"additionalContext":…}}`
 (`internal/router/handler.go`, `classify`). The mismatch is one wrapper.
 
-`docs/design/fixtures/recall/hookyard-exec-wrapper.py` is a ~12-line handler
+`docs/design/fixtures/recall/hookyard-exec-wrapper.py` is a ~14-line handler
 that reads `.recall/context.md` and re-emits it in hookyard's shape. Run through
 the real binary:
 
@@ -215,10 +215,21 @@ hookyard route --registered-for claude-code --event session_start \
 ```
 
 it delivered the full digest as Claude Code `additionalContext`: **5104 bytes**
-of `context.md` in, **5777 bytes** out, well under hookyard's 64 KiB stdout cap
-and 4.3 s timeout. **Yes** — recall's digest can be delivered through hookyard
-instead of its own hooks, so it shares the `session_start` advisory budget with
-tier 1 rather than competing for the engine's own hook slot.
+of `context.md` in, **5184 bytes** in the rendered `additionalContext` (**5826
+bytes** of JSON out), well under hookyard's 64 KiB stdout cap and 4.3 s timeout.
+**Yes** — recall's digest can be delivered through hookyard instead of its own
+hooks, so it shares the `session_start` advisory budget with tier 1 rather than
+competing for the engine's own hook slot.
+
+One fence caveat, and it is why the fixture is not a verbatim re-emit: **hookyard
+adds no untrusted-data fence.** Its Claude session_start render
+(`internal/verdict/render.go`, `renderClaudeCodeAdvisoryOnly`) passes the advice
+string through unchanged, so a wrapper that re-emitted `context.md` verbatim
+would silently drop the `BEGIN/END recall context (untrusted data)` markers that
+`session_start.py` supplies (§4). Since `context.md` is transcript-derived and can
+carry injected text, the wrapper must reproduce those markers itself — the
+fixture does, and the delivered `additionalContext` above still ends with
+`===== END recall context =====`.
 
 What hookyard does **not** do is share or trim the budget: the 8 K total is
 `memory-layer.md` §4.4's design constant, not a router limit. So the collision §9
@@ -246,7 +257,8 @@ we?", not "what is true about this tooling?".
    unfenced by design.
 5. **Adapter effort** — cheap (~100-line parser each) because hookyard supplies
    `session_file`/`transcript_path`; Codex may not need one.
-6. **Fit with hookyard** — yes, via a 12-line `exec` wrapper, proven end-to-end;
+6. **Fit with hookyard** — yes, via a ~14-line `exec` wrapper, proven end-to-end
+   (it must re-add recall's untrusted-data fence, since hookyard adds none);
    budget sharing is a memory-layer decision, not automatic.
 
 ## 9. Verdict
