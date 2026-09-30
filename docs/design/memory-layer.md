@@ -1,24 +1,37 @@
 # The memory layer: cross-harness agent memory
 
 **Status:** design proposal, **under revision — do not implement from this document.**
-An independent adversarial review (PR #83) found errors in the premises below and
-gaps in the security model. Corrected here: the corpus counts (§1), R1's evidence
-(§3), the provenance of the measured numbers (§2.1), the §2.3 reading of `recall`,
-and the `type` vocabulary (§4.1). Still open, each needing a decision: the trust
-model (§4.4), the secrets and work/personal boundary (§4.8), and tier 2's
-justification (§4.4). The review's full findings are on the PR.
+That stays until the trust model (§4.4) is decided.
+
+- *Resolved.* The corrections from the independent adversarial review (PR #83,
+  whose full findings are on the PR): the corpus counts (§1, now re-counted),
+  R1's evidence (§3), the provenance of the measured numbers (§2.1), the §2.3
+  reading of `recall`, and the `type` vocabulary (§4.1). The owner's decisions
+  1–4 of 2026-09-30: two stores keyed by repo org (§4.2), migration with dedup
+  and an importer for native memories (§4.9, §9), and packaging (§5). The
+  secrets and work/personal boundary (§4.8), settled by decision 1 plus
+  write-time redaction.
+- *Pending.* Decision 5, `recall`, awaiting the hands-on evaluation in #124.
+- *Proposed, needs owner sign-off.* Tier 2 moves out of v0, behind §7's recall
+  A/B (§4.4).
+- *Open, the last blocker.* The trust model — three options in §4.4.
+
 **Scope:** a memory store shared by Claude Code, Codex, Cursor and Pi, delivered
 through hookyard's existing advisory contract, fed by the crew bus and sessions.
+It is written against one fleet — crew, dispatcher, named hosts — kept as the
+worked example; a general single-developer version comes before the memory
+layer is more than a pointer on the public roadmap (§10).
 **Related:** [hookyard.md](hookyard.md) (§7 the envelope, §8 native config
 emission), [yard-mode.md](../yard-mode.md) (advisory rendering per engine),
+[roadmap.md](../roadmap.md) (the public roadmap),
 `internal/verdict/capability.go` (the per-engine advisory set this design is
 bounded by).
 
-Three of the four engines ship no memory at all, and the fourth keeps its own in
-a place no other engine can read. This document specifies the store, the two
-read paths, and the injection points — and then argues, from measured evidence,
-that the store should be plain markdown rather than any of the systems the
-memory-startup category sells.
+Two of the four engines ship memory of their own (Claude Code, Codex), one keeps
+it server-side (Cursor), and one has none (Pi); none can read another's. This
+document specifies the store, the two read paths, and the injection points — and
+then argues, from measured evidence, that the store should be plain markdown
+rather than any of the systems the memory-startup category sells.
 
 ---
 
@@ -26,17 +39,44 @@ memory-startup category sells.
 
 | engine | memory today | where | readable by the others |
 | --- | --- | --- | --- |
-| Claude Code | auto memory (model-written) | `~/.claude/projects/<project>/memory/` | no |
+| Claude Code | auto memory (model-written, on by default) | `~/.claude/projects/<project>/memory/` | no |
+| Codex | `memories` (stable, **opt-in**; off on this host) | `~/.codex/memories_1.sqlite` + a consolidated memory folder | no |
+| Cursor | server-side knowledge base | Cursor's backend, no local store | no |
 | Pi | none | — | — |
-| Codex | none | — | — |
-| Cursor | none | — | — |
 
-Codex does not ship a native memory store, but its hookyard advisory slot carries all five events Codex documents an advisory channel on — `session_start`, `prompt_submit`, `pre_tool`, `post_tool` and the engine-scoped `subagent_start` (PR #101 wired the first two; issue #87 confirmed and wired the rest).
+Codex 0.157 ships `memories` as a stable feature that is off unless enabled
+(`codex features list` on `tp-g5` reports it stable and off). It works in two
+phases: a stage-1 per-thread extraction into SQLite — `stage1_outputs` in
+`~/.codex/memories_1.sqlite` (read read-only) holds `raw_memory`,
+`rollout_summary`, `usage_count` and `last_usage` per `thread_id` — then a
+phase-2 consolidation that writes a memory folder: `MEMORY.md`,
+`memory_summary.md`, `raw_memories.md`, `rollout_summaries/*.md` (binary
+strings). The binary already names a `memories_v2_1.sqlite` and a migrate
+step, so the on-disk shape is moving. It also carries an
+`external_agent_memory_import` feature, under development, whose strings sit
+next to Claude's memory paths (`.claude`, `CLAUDE.md`): Codex is building an
+importer *from* Claude. That is the gap this section describes, being closed
+one pair of engines at a time, in incompatible ways. Details in §4.9.
 
-Claude Code's auto memory is a real layer, not a stub. Verified on this machine:
-52 topic files across 11 project directories plus 11 `MEMORY.md` indexes — 63 files
-in total — each a markdown file with
-`name`/`description` frontmatter and a per-directory `MEMORY.md` pointer index.
+Codex's hookyard advisory slot carries all five events Codex documents an
+advisory channel on — `session_start`, `prompt_submit`, `pre_tool`, `post_tool`
+and the engine-scoped `subagent_start` (PR #101 wired the first two; issue #87
+confirmed and wired the rest).
+
+Nothing under `~/.cursor/` or `~/.config/cursor/` is a memory store (the
+latter's `chats/*/store.db` hold only `blobs` and `meta` tables — transcripts),
+while the `cursor-agent` bundle carries `KnowledgeBaseAdd/List/Update/Remove`
+RPCs keyed by `git_origin` (bundle strings): Cursor's memory lives on Cursor's
+backend.
+
+Claude Code's auto memory is a real layer, not a stub. Verified on `tp-g5`,
+2026-09-30: 451 topic files across 21 non-empty project directories (29 exist),
+plus 20 `MEMORY.md` indexes; 206 of the 451 sit in one work-org repo's
+directory. The largest index is 173 lines and 21.3 KB, close to the byte cap
+below. The corpus is per host: an earlier revision counted 52 files elsewhere,
+and that count cannot be reproduced here. Each topic file is markdown with
+`name`/`description` frontmatter, listed in a per-directory `MEMORY.md` pointer
+index.
 Per Anthropic's docs and a subsequent bug report about the undocumented
 truncation error, the shape is:
 
@@ -159,9 +199,10 @@ write-side cost is a property of who sits on the write path, not of markdown.
 | system | shape | what it gives you | why it is not the answer here |
 | --- | --- | --- | --- |
 | **Claude Code auto memory** | index + topic files, model writes, no embedder | the shape this spec adopts; already runs in production here | per-repo, Claude-owned path, invisible to three engines |
+| **Codex `memories`** | stage-1 per-thread `raw_memory` + `rollout_summary` in SQLite, phase-2 consolidation into a `MEMORY.md`/`memory_summary.md` folder, with `usage_count`/`last_usage` | usage-tracked native memory; the prior art for §4.6's strengthening | one engine; an internal, sqlx-migrated schema already on its second version |
 | **Pi-memory** (jayzeng) | markdown + `qmd` BM25/vector, injected in `before_agent_start` | the closest prior implementation to this design, for Pi specifically | a Pi extension, so it reaches one engine; no cross-engine story |
 | **OpenClaw `memory-core`** | `MEMORY.md` + dated logs + 3-phase nightly "dreaming" | usage-gated promotion into the always-loaded index | Node/OpenClaw runtime; the consolidation pass is deferred here (§8) |
-| **Cline Memory Bank / Cursor / Windsurf memory** | instruction-file family, hand-maintained or auto-written | proves the file pattern is the shipped default | not agent-agnostic, not versioned, not one corpus |
+| **Cline Memory Bank / Cursor / Windsurf memory** | instruction-file family, hand-maintained or auto-written; Cursor: plus a server-side knowledge base (§1) | proves the file pattern is the shipped default | not agent-agnostic, not versioned, not one corpus |
 | **`server-memory`** (MCP reference) | knowledge graph, `create_entities`/`create_relations`/`search_nodes` | typed entities, no schema drift | **MCP-only** — unreachable from a `--strict-mcp-config` worker (§3) |
 | **basic-memory** | markdown source of truth + derived SQLite FTS5, `bm tool search-notes/read-note/write-note` CLI | ranked recall *and* a CLI, so it survives the no-MCP rule; Obsidian can open its folder; AGPL-3.0, Python 3.12+ | a second runtime and a second sync story for a corpus of tens of files; the *architecture* is worth copying, not the dependency (§4.5) |
 | **Inkwell** | MCP, markdown source of truth, typed `kb://` graph, bi-temporal superseding | the best worked example of supersession-in-markdown | MCP-only delivery |
@@ -252,6 +293,7 @@ several of them rule out otherwise-attractive designs.
 | R6 | **Durable, inspectable, versioned, no lock-in** | the corpus is the long-lived asset; the tooling around it is not |
 | R7 | **Bounded cost and latency per turn** | injection runs on a session-start and prompt-submit path; `hookyard` already caps a handler at 4300 ms, and a memory lookup that blocks a turn is worse than a memory that is missing |
 | R8 | **Degrades to nothing** | a missing binary, a missing index, or a timed-out retrieval must leave the session exactly as it was, never half-configured. Same fail-open discipline as the Pi bridge's `askRouter` |
+| R9 | **Work information flows into work, never out** | the owner's 2026-09-30 decision (§4.2); a personal repo's sessions and commits may be public, and a leak cannot be recalled |
 
 Non-requirements, so nobody designs for them: sub-100 ms semantic search, recall
 over raw conversation transcripts, automatic capture of every turn.
