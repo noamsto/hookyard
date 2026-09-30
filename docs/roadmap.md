@@ -14,10 +14,9 @@ is how you use it; the guard layer and the record are why.
 Yard mode is one static binary, and Nix is one way to install it, not a
 requirement.
 
-- [x] `install --claude-settings` writes Claude Code's catalog on hosts with
-  no Nix overlay; `doctor` tells that registration apart from a stale one
-  ([without Nix](yard-mode.md#without-nix)).
-- [x] Release binaries for linux and darwin (amd64, arm64), cut on a `v*` tag.
+- [ ] `install --claude-settings` writes Claude Code's catalog on hosts with
+  no Nix overlay; `doctor` tells that registration apart from a stale one.
+- [ ] Release binaries for linux and darwin (amd64, arm64), cut on a `v*` tag.
 - [ ] First tagged release, plus a Homebrew tap.
 - [ ] A `version` subcommand, so `doctor` and bug reports can name the build.
 
@@ -83,4 +82,5 @@ consumer of hookyard's advisory contract. It is not a feature of the router.
 It starts inside this repo as a separate binary on the same `exec` handler
 contract any third-party hook uses, and moves to its own repo if it grows. The
 secrets and work/personal questions are decided; its trust model is the
-remaining decision before it is built.
+remaining decision before it is built, and the evaluation of `recall` in #124
+could still replace the design with an adapter to that tool.
