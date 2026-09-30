@@ -1,0 +1,53 @@
+{
+  "recall": {
+    "repo": "github.com/raiyanyahya/recall",
+    "commit": "e65cb1e406fea99bee4931e7597715c47b3d2272",
+    "describe": "v0.4.0-5-ge65cb1e",
+    "license": "MIT"
+  },
+  "environment": {
+    "host_os": "linux",
+    "python": "3.14.7 (Nix), 3.14.6 in the uv venv",
+    "go": "1.26.7",
+    "codex": "codex-cli 0.157.0"
+  },
+  "recall_own_test_suite": {
+    "pytest_with_numpy": "52 passed",
+    "pytest_without_numpy": "51 passed, 1 skipped",
+    "ruff_check": "All checks passed",
+    "bench_py_check": "PASS (summarizer beats baselines, backends agree)"
+  },
+  "replay": {
+    "note": "real ~/.claude/projects/-home-noams-Data-git-noamsto-*/*.jsonl transcripts replayed through capture.py + make_context.py against a throwaway git repo; pure-Python summarizer unless noted",
+    "sessions": [
+      {"codename": "repo-a", "transcript_bytes": 3815066,  "capture_first_s": 0.114, "capture_incremental_s": 0.047, "make_context_s": 0.592, "history_bytes": 209623, "context_bytes": 5104, "context_approx_tokens": 1276},
+      {"codename": "repo-b", "transcript_bytes": 3294186,  "capture_first_s": 0.136, "capture_incremental_s": 0.053, "make_context_s": 0.564, "history_bytes": 176628, "context_bytes": 4850, "context_approx_tokens": 1213},
+      {"codename": "repo-c", "transcript_bytes": 2997530,  "capture_first_s": 0.105, "capture_incremental_s": 0.050, "make_context_s": 0.546, "history_bytes": 118919, "context_bytes": 6501, "context_approx_tokens": 1625},
+      {"codename": "repo-d", "transcript_bytes": 5420070,  "capture_first_s": 0.214, "capture_incremental_s": 0.053, "make_context_s": 0.591, "history_bytes": 292564, "context_bytes": 4967, "context_approx_tokens": 1242},
+      {"codename": "repo-e", "transcript_bytes": 31063449, "capture_first_s": 0.468, "capture_incremental_s": 0.048, "make_context_s": 0.559, "history_bytes": 434321, "context_bytes": 8190, "context_approx_tokens": 2048}
+    ]
+  },
+  "summarizer_wall_time": {
+    "note": "summarizer.summarize(text, 8), pure-Python and numpy, min of 5; input is capped at max_input_chars=200000",
+    "pure_python_s": {"2000": 0.002, "20000": 0.072, "100000": 0.145, "200000": 0.144},
+    "numpy_s":       {"2000": 0.000, "20000": 0.010, "100000": 0.013, "200000": 0.023}
+  },
+  "session_start_wall_time": {
+    "note": "session_start.py with a synthetic context.md of each size, min of 5; stdout = context.md + ~866B boilerplate/fence",
+    "context_bytes":       [5000, 8190, 100000, 500000],
+    "stdout_bytes":        [5866, 9056, 100866, 500866],
+    "wall_time_s":         [0.044, 0.042, 0.044, 0.051]
+  },
+  "redaction": {
+    "caught": ["aws_access_key_id (AKIA...)", "github_pat_classic (ghp_...)", "openai_sk (sk-...)", "slack_xoxb (xoxb-...)", "jwt (eyJ...)", "pem_private_key", "env_line LINEAR_API_KEY=", "env_line AWS_SECRET_ACCESS_KEY=", "env_line password=", "env_line export MY_TOKEN=", "authorization_bearer"],
+    "missed": ["github_fine_grained (github_pat_...)", "linear_api_token (lin_api_...)", "gitlab_pat (glpat-...)", "bare_base64_40", "npm_token (npm_...)", "google_api_key (AIza...)"]
+  },
+  "hookyard_exec_wrapper": {
+    "note": "a ~14-line handler reading .recall/context.md, re-adding recall's BEGIN/END untrusted-data fence (hookyard adds none), and printing hookSpecificOutput.additionalContext; run through 'hookyard route --registered-for claude-code --event session_start'",
+    "input_context_bytes": 5104,
+    "additional_context_bytes": 5184,
+    "route_stdout_bytes": 5860,
+    "hookyard_max_handler_output_bytes": 65536,
+    "hookyard_max_handler_timeout_ms": 4300
+  }
+}
