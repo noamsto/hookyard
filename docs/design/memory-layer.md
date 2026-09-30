@@ -966,16 +966,30 @@ change.
 
 | repo | change | why |
 | --- | --- | --- |
-| **hookyard** | `prompt_submit` added to `HasAdvisorySlot` for Claude and Pi (Codex already has `session_start` and `prompt_submit` since #101, so needs no hookyard change for tiers 1 and 2); Pi bridge's `input` reply delivered (not discarded); `before_agent_start` registration made a real per-prompt handler | the only hookyard changes required; tier 2 is impossible on Claude and Pi without them (R2, §4.7) |
-| **hookyard** | captured `prompt_submit` advisory payload fixtures per engine, per its own evidentiary convention | a claimed-advisory engine with no fixture is a claim, not a capability |
-| **`priors`** (new binary, own repo) | `add` / `list` / `show` / `search` / `lint` / `index`; store path from config; v0 `rg` backend | the store needs a release cadence independent of the router; §4.4's fail-open contract lives here |
-| **nix-config** | install `priors`; a `hookyard.json` manifest entry wiring `session_start` + `prompt_submit` to it; clone the store repo on every host incl. `halo` and `mbp`; `AGENTS.md` include line for Codex/Cursor/Pi; optional Obsidian `programs.obsidian.vaults` entry | one manifest, four engines — the pattern `programs.hookyard.manifests` already exists for |
-| **dispatcher** | `crew reap` → distillation proposals (§4.3b); the judge consults `priors search` before choosing tier/engine/model | closes failure mode 2 — the judge currently decides from a static table while `ratings.jsonl` holds the evidence |
+| **hookyard** | *only if tier 2 passes its gate (§4.4):* `prompt_submit` added to `HasAdvisorySlot` for Claude and Pi (Codex already has `session_start` and `prompt_submit` since #101, so needs no hookyard change for tiers 1 and 2); Pi bridge's `input` reply delivered (not discarded); `before_agent_start` registration made a real per-prompt handler | the only router changes this design can require; tier 2 is impossible on Claude and Pi without them (R2, §4.7), and v0 needs none of them |
+| **hookyard** | *only if tier 2 passes its gate (§4.4):* captured `prompt_submit` advisory payload fixtures per engine, per its own evidentiary convention | a claimed-advisory engine with no fixture is a claim, not a capability |
+| **`priors`** (separate package and binary, built from the hookyard repo) | `cmd/priors` and its own tree, with its own manifest, reached through hookyard's `exec` handler contract; it speaks the envelope as JSON like any third-party handler and imports no `internal/` package, so moving it to its own repo is moving files. `add` / `list` / `show` / `search` / `lint` / `index` / `import` / `touch`; both store paths and the work-org list from config; write-time redaction and §4.2's routing; v0 `rg` backend | the owner's decision 4: the router stays small and auditable, and the store keeps a schema cadence of its own; §4.4's fail-open contract lives here |
+| **nix-config** | install `priors` and its manifest, wiring `session_start` to `priors index` and `post_tool` to the `priors touch` usage logger (`fire_and_forget`, §4.6), and `prompt_submit` only if tier 2 passes its gate; clone the personal store on every host incl. `halo` and `mbp`, and the work store on work-profile hosts only (§4.2, §4.8); the work-org list on every host, personal ones included; `AGENTS.md` include line for Codex/Cursor/Pi; optional Obsidian `programs.obsidian.vaults` entries, one vault per store | one manifest, four engines — the pattern `programs.hookyard.manifests` already exists for; clone placement is the first of §4.2's two layers |
+| **dispatcher** | `crew reap` runs `priors import` (§4.9), then distillation proposals (§4.3b); the judge consults `priors search` before choosing tier/engine/model | closes failure mode 2 — the judge currently decides from a static table while `ratings.jsonl` holds the evidence |
 | **nix-config** | worker MCP profile unchanged (zero servers) | memory must not be the reason a worker grows an MCP dependency (R1) |
 
-Ordering matters: the hookyard gaps are prerequisites for tier 2, but the store
-and tier 1 deliver value with no hookyard change at all — a git repo, an index,
-and an `AGENTS.md` include line reach all four engines on day one.
+**Memory stays out of the router.** hookyard's case to a security team is a
+small, auditable router that sees every tool call. A memory store inside it
+would enlarge what that team must trust and tie the router's release cadence to
+the store's schema, so `priors` lives in the hookyard repo but is not router
+code: it is an `exec` handler with its own manifest, and hookyard's only
+changes are the gated advisory slots above. Kept that way, the router also makes
+memory safer — a `pre_tool` guard can check writes into the store, and the
+event record shows which memory was injected into which session — and both work
+only because memory is a handler the router observes. It also makes `priors`
+the first major handler built on hookyard's public contract, which shows the
+contract is enough for someone else to build on.
+
+Ordering matters: v0 needs no router change at all. The store, tiers 1 and 3,
+and the usage logger ride slots and lanes hookyard already has, and a git repo,
+an index, and an `AGENTS.md` include line reach all four engines on day one.
+The hookyard gaps are prerequisites for tier 2 only, and tier 2 is itself gated
+on §7's recall A/B (§4.4), so they are built only if that A/B shows its delta.
 
 ---
 
@@ -983,15 +997,29 @@ and an `AGENTS.md` include line reach all four engines on day one.
 
 Stated so the design can be falsified rather than defended:
 
-- **The corpus grows past a few hundred facts across many domains.** The
-  measured gap opens with history length; at that point v1 (FTS5) is not enough
-  and v2 (embeddings) becomes the honest answer.
+- **The corpus is already past a few hundred facts — on one host.** `tp-g5`
+  holds 451 (§1), 206 of them in one work-org repo's directory. The measured gap
+  opens with history length; past this point v1 (FTS5) may not be enough and
+  v2 (embeddings) may become the honest answer. The raw count does not decide
+  it: right after migration and dedup, `priors search` latency and §7's recall
+  A/B are measured per store and per repo, and those numbers pick the backend.
 - **Queries become conversational rather than named.** `rg` and BM25 both fail
   on paraphrase; the study's multi-session failure mode is precisely this.
-- **A second machine starts writing claims the first never validates.** Then
-  §4.6's lint stops being hygiene and becomes the load-bearing component.
-- **Injection starts costing measurable tokens per turn.** The 8 K budget is
-  the lever, and tier 1 is the first thing to shrink.
+- **Hosts write claims no other host validates.** The store is shared from v0
+  (§4.4), so this is a matter of volume: once it is routine, §4.6's lint and
+  §4.4's review path stop being hygiene and become the load-bearing components.
+- **Injection starts costing measurable tokens per turn.** The budget is the
+  lever — 4 K in v0, 8 K if tier 2 is built — and tier 1's promoted subset
+  (§4.6) is the first thing to shrink.
+- **Codex changes its memory schema, or ships the v2 database.** The importer's
+  pin on `_sqlx_migrations` (§4.9) is the tripwire: an unknown version is
+  skipped and reported, never guessed. A schema that moves every release argues
+  for reading Codex's consolidated memory folder instead of the database.
+- **Cursor ships a local memory store, or documents its knowledge-base API.**
+  Then Cursor joins §4.9's table; until then v0 imports nothing from Cursor.
+- **A work fact is ever found in the personal store.** The write rule, or both
+  of §4.2's layers, failed, and a leak cannot be recalled (R9). Stop writing and
+  revisit §4.2 before anything else.
 
 ---
 
@@ -1006,24 +1034,59 @@ Stated so the design can be falsified rather than defended:
   §4.6 (one test per rule);
 - **fail-open**: missing binary, missing index, unreadable file, and a
   deliberately hung search each yield empty injection and exit 0;
-- budget: each tier's truncation order, asserted positionally, and the total cap.
+- budget: each tier's truncation order, asserted positionally, and the total
+  cap; with two indexes, the session's own store fills the tier-1 budget first
+  and each index keeps its own 200-line/25 KB cap (§4.4);
+- **the importer**, per engine, against fixtures — a Claude project dir, and a
+  Codex SQLite built at the pinned migration version — and an unknown migration
+  version is skipped and reported, writes nothing, and exits 0; a byte-identical
+  source is dropped, a near-duplicate becomes a proposal and is never merged,
+  and re-importing an unchanged source is a no-op (§4.9);
+- **routing and the read rule** (§4.2): with both stores present, a
+  personal-repo session never receives a work fact — from an index, a search
+  or a local layer; an unresolvable session reads personal only and writes to
+  the work store where the host has one, personal where it has none; a work-org
+  session on a host without a work store quarantines the fact and never writes
+  personal; a Claude project dir that does not decode to a git checkout is
+  unresolvable;
+- **double injection** (§4.9): the canonical copy is skipped only when native
+  memory is on, the native source exists and the fact is inside the native
+  window; it is injected when native memory is off, the source is gone, the
+  fact is past the native index cap, or the setting cannot be read;
+- **the usage log** (§4.6): a read naming one fact path counts, a read of a
+  native source path counts for its canonical fact, and an injection or a
+  multi-file search (`rg` over the store, `ls`) does not; after any number of
+  reads, each store's `git status` is clean;
+- **promotion and demotion** (§4.6): seeding matches the native index window,
+  demotion steps index → lower tier → archive candidate, and nothing is ever
+  archived or deleted automatically;
+- **write-time redaction** (§4.3): a secret-shaped fact is refused by
+  `priors add` with a non-zero exit, skipped and reported by the importer, and
+  rejected by the lint.
 
 **Injection end-to-end** (the test that actually matters, adapted from
 Pi-memory's test 8): write a fact, start a *new* session, and ask the question
-without instructing the agent to search. If it answers, tier 2 worked. Repeated
-per engine that has an advisory slot — with Codex run the same way now that
-PR #101 gives it a slot whose delivery is confirmed by the live test
+without instructing the agent to search. If it answers, injection worked. In v0
+that is tier 1, with the fact in the index. Repeated per engine that has an
+advisory slot — with Codex run the same way now that PR #101 gives it a slot
+whose delivery is confirmed by the live test
 `TestLiveCodexDeliversSessionStartAndPromptSubmitAdvice` (`cmd/hookyard/live_e2e_test.go`).
+Tier 2's end-to-end run — the fact outside the index window, reachable only
+through `prompt_submit` — is the recall A/B below, and it is tier 2's gate
+(§4.4). Codex, which already has the slot (§4.7), can run it with no hookyard
+change.
 
 **Cost and latency**, because §4.4 has a deadline: p50/p95 of `priors search` at
-10, 100 and 1000 facts, against the 800 ms budget, so the v0→v1 trigger is a
-number rather than a feeling.
+10, 100 and 1000 facts, and on the migrated corpus per store (§6), against the
+800 ms budget, so the v0→v1 trigger is a number rather than a feeling.
 
-**Recall A/B**, ported from Pi-memory's eval shape: a corpus built from the real
-62 migrated facts, ~15 questions across source types, run with injection on and
-off. The expected result — and the reason to run it — is that the delta
-concentrates in facts that are *not* in the tier-1 index window, which is the
-only thing that would justify tier 2's complexity.
+**Recall A/B**, ported from Pi-memory's eval shape: a corpus built from facts
+sampled from the migrated corpus, ~15 questions across source types, run with
+injection on and off, per store. The expected result — and the reason to run
+it — is that the delta concentrates in facts that are *not* in the tier-1 index
+window, which is the only thing that would justify tier 2's complexity. It is
+the gate (§4.4): without that delta, tier 2 is not built, and neither are the
+hookyard gaps behind it (§4.7, §5).
 
 ---
 
@@ -1033,6 +1096,16 @@ only thing that would justify tier 2's complexity.
 - no knowledge-graph database;
 - no per-turn fact extraction;
 - no background consolidation / "dreaming" (§4.6 defers it on measured grounds);
+- no LLM merge of near-duplicates — migration and the importer only propose a
+  merge, and a human approves it (§4.9);
+- no automatic deletion or archiving — disuse makes an archive candidate, and a
+  human archives it (§4.6);
+- no tier 2 — it is gated on §7's recall A/B (§4.4);
+- no Cursor import — there is no local store to read (§4.9);
+- no cross-host usage sync — the usage log stays on its host, and aggregation
+  is an explicit step (§4.6);
+- no memory view in `hookyard serve` — step 2 of §4.8, only if the Obsidian
+  viewer falls short;
 - no Obsidian Sync, no vault-as-store;
 - no MCP server — explicitly, because a worker cannot see one;
 - no conversation-transcript digest. That is §2.3's territory, and `recall`
