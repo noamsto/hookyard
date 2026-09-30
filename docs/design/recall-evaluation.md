@@ -215,7 +215,7 @@ hookyard route --registered-for claude-code --event session_start \
 ```
 
 it delivered the full digest as Claude Code `additionalContext`: **5104 bytes**
-of `context.md` in, **5184 bytes** in the rendered `additionalContext` (**5826
+of `context.md` in, **5184 bytes** in the rendered `additionalContext` (**5860
 bytes** of JSON out), well under hookyard's 64 KiB stdout cap and 4.3 s timeout.
 **Yes** — recall's digest can be delivered through hookyard instead of its own
 hooks, so it shares the `session_start` advisory budget with tier 1 rather than

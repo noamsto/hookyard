@@ -46,7 +46,7 @@
     "note": "a ~14-line handler reading .recall/context.md, re-adding recall's BEGIN/END untrusted-data fence (hookyard adds none), and printing hookSpecificOutput.additionalContext; run through 'hookyard route --registered-for claude-code --event session_start'",
     "input_context_bytes": 5104,
     "additional_context_bytes": 5184,
-    "route_stdout_bytes": 5826,
+    "route_stdout_bytes": 5860,
     "hookyard_max_handler_output_bytes": 65536,
     "hookyard_max_handler_timeout_ms": 4300
   }

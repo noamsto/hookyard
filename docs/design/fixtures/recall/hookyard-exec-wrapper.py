@@ -20,7 +20,7 @@ Verified against hookyard's own router:
         --state-dir <state-dir> < claude-SessionStart.json
 
 with a 5104-byte context.md, the router emitted 5184 bytes of
-`additionalContext` (5826 bytes of JSON), fence included. Fail-open: an absent
+`additionalContext` (5860 bytes of JSON), fence included. Fail-open: an absent
 context.md exits 0 with no output, so a missing digest leaves the session
 exactly as it was.
 
