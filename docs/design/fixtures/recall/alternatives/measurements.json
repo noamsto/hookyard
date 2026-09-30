@@ -35,6 +35,18 @@
       },
       "queries": {
         "count": 10,
+        "questions": [
+          "which PR removed pi hand-written hook extensions",
+          "remote bridge keepalive control connection dead remote",
+          "enrich card shows why issue has no URL",
+          "pane-shell-prompt flaky test OSC 133 dead-agent",
+          "OSC 9;4 progress tmux resends on focus kitty",
+          "recording tape key-presses overlay",
+          "mini-map over scrollback focused pane",
+          "which PR is green and waiting merge",
+          "multi-dir install doctor coverage",
+          "carousel mirrored session prefix+i does nothing"
+        ],
         "latency_ms": [39, 31, 38, 35, 31, 41, 39, 39, 34, 39],
         "session_top1_hits": 10,
         "session_top1_total": 10,
