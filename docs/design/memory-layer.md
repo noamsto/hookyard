@@ -306,11 +306,16 @@ over raw conversation transcripts, automatic capture of every turn.
 
 Plain markdown, **one fact per file**, in a pointer-index layout — the shape
 Claude Code's auto memory already proved in production, adopted here so the
-62-file corpus can migrate by moving files rather than transforming them.
+existing corpus migrates by moving files and adding frontmatter (§9 decision 2).
+
+There are **two stores of that one shape**: a personal store and a work store,
+each its own git repository with its own generated index, repo directories,
+`_global/` and `_archive/`. Which facts go in which, and which sessions read
+which, is §4.2; how each is placed and synced is §4.8.
 
 ```
-<store>/
-  MEMORY.md                     # pointer index: one line per fact, injected at session start
+<personal-store>/               # personal tooling + personal-org repos (§4.2)
+  MEMORY.md                     # generated index of promoted facts, injected at session start
   INDEX.md → MEMORY.md          # (no alias in v0; named MEMORY.md for Claude parity)
   dispatcher/
     haiku-workers-stall-on-prompts.md
@@ -320,6 +325,11 @@ Claude Code's auto memory already proved in production, adopted here so the
   _global/
     wt-post-switch-owns-navigation.md
   _archive/                     # superseded facts, moved not deleted
+<work-store>/                   # work-org repos only; same shape
+  MEMORY.md
+  <work-org-repo>/
+  _global/                      # tooling facts learned in a work-org repo (§4.2)
+  _archive/
 ```
 
 Frontmatter is a superset of what Claude already writes, so the existing corpus
@@ -339,6 +349,15 @@ metadata:
   valid_from: 2026-09-16
   superseded_by: null    # a filename, once this stops being true
   verified: 2026-09-16   # when a human or agent last confirmed it still holds
+  confidence: proposed   # proposed | reviewed — meaning set by §4.4's decision
+  provenance:            # who wrote it; every §4.4 option needs it
+    engine: claude
+    session: 98a49727-b288-4f1c-9e6c-e7453ce01ef6
+    host: tp-g5
+  source:                # imported facts only (§4.9)
+    engine: claude       # claude | codex
+    path: ~/.claude/projects/<project>/memory/haiku-workers-stall-on-prompts.md
+    sha256: <hash of the source bytes at import>
   originSessionId: 98a49727-b288-4f1c-9e6c-e7453ce01ef6
   modified: 2026-09-16T13:42:44.668Z
 ---
@@ -348,6 +367,14 @@ Observed 2026-09-16 (crew 1789561716-857282, PR #205): ...
 **Why:** ...
 **How to apply:** ...
 ```
+
+Three fields are new beyond Claude's. `confidence` (`proposed` | `reviewed`)
+is already used by §4.3b's drafts; what each value means for injection is set
+by §4.4's trust decision. `provenance` records the writing engine, session and
+host, which every option in §4.4 needs, so a writer can be filtered or purged.
+`source` appears on imported facts only: the engine, the native `path` (Claude)
+or `thread_id` (Codex), and the `sha256` of the source at import — the keys
+§4.9's dedup and §4.6's use count match on.
 
 Two conventions carry meaning without a schema engine, following Pi-memory's
 "tags are content conventions, not enforced metadata" and the markdown-vault
@@ -360,10 +387,14 @@ budget are the 20 % a vault lacks over a plain linked graph):
 - **`type` is a closed set.** The lint (§4.6) rejects a fifth value, which keeps
   retrieval filters honest.
 
-`MEMORY.md` is a pointer index in Claude's exact sense: one line per fact,
+`MEMORY.md` is a pointer index in Claude's line format,
 `- [Title](path) — one-line description`, capped at the same 200-line/25 KB
-budget so the two consumers agree on the ceiling. It is generated, not
-hand-written; the lint regenerates and diffs it.
+budget so the two consumers agree on the ceiling. It is a **generated, promoted
+subset**, one line per *promoted* fact, not one per fact: at 451 facts on one
+host (§1) a line per fact no longer fits the cap. Which facts are promoted, and
+where the index starts at migration, is §4.6 rule 4 and its seeding rule; every
+other fact stays on disk and reachable by search (tier 3, §4.4). Each store
+generates its own index, never hand-written; the lint regenerates and diffs it.
 
 **Why one fact per file.** It is what makes R4 nearly free: two agents editing
 `MEMORY.md` concurrently would conflict on every write, while two agents writing
@@ -371,7 +402,77 @@ two different fact files do not touch the same bytes. Every sync substrate
 becomes adequate when writers do not share files — which is what makes the
 choice in §4.8 a preference rather than a commitment.
 
-### 4.2 Scoping and resolution
+### 4.2 Scoping: two stores, then repos
+
+The owner's decision 1 (2026-09-30), and requirement R9: two stores, keyed by
+the org of the repo a session runs in.
+
+| store | holds | cloned on |
+| --- | --- | --- |
+| **personal** | personal tooling, the machine, the person; facts from personal-org repos | every host, work hosts included |
+| **work** | facts learned in work-org repos, tooling facts among them | work-profile hosts only; never a personal host |
+
+**Resolving the org.** A session's org is the owner of its repo's `origin`
+remote, matched against a **work-org list configured on every host** —
+personal hosts too, so a personal host can recognise a work repo it holds no
+store for. The key is the repo's org, not the machine: a work host can clone a
+personal repo and the reverse, which is the rule the fleet already uses to pick
+Linear or GitHub issues. A session with no repo, or a repo with no `origin`, is
+**unresolvable**.
+
+**Claude project directories** name a path in a lossy encoding (`/` and `.`
+both become `-`), so a migrated or imported Claude fact is resolved by decoding
+the name against paths that exist, confirming the directory exists and is a git
+checkout, and reading its `origin`. Any failure is unresolvable; a repo is never
+guessed from the name.
+
+**Read rule** — information flows into work, never out of it:
+
+| session's repo | reads |
+| --- | --- |
+| work-org | work + personal |
+| any other org | personal only |
+| unresolvable | personal only |
+
+On a host with no work store, a work-org session reads personal only — there is
+nothing else on the host to read.
+
+**Write rule** — where a new fact lands:
+
+| session's repo | host | fact lands in |
+| --- | --- | --- |
+| any org not on the work-org list | any | personal |
+| work-org | has a work store | work — **global and tooling facts included**; only a human moves one to personal |
+| work-org | no work store | neither: a host-local quarantine outside both checkouts (`$XDG_STATE_HOME/priors/quarantine/`), reported, never synced, drained only by a human (a later workstream, §10) |
+| unresolvable | has a work store | work |
+| unresolvable | no work store | personal — a host with no work store is a personal host, where the rule has nothing to protect |
+
+Why the write rule is shaped so:
+
+- **The writing agent is the classifier trusted least.** Asking it whether a
+  lesson learned in a work-org repo is "really" global asks the least reliable
+  party to make the one call that cannot be undone.
+- **Tooling facts routinely carry work names.** A lesson about the fleet's
+  tooling, learned in a work-org repo, tends to cite that repo's name, paths and
+  hostnames, so "global" is not the same as "safe to leave work".
+- **The costs are asymmetric.** A leak is irreversible — a personal repo's
+  sessions and commits may be public (R9) — while a personal fact misfiled into
+  the work store costs one reviewed move.
+- **Unresolvable fails closed in both directions**: it reads the least
+  (personal only) and writes to the most protected store the host has.
+- **Quarantine, not personal, on a host without a work store.** Writing the
+  fact to personal would be a leak by construction, and dropping it would lose
+  it; holding it host-local and reporting it does neither.
+
+**Two independent layers enforce the boundary.** *Clone placement*: the work
+store is never cloned on a personal host, so no filter bug there can surface a
+work fact. *The read filter*: on a work host, where both stores are present, a
+session in a non-work repo is never given the work store. Where one layer is
+absent the other still holds — a personal host has nothing to filter, and a
+work store cloned where it should not be still meets the read filter.
+Write-time redaction (§4.3) applies to both stores on top of these.
+
+Inside a store, facts are scoped by repo:
 
 - **repo scope** — a fact that is only true in one repository (`repos: [x]`).
 - **global scope** — a fact about the machine, the tooling, or the person
@@ -380,13 +481,13 @@ choice in §4.8 a preference rather than a commitment.
   *policy*, so it illustrates the boundary: the fact is repo-scoped, its
   applicability is not.
 
-Resolution is a filter, not a hierarchy: for a session in repo `R`, retrieval
-considers `scope == global` **or** `R ∈ repos`. No precedence rules, because
-precedence rules are where instruction files go wrong.
+Inside a store, resolution is a filter, not a hierarchy: for a session in repo
+`R`, retrieval considers `scope == global` **or** `R ∈ repos`. No precedence
+rules, because precedence rules are where instruction files go wrong.
 
 ### 4.3 Write path
 
-Two writers, one corpus. Neither is "every turn".
+Three writers, one corpus in two stores. None is "every turn".
 
 **a. Session reflection (agent-initiated).** The agent gains three file
 operations, not a new tool surface:
@@ -416,6 +517,26 @@ a `type: project` draft marked `confidence: proposed`. Proposals are not
 injected until a human or a later run confirms them (§4.6) — the failure mode
 worth avoiding is an unverified statistical claim becoming a standing
 instruction.
+
+**c. The importer (mechanical).** Engines keep their native memory (the
+owner's decision 3); at `crew reap`, or by hand with `priors import`, an
+importer sweeps each engine's native store into the canonical one, one fact per
+file with a `source:` block, dropping byte-identical duplicates and proposing
+near-duplicates for merge. What it reads per engine, how it routes and dedups,
+and how a fact avoids being injected twice are §4.9.
+
+**Every write, whoever makes it**, passes **write-time redaction** first, then
+is routed by §4.2's write rule. A fact matching a secret pattern is refused,
+not scrubbed — `priors add` exits non-zero, the importer skips the item and
+reports it, and a fact written directly meets the same rule in the lint
+(§4.6) — because a fact containing a secret must not be written at all. The
+patterns are one rule set shared with the roadmap's `hookyard export`
+redaction, not a second list to keep in step, and they apply to both stores:
+the store split keeps work facts off personal hosts, redaction keeps secrets
+out of either, and read-time scoping (§4.2) is the second line of defence, not
+the only one. Which path a write then takes before it reaches another host —
+pushed as written, reviewed first, or held on the host that wrote it — is the
+trust decision (§4.4), and each option there names it.
 
 ### 4.4 Read path: three tiers, one budget
 
