@@ -670,10 +670,10 @@ dismissed: basic-memory's derived-SQLite-FTS5 architecture is the right v1, and
 dependency in v0, because a corpus of tens of hand-curated facts is served
 exactly by `rg` and the measured edge only opens as history grows.
 
-### 4.6 Hygiene: the lint and the retirement rule
+### 4.6 Hygiene: the lint, retirement, and use
 
 Agent memory's dominant failure is not a missing fact, it is a stale one
-injected with the same confidence as a fresh one. Three mechanical rules:
+injected with the same confidence as a fresh one. Four mechanical rules:
 
 1. **Supersede, do not delete.** A fact that stops being true gets
    `superseded_by: <name>` and is moved to `_archive/`. It stops being injected
@@ -686,18 +686,73 @@ injected with the same confidence as a fresh one. Three mechanical rules:
    90 days) is flagged by `priors list --stale`, and tier 2 down-ranks it rather
    than hiding it. Staleness is visible, not silently enforced.
 3. **The lint** rejects: unknown `type`, missing `name`/`description`, a
-   duplicate `name`, a `superseded_by` pointing nowhere, a `repos` entry naming
-   no repo, a dangling `[[wiki-link]]`, and an index out of sync with the
-   directory. It runs in the store's own pre-commit and in the write path, so a
-   malformed fact cannot be injected.
+   missing `provenance`, a duplicate `name`, a `superseded_by` pointing
+   nowhere, a `repos` entry naming no repo, a dangling `[[wiki-link]]`, a fact
+   carrying a secret pattern (§4.3's shared rule set), and an index out of sync
+   with the directory. It runs in the store's own pre-commit and in the write
+   path, so a malformed fact cannot be injected.
+4. **Use strengthens, disuse demotes.** The index is a promoted subset (§4.1);
+   this rule decides which facts are in it, from what agents actually open.
 
-Consolidation — OpenClaw's nightly "dreaming", or mem0's dedup — is
-**deliberately deferred**, and the deferral is evidence-based rather than
-lazy: at the measured scale it merged real duplicates and bought no accuracy
-(§2.1). When it is eventually needed, the policy worth copying is OpenClaw's
-gate rather than a similarity threshold: an item earns promotion into the
-always-loaded index by *being used*, clearing a recall-count threshold across
-distinct queries — a signal neither the write nor the read path can see.
+**What counts as a use.** An agent *opening* a fact file, observed on
+`post_tool`. Injection is **not** a use: counting it would make the
+always-loaded index self-reinforcing, since every indexed fact is injected
+into every session and would keep itself indexed.
+
+| engine | an open is | the `post_tool` payload (`internal/vocab/inbound.go`) |
+| --- | --- | --- |
+| Claude Code | a file-read tool naming one fact path, or a shell command naming exactly one | observed |
+| Pi | the same | observed |
+| Cursor | the same | observed |
+| Codex | a shell command naming exactly one fact path — Codex has no read tool | *assumed*: its signal needs a captured `PostToolUse` fixture before it is trusted |
+
+A shell command naming exactly one fact path (`cat`, `sed -n`, `head` …)
+counts on every engine. A command that names or lists many fact files (`rg`
+over the store, `ls`) does not: it is a search, not a read of any one fact.
+An open of a *native* source path counts for the canonical fact that
+records it in `source.path` (§4.9), so Claude reading its own copy of an
+imported fact still strengthens the canonical one.
+
+**Where uses go.** The logger is `post_tool → priors touch`, a handler on the
+`fire_and_forget` lane (`internal/manifest/manifest.go`), so it cannot slow a
+turn. It appends to a usage log that is **local per host**, outside both store
+checkouts (`$XDG_STATE_HOME/priors/usage.jsonl`), and **never synced**: a read
+causes no git write, no commit and no conflict, and a store's `git status`
+stays clean however much it is read. Aggregating across hosts is an explicit
+step — a command that reads other hosts' logs — never a side effect of a read.
+
+**Promotion and demotion.** A fact is promoted into its store's index when it
+has been used — opened in several distinct sessions within a window — **and**
+carries a recent `verified` date (rule 2). Demotion runs one way, a step at a
+time: a promoted fact that goes unused leaves the index for the lower tier
+(still on disk, still found by tier-3 search, no longer indexed), and one that
+stays unused there becomes an **archive candidate**, flagged by
+`priors list --stale` and in the viewer (§4.8). **Archiving stays
+human-approved; nothing is deleted or archived automatically.** The windows and
+counts are v0 defaults to be tuned from the log, not fixed here. Promotion
+decides which facts the index lists; which of those may be injected into a
+session is still §4.4's trust decision.
+
+**Seeding.** At migration, a fact listed in its native `MEMORY.md` within the
+native cap window (the first 200 lines / 25 KB) starts promoted, so each index
+begins as today's Claude index. A newly written fact starts promoted for a
+probation window. Every change after that — including a seeded fact's
+demotion through disuse — is governed by this rule.
+
+Prior art: Codex already counts use per memory — `stage1_outputs` carries
+`usage_count` and `last_usage` (§1, read read-only) — and OpenClaw's
+recall-count gate (§2.2) promotes into the always-loaded index only what is
+used across distinct queries, rather than by a similarity threshold. Use is a
+signal neither the write nor the read path can see, which is why it needs its
+own observer.
+
+Consolidation by an LLM — OpenClaw's nightly "dreaming", or mem0's dedup —
+stays **deliberately deferred**, and the deferral is evidence-based rather
+than lazy: at the measured scale it merged real duplicates and bought no
+accuracy (§2.1). What is now in scope is mechanical, at migration and at every
+import (§4.9): byte-identical duplicates are dropped, and near-duplicates are
+*proposed* for a merge a human approves. The usage-gated promotion the
+deferral once pointed at is now rule 4.
 
 ### 4.7 Delivery: hookyard's advisory contract, unchanged
 
@@ -708,8 +763,9 @@ and tested.
 
 ```
 session_start   → priors index      → advisory → tier 1
-prompt_submit   → priors search     → advisory → tier 2
-(pre_tool / post_tool reserved for future targeted recall)
+prompt_submit   → priors search     → advisory → tier 2   (gated, §4.4)
+post_tool       → priors touch      (fire_and_forget) → local usage log (§4.6)
+(pre_tool reserved for future targeted recall)
 ```
 
 What each engine can actually receive, read off `internal/verdict/capability.go`:
@@ -723,7 +779,8 @@ What each engine can actually receive, read off `internal/verdict/capability.go`
 
 So the reach matrix is the requirement R2 in practice: **the store has to be the mechanism because files are the only path all four engines share**, injection being an optimisation layered on top. That optimisation now reaches three of four engines for tier 1 (Claude Code, Pi, Codex) — Cursor's advisory still rides only a rendered permission — and **Codex is the only engine with a tier-2 `prompt_submit` slot today**. Codex also reads `AGENTS.md` natively, and a repo can therefore point Codex at the index through the instruction-file path with no hook at all. That is why the store must be file-native rather than hook-native: the hook is an optimisation for three engines now, but files are the mechanism for all four.
 
-Two gaps must be closed in **hookyard**, and they are the only hookyard changes this design needs:
+Three gaps must be closed in **hookyard** — needed only if tier 2 passes its
+gate (§4.4) — and they are the only hookyard changes this design needs:
 
 1. **No `prompt_submit` advisory slot on Claude Code or Pi (Codex has one since #101).** `HasAdvisorySlot`
    allows only `pre_tool`, `session_start` and `post_tool` for Claude and Pi.
@@ -751,11 +808,20 @@ Claude Code.
 
 ### 4.8 Sync: git, with the viewer optional
 
-The store is a private git repository, cloned to the same path on every host.
-Agents are already fluent in git; it provides real three-way merge with
-ancestry, an audit trail, and a headless path that works on `halo` and in CI.
-Because §4.1 puts one fact per file, merge conflicts are rare rather than
-structural.
+The store is two private git repositories, placed per §4.2: the personal store
+cloned to the same path on every host, work hosts included, and the work store
+cloned to the same path on work-profile hosts only. Agents are already fluent
+in git; it provides real three-way merge with ancestry, an audit trail, and a
+headless path that works on `halo` and in CI. Because §4.1 puts one fact per
+file, merge conflicts are rare rather than structural. Only the checkouts sync:
+the usage log (§4.6), the quarantine (§4.2) and, under the trust model's
+option C, the local layers (§4.4) stay on the host that wrote them.
+
+**The boundary.** Redaction happens at write time (§4.3), so a secret is
+refused before it reaches either store; the store split keeps work facts off
+personal hosts; and read-time scoping — §4.2's read rule, then `scope`/`repos`
+inside a store — is the second line of defence, not the only one. With
+decision 1, that settles PR #83's secrets and work/personal boundary item.
 
 The comparison, for the record, since it was asked directly:
 
@@ -765,22 +831,123 @@ The comparison, for the record, since it was asked directly:
 | Obsidian Sync | diff-match-patch for `.md`; conflict files if opted in; open class of spurious conflicts from background writers | 1 mo (Standard) | only via `ob`, and `ob` is a *sync* client, not an interface | ✅ native | $8/mo (Plus: 10 vaults) |
 | Syncthing | `.sync-conflict-<date>-<device>.md` copies | opt-in versioning | ✅ | ✅ | free |
 
-**Obsidian is adopted as a viewer and nothing else.** Point it at the checkout:
-graph view, backlinks, and — the genuinely useful part — **Bases**, which gives a
-table over the frontmatter (`type`, `repos`, `verified`, `superseded_by`) and is
-the best available surface for the §4.6 retirement job. That is a real advantage
-over `rg`, and it is why Obsidian appears in this design at all. It is not the
-medium: `obsidian-cli` needs the app running (R3), `ob` moves bytes but cannot be
-queried, and its sync's markdown merge is a text merge with no ancestry, which is
-the wrong tool for a corpus two agents write to concurrently. Running git *and*
-Sync over one directory is explicitly rejected.
+**Step 1: Obsidian is adopted as a viewer and nothing else.** Point one vault
+at each store's checkout: graph view, backlinks, and — the genuinely useful
+part — **Bases**, which gives a table over the frontmatter (`type`, `repos`,
+`verified`, `superseded_by`) and is the best available surface for the §4.6
+retirement job. That is a real advantage over `rg`, and it is why Obsidian
+appears in this design at all. It is not the medium: `obsidian-cli` needs the
+app running (R3), `ob` moves bytes but cannot be queried, and its sync's
+markdown merge is a text merge with no ancestry, which is the wrong tool for a
+corpus two agents write to concurrently. Running git *and* Sync over one
+directory is explicitly rejected.
 
 Prior context worth carrying: Obsidian was installed in `nix-config` on Apr 16
 2026 with two vaults (`personal`, `work`), the `sync`/`bases`/`properties` core
 plugins enabled, and an `obsidian-mcp` server; the MCP server was removed
-Jul 1 2026 and `obsidian.nvim` Jun 30 2026, and as of now the vaults exist on
-`tp-g6` with **zero markdown files** in them. The viewer earns its place here
-only if agent-written content is what fills it.
+Jul 1 2026 and `obsidian.nvim` Jun 30 2026, and as of now the two vaults,
+`personal` and `work`, already exist on `tp-g6` with **zero markdown files** in
+them — one for each store. The viewer earns its place here only if
+agent-written content is what fills it.
+
+**Step 2, only if step 1 falls short: a memory view in `hookyard serve`.** It
+would show what a vault over one checkout does not: which facts actually get
+used (§4.6's log, which lives outside the checkouts), which repos keep
+rediscovering the same thing, facts that contradict each other, and a
+staleness board. It is a later workstream (§10), not v0.
+
+### 4.9 Importing native memories
+
+The owner's decision 3 (2026-09-30): engines keep their native memory. An
+importer sweeps each native store into the canonical one (§4.1), and the
+canonical store is what hookyard injects. Nothing is symlinked, switched off or
+left to fork: an engine that remembers a fact natively goes on doing so, and the
+fact reaches the other engines through the import.
+
+**When.** At `crew reap` in this fleet, alongside distillation (§4.3b), and as
+`priors import`, run by hand, for anyone outside it. Each run is per host,
+because each native store is (§1).
+
+**What it reads**, per engine:
+
+| engine | what the importer reads | evidence | v0 |
+| --- | --- | --- | --- |
+| Claude Code | the topic files and `MEMORY.md` of each project dir under `~/.claude/projects/<project>/memory/`; their frontmatter is already a subset of §4.1's | on disk, `tp-g5`, 2026-09-30 | yes |
+| Codex | `~/.codex/memories_1.sqlite`, opened read-only: `stage1_outputs` (`thread_id`, `raw_memory`, `rollout_summary`, `rollout_slug`, `usage_count`, `last_usage`, `source_updated_at`); the phase-2 memory folder once phase 2 has run | schema read read-only (0 rows on `tp-g5`, where the feature is off); folder names from binary strings | yes, pinned: it reads `_sqlx_migrations` and accepts only the migration versions it was built against. Any other version — the binary already names a `memories_v2_1.sqlite` and a migrate step — is skipped and reported, never guessed |
+| Cursor | nothing: no local store under `~/.cursor/` or `~/.config/cursor/`; the `KnowledgeBaseAdd/List/Update/Remove` RPCs keyed by `git_origin` reach an undocumented, authenticated backend | on disk + bundle strings | no |
+| Pi | nothing: no native memory | — | nothing to import |
+
+A skipped Codex import fails open for the session and closed for the store:
+nothing is written from a schema the importer does not know, the run reports
+the version it found and exits 0, and the other engines' imports go on.
+
+**Normalisation.** Every item becomes one fact per file in §4.1's frontmatter,
+with a `provenance` block (the native writer's engine and session where the
+source names one, and the host) and a `source` block (`engine`, the native
+`path` or `thread_id`, and the `sha256` of the source bytes). Claude files keep
+their body and frontmatter unchanged, plus the fields §4.1 adds. A Codex row
+maps `raw_memory` → body, `rollout_summary` → `description` (trimmed to one
+line) and `rollout_slug` → `name`, and lands as `type: project`. Its
+`usage_count` and `last_usage` are native history, not uses: §4.6 rule 4
+counts only the opens hookyard observes.
+
+**Dedup**, against the facts already in the target store, with no embedder:
+
+- a byte-identical source, or one whose `sha256` matches a fact's
+  `source.sha256`, is dropped mechanically;
+- a near-duplicate — the same `name`, the same description once case,
+  whitespace and punctuation are folded, or high overlap between body tokens —
+  becomes a merge *proposal* a human approves; the importer never merges;
+- re-importing an unchanged source is a no-op, and a changed source becomes a
+  new proposal against the fact it came from, never a silent overwrite.
+
+**Routing** is §4.2's write rule, with the repo resolved per engine. A Claude
+fact's repo comes from decoding its project dir (§4.2). A Codex row carries a
+`thread_id` and no path; the rollout for that thread under
+`~/.codex/sessions/**` begins with a `session_meta` record whose payload
+carries `cwd` (on disk), and that `cwd`'s `origin` names the org. No rollout,
+or a `cwd` that is not a git checkout, is unresolvable. Write-time redaction
+(§4.3) runs first: a secret-shaped item is skipped and reported.
+
+**Trust.** Imported facts land as `confidence: proposed`. The importer is a
+write path into stores that are injected fleet-wide, and nothing it reads was
+reviewed. What `proposed` means for injection is §4.4's open decision; under
+the recommended option C, imported facts land in the target store's local
+layer (`$XDG_STATE_HOME/priors/local/<store>/`) on the host whose engine wrote
+them, until reviewed.
+
+**Double injection.** An engine with native memory already injects its own
+copy of a fact, so hookyard injecting the imported copy too would show that
+engine the fact twice. hookyard skips the canonical copy for an engine only
+when all three hold:
+
+- **(a)** the engine's native memory is enabled for the session — Claude:
+  `autoMemoryEnabled` and the `CLAUDE_CODE_DISABLE_AUTO_MEMORY` env var (Claude
+  Code 2.1.284, binary strings); Codex: `features.memories`;
+- **(b)** the native source still exists — the file at `source.path`, or the
+  row for `source.thread_id`;
+- **(c)** the fact is inside the engine's native injection window — Claude: it
+  is listed within the first 200 lines / 25 KB of that same project dir's
+  `MEMORY.md`; Codex: its own consolidated `memory_summary.md`/`MEMORY.md`,
+  which is global.
+
+Otherwise the canonical copy is injected, and where hookyard cannot tell — a
+setting it cannot read — it injects too: a duplicate costs tokens, a gap costs
+the fact. For Codex, (c) falls to that branch: phase 2 consolidates rows into
+a summary, and whether a given stage-1 row reached it is generally not
+decidable, so a Codex fact is injected. Other engines, and Claude sessions in
+any other repo, always get the canonical copy. The skip changes injection
+only: the fact stays in the store, found by search, and an open of its native
+path still counts as a use (§4.6).
+
+**Codex's own importer goes the other way.** `external_agent_memory_import`
+(under development and off in `codex features list`) sits in
+`external-agent-migration/src/memory_import.rs`, next to strings naming
+`.claude`, `memory` and `CLAUDE.md` (binary strings): an import from Claude
+into Codex. If it ships, its copies are Codex's native memory and the
+double-injection rule applies to them too, and this importer must not
+re-import what Codex took from Claude: dedup on `source.sha256` catches byte
+copies, and the rest surface as near-duplicate proposals.
 
 ---
 
