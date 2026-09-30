@@ -18,11 +18,10 @@ lands.
   write-time redaction. The owner's decisions 6 and 7 of 2026-09-30: the trust
   model is option A with automatic gates (§4.4), and tier 2 is out of v0,
   gated on §7's recall A/B (§4.4).
-- *Pending.* Decision 5, session continuity — originating issue #124, now
-  awaiting [PR #126](https://github.com/noamsto/hookyard/pull/126) (which
-  carries #128's deja-vu verdict) and
-  [#127](https://github.com/noamsto/hookyard/issues/127). No option is chosen,
-  and the outcome could still replace §4 (decision 5's second shape).
+- *Resolved.* Decision 5, session continuity: deja-vu adopted per
+  [`recall-evaluation.md`](recall-evaluation.md) (PR #126, #128). It
+  complements §4 — deja-vu holds session history, §4 holds durable cross-repo
+  facts — and does not replace it.
 - *Waiting.* Promotion of flagged facts by attestation, on #130 — not a v0
   blocker.
 
@@ -285,6 +284,9 @@ has no staleness or supersession model; and its corpus is per-project by
 construction, so *"claude haiku workers stall on prompts"* — true of dispatcher,
 applicable to any crew — has no home in it. Recall answers *"where were we?"*;
 §4 answers *"what is true about this tooling, and should we act on it?"*
+The owner adopted deja-vu instead (decision 5, §9), which covers the same
+session-continuity ground with native hookyard fit, broader engine coverage
+and no model cost — see [`recall-evaluation.md`](recall-evaluation.md) §10.
 
 ---
 
@@ -637,8 +639,7 @@ measured one session-continuity digest at 8190 B, 9056 B with its fence: a
 digest alone can exceed the 8 K total. So tier 1 and the session-continuity
 tool (decision 5) each get their own cap inside the total, for example tier 1
 4 K plus the continuity tool 4 K, and a source over its cap is truncated inside
-its own fence rather than crowding out the other. This holds whichever tool
-[#127](https://github.com/noamsto/hookyard/issues/127) picks.
+its own fence rather than crowding out the other. This holds for deja-vu (§9).
 
 Tier 1 is cheap and unconditional, and it is what makes the system work when
 everything else fails — a session with a broken retrieval backend still sees the
@@ -1392,15 +1393,16 @@ hookyard gaps behind it (§4.7, §5).
 - no MCP server — explicitly, because a worker cannot see one;
 - no conversation-transcript digest. That is §2.3's territory, and `recall`
   already does it for Claude Code and opencode at zero model tokens; whether
-  the other engines get it by an adapter or by another tool is decision 5,
-  still open, and either way it is not a second implementation here.
+  the other engines get it by an adapter or by another tool was decision 5,
+  settled 2026-09-30: deja-vu (see §9), and either way it is not a second
+  implementation here.
 
 ---
 
 ## 9. Decisions
 
-Decided by the owner on 2026-09-30 unless marked. Decision 5 is pending
-(PR #126); promoting flagged facts waits on #130, which is not a v0 blocker
+Decided by the owner on 2026-09-30 unless marked. Decision 5 is settled
+(see below); promoting flagged facts waits on #130, which is not a v0 blocker
 (status line).
 
 1. **Store placement — decided: two stores, keyed by repo org** (§4.2). A
@@ -1437,19 +1439,15 @@ Decided by the owner on 2026-09-30 unless marked. Decision 5 is pending
    importing no `internal/` package, so splitting it into its own repo is
    moving files. This replaces the choice between its own repo and a
    `hookyard priors` subcommand, and keeps memory out of the router (§5).
-5. **Session continuity — pending; no option is chosen.** Evaluated in
-   [PR #126](https://github.com/noamsto/hookyard/pull/126), whose
-   recommendation, "adopt and contribute adapters", the owner has not
-   accepted, and being re-compared against alternatives in
-   [#127](https://github.com/noamsto/hookyard/issues/127), which will revise
-   that verdict. This document does not commit to `recall` or any other tool.
-   What the choice decides (§2.3): whether session continuity ("where were
-   we?") comes from an existing tool while §4 covers only durable facts, or
-   whether §4 is skipped in favour of adapters on the tool — much cheaper, but
-   it does not close failure mode 2, because the dispatcher still never learns
-   from its own outcomes; or both. Whichever tool wins shares the
-   `session_start` budget with tier 1, so §4.4's per-source caps apply and the
-   index may have to shrink or be dropped.
+5. **Session continuity — decided 2026-09-30: deja-vu.** Evaluated in
+   [`recall-evaluation.md`](recall-evaluation.md) (§9 verdict, §10 comparison
+   against recall, remem and claudemem; PR #126, #128). deja-vu delivers
+   session continuity through a hookyard `exec` wrapper, holding session
+   history across 35 harnesses at zero model tokens. It complements §4 and
+   does not replace it: deja-vu answers "where were we?"; §4 answers "what
+   is true about this tooling, and should we act on it?". The per-source cap
+   (§4.4) still applies: deja-vu's digest and tier 1 each have their own
+   budget inside the 8 K total.
 6. **Trust model — decided: option A with automatic gates** (§4.4; the owner,
    2026-09-30). Facts that pass the mechanical gates — secret scan and
    redaction, provenance, content heuristics, lint and size cap, always
