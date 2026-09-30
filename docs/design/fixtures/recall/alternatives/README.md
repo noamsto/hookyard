@@ -15,15 +15,15 @@ re-identified by byte size (the set is the same; one grew slightly since
 was read — no `factify`/work session. Raw paths and UUIDs are intentionally
 not recorded here; codenames match the parent doc.
 
-| codename | transcript bytes at replay | user turns | what it settled |
-| --- | ---: | ---: | --- |
-| repo-a | 3 815 066 | 12 | pi hook extension consolidation across five repos |
-| repo-b | 3 299 826 | 15 | lazytmux remote-bridge keepalive / passthrough (4 PRs) |
-| repo-c | 2 997 530 | 11 | tmux-og Linear picker / enrich card; a flaky macOS bats test |
-| repo-d | 5 420 070 | 16 | lazytmux OSC 9;4 progress thread (spike → #524 → #526) |
-| repo-e | 31 063 449 | 49 | tmux-remux recording tape + mini-map (PR #97) |
+| codename | transcript bytes at replay | what it settled |
+| --- | ---: | --- |
+| repo-a | 3 815 066 | pi hook extension consolidation across five repos |
+| repo-b | 3 299 826 | lazytmux remote-bridge keepalive / passthrough (4 PRs) |
+| repo-c | 2 997 530 | tmux-og Linear picker / enrich card; a flaky macOS bats test |
+| repo-d | 5 420 070 | lazytmux OSC 9;4 progress thread (spike → #524 → #526) |
+| repo-e | 31 063 449 | tmux-remux recording tape + mini-map (PR #97) |
 
-Total 44.4 MB. `replay-metrics.json` in the parent directory still carries the
+Total 46 595 941 B (46.6 MB decimal, matching the parent doc's units). `replay-metrics.json` in the parent directory still carries the
 `recall` numbers for the same set.
 
 ## Isolation

@@ -271,7 +271,7 @@ we?", not "what is true about this tooling?".
 §10 installs and measures the Go and Rust alternatives the owner asked for
 against the same five replayed personal transcripts. `deja-vu` beats `recall` on
 every axis that matters for the session-continuity half: one Go binary, no model
-tokens and no network, indexes the same 44.4 MB in 2.25 s (24 ms warm), answers
+tokens and no network, indexes the same 46.6 MB in 2.25 s (24 ms warm), answers
 ten concrete recall questions with the right session ranked first (31–41 ms),
 and injects a 973–1416-byte session digest **fenced as untrusted data** at
 25–221 ms — far inside hookyard's 4.3 s handler budget and the 8 K total. It
@@ -317,7 +317,9 @@ The owner asked whether a Go or Rust alternative exists before accepting §9's
 recommendation. The candidates were `deja-vu` (Go), `remem` (Rust) and
 `claudemem` (Go), plus a Go port of `recall`'s deterministic sections. Each was
 pinned, installed isolated, and run against the **same five replayed personal
-transcripts** as §2 (44.4 MB; codenames unchanged; `repo-b` grew by 5 640 bytes
+transcripts** as §2 (46.6 MB decimal — the five sizes in
+`alternatives/README.md` sum to 46 595 941 B; codenames unchanged; `repo-b` grew
+by 5 640 bytes
 since #126), under the same measurements. Raw numbers and the fake-secret matrix
 are in [`fixtures/recall/alternatives/`](fixtures/recall/alternatives/README.md).
 
@@ -329,8 +331,8 @@ are in [`fixtures/recall/alternatives/`](fixtures/recall/alternatives/README.md)
 | **Model / network** | none | none | **distill spawns `claude`/`codex`** | none (local embeddings) | none |
 | **Quality on the 5 transcripts** | deterministic sections faithful; summary noisy; Bash edits missed | 10/10 sessions ranked #1; 9/10 answers in snippets | raw capture only (154 msgs for repo-a); curated quality **not evaluable** offline | cannot replay transcripts — notes/sessions are authored | would fix recall's misses |
 | **Latency** | `capture` 0.05–0.47 s; `make_context` 0.55 s | index 2.25 s cold / 0.024 s warm; query 31–41 ms; digest 25–221 ms | drain ~1 s; raw search 27–28 ms | session save 68 ms for 5; search 8–11 ms; inject 8 ms | sub-second |
-| **Injected size vs 8 K** | 5 104–8 190 B (overflows) | 973–1 416 B | n/a (no curated context offline) | 994 B | ~2–6 KB |
-| **Redaction (of 17)** | 11 caught | **13 caught** (misses `github_pat_`, `glpat-`, `npm_`, bare 64) | 0 at capture (raw archive holds all 17) | 0 on the manual path | would catch 15 |
+| **Injected size vs 8 K** | 4 850–8 190 B (overflows) | 973–1 416 B | n/a (no curated context offline) | 994 B | ~2–6 KB |
+| **Redaction (of 17)** | 11 caught | **13 caught** (misses `github_pat_`, `glpat-`, `npm_`, bare 40-char base64) | 0 at capture (raw archive holds all 17) | 0 on the manual path | would catch 15 |
 | **Injection fenced** | yes (Claude path) | **yes** (`<deja-recall>` + untrusted preamble) | source-level intent, not exercised | no | yes (if reused) |
 | **Engine coverage** | Claude, opencode; Pi/Codex adapters to write | Claude, Codex, **Pi**, Cursor — native | Claude, Codex, Cursor partial; **no Pi** | Claude skill; Codex/others aspirational | via hookyard per engine |
 | **Hookyard fit** | `exec` wrapper, 5.2 KB, done | `exec` wrapper over `hook-context`/`hook-prompt`, 25–221 ms | owns hooks + MCP; capture needs them | `exec` wrapper over `context inject` | in-process |
@@ -370,6 +372,28 @@ the Claude/Codex/Pi parsers; it would fix the Bash-edit file capture, add the
 8 K cap, close the four redaction gaps and drop the noisy summary, but it keeps
 `recall`'s limits — no retrieval, no durable facts — and hands us the transcript
 format drift `deja-vu` already tracks.
+
+### Per-question results (`deja-vu`)
+
+The ten questions are answered from the replayed transcripts; a hit means the
+expected project's session ranked first **and** the answer appeared in the
+returned snippets. Full query text in `alternatives/measurements.json`.
+
+| # | question (short) | expected | ranked #1 | answer shown |
+| --- | --- | --- | :-: | :-: |
+| 1 | which PR removed pi hand-written hook extensions | repo-a | ✅ | ✅ |
+| 2 | remote bridge keepalive control connection | repo-b | ✅ | ✅ |
+| 3 | enrich card shows why issue has no URL | repo-c | ✅ | ✅ |
+| 4 | pane-shell-prompt flaky test OSC 133 dead-agent | repo-c | ✅ | ✅ |
+| 5 | OSC 9;4 progress tmux resends on focus | repo-d | ✅ | ✅ |
+| 6 | recording tape key-presses overlay | repo-e | ✅ | ✅ |
+| 7 | mini-map over scrollback focused pane | repo-e | ✅ | ✅ |
+| 8 | which PR is green and waiting merge | repo-d | ✅ | partial |
+| 9 | multi-dir install doctor coverage | repo-a | ✅ | ✅ |
+| 10 | carousel mirrored session prefix+i does nothing | repo-b | ✅ | ✅ |
+
+10/10 sessions ranked first; 9/10 answers verbatim in the snippets (#8 needed a
+follow-up phrase to surface the exact PR id).
 
 ### Answers for the alternatives
 

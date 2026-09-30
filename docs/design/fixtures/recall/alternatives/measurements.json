@@ -27,7 +27,7 @@
         "runtime_deps": "none (single binary; sqlite3 only for Cursor IDE chats)"
       },
       "index": {
-        "corpus": "5 personal transcripts / 44.4 MB / 4992 messages",
+        "corpus": "5 personal transcripts / 46.6 MB decimal (46 595 941 B) / 4 992 messages (deja index count)",
         "cold_rebuild_s": 2.254,
         "warm_noop_s": 0.024,
         "cache_bytes": 3891200,
@@ -39,11 +39,12 @@
         "session_top1_hits": 10,
         "session_top1_total": 10,
         "answer_in_snippets": 9,
-        "questions_file": "see measurements per-question in the parent doc §10 notes"
+        "questions_file": "docs/design/recall-evaluation.md §10 'Per-question results (deja-vu)'"
       },
       "session_start_digest": {
         "command": "deja hook-context --plain",
         "bytes_by_project": {"repo-a": 1151, "repo-b": 1416, "repo-c": 973, "repo-e": 1021},
+        "projects_note": "digest is project-scoped; repo-b and repo-d share the lazytmux project, so four project digests cover the five sessions",
         "latency_ms_range": [25, 221],
         "fenced": true,
         "fence": "<deja-recall> ... </deja-recall> with an explicit \"untrusted reference data\" preamble",
