@@ -35,6 +35,9 @@ const (
 	gitTimeout  = 10 * time.Second
 	pushTimeout = 30 * time.Second
 	maxGitOut   = 200
+	// waitDelay bounds how long a killed git's children (an ssh signer that
+	// inherited its stdout) can hold the output pipes open.
+	waitDelay = time.Second
 )
 
 // Checkout commits root's dirty files with msg, and pushes when configured,
@@ -619,6 +622,7 @@ func runGitEnv(ctx context.Context, dir string, env []string, timeout time.Durat
 	// pathspecs keep a file named like a glob from staging its neighbours.
 	cmd.Env = route.RepoEnv(append([]string{"GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "GIT_LITERAL_PATHSPECS=1"}, env...)...)
 	cmd.Stdin = stdin
+	cmd.WaitDelay = waitDelay
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {

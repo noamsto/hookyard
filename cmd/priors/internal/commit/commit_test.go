@@ -708,11 +708,15 @@ func TestRefusesTamperedIndex(t *testing.T) {
 func TestSigningFailureCommitsNothing(t *testing.T) {
 	tests := []struct {
 		name    string
+		format  string
 		signer  string
 		timeout time.Duration
 	}{
-		{"signer fails", "exit 1", gitTimeout},
-		{"signer hangs", "exec sleep 2", 200 * time.Millisecond},
+		{"signer fails", "openpgp", "exit 1", gitTimeout},
+		{"signer hangs", "openpgp", "exec sleep 10", 200 * time.Millisecond},
+		// git hands an ssh signer its own stdout, so a hung one outlives the
+		// killed git while holding our pipe open.
+		{"ssh signer hangs", "ssh", "exec sleep 10", 200 * time.Millisecond},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -725,8 +729,10 @@ func TestSigningFailureCommitsNothing(t *testing.T) {
 				t.Fatal(err)
 			}
 			git(t, fx.dir(), "config", "commit.gpgsign", "true")
-			git(t, fx.dir(), "config", "gpg.format", "openpgp")
+			git(t, fx.dir(), "config", "gpg.format", tt.format)
 			git(t, fx.dir(), "config", "gpg.program", program)
+			git(t, fx.dir(), "config", "gpg.ssh.program", program)
+			git(t, fx.dir(), "config", "user.signingkey", "key::ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl test")
 			signTimeout = tt.timeout
 			t.Cleanup(func() { signTimeout = gitTimeout })
 			fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
@@ -737,7 +743,7 @@ func TestSigningFailureCommitsNothing(t *testing.T) {
 			if !strings.Contains(w, "signing the commit failed") || !strings.Contains(w, "git commit-tree") {
 				t.Errorf("warning = %q, want a signing failure", w)
 			}
-			if took := time.Since(start); took > time.Second+tt.timeout {
+			if took := time.Since(start); took > tt.timeout+waitDelay+time.Second {
 				t.Errorf("Checkout took %v, past the signing timeout", took)
 			}
 			if _, err := os.Stat(marker); err != nil {
