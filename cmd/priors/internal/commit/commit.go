@@ -119,9 +119,8 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 			return warning
 		}
 	}
-	// Syncing only the gated paths leaves a foreign process's other staging
-	// alone, and running it on an unchanged tree heals a sync that failed
-	// after an earlier commit, before a manual git commit could revert it.
+	// Runs on an unchanged tree too, so a sync that failed after an earlier
+	// commit heals; limited to the gated paths to leave others' staging alone.
 	if out, err := runGit(ctx, dir, gitTimeout, strings.NewReader(strings.Join(accepted, "\x00")), "reset", "-q", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
 		return gitWarning("git reset", out, err)
 	}
@@ -141,7 +140,7 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 var beforeStage = func() {}
 
 // signTimeout bounds a signing commit-tree, so a pinentry or hardware-key
-// prompt cannot hang priors. A var so tests can shorten it.
+// prompt cannot hang priors.
 var signTimeout = gitTimeout
 
 // commitTree commits tree on parent and moves HEAD to it, signing as the
