@@ -225,25 +225,29 @@ func gitOut(ctx context.Context, dir string, args ...string) (string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...) //nolint:gosec // fixed git subcommands; only the directory and a remote name vary
 	// Resolve matches git's English "not a git repository".
-	cmd.Env = repoEnv("LC_ALL=C")
+	cmd.Env = RepoEnv("LC_ALL=C")
 	out, err := cmd.Output()
 	return strings.TrimSpace(string(out)), err
 }
 
-// repoEnv is os.Environ plus extra, minus the variables git exports into a
-// hook's environment to locate its own repository: left in place they would
-// point every `git -C dir` at that repository instead of dir.
-func repoEnv(extra ...string) []string {
+// RepoEnv is os.Environ plus extra, minus RepoLocatingEnv: left in place, the
+// variables git exports into a hook's environment would point every
+// `git -C dir` at that hook's repository instead of dir.
+func RepoEnv(extra ...string) []string {
 	env := slices.DeleteFunc(os.Environ(), func(kv string) bool {
 		k, _, _ := strings.Cut(kv, "=")
-		return slices.Contains(repoLocatingEnv, k)
+		return slices.Contains(RepoLocatingEnv, k)
 	})
 	return append(env, extra...)
 }
 
-var repoLocatingEnv = []string{
-	"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
-	"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_PREFIX", "GIT_NAMESPACE",
+// RepoLocatingEnv mirrors `git rev-parse --local-env-vars`, plus the
+// namespace and quarantine variables a hook can also inherit.
+var RepoLocatingEnv = []string{
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+	"GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE",
+	"GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX",
+	"GIT_SHALLOW_FILE", "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_QUARANTINE_PATH",
 }
 
 func defaultSSHHost(ctx context.Context, sshConfig, alias string) string {

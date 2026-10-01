@@ -9,18 +9,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 	"github.com/noamsto/hookyard/cmd/priors/internal/sanitize"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
 )
 
-// UnsetRepoEnv drops the variables git exports into a hook's environment to
-// locate its own repository, which a TestMain calls so the test's `git -C dir`
-// helpers act on dir, not on the repo running `go test` from a hook.
+// UnsetRepoEnv drops route.RepoLocatingEnv, which a TestMain calls so the
+// test's `git -C dir` helpers act on dir, not on the repo running `go test`
+// from a hook.
 func UnsetRepoEnv() {
-	for _, k := range []string{
-		"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
-		"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_PREFIX", "GIT_NAMESPACE",
-	} {
+	for _, k := range route.RepoLocatingEnv {
 		_ = os.Unsetenv(k)
 	}
 }

@@ -61,7 +61,7 @@ func (r Rg) Candidates(ctx context.Context, roots []string, term string) ([]stri
 		return nil, nil
 	}
 	args := append([]string{
-		"--files-with-matches", "--ignore-case", "--fixed-strings", "--no-messages",
+		"--no-config", "--files-with-matches", "--ignore-case", "--fixed-strings", "--no-messages",
 		"--glob", "*.md", "-e", term, "--",
 	}, existing...)
 	out, err := exec.CommandContext(ctx, bin, args...).Output() //nolint:gosec // bin is the operator's rg; term is passed after -e, never parsed as a flag
@@ -132,10 +132,15 @@ func Run(ctx context.Context, b Backend, roots []store.Root, s route.Session, q 
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, nil, ctxErr
 		}
-		switch {
-		case errors.Is(err, ErrPartial):
-			reports = append(reports, unsearched(root, paths)...)
-		case err != nil:
+		if errors.Is(err, ErrPartial) {
+			// A partial result that matched nothing and names no unreadable
+			// file is a failed search, not a clean miss.
+			if skipped := unsearched(root, paths); len(paths) > 0 || len(skipped) > 0 {
+				reports = append(reports, skipped...)
+				err = nil
+			}
+		}
+		if err != nil {
 			reports = append(reports, fmt.Sprintf("unsearched %s %s: %v", root.Store, root.Kind, err))
 			if firstErr == nil {
 				firstErr = fmt.Errorf("search %s: %w", root.Path, err)

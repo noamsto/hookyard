@@ -41,8 +41,6 @@ else
 fi
 `
 
-var workOrgs = []string{"github.com/factify-inc"}
-
 type fixture struct {
 	cfg     config.Config
 	root    store.Root
@@ -54,7 +52,7 @@ func (fx fixture) dir() string { return fx.root.Path }
 
 func (fx fixture) checkout(t *testing.T) string {
 	t.Helper()
-	return Checkout(context.Background(), fx.cfg, fx.root, fx.rules, fx.scanner, workOrgs, nil, "priors: test")
+	return Checkout(context.Background(), fx.cfg, fx.root, fx.rules, fx.scanner, "priors: test")
 }
 
 func git(t *testing.T, dir string, args ...string) string {
@@ -148,7 +146,7 @@ func setup(t *testing.T) fixture {
 	}
 	dir := filepath.Join(tmp, "store")
 	fx := fixture{
-		cfg:     config.Config{Profile: "personal", PersonalStore: dir, StateDir: filepath.Join(tmp, "state")},
+		cfg:     config.Config{Profile: "personal", PersonalStore: dir, StateDir: filepath.Join(tmp, "state"), WorkOrgs: []string{"github.com/factify-inc"}},
 		root:    store.Root{Store: route.StorePersonal, Kind: store.KindCheckout, Path: dir},
 		rules:   rules,
 		scanner: gate.Scanner{Bin: bin},
@@ -550,4 +548,73 @@ func TestFailedCommitWarnsAndLaterCommitCatchesUp(t *testing.T) {
 		}
 	}
 	committest.AssertHeadIndexInTree(t, fx.dir())
+}
+
+func linkyFact(name string) fact.Fact {
+	f := cleanFact(name)
+	f.Body = "see https://example.com/docs\n"
+	return f
+}
+
+func marshal(t *testing.T, f fact.Fact) []byte {
+	t.Helper()
+	b, err := f.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// headBlob is rel's content in HEAD, or "" when HEAD lacks it.
+func headBlob(t *testing.T, dir, rel string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", dir, "show", "HEAD:"+rel).Output()
+	if err != nil {
+		return ""
+	}
+	return string(out)
+}
+
+func TestCommitsTheGatedBytesWhenTheFileFlipsBeforeStaging(t *testing.T) {
+	fx := setup(t)
+	rel := "_global/good-fact.md"
+	gated := marshal(t, cleanFact("good-fact"))
+	writeFile(t, filepath.Join(fx.dir(), rel), gated)
+	fx.index(t)
+	beforeStage = func() { writeFile(t, filepath.Join(fx.dir(), rel), marshal(t, linkyFact("good-fact"))) }
+	t.Cleanup(func() { beforeStage = func() {} })
+
+	if w := fx.checkout(t); w != "" {
+		t.Fatalf("warning = %q", w)
+	}
+	if got := headBlob(t, fx.dir(), rel); got != string(gated) {
+		t.Errorf("committed %s =\n%s\nwant the gated bytes\n%s", rel, got, gated)
+	}
+	committest.AssertHeadIndexInTree(t, fx.dir())
+}
+
+func TestStagedBlobHiddenFromStatusIsNotCommittedUnchecked(t *testing.T) {
+	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
+		t.Run(flag, func(t *testing.T) {
+			fx := setup(t)
+			rel := "_global/good-fact.md"
+			path := filepath.Join(fx.dir(), rel)
+			writeFile(t, path, marshal(t, linkyFact("good-fact")))
+			git(t, fx.dir(), "add", "--", rel)
+			git(t, fx.dir(), "update-index", flag, "--", rel)
+			gated := marshal(t, cleanFact("good-fact"))
+			writeFile(t, path, gated)
+			fx.index(t)
+
+			w := fx.checkout(t)
+			got := headBlob(t, fx.dir(), rel)
+			if strings.Contains(got, "example.com") {
+				t.Fatalf("HEAD holds the ungated staged blob (warning %q)", w)
+			}
+			if w == "" && got != string(gated) {
+				t.Errorf("committed %s =\n%s\nwant the gated bytes", rel, got)
+			}
+			committest.AssertHeadIndexInTree(t, fx.dir())
+		})
+	}
 }

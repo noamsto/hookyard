@@ -1,7 +1,8 @@
-// Package commit is the only code in priors that runs git add, commit or
-// push. It commits a store checkout's dirty files only when every one of them
-// is gated content, so a store commit never carries a file priors' gates have
-// not passed, and HEAD's MEMORY.md never lists a file HEAD lacks.
+// Package commit is the only code in priors that stages, commits or pushes
+// to a store. It commits a store checkout's dirty files only when every one
+// of them is gated content, staging the very bytes the gates read, so a store
+// commit never carries a file priors' gates have not passed, and HEAD's
+// MEMORY.md never lists a file HEAD lacks.
 package commit
 
 import (
@@ -11,17 +12,21 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"iter"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 	"github.com/noamsto/hookyard/cmd/priors/internal/lint"
+	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 	"github.com/noamsto/hookyard/cmd/priors/internal/sanitize"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
 )
@@ -37,7 +42,7 @@ const (
 // gates; otherwise it stages nothing. The caller holds the store's lock. It
 // returns a warning naming what stopped the commit, or "" on success or when
 // there is nothing to do.
-func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gate.Rules, scanner gate.Scanner, workOrgs, workNames []string, msg string) (warning string) {
+func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gate.Rules, scanner gate.Scanner, msg string) (warning string) {
 	if !cfg.CommitEnabled() {
 		return ""
 	}
@@ -62,15 +67,24 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 		return ""
 	}
 
-	opts := lint.Options{Store: root.Store, WorkOrgs: workOrgs, WorkNames: workNames, Rules: rules, Scanner: &scanner, Gates: true}
+	// The gates and the staged blobs read one private copy, so nothing that
+	// writes the checkout outside priors' lock can swap a file after its check.
+	snapDir, special, err := snapshot(dir)
+	defer func() { _ = os.RemoveAll(snapDir) }()
+	if err != nil {
+		return fmt.Sprintf("nothing committed in %s: snapshotting the checkout: %v", dir, err)
+	}
+	snap := store.Root{Store: root.Store, Kind: root.Kind, Path: snapDir}
+
+	opts := lint.Options{Store: root.Store, WorkOrgs: cfg.WorkOrgs, WorkNames: cfg.WorkNames, Rules: rules, Scanner: &scanner, Gates: true}
 	findings := map[string][]string{}
-	for _, f := range lint.Store(ctx, root, opts) {
+	for _, f := range lint.Store(ctx, snap, opts) {
 		if f.File == "." {
 			return fmt.Sprintf("nothing committed in %s: %s: %s", dir, f.Rule, f.Msg)
 		}
 		findings[f.File] = append(findings[f.File], f.Rule)
 	}
-	c := classifier{root: root, rules: rules, findings: findings}
+	c := classifier{root: snap, rules: rules, findings: findings, special: special}
 	var accepted, refused []string
 	for _, e := range dirty {
 		switch why := c.refusal(e); {
@@ -88,9 +102,20 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 		return ""
 	}
 
-	pathspecs := strings.NewReader(strings.Join(accepted, "\x00") + "\x00")
-	if out, err := runGit(ctx, dir, gitTimeout, pathspecs, "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
-		return gitWarning("git add", out, err)
+	beforeStage()
+	gated, warning := stage(ctx, dir, snapDir, accepted)
+	if warning != "" {
+		return warning
+	}
+	if stray, err := strayEntries(ctx, dir, gated); err != nil || len(stray) > 0 {
+		out, resetErr := runGit(ctx, dir, gitTimeout, nil, "reset", "-q")
+		switch {
+		case resetErr != nil:
+			return gitWarning("git reset", out, resetErr)
+		case err != nil:
+			return fmt.Sprintf("nothing committed in %s: checking the staged index: %v", dir, err)
+		}
+		return fmt.Sprintf("nothing committed in %s: the staged index holds entries the gates did not pass: %s", dir, strings.Join(stray, ", "))
 	}
 	if _, err := runGit(ctx, dir, gitTimeout, nil, "diff", "--cached", "--quiet"); err == nil {
 		return ""
@@ -114,6 +139,182 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 		}
 	}
 	return ""
+}
+
+// beforeStage is a test seam that runs once the gates have passed, just
+// before the accepted paths are staged.
+var beforeStage = func() {}
+
+// snapshot copies the checkout at src, less its own .git, into a new
+// temporary dir, reading each regular file once. It recreates symlinks as
+// symlinks and returns the paths of everything else that is not a directory,
+// which it does not copy. The caller removes dst, even on error.
+func snapshot(src string) (dst string, special []string, err error) {
+	tmp, err := os.MkdirTemp("", "priors-commit-")
+	if err != nil {
+		return "", nil, err
+	}
+	// Resolved so Root.Confine agrees with Walk behind a symlinked TMPDIR.
+	if dst, err = filepath.EvalSymlinks(tmp); err != nil {
+		return tmp, nil, err
+	}
+	err = filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil || rel == "." {
+			return err
+		}
+		out := filepath.Join(dst, rel)
+		switch {
+		case rel == ".git" && d.IsDir():
+			return filepath.SkipDir
+		case rel == ".git":
+			return nil
+		case d.IsDir():
+			return os.Mkdir(out, 0o700)
+		case d.Type()&fs.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(target, out) //nolint:gosec // out is under the private snapshot dir, which nothing else writes
+		case !d.Type().IsRegular():
+			special = append(special, filepath.ToSlash(rel))
+			return nil
+		}
+		regular, err := copyRegular(path, out)
+		if err == nil && !regular {
+			special = append(special, filepath.ToSlash(rel))
+		}
+		return err
+	})
+	return dst, special, err
+}
+
+// copyRegular copies path to out, reporting false without copying when path
+// is no longer a regular file. O_NOFOLLOW and O_NONBLOCK keep a file swapped
+// for a symlink or FIFO since the walk from being followed or hanging.
+func copyRegular(path, out string) (regular bool, err error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0) //nolint:gosec // path comes from walking the checkout
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return false, err
+	}
+	raw, err := io.ReadAll(f)
+	if err != nil {
+		return false, err
+	}
+	perm := fs.FileMode(0o600)
+	if info.Mode()&0o100 != 0 {
+		perm = 0o700
+	}
+	return true, os.WriteFile(out, raw, perm)
+}
+
+// stage puts the snapshot's bytes for accepted into dir's index, never the
+// worktree's, and removes the accepted paths the snapshot lacks. It returns
+// each path's staged "<mode> <oid>", or "" for a removal.
+func stage(ctx context.Context, dir, snapDir string, accepted []string) (gated map[string]string, warning string) {
+	gated = map[string]string{}
+	var info, removed strings.Builder
+	for _, rel := range accepted {
+		path := filepath.Join(snapDir, filepath.FromSlash(rel))
+		fi, err := os.Lstat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			gated[rel] = ""
+			removed.WriteString(rel + "\x00")
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Sprintf("nothing committed in %s: reading the snapshot: %v", dir, err)
+		}
+		raw, err := os.ReadFile(path) //nolint:gosec // path is under priors' private snapshot
+		if err != nil {
+			return nil, fmt.Sprintf("nothing committed in %s: reading the snapshot: %v", dir, err)
+		}
+		// Hashed from stdin without --path, so no clean filter rewrites the
+		// gated bytes on their way into the object store.
+		oid, err := runGit(ctx, dir, gitTimeout, bytes.NewReader(raw), "hash-object", "-w", "--stdin")
+		if err != nil {
+			return nil, gitWarning("git hash-object", oid, err)
+		}
+		mode := "100644"
+		if fi.Mode()&0o100 != 0 {
+			mode = "100755"
+		}
+		gated[rel] = mode + " " + strings.TrimSpace(oid)
+		info.WriteString(gated[rel] + "\t" + rel + "\x00")
+	}
+	// --index-info replaces each entry whole, clearing any assume-unchanged
+	// or skip-worktree bit that would have hidden it from git add.
+	if info.Len() > 0 {
+		if out, err := runGit(ctx, dir, gitTimeout, strings.NewReader(info.String()), "update-index", "-z", "--index-info"); err != nil {
+			return nil, gitWarning("git update-index", out, err)
+		}
+	}
+	if removed.Len() > 0 {
+		if out, err := runGit(ctx, dir, gitTimeout, strings.NewReader(removed.String()), "update-index", "--force-remove", "-z", "--stdin"); err != nil {
+			return nil, gitWarning("git update-index", out, err)
+		}
+	}
+	return gated, ""
+}
+
+// strayEntries lists the index paths that differ from HEAD's tree with gated
+// applied: anything staged that the gates did not pass, or a conflict.
+func strayEntries(ctx context.Context, dir string, gated map[string]string) ([]string, error) {
+	want := map[string]string{}
+	if _, err := runGit(ctx, dir, gitTimeout, nil, "rev-parse", "-q", "--verify", "HEAD"); err == nil {
+		out, err := runGit(ctx, dir, gitTimeout, nil, "ls-tree", "-r", "-z", "--full-tree", "HEAD")
+		if err != nil {
+			return nil, errors.New(gitWarning("git ls-tree", out, err))
+		}
+		for meta, path := range records(out) {
+			if f := strings.Fields(meta); len(f) == 3 {
+				want[path] = f[0] + " " + f[2]
+			}
+		}
+	}
+	for rel, entry := range gated {
+		if entry == "" {
+			delete(want, rel)
+		} else {
+			want[rel] = entry
+		}
+	}
+	out, err := runGit(ctx, dir, gitTimeout, nil, "ls-files", "-s", "-z")
+	if err != nil {
+		return nil, errors.New(gitWarning("git ls-files", out, err))
+	}
+	var stray []string
+	for meta, path := range records(out) {
+		f := strings.Fields(meta)
+		if len(f) != 3 || f[2] != "0" || want[path] != f[0]+" "+f[1] {
+			stray = append(stray, path)
+		}
+		delete(want, path)
+	}
+	stray = append(stray, slices.Collect(maps.Keys(want))...)
+	slices.Sort(stray)
+	return slices.Compact(stray), nil
+}
+
+// records yields the "<meta>\t<path>" records of git's -z listings.
+func records(out string) iter.Seq2[string, string] {
+	return func(yield func(string, string) bool) {
+		for rec := range strings.SplitSeq(out, "\x00") {
+			meta, path, ok := strings.Cut(rec, "\t")
+			if ok && !yield(meta, path) {
+				return
+			}
+		}
+	}
 }
 
 // statusEntry is one path git status reports. Dir entries end in '/': an
@@ -141,6 +342,7 @@ type classifier struct {
 	root     store.Root
 	rules    gate.Rules
 	findings map[string][]string
+	special  []string
 }
 
 // refusal says why e must not reach a commit: "" to stage it, skip to leave
@@ -157,6 +359,9 @@ func (c classifier) refusal(e statusEntry) string {
 			return "ignored by git but indexed"
 		}
 		return skip
+	}
+	if slices.Contains(c.special, e.path) {
+		return "not a regular file"
 	}
 
 	info, err := os.Lstat(filepath.Join(c.root.Path, filepath.FromSlash(e.path)))
@@ -219,6 +424,9 @@ func indexable(rel string) bool {
 }
 
 func (c classifier) holdsIndexable(dirRel string) bool {
+	if slices.ContainsFunc(c.special, func(rel string) bool { return strings.HasPrefix(rel, dirRel) && indexable(rel) }) {
+		return true
+	}
 	found := false
 	base := filepath.Join(c.root.Path, filepath.FromSlash(dirRel))
 	_ = filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
@@ -284,7 +492,7 @@ func runGit(ctx context.Context, dir string, timeout time.Duration, stdin io.Rea
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...) //nolint:gosec // dir is the configured store checkout; args are fixed git subcommands
 	// Checkout matches git's English "not a git repository"; literal
 	// pathspecs keep a file named like a glob from staging its neighbours.
-	cmd.Env = repoEnv("GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "GIT_LITERAL_PATHSPECS=1")
+	cmd.Env = route.RepoEnv("GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "GIT_LITERAL_PATHSPECS=1")
 	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -292,22 +500,6 @@ func runGit(ctx context.Context, dir string, timeout time.Duration, stdin io.Rea
 		return stdout.String() + stderr.String(), err
 	}
 	return stdout.String(), nil
-}
-
-// repoEnv is os.Environ plus extra, minus the variables git exports into a
-// hook's environment to locate its own repository: left in place they would
-// point every `git -C dir` at that repository instead of dir.
-func repoEnv(extra ...string) []string {
-	env := slices.DeleteFunc(os.Environ(), func(kv string) bool {
-		k, _, _ := strings.Cut(kv, "=")
-		return slices.Contains(repoLocatingEnv, k)
-	})
-	return append(env, extra...)
-}
-
-var repoLocatingEnv = []string{
-	"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
-	"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_PREFIX", "GIT_NAMESPACE",
 }
 
 func gitWarning(what, out string, err error) string {

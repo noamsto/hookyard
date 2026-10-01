@@ -249,7 +249,7 @@ func writeGroup(ctx context.Context, cfg config.Config, rules gate.Rules, scanne
 		}
 		s.outln("wrote", filepath.Join(root.Path, store.IndexFile))
 		if root.Kind == store.KindCheckout {
-			if w := commit.Checkout(ctx, cfg, root, rules, scanner, cfg.WorkOrgs, cfg.WorkNames, "priors: regenerate index"); w != "" {
+			if w := commit.Checkout(ctx, cfg, root, rules, scanner, "priors: regenerate index"); w != "" {
 				s.errf("%s: warning: %s\n", root.Path, w)
 			}
 		}

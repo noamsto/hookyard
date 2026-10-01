@@ -713,3 +713,62 @@ func wantSkipped(t *testing.T, reports []string, prefix string) {
 		t.Errorf("reports = %q, want one starting %q", reports, prefix)
 	}
 }
+
+func TestRgIgnoresRipgrepConfig(t *testing.T) {
+	needRg(t)
+	cfg := newConfig(t)
+	co := store.CheckoutRoot(cfg, route.StorePersonal)
+	put(t, co, "hookyard/a.md", newFact("a", "shared topic", "hookyard"))
+	for name, body := range map[string]string{
+		"broken":   "--no-such-ripgrep-flag\n",
+		"narrowed": "--max-filesize=1\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			rc := filepath.Join(t.TempDir(), "ripgreprc")
+			if err := os.WriteFile(rc, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("RIPGREP_CONFIG_PATH", rc)
+
+			hits, reports, err := Run(context.Background(), Rg{}, []store.Root{co}, personalSession("hookyard"),
+				Query{Terms: []string{"shared topic"}}, builtinRules(t))
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := []string{"a"}; !slices.Equal(names(hits), want) {
+				t.Errorf("hits = %v, want %v (reports %v)", names(hits), want, reports)
+			}
+		})
+	}
+}
+
+func TestPartialRootWithNothingReadIsAFailedRoot(t *testing.T) {
+	cfg := newConfig(t)
+	broken := store.CheckoutRoot(cfg, route.StorePersonal)
+	good := store.CheckoutRoot(cfg, route.StoreWork)
+	put(t, broken, "hookyard/a.md", newFact("a", "shared topic", "hookyard"))
+	put(t, good, "hookyard/b.md", newFact("b", "shared topic", "hookyard"))
+	b := stubBackend(func(_ context.Context, roots []string, _ string) ([]string, error) {
+		if roots[0] == broken.Path {
+			return nil, ErrPartial
+		}
+		return []string{filepath.Join(good.Path, "hookyard", "b.md")}, nil
+	})
+	q := Query{Terms: []string{"shared topic"}}
+
+	if _, _, err := Run(context.Background(), b, []store.Root{broken}, personalSession("hookyard"), q, builtinRules(t)); !errors.Is(err, ErrPartial) {
+		t.Errorf("only root partial with nothing read: err = %v, want ErrPartial", err)
+	}
+
+	hits, reports, err := Run(context.Background(), b, []store.Root{broken, good}, personalSession("hookyard"), q, builtinRules(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"b"}; !slices.Equal(names(hits), want) {
+		t.Errorf("hits = %v, want %v", names(hits), want)
+	}
+	if len(reports) != 1 || !strings.HasPrefix(reports[0], "unsearched personal checkout") {
+		t.Errorf("reports = %q, want one naming the unsearched personal checkout", reports)
+	}
+}

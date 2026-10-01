@@ -13,7 +13,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	for _, k := range repoLocatingEnv {
+	for _, k := range RepoLocatingEnv {
 		_ = os.Unsetenv(k)
 	}
 	os.Exit(m.Run())

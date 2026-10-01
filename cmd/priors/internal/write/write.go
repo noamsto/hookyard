@@ -146,7 +146,7 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 	res.Reports = reports
 
 	if res.Outcome == "published" {
-		res.Warning = commit.Checkout(ctx, cfg, root, d.Rules, d.Scanner, cfg.WorkOrgs, cfg.WorkNames, "priors: add "+f.Name)
+		res.Warning = commit.Checkout(ctx, cfg, root, d.Rules, d.Scanner, "priors: add "+f.Name)
 	}
 	return res, nil
 }

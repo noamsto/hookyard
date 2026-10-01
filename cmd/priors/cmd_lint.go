@@ -29,8 +29,8 @@ func cmdLint(args []string, s streams) int {
 	dir := fs.String("dir", "", "lint this store directory instead of the configured stores")
 	kind := fs.String("kind", "", "with --dir: personal or work")
 	var workOrgs, workNames stringList
-	fs.Var(&workOrgs, "work-org", "work org (host/owner) the personal store must not name (repeatable)")
-	fs.Var(&workNames, "work-name", "work name the personal store must not use (repeatable)")
+	fs.Var(&workOrgs, "work-org", "work org (host/owner) the personal store must not name, added to the configured work_orgs (repeatable)")
+	fs.Var(&workNames, "work-name", "work name the personal store must not use, added to the configured work_names (repeatable)")
 	moveFlagged := fs.Bool("move-flagged", false, "move checkout facts that trip a content or size gate into the local layer")
 	if _, code, ok := parseFlags(fs, args); !ok {
 		return code
@@ -60,12 +60,8 @@ func cmdLint(args []string, s streams) int {
 			s.errln(err)
 			return 1
 		}
-		if len(workOrgs) == 0 {
-			workOrgs = cfg.WorkOrgs
-		}
-		if len(workNames) == 0 {
-			workNames = cfg.WorkNames
-		}
+		workOrgs = append(slices.Clone(cfg.WorkOrgs), workOrgs...)
+		workNames = append(slices.Clone(cfg.WorkNames), workNames...)
 	}
 
 	rules, err := gate.LoadRules(cfg.Rules)
@@ -93,7 +89,7 @@ func cmdLint(args []string, s streams) int {
 			moved, reports, err := lint.MoveFlagged(ctx, t.checkout, t.local, opts)
 			var warning string
 			if err == nil && len(moved) > 0 {
-				warning = commit.Checkout(ctx, cfg, t.checkout, rules, sc, workOrgs, workNames, "priors: move flagged facts to the local layer")
+				warning = commit.Checkout(ctx, cfg, t.checkout, rules, sc, "priors: move flagged facts to the local layer")
 			}
 			unlock()
 			for _, rel := range moved {
