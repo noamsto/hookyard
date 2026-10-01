@@ -123,19 +123,37 @@ func (r Root) WriteIndex(rules gate.Rules) (changed bool, reports []string, err 
 
 	path := filepath.Join(r.Path, IndexFile)
 	if b, err := os.ReadFile(path); err == nil { //nolint:gosec // path is the store's own MEMORY.md
-		if have, ok := sanitize.Unfence(string(b)); ok && slices.Equal(have, lines) {
+		if have, ok := sanitize.Unfence(string(b)); ok && slices.Equal(have, lines) && r.IndexIntact(string(b)) {
 			return false, reports, nil
 		}
 	}
 
-	body := ""
-	if len(lines) > 0 {
-		body = strings.Join(lines, "\n") + "\n"
-	}
-	if err := atomicfile.Write(path, []byte(r.indexFile(body, sanitize.NewDelimiter())), 0o644); err != nil {
+	if err := atomicfile.Write(path, []byte(r.indexFile(indexBody(lines), sanitize.NewDelimiter())), 0o644); err != nil {
 		return false, reports, err
 	}
 	return true, reports, nil
+}
+
+// IndexIntact reports whether raw is byte for byte the MEMORY.md WriteIndex
+// writes for the lines inside raw's own fence, so that nothing around the
+// fence or between its lines rides along with them.
+func (r Root) IndexIntact(raw string) bool {
+	lines, ok := sanitize.Unfence(raw)
+	if !ok {
+		return false
+	}
+	// A delimiter taken from anywhere but the real BEGIN line renders a file
+	// that cannot equal raw.
+	_, rest, _ := strings.Cut(raw, "===== BEGIN ")
+	delim, _, _ := strings.Cut(rest, " =====")
+	return raw == r.indexFile(indexBody(lines), delim)
+}
+
+func indexBody(lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 func (r Root) indexFile(body, delim string) string {

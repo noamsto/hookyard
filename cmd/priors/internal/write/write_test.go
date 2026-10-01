@@ -552,18 +552,15 @@ func head(t *testing.T, dir string) string {
 func TestPublishCommitsWholeCheckout(t *testing.T) {
 	fx := setup(t, "work")
 	dir := fx.cfg.PersonalStore
-	hook := filepath.Join(dir, ".git", "hooks", "pre-commit")
-	if err := os.MkdirAll(filepath.Dir(hook), 0o755); err != nil { //nolint:gosec // test fixture
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil { //nolint:gosec // a test hook
+	lock := filepath.Join(dir, ".git", "refs", "heads", "main.lock")
+	if err := os.WriteFile(lock, nil, 0o644); err != nil { //nolint:gosec // test fixture
 		t.Fatal(err)
 	}
 	res, err := Add(context.Background(), fx.cfg, request("first-fact", personalRepo), fx.deps)
-	if err != nil || res.Warning == "" {
-		t.Fatalf("first add = %+v, %v; want a commit warning", res, err)
+	if err != nil || !strings.Contains(res.Warning, "git update-ref") {
+		t.Fatalf("first add = %+v, %v; want a ref update warning", res, err)
 	}
-	if err := os.Remove(hook); err != nil {
+	if err := os.Remove(lock); err != nil {
 		t.Fatal(err)
 	}
 

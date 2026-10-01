@@ -103,35 +103,38 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 	}
 
 	beforeStage()
-	gated, warning := stage(ctx, dir, snapDir, accepted)
-	if warning != "" {
+	parent, err := runGit(ctx, dir, gitTimeout, nil, "rev-parse", "-q", "--verify", "HEAD^{commit}")
+	if parent = strings.TrimSpace(parent); err != nil {
+		parent = ""
+	}
+	tree, warning := gatedTree(ctx, dir, snapDir, parent, accepted)
+	if warning != "" || tree == "" {
 		return warning
 	}
-	if stray, err := strayEntries(ctx, dir, gated); err != nil || len(stray) > 0 {
-		out, resetErr := runGit(ctx, dir, gitTimeout, nil, "reset", "-q")
-		switch {
-		case resetErr != nil:
-			return gitWarning("git reset", out, resetErr)
-		case err != nil:
-			return fmt.Sprintf("nothing committed in %s: checking the staged index: %v", dir, err)
-		}
-		return fmt.Sprintf("nothing committed in %s: the staged index holds entries the gates did not pass: %s", dir, strings.Join(stray, ", "))
-	}
-	if _, err := runGit(ctx, dir, gitTimeout, nil, "diff", "--cached", "--quiet"); err == nil {
-		return ""
-	}
-	if missing, err := unlisted(ctx, dir); err != nil || len(missing) > 0 {
-		out, resetErr := runGit(ctx, dir, gitTimeout, nil, "reset", "-q")
-		switch {
-		case resetErr != nil:
-			return gitWarning("git reset", out, resetErr)
-		case err != nil:
-			return fmt.Sprintf("nothing committed in %s: checking the staged index: %v", dir, err)
-		}
+	missing, err := unlisted(ctx, dir, tree)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("nothing committed in %s: checking the gated tree: %v", dir, err)
+	case len(missing) > 0:
 		return fmt.Sprintf("nothing committed in %s: %s would list files the commit lacks: %s", dir, store.IndexFile, strings.Join(missing, ", "))
 	}
-	if out, err := runGit(ctx, dir, gitTimeout, nil, "commit", "-q", "-m", msg); err != nil {
-		return gitWarning("git commit", out, err)
+	args := []string{"commit-tree", "-m", msg}
+	if parent != "" {
+		args = append(args, "-p", parent)
+	}
+	commit, err := runGit(ctx, dir, gitTimeout, nil, append(args, tree)...)
+	if err != nil {
+		return gitWarning("git commit-tree", commit, err)
+	}
+	// parent as the old value makes this a compare-and-swap: a HEAD that
+	// moved since the tree was built, or appeared on an unborn branch, fails it.
+	if out, err := runGit(ctx, dir, gitTimeout, nil, "update-ref", "-m", msg, "HEAD", strings.TrimSpace(commit), parent); err != nil {
+		return gitWarning("git update-ref", out, err)
+	}
+	// Every dirty path was gated, so resetting the shared index to the new
+	// HEAD discards nothing a user staged that the commit does not hold.
+	if out, err := runGit(ctx, dir, gitTimeout, nil, "reset", "-q"); err != nil {
+		return gitWarning("git reset", out, err)
 	}
 	if cfg.Push {
 		if out, err := runGit(ctx, dir, pushTimeout, nil, "push", "-q"); err != nil {
@@ -159,6 +162,11 @@ func snapshot(src string) (dst string, special []string, err error) {
 		return tmp, nil, err
 	}
 	err = filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		// A path gone since its directory was listed is absent, as git
+		// status will see it next time.
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -176,6 +184,9 @@ func snapshot(src string) (dst string, special []string, err error) {
 			return os.Mkdir(out, 0o700)
 		case d.Type()&fs.ModeSymlink != 0:
 			target, err := os.Readlink(path)
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
 			if err != nil {
 				return err
 			}
@@ -185,6 +196,9 @@ func snapshot(src string) (dst string, special []string, err error) {
 			return nil
 		}
 		regular, err := copyRegular(path, out)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		if err == nil && !regular {
 			special = append(special, filepath.ToSlash(rel))
 		}
@@ -217,10 +231,49 @@ func copyRegular(path, out string) (regular bool, err error) {
 	return true, os.WriteFile(out, raw, perm)
 }
 
-// stage puts the snapshot's bytes for accepted into dir's index, never the
-// worktree's, and removes the accepted paths the snapshot lacks. It returns
-// each path's staged "<mode> <oid>", or "" for a removal.
-func stage(ctx context.Context, dir, snapDir string, accepted []string) (gated map[string]string, warning string) {
+// gatedTree builds, in a private index seeded from parent, the tree of
+// parent with the snapshot's accepted paths applied, and checks it holds
+// nothing else. It returns "" for the tree when that is parent's own tree.
+func gatedTree(ctx context.Context, dir, snapDir, parent string, accepted []string) (tree, warning string) {
+	tmp, err := os.MkdirTemp("", "priors-index-")
+	if err != nil {
+		return "", fmt.Sprintf("nothing committed in %s: making a private index: %v", dir, err)
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+	env := []string{"GIT_INDEX_FILE=" + filepath.Join(tmp, "index")}
+
+	seed := []string{"read-tree", "--empty"}
+	if parent != "" {
+		seed = []string{"read-tree", parent}
+	}
+	if out, err := runGitEnv(ctx, dir, env, gitTimeout, nil, seed...); err != nil {
+		return "", gitWarning("git read-tree", out, err)
+	}
+	gated, warning := stage(ctx, dir, env, snapDir, accepted)
+	if warning != "" {
+		return "", warning
+	}
+	tree, err = runGitEnv(ctx, dir, env, gitTimeout, nil, "write-tree")
+	if err != nil {
+		return "", gitWarning("git write-tree", tree, err)
+	}
+	tree = strings.TrimSpace(tree)
+	stray, unchanged, err := checkTree(ctx, dir, parent, tree, gated)
+	switch {
+	case err != nil:
+		return "", fmt.Sprintf("nothing committed in %s: checking the gated tree: %v", dir, err)
+	case len(stray) > 0:
+		return "", fmt.Sprintf("nothing committed in %s: the gated tree holds entries the gates did not pass: %s", dir, strings.Join(stray, ", "))
+	case unchanged:
+		return "", ""
+	}
+	return tree, ""
+}
+
+// stage puts the snapshot's bytes for accepted into the index env names,
+// never the worktree's, and removes the accepted paths the snapshot lacks. It
+// returns each path's staged "<mode> <oid>", or "" for a removal.
+func stage(ctx context.Context, dir string, env []string, snapDir string, accepted []string) (gated map[string]string, warning string) {
 	gated = map[string]string{}
 	var info, removed strings.Builder
 	for _, rel := range accepted {
@@ -251,36 +304,33 @@ func stage(ctx context.Context, dir, snapDir string, accepted []string) (gated m
 		gated[rel] = mode + " " + strings.TrimSpace(oid)
 		info.WriteString(gated[rel] + "\t" + rel + "\x00")
 	}
-	// --index-info replaces each entry whole, clearing any assume-unchanged
-	// or skip-worktree bit that would have hidden it from git add.
 	if info.Len() > 0 {
-		if out, err := runGit(ctx, dir, gitTimeout, strings.NewReader(info.String()), "update-index", "-z", "--index-info"); err != nil {
+		if out, err := runGitEnv(ctx, dir, env, gitTimeout, strings.NewReader(info.String()), "update-index", "-z", "--index-info"); err != nil {
 			return nil, gitWarning("git update-index", out, err)
 		}
 	}
 	if removed.Len() > 0 {
-		if out, err := runGit(ctx, dir, gitTimeout, strings.NewReader(removed.String()), "update-index", "--force-remove", "-z", "--stdin"); err != nil {
+		if out, err := runGitEnv(ctx, dir, env, gitTimeout, strings.NewReader(removed.String()), "update-index", "--force-remove", "-z", "--stdin"); err != nil {
 			return nil, gitWarning("git update-index", out, err)
 		}
 	}
 	return gated, ""
 }
 
-// strayEntries lists the index paths that differ from HEAD's tree with gated
-// applied: anything staged that the gates did not pass, or a conflict.
-func strayEntries(ctx context.Context, dir string, gated map[string]string) ([]string, error) {
-	want := map[string]string{}
-	if _, err := runGit(ctx, dir, gitTimeout, nil, "rev-parse", "-q", "--verify", "HEAD"); err == nil {
-		out, err := runGit(ctx, dir, gitTimeout, nil, "ls-tree", "-r", "-z", "--full-tree", "HEAD")
-		if err != nil {
-			return nil, errors.New(gitWarning("git ls-tree", out, err))
-		}
-		for meta, path := range records(out) {
-			if f := strings.Fields(meta); len(f) == 3 {
-				want[path] = f[0] + " " + f[2]
-			}
+// checkTree lists the paths where tree differs from parent's tree with gated
+// applied, and reports whether tree is parent's tree unchanged.
+func checkTree(ctx context.Context, dir, parent, tree string, gated map[string]string) (stray []string, unchanged bool, err error) {
+	base := map[string]string{}
+	if parent != "" {
+		if base, err = treeEntries(ctx, dir, parent); err != nil {
+			return nil, false, err
 		}
 	}
+	have, err := treeEntries(ctx, dir, tree)
+	if err != nil {
+		return nil, false, err
+	}
+	want := maps.Clone(base)
 	for rel, entry := range gated {
 		if entry == "" {
 			delete(want, rel)
@@ -288,21 +338,33 @@ func strayEntries(ctx context.Context, dir string, gated map[string]string) ([]s
 			want[rel] = entry
 		}
 	}
-	out, err := runGit(ctx, dir, gitTimeout, nil, "ls-files", "-s", "-z")
-	if err != nil {
-		return nil, errors.New(gitWarning("git ls-files", out, err))
-	}
-	var stray []string
-	for meta, path := range records(out) {
-		f := strings.Fields(meta)
-		if len(f) != 3 || f[2] != "0" || want[path] != f[0]+" "+f[1] {
+	for path, entry := range have {
+		if want[path] != entry {
 			stray = append(stray, path)
 		}
-		delete(want, path)
 	}
-	stray = append(stray, slices.Collect(maps.Keys(want))...)
+	for path := range want {
+		if _, ok := have[path]; !ok {
+			stray = append(stray, path)
+		}
+	}
 	slices.Sort(stray)
-	return slices.Compact(stray), nil
+	return stray, maps.Equal(have, base), nil
+}
+
+// treeEntries maps each path in treeish to its "<mode> <oid>".
+func treeEntries(ctx context.Context, dir, treeish string) (map[string]string, error) {
+	out, err := runGit(ctx, dir, gitTimeout, nil, "ls-tree", "-r", "-z", "--full-tree", treeish)
+	if err != nil {
+		return nil, errors.New(gitWarning("git ls-tree", out, err))
+	}
+	entries := map[string]string{}
+	for meta, path := range records(out) {
+		if f := strings.Fields(meta); len(f) == 3 {
+			entries[path] = f[0] + " " + f[2]
+		}
+	}
+	return entries, nil
 }
 
 // records yields the "<meta>\t<path>" records of git's -z listings.
@@ -378,12 +440,27 @@ func (c classifier) refusal(e statusEntry) string {
 		return "not a regular file"
 	}
 	if e.path == store.IndexFile {
-		return ""
+		return c.indexRefusal()
 	}
 	if !indexable(e.path) {
 		return "not a fact file"
 	}
 	return c.factRefusal(e.path)
+}
+
+// indexRefusal gates MEMORY.md's whole bytes: its lines must match the facts
+// (lint's index-sync), and nothing may sit outside or between them.
+func (c classifier) indexRefusal() string {
+	raw, err := os.ReadFile(filepath.Join(c.root.Path, store.IndexFile)) //nolint:gosec // the snapshot's own MEMORY.md, lstat-checked as a regular file
+	if err != nil {
+		return "unreadable"
+	}
+	rules := slices.Clone(c.findings[store.IndexFile])
+	if !c.root.IndexIntact(string(raw)) {
+		rules = append(rules, "not as generated")
+	}
+	slices.Sort(rules)
+	return strings.Join(slices.Compact(rules), ", ")
 }
 
 func (c classifier) factRefusal(rel string) string {
@@ -453,20 +530,19 @@ func (c classifier) holdsIndexable(dirRel string) bool {
 	return found
 }
 
-// unlisted returns the files the staged MEMORY.md lists that the staged tree
-// lacks.
-func unlisted(ctx context.Context, dir string) ([]string, error) {
-	out, err := runGit(ctx, dir, gitTimeout, nil, "ls-files", "-z")
+// unlisted returns the files tree's MEMORY.md lists that tree lacks.
+func unlisted(ctx context.Context, dir, tree string) ([]string, error) {
+	out, err := runGit(ctx, dir, gitTimeout, nil, "ls-tree", "-r", "-z", "--full-tree", "--name-only", tree)
 	if err != nil {
-		return nil, errors.New(gitWarning("git ls-files", out, err))
+		return nil, errors.New(gitWarning("git ls-tree", out, err))
 	}
 	files := strings.Split(out, "\x00")
 	if !slices.Contains(files, store.IndexFile) {
 		return nil, nil
 	}
-	index, err := runGit(ctx, dir, gitTimeout, nil, "show", ":"+store.IndexFile)
+	index, err := runGit(ctx, dir, gitTimeout, nil, "cat-file", "blob", tree+":"+store.IndexFile)
 	if err != nil {
-		return nil, errors.New(gitWarning("git show", index, err))
+		return nil, errors.New(gitWarning("git cat-file", index, err))
 	}
 	lines, _ := sanitize.Unfence(index)
 	var missing []string
@@ -487,12 +563,19 @@ func sameDir(a, b string) bool {
 // runGit returns stdout, or stdout and stderr combined on failure so that a
 // warning can quote git's complaint.
 func runGit(ctx context.Context, dir string, timeout time.Duration, stdin io.Reader, args ...string) (string, error) {
+	return runGitEnv(ctx, dir, nil, timeout, stdin, args...)
+}
+
+// runGitEnv is runGit with env set after the repo-locating variables are
+// stripped. No hook runs: one could stage, amend or move a ref after the
+// gates passed.
+func runGitEnv(ctx context.Context, dir string, env []string, timeout time.Duration, stdin io.Reader, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...) //nolint:gosec // dir is the configured store checkout; args are fixed git subcommands
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir, "-c", "core.hooksPath=/dev/null"}, args...)...) //nolint:gosec // dir is the configured store checkout; args are fixed git subcommands
 	// Checkout matches git's English "not a git repository"; literal
 	// pathspecs keep a file named like a glob from staging its neighbours.
-	cmd.Env = route.RepoEnv("GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "GIT_LITERAL_PATHSPECS=1")
+	cmd.Env = route.RepoEnv(append([]string{"GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "GIT_LITERAL_PATHSPECS=1"}, env...)...)
 	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

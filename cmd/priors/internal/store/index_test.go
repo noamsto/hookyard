@@ -300,6 +300,34 @@ func TestWriteIndexRewritesOnChange(t *testing.T) {
 	}
 }
 
+func TestIndexIntact(t *testing.T) {
+	root := checkoutRoot(t)
+	writeFact(t, root, "hookyard/one.md", newFact("one", "first", stamp(1)))
+	if _, _, err := root.WriteIndex(testRules(t)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root.Path, IndexFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := string(raw)
+	if !root.IndexIntact(index) {
+		t.Fatalf("a freshly written index is not intact:\n%s", index)
+	}
+	marker, rest, _ := strings.Cut(index, "\n")
+	for name, tampered := range map[string]string{
+		"text after the fence":  index + "extra\n",
+		"text before the fence": marker + "\nextra\n" + rest,
+		"blank line in fence":   strings.Replace(index, " =====\n", " =====\n\n", 1),
+		"other store's label":   strings.Replace(index, "personal store", "work store", 1),
+		"no trailing newline":   strings.TrimSuffix(index, "\n"),
+	} {
+		if root.IndexIntact(tampered) {
+			t.Errorf("%s: reported intact", name)
+		}
+	}
+}
+
 func TestWriteIndexOverwritesGarbage(t *testing.T) {
 	root := checkoutRoot(t)
 	writeFact(t, root, "hookyard/one.md", newFact("one", "first", stamp(1)))
@@ -489,5 +517,30 @@ func TestWriteIndexSkipsSymlinkedFact(t *testing.T) {
 	}
 	if len(reports) != 1 || !strings.HasPrefix(reports[0], "skipped _global/x.md: ") {
 		t.Errorf("reports = %q, want one skip for the symlink", reports)
+	}
+}
+
+func TestWriteIndexRepairsTextOutsideTheFence(t *testing.T) {
+	root := checkoutRoot(t)
+	writeFact(t, root, "hookyard/one.md", newFact("one", "first", stamp(1)))
+	if _, _, err := root.WriteIndex(testRules(t)); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root.Path, IndexFile)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(raw, "extra\n"...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, _, err := root.WriteIndex(testRules(t))
+
+	if err != nil || !changed {
+		t.Fatalf("WriteIndex = %v, %v; want a rewrite", changed, err)
+	}
+	if got, err := os.ReadFile(path); err != nil || !root.IndexIntact(string(got)) {
+		t.Errorf("index after repair is not intact (err %v):\n%s", err, got)
 	}
 }
