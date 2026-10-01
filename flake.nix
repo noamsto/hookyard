@@ -60,6 +60,7 @@
           diagrams = import ./nix/checks/diagrams.nix {inherit pkgs;};
           pi-bridge = import ./nix/checks/pi_bridge.nix {inherit pkgs;};
           flow-bundle = import ./nix/checks/flow-bundle.nix {inherit pkgs;};
+          priors = config.packages.priors;
         };
 
         treefmt = {
@@ -71,11 +72,12 @@
         };
 
         packages = let
+          vendorHash = "sha256-vrX9aKypJjlpyWY3zlEgrajxqPDW2W3EUPZ4xPGdBs0=";
           hookyard = pkgs.buildGoModule {
             pname = "hookyard";
             version = "0.1.0";
             src = ./.;
-            vendorHash = "sha256-pbA/AlBz3cQYRTMnQ/qBPcinYOKokrBLNhkbRTq54gE=";
+            inherit vendorHash;
             subPackages = ["cmd/hookyard"];
             # dispatch_e2e_test.go asks `ps -o sid=` whether a dispatched
             # handler got a session of its own. stdenv has no ps, so without
@@ -87,8 +89,38 @@
               mainProgram = "hookyard";
             };
           };
+          # The memory layer's CLI and session_start handler
+          # (docs/design/memory-layer.md §5).
+          priors = let
+            # ssh resolves host aliases when routing a repo to its store.
+            runtimeDeps = [pkgs.git pkgs.ripgrep pkgs.betterleaks pkgs.openssh];
+          in
+            pkgs.buildGoModule {
+              pname = "priors";
+              version = "0.1.0";
+              src = ./.;
+              inherit vendorHash;
+              subPackages = ["cmd/priors"];
+              nativeBuildInputs = [pkgs.makeWrapper];
+              nativeCheckInputs = runtimeDeps;
+              # subPackages alone would test only cmd/priors; the gates,
+              # routing and store live in its internal packages.
+              preCheck = ''
+                subPackages=cmd/priors/...
+              '';
+              # A hook runs with the engine's PATH, not the user's shell's, so
+              # the tools the gates and search shell out to travel with it.
+              postInstall = ''
+                wrapProgram $out/bin/priors --suffix PATH : ${pkgs.lib.makeBinPath runtimeDeps}
+              '';
+              meta = {
+                description = "Cross-harness agent memory: markdown fact stores, write gates, tier-1 index and search";
+                mainProgram = "priors";
+              };
+            };
         in {
           default = hookyard;
+          inherit priors;
           # §9 names this attribute explicitly: nix-config takes it as the
           # home-manager module's default package, so "one input, one binary"
           # holds by construction rather than by the consumer wiring it up.
@@ -139,6 +171,9 @@
               # For running the bridge's `node --check` by hand, and for the
               # bridge runtime tests, which skip when node is absent.
               pkgs.nodejs
+              # priors' search backend and write-path secret scanner.
+              pkgs.ripgrep
+              pkgs.betterleaks
               config.treefmt.build.wrapper
             ];
         };

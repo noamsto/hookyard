@@ -1,0 +1,18 @@
+{
+  "handlers": [
+    {
+      "id": "priors-index",
+      "exec": "/run/current-system/sw/bin/priors",
+      "events": ["session_start"],
+      "engines": ["claude-code", "codex", "pi"],
+      "timeout_ms": 1000
+    },
+    {
+      "id": "priors-record",
+      "exec": "/run/current-system/sw/bin/priors",
+      "events": ["post_tool"],
+      "engines": ["claude-code", "codex", "cursor", "pi"],
+      "lane": "fire_and_forget"
+    }
+  ]
+}

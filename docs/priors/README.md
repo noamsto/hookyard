@@ -1,0 +1,104 @@
+# priors v0
+
+`priors` is the memory layer's command-line tool
+([design](../design/memory-layer.md), workstream 1 of §10). It keeps
+agent-learned facts as plain markdown, one fact per file, in two git
+checkouts — a personal store and a work store — and serves them back to
+Claude Code, Codex and Pi at `session_start`, and to any engine by search.
+
+It lives in this repo as `cmd/priors`, but it is not router code: it is an
+`exec` handler that speaks hookyard's envelope as JSON and imports no
+`internal/` package (§5, decision 4).
+
+## Configure
+
+`$PRIORS_CONFIG`, else `$XDG_CONFIG_HOME/priors/config.toml`:
+
+```toml
+profile        = "work"            # the host kind: "work" or "personal"
+personal_store = "~/memory/personal"
+work_store     = "~/memory/work"   # read only on a work-profile host
+work_orgs      = ["github.com/your-work-org"]   # host/owner
+personal_orgs  = ["github.com/you"]
+# optional:
+# work_names   = ["build.corp.internal"]  # also rejected in the personal store
+# state_dir    = ""     # default $XDG_STATE_HOME/priors
+# event_record = ""     # hookyard's state dir; default follows hookyard's own
+# rules        = ""     # redaction rule set; "" = the built-in one
+# scanner      = ""     # default betterleaks, then gitleaks, on PATH
+# ssh_config   = ""     # passed to `ssh -G -F` when resolving host aliases
+# commit       = true   # commit published facts into the checkout
+# push         = false
+```
+
+`work_orgs` is required on every host. `personal_store`, `work_store` and
+`state_dir` must be absolute once `~/` is expanded, and none may be the same
+as, or nested inside, another (the default state dir included). Symlinks in
+them are resolved first, so a store behind a symlink behaves as the directory
+it names, and the nesting check sees the real paths.
+
+A session's store is picked from its repo's `origin` org (§4.2): a work-org
+repo reads both stores and writes work; any other repo reads the personal
+store only.
+
+## Commands
+
+```
+priors add --name N --description D --type project|reference|feedback|user \
+           [--scope repo|global] [--repo R ...] [--session ID] [--external] --stdin
+priors list [--repo R] [--type T] [--store S] [--stale] [--flagged] [--all]
+priors show <name>
+priors search <terms...> [--repo R] [--any-repo] [--type T] [--scope S] [--all]
+priors lint [--store S] [--move-flagged] | priors lint --dir D --kind K [--work-org O ...]
+priors index [--text]        # session_start output (envelope on stdin)
+priors index --write         # regenerate every MEMORY.md
+```
+
+`add` refuses a fact that matches a secret pattern or the scanner, or fails
+the lint, and exits 1. Otherwise it prints one line and exits 0:
+
+- `published <store> <path>`: the fact passed every gate and was committed
+  into the store's checkout.
+- `flagged <store> <path>: <reasons>`: a gate flagged it, so it waits,
+  `proposed`, in the unsynced host-local layer
+  (`$XDG_STATE_HOME/priors/local/<store>/`). It is injected only into
+  sessions of the repo it was learned in, on this host.
+- `quarantined <path>: <why>`: §4.2's write rule sent it to the host-local
+  quarantine (for example a work repo on a personal host).
+
+The flagging gates are provenance (the session fetched web or MCP content,
+or its tool calls are not in hookyard's event record), content (URLs,
+`curl | sh`, hook bypasses, shell commands, "always/never" aimed at tools,
+override phrasing) and a size cap of 8 KiB. Gate 2 learns the session from
+the engine when the engine provides it (inside Claude Code, `CLAUDECODE=1`
+with `CLAUDE_CODE_SESSION_ID`), and that id and engine always win; a
+`--engine`, `--session`, `PRIORS_ENGINE` or `PRIORS_SESSION` that disagrees
+with them does not replace them, and flags the fact
+`provenance:asserted-identity`. Elsewhere the session is `--session`, else
+`PRIORS_SESSION`; with no session a fact is flagged. This binds the id to the
+engine's environment, not to the agent: an agent can still set those
+variables in its own command. It sees tool names
+only: hookyard's event record carries no command text, so an issue or PR
+read through a shell (`gh issue view`, `curl`) does not flag the session.
+
+`list`, `show` and `search` fence what they print as reference data, with a
+delimiter drawn per call.
+
+## Wire it into hookyard
+
+[`cmd/priors/hookyard.json`](../../cmd/priors/hookyard.json) is an example
+manifest; point both `exec` paths at the installed binary (`nix build
+.#priors`). It registers two handlers:
+
+- `priors-index` on `session_start`, which injects the tier-1 index. It
+  always exits 0 and prints nothing when anything is missing or slow
+  (800 ms), so a broken store leaves the session as it was.
+- `priors-record` on `post_tool` with no `match`, on the fire-and-forget
+  lane. It answers nothing. It exists so that every tool call reaches
+  hookyard's event record, which gate 2 reads.
+
+## Store repositories
+
+Each store is its own private git repo. Run `priors lint` there as a
+required check: [`store-ci.example.yml`](store-ci.example.yml) is a
+starting point.
