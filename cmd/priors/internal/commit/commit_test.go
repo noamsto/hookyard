@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/commit/committest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
@@ -701,5 +702,82 @@ func TestRefusesTamperedIndex(t *testing.T) {
 				t.Errorf("staged %q, want nothing", s)
 			}
 		})
+	}
+}
+
+func TestSigningFailureCommitsNothing(t *testing.T) {
+	tests := []struct {
+		name    string
+		signer  string
+		timeout time.Duration
+	}{
+		{"signer fails", "exit 1", gitTimeout},
+		{"signer hangs", "exec sleep 2", 200 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := setup(t)
+			before := head(t, fx.dir())
+			marker := filepath.Join(t.TempDir(), "signed")
+			program := filepath.Join(t.TempDir(), "gpg")
+			writeFile(t, program, []byte("#!/bin/sh\ntouch '"+marker+"'\n"+tt.signer+"\n"))
+			if err := os.Chmod(program, 0o755); err != nil { //nolint:gosec // a test executable
+				t.Fatal(err)
+			}
+			git(t, fx.dir(), "config", "commit.gpgsign", "true")
+			git(t, fx.dir(), "config", "gpg.format", "openpgp")
+			git(t, fx.dir(), "config", "gpg.program", program)
+			signTimeout = tt.timeout
+			t.Cleanup(func() { signTimeout = gitTimeout })
+			fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+			fx.index(t)
+
+			start := time.Now()
+			w := fx.checkout(t)
+			if !strings.Contains(w, "signing the commit failed") || !strings.Contains(w, "git commit-tree") {
+				t.Errorf("warning = %q, want a signing failure", w)
+			}
+			if took := time.Since(start); took > time.Second+tt.timeout {
+				t.Errorf("Checkout took %v, past the signing timeout", took)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Errorf("gpg.program never ran: %v", err)
+			}
+			if head(t, fx.dir()) != before {
+				t.Error("HEAD moved without the signature the config asks for")
+			}
+		})
+	}
+}
+
+func TestFailedIndexSyncHealsOnTheNextRun(t *testing.T) {
+	fx := setup(t)
+	before := head(t, fx.dir())
+	lock := filepath.Join(fx.dir(), ".git", "index.lock")
+	beforeStage = func() { writeFile(t, lock, nil) }
+	t.Cleanup(func() { beforeStage = func() {} })
+	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+	fx.index(t)
+
+	if w := fx.checkout(t); !strings.Contains(w, "git reset") {
+		t.Fatalf("warning = %q, want an index sync failure", w)
+	}
+	committed := head(t, fx.dir())
+	if committed == before {
+		t.Fatal("HEAD did not move")
+	}
+	beforeStage = func() {}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+
+	if w := fx.checkout(t); w != "" {
+		t.Fatalf("warning = %q", w)
+	}
+	if out := git(t, fx.dir(), "status", "--porcelain"); out != "" {
+		t.Errorf("checkout still dirty: %q", out)
+	}
+	if got := head(t, fx.dir()); got != committed {
+		t.Errorf("the second run moved HEAD: %s -> %s", committed, got)
 	}
 }

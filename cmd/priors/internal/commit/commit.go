@@ -108,33 +108,22 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 		parent = ""
 	}
 	tree, warning := gatedTree(ctx, dir, snapDir, parent, accepted)
-	if warning != "" || tree == "" {
+	if warning != "" {
 		return warning
 	}
-	missing, err := unlisted(ctx, dir, tree)
-	switch {
-	case err != nil:
-		return fmt.Sprintf("nothing committed in %s: checking the gated tree: %v", dir, err)
-	case len(missing) > 0:
-		return fmt.Sprintf("nothing committed in %s: %s would list files the commit lacks: %s", dir, store.IndexFile, strings.Join(missing, ", "))
+	if tree != "" {
+		if warning := commitTree(ctx, dir, parent, tree, msg); warning != "" {
+			return warning
+		}
 	}
-	args := []string{"commit-tree", "-m", msg}
-	if parent != "" {
-		args = append(args, "-p", parent)
-	}
-	commit, err := runGit(ctx, dir, gitTimeout, nil, append(args, tree)...)
-	if err != nil {
-		return gitWarning("git commit-tree", commit, err)
-	}
-	// parent as the old value makes this a compare-and-swap: a HEAD that
-	// moved since the tree was built, or appeared on an unborn branch, fails it.
-	if out, err := runGit(ctx, dir, gitTimeout, nil, "update-ref", "-m", msg, "HEAD", strings.TrimSpace(commit), parent); err != nil {
-		return gitWarning("git update-ref", out, err)
-	}
-	// Every dirty path was gated, so resetting the shared index to the new
-	// HEAD discards nothing a user staged that the commit does not hold.
-	if out, err := runGit(ctx, dir, gitTimeout, nil, "reset", "-q"); err != nil {
+	// Syncing only the gated paths leaves a foreign process's other staging
+	// alone, and running it on an unchanged tree heals a sync that failed
+	// after an earlier commit, before a manual git commit could revert it.
+	if out, err := runGit(ctx, dir, gitTimeout, strings.NewReader(strings.Join(accepted, "\x00")), "reset", "-q", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
 		return gitWarning("git reset", out, err)
+	}
+	if tree == "" {
+		return ""
 	}
 	if cfg.Push {
 		if out, err := runGit(ctx, dir, pushTimeout, nil, "push", "-q"); err != nil {
@@ -147,6 +136,59 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 // beforeStage is a test seam that runs once the gates have passed, just
 // before the accepted paths are staged.
 var beforeStage = func() {}
+
+// signTimeout bounds a signing commit-tree, so a pinentry or hardware-key
+// prompt cannot hang priors. A var so tests can shorten it.
+var signTimeout = gitTimeout
+
+// commitTree commits tree on parent and moves HEAD to it, signing as the
+// store's config asks: unlike git commit, commit-tree ignores commit.gpgSign.
+func commitTree(ctx context.Context, dir, parent, tree, msg string) (warning string) {
+	missing, err := unlisted(ctx, dir, tree)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("nothing committed in %s: checking the gated tree: %v", dir, err)
+	case len(missing) > 0:
+		return fmt.Sprintf("nothing committed in %s: %s would list files the commit lacks: %s", dir, store.IndexFile, strings.Join(missing, ", "))
+	}
+	sign, err := signs(ctx, dir)
+	if err != nil {
+		return fmt.Sprintf("nothing committed in %s: %v", dir, err)
+	}
+	args, timeout := []string{"commit-tree", "-m", msg}, gitTimeout
+	if parent != "" {
+		args = append(args, "-p", parent)
+	}
+	if sign {
+		// Plain -S lets git pick the key and format from the config.
+		args, timeout = append(args, "-S"), signTimeout
+	}
+	commit, err := runGit(ctx, dir, timeout, nil, append(args, tree)...)
+	switch {
+	case err != nil && sign:
+		return fmt.Sprintf("nothing committed in %s: signing the commit failed: %s", dir, gitWarning("git commit-tree", commit, err))
+	case err != nil:
+		return gitWarning("git commit-tree", commit, err)
+	}
+	// parent as the old value makes this a compare-and-swap: a HEAD that
+	// moved since the tree was built, or appeared on an unborn branch, fails it.
+	if out, err := runGit(ctx, dir, gitTimeout, nil, "update-ref", "-m", msg, "HEAD", strings.TrimSpace(commit), parent); err != nil {
+		return gitWarning("git update-ref", out, err)
+	}
+	return ""
+}
+
+// signs reports whether the store's config sets commit.gpgSign.
+func signs(ctx context.Context, dir string) (bool, error) {
+	out, err := runGit(ctx, dir, gitTimeout, nil, "config", "--type=bool", "--get", "commit.gpgsign")
+	if exit := (*exec.ExitError)(nil); errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return false, nil
+	}
+	if err != nil {
+		return false, errors.New(gitWarning("git config", out, err))
+	}
+	return strings.TrimSpace(out) == "true", nil
+}
 
 // snapshot copies the checkout at src, less its own .git, into a new
 // temporary dir, reading each regular file once. It recreates symlinks as
