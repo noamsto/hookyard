@@ -6,9 +6,9 @@ layer. [#130](https://github.com/noamsto/hookyard/issues/130) settled the
 attestation design (§4.4, *Attestation*); promoting a *flagged* fact to
 `reviewed` waits on its implementation (§10 workstream 5) and is not a v0
 blocker: unflagged facts publish through the gates, and flagged ones stay
-`proposed` in their host-local layer until it lands, and after that until
-attested from a host whose trust file declares `trust_root = "separate"`
-(§4.4, *Host classification*).
+`proposed` in their host-local layer until a human publishes them, and read
+`reviewed` only once attested from a host whose trust file declares
+`trust_root = "separate"` (§4.4, *Host classification*).
 
 - *Resolved.* The corrections from the independent adversarial review (PR #83,
   whose full findings are on the PR): the corpus counts (§1, now re-counted),
@@ -1105,46 +1105,81 @@ label an agent can mint that way is a tripwire, not a wall, so attestation is
 off there. The trust file's `trust_root` key (`"owner-admin"` or
 `"separate"`; the module option that writes it defaults to `owner-admin`)
 turns it on only when it is exactly the string `"separate"`; an absent key,
-`"owner-admin"`, any other string or a non-string value is off. `separate`
-is honest only when the user agents run as has no route to root (not in
-`wheel`, `admin`, rootful `docker`, `libvirtd` or `input`; no sudo rule at
-all; not a Nix trusted user, directly or through a group); the root
-credential is entered only outside any session agents run in (a separate
-admin account on another VT, another macOS user or another device, never
-`sudo` in the owner's terminal or tmux); and the trust file and allowlist
-come from the Nix store through that admin's rebuild, or are root-owned with
-no agent route to root. The module asserts the first at evaluation; when
-`separate` is declared and it fails, the module writes `trust_root =
-"owner-admin"` with an empty allowlist and warns, so the profile and org
-lists still reach routing. The second is a human rule, stated as one. At
-runtime `priors` also reads the host as off when the invoking user is in one
-of those groups, a backstop that cannot see sudo rules. The verdict job runs
-only on a `separate` host, under that host's root.
+`"owner-admin"`, any other string or a non-string value is off.
+
+**When `separate` is honest.** All three hold. First, the user agents run as
+has no route to root by any mechanism, for example: no membership of
+`wheel`, `admin`, `libvirtd`, `input`, `disk`, `lxd` or `incus-admin`, and
+no access to a rootful `docker` or podman socket; no sudo, sudo-rs or doas
+rule at all; not a polkit admin identity, so no `pkexec` or `run0`; no key
+in root's `authorized_keys` the user can present; no setuid wrapper granting
+root; not a Nix trusted user, directly or through a group. Second, no
+credential of root, or of any account that can become root, is ever entered
+in a session agents run in (a separate admin account on another VT, another
+macOS user or another device; never `sudo` or `su admin` in the owner's
+terminal or tmux), and the trust file and allowlist come from the Nix store
+through that admin's rebuild, or are root-owned with no agent route to root.
+Third, a host becomes `separate` only after a reinstall, or after a wipe of
+mutable root state (root's dotfiles and `authorized_keys`, system cron and
+launchd jobs, setuid files, `/var/lib/priors`): anything planted while it
+was owner-admin survives a rebuild. The second and third are human rules,
+stated as such. The module asserts the first at evaluation, as far as
+declarative NixOS config shows it (groups, sudo and doas rules, polkit admin
+identities, root's authorized keys, `trusted-users`); with
+`users.mutableUsers = true` imperative changes are invisible to it, and on
+nix-darwin `admin` membership is not declared, so there the first is a human
+rule too. When `separate` is declared and the assertion fails, the module
+writes `trust_root = "owner-admin"` with an empty allowlist and warns, so the
+profile and org lists still reach routing. At runtime `priors` reads its own
+process credentials (`getgroups` plus the primary gid, never `/etc/group`,
+which misses darwin's Directory Services) and reads the host as off when the
+user is in `wheel`, `admin`, `docker`, `libvirtd`, `input`, `disk`, `lxd` or
+`incus-admin` (`docker` counts because rootful and rootless cannot be told
+apart), a backstop that cannot see sudo, doas, polkit or keys. The verdict
+job runs only on a `separate` host, as `priors-verify`, deployed by that
+host's admin.
 
 **Off a separate trust root.** `priors index`, `show`, `search`, `list` and
 `lint` read every `confidence: reviewed` fact as `proposed` (check 1 fails
-first: "attestation off: trust_root owner-admin"), report it once per store
-per run, and read no verdict file. `priors attest` and `--revoke` refuse
+first, naming the cause: "attestation off: trust_root <value|absent>" or
+"attestation off: group <g>"), report it once per store per run, and read
+no verdict file. `priors attest` and `--revoke` refuse
 before any fetch, render or signature, exit non-zero and write nothing,
 naming the classification. The commit gate keeps v0's behaviour: a
 `confidence: reviewed` fact is refused as `unattested-review`. The module
 deploys no `priors-verify` account, units, credentials or
 `/var/lib/priors/<store id>`; `priors verify` run by hand there exits
-non-zero naming the classification and writes no verdict file.
+non-zero naming the classification and writes no verdict file. Residual:
+off means no `reviewed` label there carries meaning, not that none can
+appear; an agent that has taken root can rewrite the trust file or the
+binary and make that host's own index print `reviewed`. The refusal of
+`priors attest` is a convenience, not the boundary: an agent can call
+`ssh-keygen -Y sign` itself, and one with root can capture the PIN. So the
+allowlisted attestation token is used only on a `separate` host and never
+plugged into an owner-admin one, a human rule stated as one; an entry signed
+on an owner-admin host would verify everywhere (the confused-deputy
+residual).
 
 **Promoting a fact flagged on an owner-admin host.** The fact stays in its
-local layer as `proposed`. `priors publish` still commits it to the checkout
-as `proposed` on an owner-admin host; only `reviewed` is refused. Once the
-store syncs, the owner runs `priors attest <name>` on a `separate` host,
-which sets `confidence: reviewed` in the fact file it commits with the entry;
-or rewrites the fact there, publishes and attests it. On the owner-admin
-host it still reads `proposed`.
+local layer as `proposed`; a local-layer fact is never attested (check 2)
+and the local layer never syncs. A human first clears the flag with
+`priors publish` on the owner-admin host, which commits it to the checkout
+as `proposed` (only `reviewed` is refused there); once the store syncs, the
+owner runs `priors attest <name>` on a `separate` host, which sets
+`confidence: reviewed` in the fact file it commits with the entry; or
+rewrites the fact there, publishes and attests it. On the owner-admin host
+it still reads `proposed`.
 
 **Rejected.** (b) Opt-in session trust with a stated residual: a `reviewed`
 label an agent can mint by taking root through the owner's own session. (c)
-An out-of-band trust root (a hardware-key-signed allowlist, or a root
-credential outside tmux): the owner holds no FIDO2 key and runs no separate
-admin path today; revisit if the owner adopts a FIDO2 key.
+Making a single-user admin host trustworthy by an out-of-band root: a
+hardware-key-signed allowlist replacing the root-owned trust file, or polkit
+or an admin credential outside tmux on that same host. There the owner still
+types root into sessions agents reach, and holds no FIDO2 key; revisit if
+the owner adopts one. A separate admin path on a genuinely separate host is
+not (c): it is what `separate` declares, simply not deployed on the owner's
+hosts today. Attesting also needs the FIDO2 attestation key, so promotion
+waits on both that key and a `separate` host.
 
 **Unwritable means no agent write takes effect without a human's root act.**
 The trust file's source lives in nix-config, and the `priors` binary, with
@@ -1456,8 +1491,9 @@ At index time — `priors index`, `show`, `search`, `list` and `lint` —
 `priors` runs checks 1–3, with no git and no history, a fixed cost per
 claiming fact:
 
-1. the trust file declares `trust_root = "separate"`, passes the ownership
-   check and lists at least one key; the
+1. the trust file declares `trust_root = "separate"`, the invoking user is
+   in none of the groups *Host classification* lists, the trust file passes
+   the ownership check and lists at least one key; the
    store's verdict file passes its ownership check, names this store's id, is
    at most 1 MiB, its `trust` digest equals the sha256 of the trust file's
    bytes as this run read them (so a key removed from the allowlist voids its
@@ -2057,7 +2093,7 @@ change.
 | **hookyard** | *only if tier 2 passes its gate (§4.4):* `prompt_submit` added to `HasAdvisorySlot` for Claude and Pi (Codex already has `session_start` and `prompt_submit` since #101, so needs no hookyard change for tiers 1 and 2); Pi bridge's `input` reply delivered (not discarded); `before_agent_start` registration made a real per-prompt handler | the only router changes this design can require; tier 2 is impossible on Claude and Pi without them (R2, §4.7), and v0 needs none of them |
 | **hookyard** | *only if tier 2 passes its gate (§4.4):* captured `prompt_submit` advisory payload fixtures per engine, per its own evidentiary convention | a claimed-advisory engine with no fixture is a claim, not a capability |
 | **`priors`** (separate package and binary, built from the hookyard repo) | `cmd/priors` and its own tree, with its own manifest, reached through hookyard's `exec` handler contract; it speaks the envelope as JSON like any third-party handler and imports no `internal/` package, so moving it to its own repo is moving files. `add` / `list` (`--flagged`) / `show` / `search` / `lint` / `index` / `import` / `touch` / `move` / `publish` / `attest` / `trust check` / `verify`; the verdict job (`priors verify`) reads the root-owned trust file and writes `/var/lib/priors` (§4.4); the host profile, both org lists, each store's id, path and remote URL, the work-name floor and the attestation allowlist from the root-owned trust file (§4.4), and the other keys from `config.toml`, per §4.2's config table; write-time redaction and §4.2's routing; v0 `rg` backend | the owner's decision 4: the router stays small and auditable, and the store keeps a schema cadence of its own; §4.4's fail-open contract lives here, and covers its `pre_tool` guards too, since the router cannot deny on handler error (§4.2) |
-| **nix-config** | install `priors` and its manifest, wiring `session_start` to `priors index` and `post_tool` to the `priors touch` usage logger (`fire_and_forget`, §4.6), and `prompt_submit` only if tier 2 passes its gate; clone the personal store on every host incl. `halo` and `mbp`, and the work store on work-profile hosts only, as full (not shallow, partial or blobless) clones (§4.2, §4.8); the trust file (§4.4) via `environment.etc` on every host, personal ones included: the trust-file keys of §4.2's config table and `trust_root` (a module option, default `owner-admin`), with the attestation allowlist in its own file, checked by `priors trust check` when the module builds the trust file, which fails the build on any entry that fails it, with an activation-time diff of the whole trust file plus the `priors` store path and the hookyard revision it was built from, and an activation poke of each store's trigger socket after any trust-file change; the `priors-verify` system account and a systemd template unit per store, deployed only where `trust_root = "separate"`, `priors-verify@<store id>` (service, timer and socket instance; the timer `OnActiveSec=0` plus `OnUnitActiveSec=15min` with `AccuracySec=1s`, never `OnUnitInactiveSec`; nix-darwin: one `launchd` daemon per store with `StartInterval=900` and `RunAtLoad`; deploying it is [#191](https://github.com/noamsto/hookyard/issues/191)), and `/var/lib/priors` (root-owned, mode 0755, each store dir `StateDirectory=priors/<store id>` owned by `priors-verify`, never a plain `StateDirectory=priors`; nix-darwin: by activation); a read-only credential per store, readable by `priors-verify` only, with the verdict job, the trust file's stores and these credentials limited to the stores the host's profile clones, so a personal host has no work mirror, verdict file or credential (§4.4), and §4.4's deployment requirement on owner-readable credentials (credentials without Administration), stated, not asserted; an evaluation-time assertion of §4.4's preconditions (no rootful `docker` group, no Nix trusted user, directly or through a group, no `NOPASSWD` sudo, rebuilds behind a human-typed root credential), which also covers §4.4's *Host classification* conditions when `separate` is declared (no `wheel`, `admin`, `libvirtd` or `input` group, no sudo rule at all), and on failure writes `trust_root = "owner-admin"` with an empty allowlist and warns; the secret scanner, `git`, `ssh` and `rg` pinned at build time (§4.2); the host-level include of the personal index in a Cursor-only rule file, never the shared instruction file Claude, Codex and Cursor all read, and no repo-level work include (§4.7); optional Obsidian `programs.obsidian.vaults` entries, one vault per store | one manifest, four engines — the pattern `programs.hookyard.manifests` already exists for; clone placement is the first of §4.2's two layers |
+| **nix-config** | install `priors` and its manifest, wiring `session_start` to `priors index` and `post_tool` to the `priors touch` usage logger (`fire_and_forget`, §4.6), and `prompt_submit` only if tier 2 passes its gate; clone the personal store on every host incl. `halo` and `mbp`, and the work store on work-profile hosts only, as full (not shallow, partial or blobless) clones (§4.2, §4.8); the trust file (§4.4) via `environment.etc` on every host, personal ones included: the trust-file keys of §4.2's config table and `trust_root` (a module option, default `owner-admin`), with the attestation allowlist in its own file, checked by `priors trust check` when the module builds the trust file, which fails the build on any entry that fails it, with an activation-time diff of the whole trust file plus the `priors` store path and the hookyard revision it was built from, and an activation poke of each store's trigger socket after any trust-file change; the `priors-verify` system account and a systemd template unit per store, deployed only where `trust_root = "separate"`, `priors-verify@<store id>` (service, timer and socket instance; the timer `OnActiveSec=0` plus `OnUnitActiveSec=15min` with `AccuracySec=1s`, never `OnUnitInactiveSec`; nix-darwin: one `launchd` daemon per store with `StartInterval=900` and `RunAtLoad`; deploying it is [#191](https://github.com/noamsto/hookyard/issues/191)), and `/var/lib/priors` (root-owned, mode 0755, each store dir `StateDirectory=priors/<store id>` owned by `priors-verify`, never a plain `StateDirectory=priors`; nix-darwin: by activation); a read-only credential per store, readable by `priors-verify` only, with the verdict job, the trust file's stores and these credentials limited to the stores the host's profile clones, so a personal host has no work mirror, verdict file or credential (§4.4), and §4.4's deployment requirement on owner-readable credentials (credentials without Administration), stated, not asserted; an evaluation-time assertion of §4.4's preconditions (no rootful `docker` group, no Nix trusted user, directly or through a group, no `NOPASSWD` sudo, rebuilds behind a human-typed root credential), which also covers §4.4's *Host classification* conditions when `separate` is declared (no root-capable group, no sudo or doas rule, no polkit admin identity, no root authorized key), and on failure writes `trust_root = "owner-admin"` with an empty allowlist and warns; the secret scanner, `git`, `ssh` and `rg` pinned at build time (§4.2); the host-level include of the personal index in a Cursor-only rule file, never the shared instruction file Claude, Codex and Cursor all read, and no repo-level work include (§4.7); optional Obsidian `programs.obsidian.vaults` entries, one vault per store | one manifest, four engines — the pattern `programs.hookyard.manifests` already exists for; clone placement is the first of §4.2's two layers |
 | **dispatcher** | `crew reap` runs `priors import` (§4.9), then distillation proposals (§4.3b); the judge consults `priors search` before choosing tier/engine/model | closes failure mode 2 — the judge currently decides from a static table while `ratings.jsonl` holds the evidence |
 | **nix-config** | worker MCP profile unchanged (zero servers) | memory must not be the reason a worker grows an MCP dependency (R1) |
 
@@ -2119,8 +2155,8 @@ flagged facts stops being optional.
 - **Owner-readable store credentials keep Administration.** §4.4's deployment
   requirement is unmet, so its residual (a) and (b) are open to agents. Revisit
   with an append-only remote or verdicts signed off-host.
-- **The owner adopts a FIDO2 key or a separate admin path.** Revisit rejected
-  option (c) for single-user admin hosts (§4.4).
+- **The owner adopts a FIDO2 key.** Revisit rejected option (c) for
+  single-user admin hosts (§4.4).
 - **A work fact is ever found in the personal store.** The write rule, or both
   of §4.2's layers, failed, and a leak cannot be recalled (R9). Stop writing and
   revisit §4.2 before anything else. The personal store's lint scans for
@@ -2220,9 +2256,12 @@ flagged facts stops being optional.
   store; `priors attest` and `--revoke` refuse there, naming the
   classification, before any fetch or signature, writing nothing; `priors
   verify` exits non-zero and writes no verdict file; the module with
-  `trust_root = "separate"` and a user in `wheel` (or with any sudo rule, or
+  `trust_root = "separate"` and a user in `wheel` (or with any sudo or doas
+  rule, a polkit admin identity, a key in root's `authorized_keys`, or
   trusted) writes `owner-admin`, an empty allowlist and a warning; a runtime
-  user in `wheel` or `admin` under a `separate` trust file reads off; every
+  process in `wheel`, `admin` (darwin) or `docker` under a `separate` trust
+  file reads off, its message naming the group; a trust file without the key
+  reports `trust_root absent`; every
   positive fixture above (anything expecting `reviewed`) uses a trust file
   with `trust_root = "separate"`;
   *key and evidence* (checks 4 and 5): an allowlist entry without
@@ -2511,10 +2550,13 @@ declares `trust_root = "separate"` (decision 8). It is not a v0 blocker
    can take root and mint a `reviewed` label; attestation is off there, and
    on only where the trust file declares `trust_root = "separate"`. Rejected:
    (b) opt-in session trust with a stated residual, a tripwire dressed as a
-   wall; (c) an out-of-band trust root (hardware-key-signed allowlist, or an
-   admin credential outside tmux), since the owner holds no FIDO2 key and
-   runs no separate admin path today. Revisit (c) if the owner adopts a
-   FIDO2 key (§6).
+   wall; (c) making a single-user admin host trustworthy by an out-of-band
+   root (a hardware-key-signed allowlist replacing the root-owned trust
+   file, or polkit or an admin credential outside tmux on that same host),
+   since there the owner still types root into sessions agents reach, and
+   holds no FIDO2 key. A separate admin path on a genuinely separate host is
+   not (c); it is what `separate` declares, not deployed on the owner's hosts
+   today. Revisit (c) if the owner adopts a FIDO2 key (§6).
 
 ---
 
