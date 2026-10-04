@@ -153,11 +153,15 @@ func Resolve(ctx context.Context, cwd string, cfg config.Config, r Resolver) Ses
 	var all, originAll []remote
 	var origin remote
 	hasOrigin, opaque := false, false
-	raws, err := rawURLs(ctx, dir)
+	names, _ := gitOut(ctx, dir, "remote")
+	raws, err := rawURLs(ctx, dir, strings.Fields(names))
 	if err != nil {
 		opaque = true
 	}
-	names, _ := gitOut(ctx, dir, "remote")
+	rewrites, err := configGetRegexp(ctx, dir, `^url\..*\.(insteadof|pushinsteadof)$`)
+	if err != nil {
+		opaque = true
+	}
 	for name := range strings.FieldsSeq(names) {
 		fetch, err := gitOut(ctx, dir, "remote", "get-url", "--all", name)
 		if err != nil {
@@ -177,11 +181,10 @@ func Resolve(ctx context.Context, cwd string, cfg config.Config, r Resolver) Ses
 			rem, err := parse(raw)
 			if err != nil {
 				// A raw value is what the repo's own config names, so one priors
-				// cannot read could hide a work org behind an insteadOf rewrite.
-				// A colon-less value is a local path to git. Other unparsable
-				// rewritten URLs name no org they could be matched by.
+				// cannot read could hide a work org behind a rewrite. Other
+				// unparsable rewritten URLs name no org they could be matched by.
 				isRaw := i >= rawStart
-				if (i == 0 || isRaw && strings.Contains(raw, ":")) && !isLocalPath(raw) {
+				if i == 0 && !isLocalPath(raw) || isRaw && !localRaw(raw, rewrites) {
 					opaque = true
 				}
 				continue
@@ -222,9 +225,42 @@ func Resolve(ctx context.Context, cwd string, cfg config.Config, r Resolver) Ses
 }
 
 // rawURLs returns every remote.<name>.url and .pushurl value as configured,
-// before insteadOf rewriting, keyed by remote name.
-func rawURLs(ctx context.Context, dir string) (map[string][]string, error) {
-	out, err := gitOut(ctx, dir, "config", "-z", "--get-regexp", `^remote\..*\.(url|pushurl)$`)
+// before insteadOf rewriting, keyed by remote name. A remote with no url is
+// fetched from its name, so the name stands in as its raw URL.
+func rawURLs(ctx context.Context, dir string, names []string) (map[string][]string, error) {
+	vars, err := configGetRegexp(ctx, dir, `^remote\..*\.(url|pushurl)$`)
+	if err != nil {
+		return nil, err
+	}
+	raws := map[string][]string{}
+	hasURL := map[string]bool{}
+	for _, v := range vars {
+		rest, ok := strings.CutPrefix(v.key, "remote.")
+		if !ok {
+			continue
+		}
+		// A remote name may contain dots; the variable follows the last one.
+		dot := strings.LastIndex(rest, ".")
+		name := rest[:dot]
+		raws[name] = append(raws[name], v.value)
+		if rest[dot+1:] == "url" {
+			hasURL[name] = true
+		}
+	}
+	for _, name := range names {
+		if !hasURL[name] {
+			raws[name] = append(raws[name], name)
+		}
+	}
+	return raws, nil
+}
+
+type configVar struct{ key, value string }
+
+// configGetRegexp returns every config variable matching pattern. No match is
+// not an error.
+func configGetRegexp(ctx context.Context, dir, pattern string) ([]configVar, error) {
+	out, err := gitOut(ctx, dir, "config", "-z", "--get-regexp", pattern)
 	if err != nil {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) && exit.ExitCode() == 1 {
@@ -232,18 +268,24 @@ func rawURLs(ctx context.Context, dir string) (map[string][]string, error) {
 		}
 		return nil, err
 	}
-	raws := map[string][]string{}
-	for rec := range strings.SplitSeq(out, "\x00") {
+	var vars []configVar
+	// Each record ends in NUL; splitting on it would add an empty record, read as
+	// an empty prefix that matches every URL.
+	for rec := range strings.SplitSeq(strings.TrimSuffix(out, "\x00"), "\x00") {
 		key, value, _ := strings.Cut(rec, "\n")
-		rest, ok := strings.CutPrefix(key, "remote.")
-		if !ok {
-			continue
-		}
-		// A remote name may contain dots; the variable follows the last one.
-		name := rest[:strings.LastIndex(rest, ".")]
-		raws[name] = append(raws[name], value)
+		vars = append(vars, configVar{key, value})
 	}
-	return raws, nil
+	return vars, nil
+}
+
+// localRaw reports whether an unparsable raw URL is a local path git uses as
+// written. git applies insteadOf and pushInsteadOf prefixes to any value, so a
+// matching prefix means user config chose the URL git uses.
+func localRaw(raw string, rewrites []configVar) bool {
+	if slices.ContainsFunc(rewrites, func(v configVar) bool { return strings.HasPrefix(raw, v.value) }) {
+		return false
+	}
+	return isLocalPath(raw) || !strings.Contains(raw, ":")
 }
 
 // isLocalPath reports whether an unparsable remote URL is plainly a path on

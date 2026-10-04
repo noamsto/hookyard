@@ -180,6 +180,7 @@ func TestResolveRewrites(t *testing.T) {
 		pushInst  = "pushInsteadOf"
 	)
 	type rewrite struct{ base, kind, prefix string }
+	shadowFyx := []rewrite{{"https://github.com/factify-inc/", insteadOf, "fy"}, {"https://github.com/noamsto/x", insteadOf, "fyx"}}
 	tests := []struct {
 		name     string
 		profile  string
@@ -205,6 +206,17 @@ func TestResolveRewrites(t *testing.T) {
 		{"dotted remote name raw work hidden by insteadOf", "personal", noamsto, []rewrite{{"https://github.com/noamsto/", insteadOf, "https://github.com/factify-inc/"}}, [][]string{{"remote", "add", "up.stream", "https://github.com/factify-inc/y"}}, ClassWork, "x"},
 		// Intended: the raw gh:noamsto/x names host gh, on no list, so origin fails closed.
 		{"personal shorthand prefix is unresolvable on work host", "work", "gh:noamsto/x", []rewrite{{"https://github.com/", insteadOf, "gh:"}}, nil, ClassUnresolvable, "x"},
+		{"colon-less raw shadowed by longer rewrite", "personal", "fyx", shadowFyx, nil, ClassUnresolvable, "x"},
+		{"local-path raw shadowed by longer rewrite", "personal", "/srv/fy/x", []rewrite{{"https://github.com/factify-inc/", insteadOf, "/srv/fy/"}, {"https://github.com/noamsto/x", insteadOf, "/srv/fy/x"}}, nil, ClassUnresolvable, "x"},
+		{"local-path raw shadowed by pushInsteadOf only", "personal", "/srv/fy/x", []rewrite{{"https://github.com/factify-inc/", pushInst, "/srv/fy/"}, {"https://github.com/noamsto/x", pushInst, "/srv/fy/x"}}, nil, ClassUnresolvable, "clone"},
+		{"colon-less pushurl shadowed by longer rewrite", "personal", noamsto, shadowFyx, [][]string{{"config", "remote.origin.pushurl", "fyx"}}, ClassUnresolvable, "x"},
+		{"url-less remote name rewritten", "personal", noamsto, shadowFyx, [][]string{{"config", "remote.fyx.fetch", "+refs/heads/*:refs/remotes/fyx/*"}}, ClassUnresolvable, "x"},
+		{"colon-less raw shadowed by includeIf rewrite", "personal", "fyx", nil, [][]string{
+			{"config", "--file", ".git/rw.inc", "url.https://github.com/factify-inc/.insteadOf", "fy"},
+			{"config", "--file", ".git/rw.inc", "url.https://github.com/noamsto/x.insteadOf", "fyx"},
+			{"config", "includeIf.gitdir:**/clone/.path", "rw.inc"},
+		}, ClassUnresolvable, "x"},
+		{"no_push pushurl with unmatched rewrite", "personal", noamsto, []rewrite{{"https://github.com/", insteadOf, "gh:"}}, [][]string{{"config", "remote.origin.pushurl", "no_push"}}, ClassPersonal, "x"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
