@@ -795,9 +795,11 @@ distillation) and again as each store's required check on its remote:
    any word after it. A simple command's words are expanded the way the shell
    would expand them: quote removal, backslashes, `$'…'`, `$""`, brace
    expansion and `${X:-…}` defaults, a variable being read both unset and as
-   a placeholder, so `$'\x67h'`, `g$""h` and `{gh,issue,view,1}` all read as
+   a placeholder (the shell's own `IFS`, `PATH`, … always set), so
+   `$'\x67h'`, `g$""h`, `{gh,issue,view,1}` and `gh${IFS}issue` all read as
    `gh`. The command word is found by skipping assignments, flags, numeric
-   arguments and wrappers (`sudo`, `env`, `timeout`, …). If it is an inert
+   arguments and wrappers (`sudo`, `env`, `timeout`, …), and is read without
+   a leading `!` or `=` (a git alias `!gh …`, zsh's `=gh`). If it is an inert
    search or print command (`grep`, `egrep`, `fgrep`, `rg`, `which`,
    `whereis`, `type`), the segment is clean; otherwise every listed name from
    the command word on is judged, so an unlisted wrapper is seen through and
@@ -806,15 +808,19 @@ distillation) and again as each store's required check on its remote:
    groups (`auth`, `config`, …) are exempt, since they print only what the
    agent itself caused.
 
-   Every word, assignment value and heredoc, and the value after a word's
-   first `=`, is also re-read as a script, recursively, so a script quoted,
-   glued to `--opt=` or `KEY=`, or nested in `sh -c` is judged too. printf /
-   `echo -e` escapes are decoded first, since a script printed into a shell
-   runs decoded. A listed name glued to an option (`--split-string=gh`,
-   `-Sgh`) is also judged as the command the following words continue. A
-   command the parser cannot read or expand falls back to a token scan with
-   quotes stripped and no inert exemption. Nesting is bounded (depth 8, 1 MiB
-   per call), and past the bound the command flags.
+   Every word, assignment value and heredoc, the value after a word's first
+   `=`, and a command's arguments joined back together (as `eval`, `ssh host`
+   or `echo … | sh` join them) are also re-read as a script, recursively, so
+   a script quoted, glued to `--opt=` or `KEY=`, or nested in `sh -c` is
+   judged too. printf / `echo -e` escapes are decoded first, since a script
+   printed into a shell runs decoded. A listed name glued to an option or a
+   prefix assignment (`--split-string=gh`, `-Sgh`, `GIT_PAGER=curl`) is also
+   judged as the command the following words continue. Statements before a
+   syntax error are still judged; the whole text then also goes to a token
+   scan with quotes stripped and no inert exemption, and so does a word the
+   parser cannot expand. The work is bounded (re-read depth 8, 1 MiB of
+   parsed and expanded text, 256 KiB per text, bracket nesting 256, brace
+   expansion estimated before it runs), and past a bound the command flags.
 
    It misses what the command text does not show: content arriving through
    `git fetch` or `git pull` without a URL; aliases, shell functions and
@@ -822,16 +828,19 @@ distillation) and again as each store's required check on its remote:
    client reading the URL from a variable). It misses a command word the
    parser cannot resolve: variable indirection (`$CMD`, `G=gh; $G issue view
    1`), a spelling built by command substitution (`$(printf g)h`), `eval` of
-   a variable, and globs (`/usr/bin/g[h]`), since globbing is off. It misses
-   a script another program transforms or assembles before it reaches a
-   shell: `base64 -d | sh`, `rev`, `tr` or `xxd -r` pipes, and a name split
+   a variable, a spelling that depends on a variable's actual value
+   (`${0/bas/g}`), and globs (`/usr/bin/g[h]`), since globbing is off. It
+   misses a script another program transforms or assembles before it reaches
+   a shell: `base64 -d | sh`, `rev`, `tr` or `xxd -r` pipes, and a name split
    across printf arguments. An inert command hides a plain listed name in its
    own arguments, so an unquoted `rg --pre curl …` is a miss (a quoted or
-   glued `--pre` script is re-read as a script). Syntax the parser rejects
-   (zsh- or fish-only forms) falls to the token scan, and where it and bash
-   split words differently a gap remains. A lost ingest write in a session
-   already seen from an earlier call also fails open. On Codex the `pre_tool`
-   shape is fixture-backed but the `post_tool` one is assumed.
+   glued `--pre` script is re-read as a script). Statements after syntax the
+   parser rejects (zsh- or fish-only forms, or bash forms it does not
+   support) get only the token scan, which does not decode `$'…'`, and where
+   the parser and bash split words differently a gap remains. A lost ingest
+   write in a session already seen from an earlier call also fails open. On
+   Codex the `pre_tool` shape is fixture-backed but the `post_tool` one is
+   assumed.
 
    It over-flags any URL anywhere in the command (a commit message, a PR
    body), a listed name in a quoted string (`git commit -m "curl fails"`), a
@@ -850,7 +859,8 @@ distillation) and again as each store's required check on its remote:
    name glued to `--opt=`, `KEY=` or a fused short option (`--title=curl`,
    `GIT_PAGER=curl`, `rsync -avxh`, whose `xh` is a fetcher), a command the
    parser cannot read, whose token scan flags a listed name even as an inert
-   command's argument, a command nested past the bound, and a shell call
+   command's argument, a command past a bound (a heredoc of a few hundred
+   KiB), a word starting `!` or `=` (`!gh`), and a shell call
    denied or rejected after `pre_tool` (a guard's deny, a declined
    permission prompt): the marker is written before the decision.
 

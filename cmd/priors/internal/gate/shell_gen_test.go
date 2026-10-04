@@ -24,13 +24,15 @@ type quoting struct {
 	quote func(script string) string
 }
 
-// position puts a script where it runs. A top-level position takes the script
+// position puts a script where it runs. An unquoted position takes the script
 // itself, so it has no quoting axis; every other one takes it as one shell word.
 type position struct {
 	name   string
 	quoted bool
 	// runs marks the positions the bash oracle can execute with stubs alone.
-	runs  bool
+	runs bool
+	// inner leads the script inside its quoting.
+	inner string
 	place func(w string) string
 }
 
@@ -101,20 +103,24 @@ func prefixed(prefix string) func(string) string {
 }
 
 var positions = []position{
-	{"top-level", false, true, func(s string) string { return s }},
-	{"bash -c", true, true, func(w string) string { return "bash -c " + w }},
-	{"sh -c", true, true, func(w string) string { return "sh -c " + w }},
-	{"eval", true, true, func(w string) string { return "eval " + w }},
-	{"printf | sh", true, true, func(w string) string { return "printf '%s\\n' " + w + " | sh" }},
-	{"ssh -o ProxyCommand=", true, false, func(w string) string { return "ssh -o ProxyCommand=" + w + " host" }},
-	{"ssh -oProxyCommand=", true, false, func(w string) string { return "ssh -oProxyCommand=" + w + " host" }},
-	{"git -c core.pager=", true, false, func(w string) string { return "git -c core.pager=" + w + " log" }},
-	{"flock --command=", true, false, func(w string) string { return "flock --command=" + w + " /tmp/l" }},
-	{"rsync --rsh=", true, false, func(w string) string { return "rsync --rsh=" + w + " a b" }},
-	{"GIT_PAGER=", true, false, func(w string) string { return "GIT_PAGER=" + w + " git log" }},
-	{"env -S", true, false, prefixed("env -S ")},
-	{"env --split-string=", true, false, prefixed("env --split-string=")},
-	{"rg --pre", true, false, func(w string) string { return "rg --pre " + w + " ." }},
+	{"top-level", false, true, "", func(s string) string { return s }},
+	{"bash -c", true, true, "", func(w string) string { return "bash -c " + w }},
+	{"sh -c", true, true, "", func(w string) string { return "sh -c " + w }},
+	{"eval", true, true, "", func(w string) string { return "eval " + w }},
+	{"printf | sh", true, true, "", func(w string) string { return "printf '%s\\n' " + w + " | sh" }},
+	{"ssh -o ProxyCommand=", true, false, "", func(w string) string { return "ssh -o ProxyCommand=" + w + " host" }},
+	{"ssh -oProxyCommand=", true, false, "", func(w string) string { return "ssh -oProxyCommand=" + w + " host" }},
+	{"git -c core.pager=", true, false, "", func(w string) string { return "git -c core.pager=" + w + " log" }},
+	{"flock --command=", true, false, "", func(w string) string { return "flock --command=" + w + " /tmp/l" }},
+	{"rsync --rsh=", true, false, "", func(w string) string { return "rsync --rsh=" + w + " a b" }},
+	{"GIT_PAGER=", true, false, "", func(w string) string { return "GIT_PAGER=" + w + " git log" }},
+	{"env -S", true, false, "", prefixed("env -S ")},
+	{"env --split-string=", true, false, "", prefixed("env --split-string=")},
+	{"rg --pre", true, false, "", func(w string) string { return "rg --pre " + w + " ." }},
+	{"git -c alias.v=!", true, false, "!", func(w string) string { return "git -c alias.v=" + w + " v" }},
+	{"eval words", false, true, "", prefixed("eval ")},
+	{"echo words | sh", false, true, "", func(s string) string { return "echo " + s + " | sh" }},
+	{"ssh host words", false, false, "", prefixed("ssh host ")},
 }
 
 // variants lists every way to place a script, restricted to the positions the
@@ -130,7 +136,7 @@ func variants(runsOnly bool) []variant {
 			continue
 		}
 		for _, q := range quotings {
-			out = append(out, variant{p.name + " / " + q.name, func(s string) string { return p.place(q.quote(s)) }})
+			out = append(out, variant{p.name + " / " + q.name, func(s string) string { return p.place(q.quote(p.inner + s)) }})
 		}
 	}
 	return out

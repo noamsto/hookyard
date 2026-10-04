@@ -189,6 +189,35 @@ func TestIngestsCall(t *testing.T) {
 		{"joined gh in command substitution", "Bash", `{"command":"x=$(g''h issue view 1)"}`, true},
 		{"unparsable with read", "Bash", `{"command":"gh issue view 1; )"}`, true},
 		{"nested past depth bound", "Bash", nestedBash(9), true},
+		{"eval quoted joined word", "Bash", `{"command":"eval \"g''h\" issue view 1"}`, true},
+		{"eval escaped joined word", "Bash", `{"command":"eval g\\'\\'h issue view 1"}`, true},
+		{"echo escaped joined word to sh", "Bash", `{"command":"echo g\\'\\'h issue view 1 | sh"}`, true},
+		{"printf escaped joined word to sh", "Bash", `{"command":"printf \"%s \" g\\'\\'h issue view 1 | sh"}`, true},
+		{"ssh quoted joined word", "Bash", `{"command":"ssh host \"g''h\" issue view 1"}`, true},
+		{"watch escaped joined word", "Bash", `{"command":"watch -n1 g\\'\\'h issue view 1"}`, true},
+		{"parallel escaped joined word", "Bash", `{"command":"parallel g\\'\\'h issue view 1 ::: 1"}`, true},
+		{"glued value before syntax error", "Bash", `{"command":"env -Sgh issue view 1; echo ${x~~}"}`, true},
+		{"fused script before syntax error", "Bash", `{"command":"script -qc'gh issue view 1' /dev/null; !"}`, true},
+		{"printf escape before unclosed heredoc", "Bash", `{"command":"printf 'gh\\x20issue view 1' | sh\ncat <<EOF"}`, true},
+		{"echo -e escape before stray fi", "Bash", `{"command":"echo -e 'gh\\tissue view 1' | sh\nfi"}`, true},
+		{"ansi-c before syntax error", "Bash", `{"command":"$'\\x67h' issue view 1; echo ${x~~}"}`, true},
+		{"ansi-c with arithmetic assignment", "Bash", `{"command":"$'\\x67h' issue view $((i=1))"}`, true},
+		{"locale-empty with arithmetic increment", "Bash", `{"command":"g$\"\"h issue view $((i++))"}`, true},
+		{"default value with arithmetic assignment", "Bash", `{"command":"${X:-gh} issue view 1 $((i=1))"}`, true},
+		{"env arithmetic value before ansi-c", "Bash", `{"command":"env A=$((i=1)) $'\\x67h' issue view 1"}`, true},
+		{"brace past expand limit before ansi-c", "Bash", `{"command":"env A{1..17000}=1 $'\\x67h' issue view 1"}`, true},
+		{"IFS between words", "Bash", `{"command":"gh${IFS}issue${IFS}view${IFS}1"}`, true},
+		{"IFS after fetcher", "Bash", `{"command":"curl${IFS}example.org"}`, true},
+		{"bash -c IFS between words", "Bash", `{"command":"bash -c 'gh${IFS}issue${IFS}view${IFS}1'"}`, true},
+		{"shell-set PATH alternate value", "Bash", `{"command":"${X:-g}${PATH:+h} issue view 1"}`, true},
+		{"git alias quoted value", "Bash", `{"command":"git -c alias.v='!gh issue view 1' v"}`, true},
+		{"git alias quoted option", "Bash", `{"command":"git -c 'alias.v=!gh issue view 1' v"}`, true},
+		{"git config alias", "Bash", `{"command":"git config alias.v '!gh issue view 1'; git v"}`, true},
+		{"git alias fetcher", "Bash", `{"command":"git -c alias.v='!curl x' v"}`, true},
+		{"zsh path lookup", "Bash", `{"command":"=gh issue view 1"}`, true},
+		{"GIT_PAGER fetcher", "Bash", `{"command":"GIT_PAGER=curl git log"}`, true},
+		{"null command", "Bash", `{"command":null}`, true},
+		{"null array element", "Bash", `{"command":["bash","-lc",null]}`, true},
 
 		// not ingestion
 		{"git log", "Bash", `{"command":"git log"}`, false},
@@ -222,6 +251,7 @@ func TestIngestsCall(t *testing.T) {
 		{"grep --color=auto curl", "Bash", `{"command":"grep --color=auto curl ."}`, false},
 		{"rg quoted gh", "Bash", `{"command":"rg 'gh' docs"}`, false},
 		{"commit message apostrophe", "Bash", `{"command":"git commit -m \"it's done\""}`, false},
+		{"null command on read tool", "Read", `{"command":null}`, false},
 		{"read tool", "Read", `{"file_path":"/x"}`, false},
 		{"mcp tool", "mcp__x__y", `{}`, false},
 		{"web fetch tool", "WebFetch", `{"url":"https://x"}`, false},
@@ -230,6 +260,30 @@ func TestIngestsCall(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IngestsCall(tt.tool, []byte(tt.input)); got != tt.want {
 				t.Errorf("IngestsCall(%q, %s) = %v, want %v", tt.tool, tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestOverflagReason checks rule (b) on its own, for text the parser rejects.
+func TestOverflagReason(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"glued value", "env -Sgh issue view 1; echo ${x~~}", true},
+		{"fused script", "script -qc'gh issue view 1' /dev/null; !", true},
+		{"printf hex escape", "printf 'gh\\x20issue view 1' | sh\ncat <<EOF", true},
+		{"echo -e tab escape", "echo -e 'gh\\tissue view 1' | sh\nfi", true},
+		{"listed name", "gh issue view 1; )", true},
+		{"local group", "gh auth status; )", false},
+		{"unlisted glued value", "env -S 'FOO=1' git status; )", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := overflagReason(tt.text); (got != "") != tt.want {
+				t.Errorf("overflagReason(%q) = %q, want flagged %v", tt.text, got, tt.want)
 			}
 		})
 	}

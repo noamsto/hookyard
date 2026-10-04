@@ -92,15 +92,19 @@ empty per-session marker under
 or not. A session the record covers but the watcher never saw, or whose
 markers cannot be read, flags `provenance:no-ingest-record`. The command is
 parsed as bash and every simple command in it is judged on its expanded
-words (quotes, `$'…'`, brace expansion and `${X:-…}` defaults resolved);
-every word is also re-read as a script, so a script quoted, glued
-to `--opt=` or nested in `sh -c` is judged too. A command that does not parse
-falls back to a token scan, and one nested past the bound (depth 8, 1 MiB)
+words (quotes, `$'…'`, brace expansion, `${X:-…}` defaults and `${IFS}`
+resolved); every word, and a command's arguments joined back together, is
+also re-read as a script, so a script quoted, glued to `--opt=` or nested in
+`sh -c` is judged too. Statements before a syntax error are still judged, and
+the text then also gets a token scan; a command past a bound (re-read depth
+8, 1 MiB of parsed and expanded text, 256 KiB per text, bracket nesting 256)
 flags. It misses what the command text does not show (`git fetch` or `git
 pull` content without a URL; aliases, shell functions, scripts on disk; an
-unlisted fetcher with no URL literal), a command word built at run time
-(`$CMD`, `$(printf g)h`, `eval "$X"`, `/usr/bin/g[h]`), a script another program
-decodes before a shell runs it (`base64 -d | sh`, `rev`, `xxd -r`), an
+unlisted fetcher with no URL literal), a command word built at run time or
+from a variable's value (`$CMD`, `$(printf g)h`, `eval "$X"`, `${0/bas/g}`,
+`/usr/bin/g[h]`), a script another program decodes before a shell runs it
+(`base64 -d | sh`, `rev`, `xxd -r`), statements after syntax the parser
+rejects beyond what the token scan sees, an
 unquoted `rg --pre curl …` (inert search commands such as `grep` and `rg`
 hide a listed name in their arguments, and `--pre` runs a preprocessor), a
 lost ingest write in an already-seen session, and, on Codex, any `post_tool`
@@ -114,8 +118,9 @@ with no group anywhere but as the first word of its command (`xargs gh`,
 `sudo gh`: its arguments may come from stdin or a placeholder), a listed name
 later in a `gh` / `glab` write or local segment (`gh pr comment 1 --body
 curl`), a listed name glued to `--opt=`, `KEY=` or a fused short option
-(`--title=curl`, `rsync -avxh`, whose `xh` is a fetcher), a command the
-parser cannot read, a printf / echo escape inside a quoted message (`git
+(`--title=curl`, `GIT_PAGER=curl`, `rsync -avxh`, whose `xh` is a fetcher),
+a command the parser cannot read, a command past a bound, a word starting `!`
+or `=`, a printf / echo escape inside a quoted message (`git
 commit -m 'gh auth status\nand gh issue view'`), `gh -R o/r pr create` and a
 shell call denied or rejected after `pre_tool` (a guard's deny, a declined
 permission prompt): the marker is written before the decision.
