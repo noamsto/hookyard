@@ -1008,7 +1008,8 @@ for the owner to choose between: attestation off on such hosts; an opt-in
 session-trust mode whose residual is stated; or a trust root outside the
 owner's session, such as an allowlist signed by a hardware key, or a root
 credential entered outside the owner's terminal (polkit outside tmux, a
-separate admin account).
+separate admin account). Tracked in
+[#171](https://github.com/noamsto/hookyard/issues/171).
 
 **Unwritable means no agent write takes effect without a human's root act.**
 The trust file's source lives in nix-config, and the `priors` binary, with
