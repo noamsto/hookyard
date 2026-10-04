@@ -543,7 +543,7 @@ func TestAddQuarantinesWorkRepoOnPersonalHost(t *testing.T) {
 }
 
 // TestSymlinkedStateDirIsOneDir: the marker handler and the write path both
-// land under the symlink's target, never under the link.
+// land under the symlink's target.
 func TestSymlinkedStateDirIsOneDir(t *testing.T) {
 	sb := newSandbox(t, "personal")
 	real := filepath.Join(sb.dir, "real-state")
