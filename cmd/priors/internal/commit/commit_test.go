@@ -458,6 +458,24 @@ func TestOnlyPathsOutsideTheFactLayoutIsNothingToDo(t *testing.T) {
 	}
 }
 
+func TestLeftNote(t *testing.T) {
+	const p = "left uncommitted, not fact files: "
+	for _, tc := range []struct {
+		left []string
+		want string
+	}{
+		{nil, ""},
+		{[]string{"a"}, p + "a"},
+		{[]string{"a", "b", "c"}, p + "a, b, c"},
+		{[]string{"a", "b", "c", "d"}, p + "a, b, c and 1 more"},
+		{[]string{"a", "b", "c", "d", "e"}, p + "a, b, c and 2 more"},
+	} {
+		if got := leftNote(tc.left); got != tc.want {
+			t.Errorf("leftNote(%v) = %q, want %q", tc.left, got, tc.want)
+		}
+	}
+}
+
 func TestRefusesIgnoredFactWalkWouldIndex(t *testing.T) {
 	fx := setup(t)
 	before := head(t, fx.dir())
