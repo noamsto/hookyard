@@ -283,6 +283,7 @@ async function check2(page, env) {
 }
 
 async function clickNode(page, col, name, modifiers = 0) {
+  await page.waitFor(`document.getElementById("flow-body").dataset.settling !== "1"`, 6000, "the previous click's reflow to settle");
   const p = await page.evaluate(`__e2e.nodePoint(${JSON.stringify(col)}, ${JSON.stringify(name)})`);
   assert(p?.ok, `${col} ${name} not hit-testable: ` + JSON.stringify(p));
   if (modifiers & MOD.shift) await page.keyDown(KEYS.shift, MOD.shift);
@@ -1192,6 +1193,7 @@ const CHECKS = [
   { n: 22, title: "a fan-out event's flash animates its gate, not the rule that follows neither gate edge", fn: check22, fresh: true },
   { n: 23, title: "bridge trail length stays continuous (no collapse below 50%) across a leg boundary", fn: check23, fresh: true },
   { n: 24, title: "an empty filtered flow graph keeps every column header inside the panel", fn: check24, fresh: true },
+  { n: 25, title: "a click at pre-reflow coordinates, just after a filter's reflow, selects nothing", fn: check25, fresh: true },
 ];
 
 // A press released outside the body, below the drag threshold, must end the
@@ -1511,4 +1513,40 @@ async function check24(page, env) {
   const over = r.heads.filter((h) => h > r.bodyRight + 0.5);
   assert(over.length === 0, `column header right edges ${JSON.stringify(r.heads)} pass the #flow-body right edge ${r.bodyRight}`);
   return [`header right edges ${JSON.stringify(r.heads.map(Math.round))} <= #flow-body right edge ${Math.round(r.bodyRight)}`];
+}
+
+// A node click filters and refetches; the pruned Sankey repacks. A second
+// click aimed with coordinates read before that reflow must not act on
+// whichever node now sits there.
+async function check25(page, env) {
+  await setViewport(page, 1600, 1000);
+  await openFlow(page, env.base);
+  await sleep(500);
+  const s0 = await page.evaluate("__e2e.state()");
+  const stale = await page.evaluate(`__e2e.boxes()
+    .filter((b) => !(b.col === "engine" && b.name === "codex"))
+    .map((b) => ({ col: b.col, name: b.name, x: (b.left + b.right) / 2 - scrollX, y: (b.top + b.bottom) / 2 - scrollY }))`);
+
+  await clickNode(page, "engine", "codex");
+  await page.waitFor(`__e2e.state().gen > ${s0.gen}`, 5000, "the filtered reflow to be drawn");
+
+  // A point from before the reflow that now hits a different, drawn node.
+  const moved = await page.evaluate(`(() => {
+    const stale = ${JSON.stringify(stale)};
+    for (const p of stale) {
+      const el = document.elementFromPoint(p.x, p.y)?.closest("[data-col]");
+      if (el && (el.dataset.col !== p.col || el.dataset.name !== p.name) && !el.classList.contains("k-pseudo")) {
+        return { x: p.x, y: p.y, was: p.col + ":" + p.name, now: el.dataset.col + ":" + el.dataset.name };
+      }
+    }
+    return null;
+  })()`);
+  assert(await page.evaluate('document.getElementById("flow-body").dataset.settling === "1"'), "harness too slow: the settle window closed before the stale click");
+  assert(moved, "no pre-reflow node position now hits a different node: the repro has nothing to click by mistake");
+  await page.click(moved.x, moved.y);
+  await sleep(400);
+  const got = await page.evaluate(FILTER_STATE);
+  assert(JSON.stringify(got.app) === JSON.stringify(["codex"]) && got.chips.length === 1,
+    `the stale click (${moved.was} before the reflow, ${moved.now} after) changed the filter: ${JSON.stringify(got)}`);
+  return [`click codex, then at once click ${moved.was}'s old spot, which now holds ${moved.now}: filter stays ${JSON.stringify(got.app)}`];
 }

@@ -3,7 +3,8 @@
 // is in progress) or the panel's size changes; hover, tooltips, clicks and
 // pulses all read the frame that is drawn.
 
-import { activeFilters, toggleFilter } from "../bridge.ts";
+import { activeFilters, filterParams, toggleFilter } from "../bridge.ts";
+import { SETTLE_MAX_MS, SETTLE_MS } from "../constants.ts";
 import type { Frame, FlowController } from "../model/controller.ts";
 import { splitEdgeKey, splitKey } from "../model/keys.ts";
 import { bySeverity, isLoud, knownOutcome } from "../model/snapshot.ts";
@@ -67,6 +68,9 @@ export class FlowView {
   private width = 0;
   private activeDots = -1;
   private resizeRaf = 0;
+  // Set by a filter click until its reload is drawn (+ SETTLE_MS): the nodes
+  // are about to move, so a click then lands on whatever moved under it.
+  private settling: { timer: number; drawn: boolean } | null = null;
   // The user's view of the scene. While `fitted` it is recomputed on every
   // layout; once they zoom or pan it is kept (and only clamped).
   private view: View = { k: 1, tx: 0, ty: 0 };
@@ -216,6 +220,8 @@ export class FlowView {
     d.dropped = String(c.dropped());
     d.layoutGen = String(c.layoutGen());
     d.pendingLayout = c.pendingLayout() ? "1" : "0";
+    this.advanceSettling();
+    d.settling = this.settling ? "1" : "0";
 
     if (!c.isVisible() || !c.isLive()) this.pulses.cancel();
     if (!c.isVisible()) return;
@@ -872,6 +878,7 @@ export class FlowView {
   }
 
   private click(key: string, ev: MouseEvent): void {
+    if (this.settling) return;
     const [col, name] = splitKey(key);
     if (col === "group") {
       this.c.toggleGroup(key);
@@ -879,6 +886,32 @@ export class FlowView {
     }
     toggleFilter(col, name, ev.shiftKey || ev.ctrlKey || ev.metaKey);
     this.markSelectedOptimistically(col);
+    this.beginSettling();
+  }
+
+  private beginSettling(): void {
+    this.endSettling();
+    this.body.classList.add("settling");
+    this.body.dataset.settling = "1";
+    this.settling = { timer: window.setTimeout(() => this.endSettling(), SETTLE_MAX_MS), drawn: false };
+  }
+
+  // Once the click's reload has finished and been drawn, the new layout gets
+  // SETTLE_MS to be seen before clicks act on it.
+  private advanceSettling(): void {
+    const s = this.settling;
+    if (!s || s.drawn || this.c.loadedFor() !== filterParams().toString() || this.c.pendingLayout()) return;
+    s.drawn = true;
+    window.clearTimeout(s.timer);
+    s.timer = window.setTimeout(() => this.endSettling(), SETTLE_MS);
+  }
+
+  private endSettling(): void {
+    if (!this.settling) return;
+    window.clearTimeout(this.settling.timer);
+    this.settling = null;
+    this.body.classList.remove("settling");
+    this.body.dataset.settling = "0";
   }
 
   // markSelectedOptimistically mirrors what render() will show once the
