@@ -772,7 +772,8 @@ distillation) and again as each store's required check on its remote:
    It misses what the command text does not show: content arriving through
    `git fetch` or `git pull` without a URL; aliases, shell functions, scripts,
    `eval` and variable indirection (`$CMD`); a command word quoted or escaped
-   by quoting (`"gh" issue view`); and an unlisted fetcher with no URL literal
+   by quoting, or a quoted group (`"gh" issue view`, `gh "issue" view`,
+   `gh -R "$REPO" pr view`); and an unlisted fetcher with no URL literal
    (a language client reading the URL from a variable). Inert commands hide a
    listed name in their own arguments, and `rg --pre curl …` runs a
    preprocessor, so an unquoted one is a miss (a quoted `--pre 'gh …'` still
@@ -783,12 +784,13 @@ distillation) and again as each store's required check on its remote:
    message, a PR body), a listed name at the start of a quoted string (`git
    commit -m "curl fails"`), a listed name as an argument of any non-inert
    command (`git log --grep curl`, `man curl`), `echo gh issue view` (echo is
-   not inert, since piped into a shell it runs), `sudo -u bob grep curl`,
-   where the option value `bob` is taken for the command word, a path
-   argument whose last element is a listed name (`go test ./internal/http`),
-   since every word is matched by its last path element, `gh` / `glab` with no
-   group anywhere but first in its command (`xargs gh`: its arguments may come
-   from stdin or a placeholder), and `gh -R o/r pr create`, whose flag value is
+   not inert, since piped into a shell it runs), an inert command after any
+   wrapper flag (`xargs -0 grep curl`, `sudo -u bob grep curl`), since the
+   flag may take it as its value, a path argument whose last element is a
+   listed name (`go test ./internal/http`), since every word is matched by its
+   last path element, `gh` / `glab` with no group anywhere but as the first
+   word of its command (`xargs gh`, `sudo gh`, `GH_TOKEN=x gh`: its arguments
+   may come from stdin or a placeholder), and `gh -R o/r pr create`, whose flag value is
    taken for the group, and a shell call denied or rejected after `pre_tool`
    (a guard's deny, a declined permission prompt): the marker is written
    before the decision.

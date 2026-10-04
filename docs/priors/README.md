@@ -93,17 +93,19 @@ or not. A session the record covers but the watcher never saw, or whose
 markers cannot be read, flags `provenance:no-ingest-record`. It misses what
 the command text does not show (`git fetch` or `git pull` content without a
 URL; aliases, shell functions, scripts, `eval`, `$CMD`; a quoted command word
-like `"gh" issue view`; an unlisted fetcher with no URL literal), an unquoted
+like `"gh" issue view` or a quoted group like `gh -R "$REPO" pr view`; an
+unlisted fetcher with no URL literal), an unquoted
 `rg --pre curl …` (inert search commands such as `grep` and `rg` hide a listed
 name in their arguments, and `--pre` runs a preprocessor), a lost ingest write
 in an already-seen session, and, on Codex, any `post_tool` shape mismatch (only
 `pre_tool` is fixture-backed). It over-flags any URL anywhere, a listed name at
 the start of a quoted string, a listed name as an argument of any non-inert
 command (`git log --grep curl`, `man curl`), `echo gh issue view`,
-`sudo -u bob grep curl` (the option value is taken for the command word), a
+an inert command after any wrapper flag (`xargs -0 grep curl`,
+`sudo -u bob grep curl`: the flag may take it as its value), a
 path argument whose last element is a listed name (`go test ./internal/http`),
-`gh` / `glab` with no group anywhere but first in its command (`xargs gh`: its
-arguments may come from stdin or a placeholder),
+`gh` / `glab` with no group anywhere but as the first word of its command
+(`xargs gh`: its arguments may come from stdin or a placeholder),
 `gh -R o/r pr create` and a shell call denied or rejected after `pre_tool` (a
 guard's deny, a declined permission prompt): the marker is written before the
 decision.

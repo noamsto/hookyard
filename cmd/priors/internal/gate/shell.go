@@ -11,7 +11,7 @@ import (
 var (
 	shellTools = []string{"bash", "shell", "exec_command", "local_shell", "run_terminal_cmd"}
 	// wrappers run their arguments as another command; they are skipped to find
-	// the command word, so an inert command behind one stays clean.
+	// the command word, so an inert command directly behind one stays clean.
 	wrappers = []string{"env", "sudo", "doas", "command", "exec", "time", "nice", "nohup", "xargs", "timeout", "stdbuf", "builtin"}
 	// keywords precede a command word without running one of their own; they are
 	// skipped like wrappers.
