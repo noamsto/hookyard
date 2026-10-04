@@ -733,6 +733,41 @@ distillation) and again as each store's required check on its remote:
    So an agent writes facts through `priors`; a fact that reaches a checkout
    by a direct file write is caught by gates 1, 3 and 4 at the required check,
    and a flag raised there moves it to the local layer.
+
+   Two sources feed the gate. Web and MCP ingestion is read from the tool
+   names in hookyard's event record. Shell ingestion is not in the record,
+   which carries no command text, so the `priors-record` `post_tool` handler
+   writes it itself: when a shell command looks like it reads an issue, PR or
+   comment, or fetches a URL, it creates an empty per-session marker file
+   under `$XDG_STATE_HOME/priors/provenance/`, priors' own state dir. Only
+   the marker's presence is stored, never the command. Command text can carry
+   secrets (`GH_TOKEN=… gh …`, an `Authorization` header), and keeping it out
+   of the shared record both leaves every other reader of that record no more
+   exposed and keeps `priors` free of hookyard internals.
+
+   v0 cannot tell an owner's issue from a non-owner's: that needs the author
+   of the issue and of each comment, a network call per command on a
+   fire-and-forget lane. So any ingestion flags. The matcher flags a URL
+   literal anywhere in the command, a fetcher (`curl`, `wget`, …), a forge CLI
+   (`hub`, `tea`, `jira`) or a `gh` / `glab` read group (`issue view`, `pr
+   diff`, `api`, `search`, …) in command position; `gh` / `glab` write verbs
+   (`pr create`, `issue comment`, …) and local groups (`auth`, `config`, …) are
+   exempt, since they print only what the agent itself caused.
+
+   It misses what the command text does not show: content arriving through
+   `git fetch` or `git pull` without a URL, wrappers, aliases and `eval`, a
+   fetch whose URL sits in a file or variable, and ingestion and `priors add`
+   in one shell command (the marker lands after the add). A lost ingest write
+   in a session already seen from an earlier call also fails open. It
+   over-flags any URL in an argument (a commit message, a PR body) and a
+   listed name at the start of a quoted string (`git commit -m "curl fails"`).
+
+   The gate fails closed on the other side. A second marker records that the
+   watcher saw the session at all; a session the event record covers but the
+   watcher never saw (handler not wired, state dir unwritable), or whose
+   markers cannot be read, is flagged. Identity has one weak spot: only
+   Claude's `CLAUDE_CODE_SESSION_ID` is verified, so on Codex, Pi and Cursor
+   `priors add` relies on a caller-asserted session id.
 3. **Content heuristics** — imperative or policy-override text is flagged:
    commands to run, URLs, `curl | sh`, `--no-verify`, "always" / "never" aimed
    at tools, instruction-like phrasing.

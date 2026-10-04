@@ -185,6 +185,9 @@ func (c Config) State() string {
 	return stateHome("priors")
 }
 
+// ProvenanceDir holds gate 2's per-session shell markers.
+func (c Config) ProvenanceDir() string { return filepath.Join(c.State(), "provenance") }
+
 // RecordDir is hookyard's state directory, following hookyard's own chain so
 // priors finds the records hookyard wrote; the records sit under stream/.
 func (c Config) RecordDir() string {

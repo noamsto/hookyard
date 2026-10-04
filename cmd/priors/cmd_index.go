@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -28,13 +27,24 @@ const (
 
 // envelope is the part of hookyard's exec-handler input priors reads.
 type envelope struct {
-	CanonicalEvent string `json:"canonical_event"`
-	CWD            string `json:"cwd"`
+	CanonicalEvent string          `json:"canonical_event"`
+	CWD            string          `json:"cwd"`
+	SessionID      string          `json:"session_id"`
+	ToolName       string          `json:"tool_name"`
+	ToolInput      json.RawMessage `json:"tool_input"`
+}
+
+// toolCall is a post_tool envelope; partial means the read failed partway, so
+// fields after the failure are missing.
+type toolCall struct {
+	env     envelope
+	partial bool
 }
 
 type hookResult struct {
 	text    string
 	reports []string
+	call    *toolCall
 }
 
 type hookOutput struct {
@@ -70,7 +80,8 @@ func cmdIndex(args []string, s streams) int {
 }
 
 // cmdBare is hookyard's exec handler: priors takes no arguments there, so the
-// envelope says what to do.
+// envelope says what to do. session_start answers with the index; post_tool
+// answers nothing and leaves gate 2's marker for the session.
 func cmdBare(s streams) int {
 	if !isPiped(s.in) {
 		s.errText(usage)
@@ -78,13 +89,36 @@ func cmdBare(s streams) int {
 	}
 	res := runHook(func(ctx context.Context) hookResult {
 		input, err := readEnvelope(s.in)
+		if input.CanonicalEvent == "post_tool" {
+			return hookResult{call: &toolCall{env: input, partial: err != nil}}
+		}
 		if err != nil || input.CanonicalEvent != "session_start" {
 			return hookResult{}
 		}
 		return assembleIndex(ctx, "", input.CWD)
 	})
+	if res.call != nil {
+		recordToolCall(*res.call)
+	}
 	printHook(s, res, false)
 	return 0
+}
+
+// recordToolCall marks the call's session as watched, and as having ingested
+// external content when the call may have. A partial read that lost tool_input
+// counts as ingestion: the command is unknowable. Failing to mark is silent; a
+// session left unmarked is flagged by gate 2.
+func recordToolCall(c toolCall) {
+	defer func() { _ = recover() }()
+	if c.env.SessionID == "" {
+		return
+	}
+	cfg, err := loadConfig("")
+	if err != nil {
+		return
+	}
+	ingest := (c.partial && c.env.ToolInput == nil) || gate.IngestsCall(c.env.ToolName, c.env.ToolInput)
+	_ = gate.MarkSession(cfg.ProvenanceDir(), c.env.SessionID, ingest)
 }
 
 // runHook runs job under the hook deadline and returns nothing if it is late
@@ -156,22 +190,48 @@ func isPiped(in *os.File) bool {
 }
 
 // readEnvelope reads the envelope from r. Empty input is an empty envelope;
-// anything else that is not a JSON object is an error.
+// anything else that is not a JSON object is an error. On a decode error it
+// returns the fields decoded before the error along with it: a capped post_tool
+// payload truncates native, which hookyard marshals after tool_input.
 func readEnvelope(r io.Reader) (envelope, error) {
-	raw, err := io.ReadAll(io.LimitReader(r, maxEnvelope))
-	if err != nil {
-		return envelope{}, err
-	}
-	raw = bytes.TrimSpace(raw)
-	if len(raw) == 0 {
-		return envelope{}, nil
-	}
-	if raw[0] != '{' {
-		return envelope{}, errors.New("not a JSON object")
-	}
+	dec := json.NewDecoder(io.LimitReader(r, maxEnvelope))
 	var input envelope
-	if err := json.Unmarshal(raw, &input); err != nil {
-		return envelope{}, err
+	tok, err := dec.Token()
+	if errors.Is(err, io.EOF) {
+		return input, nil
+	}
+	if err != nil {
+		return input, err
+	}
+	if tok != json.Delim('{') {
+		return input, errors.New("not a JSON object")
+	}
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return input, err
+		}
+		switch key {
+		case "canonical_event":
+			err = dec.Decode(&input.CanonicalEvent)
+		case "cwd":
+			err = dec.Decode(&input.CWD)
+		case "session_id":
+			err = dec.Decode(&input.SessionID)
+		case "tool_name":
+			err = dec.Decode(&input.ToolName)
+		case "tool_input":
+			var raw json.RawMessage
+			if err = dec.Decode(&raw); err == nil {
+				input.ToolInput = raw
+			}
+		default:
+			var skip json.RawMessage
+			err = dec.Decode(&skip)
+		}
+		if err != nil {
+			return input, err
+		}
 	}
 	return input, nil
 }

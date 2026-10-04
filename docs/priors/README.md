@@ -67,7 +67,8 @@ the lint, and exits 1. Otherwise it prints one line and exits 0:
   quarantine (for example a work repo on a personal host).
 
 The flagging gates are provenance (the session fetched web or MCP content,
-or its tool calls are not in hookyard's event record), content (URLs,
+ingested an issue, PR or URL through a shell, or its tool calls are not in
+hookyard's event record or the shell watcher never saw it), content (URLs,
 `curl | sh`, hook bypasses, shell commands, "always/never" aimed at tools,
 override phrasing) and a size cap of 8 KiB. Gate 2 learns the session from
 the engine when the engine provides it (inside Claude Code, `CLAUDECODE=1`
@@ -77,9 +78,21 @@ with them does not replace them, and flags the fact
 `provenance:asserted-identity`. Elsewhere the session is `--session`, else
 `PRIORS_SESSION`; with no session a fact is flagged. This binds the id to the
 engine's environment, not to the agent: an agent can still set those
-variables in its own command. It sees tool names
-only: hookyard's event record carries no command text, so an issue or PR
-read through a shell (`gh issue view`, `curl`) does not flag the session.
+variables in its own command; only Claude's id is verified, so elsewhere
+`priors add` trusts the id it is given.
+
+Web and MCP use is read from tool names in hookyard's event record. Shell
+ingestion is not: the record carries no command text, so the `priors-record`
+handler inspects each shell command and, when it looks like it reads an issue,
+PR or comment (`gh issue view`, `gh api`) or fetches a URL (`curl`, any
+`https://` in the command), creates an empty per-session marker under
+`provenance/` in priors' state dir. That flags the session
+`provenance:shell`; no command text is stored. Any ingestion flags, owner's
+or not. A session the record covers but the watcher never saw, or whose
+markers cannot be read, flags `provenance:no-ingest-record`. It misses what
+the command text does not show (`git fetch` content, wrappers, aliases,
+`eval`, ingestion and `priors add` in one command) and over-flags any URL in
+an argument.
 
 `list`, `show` and `search` fence what they print as reference data, with a
 delimiter drawn per call.
@@ -94,8 +107,8 @@ manifest; point both `exec` paths at the installed binary (`nix build
   always exits 0 and prints nothing when anything is missing or slow
   (800 ms), so a broken store leaves the session as it was.
 - `priors-record` on `post_tool` with no `match`, on the fire-and-forget
-  lane. It answers nothing. It exists so that every tool call reaches
-  hookyard's event record, which gate 2 reads.
+  lane. It still answers nothing. It makes every tool call reach hookyard's
+  event record, which gate 2 reads, and writes gate 2's shell markers.
 
 ## Store repositories
 

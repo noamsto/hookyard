@@ -293,6 +293,19 @@ func TestState(t *testing.T) {
 	}
 }
 
+func TestProvenanceDir(t *testing.T) {
+	isolate(t)
+	xdg := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", xdg)
+	if got, want := (Config{}).ProvenanceDir(), filepath.Join(xdg, "priors", "provenance"); got != want {
+		t.Errorf("XDG_STATE_HOME = %q, want %q", got, want)
+	}
+
+	if got, want := (Config{StateDir: "/explicit"}).ProvenanceDir(), "/explicit/provenance"; got != want {
+		t.Errorf("StateDir = %q, want %q", got, want)
+	}
+}
+
 func TestRecordDirChain(t *testing.T) {
 	home := isolate(t)
 	if got, want := (Config{}).RecordDir(), filepath.Join(home, ".local/state/hookyard"); got != want {
