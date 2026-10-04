@@ -37,9 +37,11 @@ type Request struct {
 
 // Result says where the fact landed. Outcome is "published", "flagged" or
 // "quarantined"; Path is the fact file. Reasons are the flag reasons, led by
-// the quarantine's reason for a quarantined fact. Warning reports a publish
-// (commit or push) that failed after the fact was written. Reports are the
-// index regeneration's, naming each file it skipped or kept out.
+// the quarantine's reason for a quarantined fact. Warning is the
+// commit.Checkout report: "" on a clean commit+push (or nothing to do), or a
+// note describing a commit/push failure or paths outside the fact layout that
+// were left uncommitted. Reports are the index regeneration's, naming each
+// file it skipped or kept out.
 type Result struct {
 	Outcome, Path string
 	Store         route.StoreID
