@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"net/url"
 	"os"
 	"os/exec"
@@ -132,22 +131,10 @@ func Resolve(ctx context.Context, cwd string, cfg config.Config, r Resolver) Ses
 		sshHost = func(ctx context.Context, alias string) string { return defaultSSHHost(ctx, cfg.SSHConfig, alias) }
 	}
 	resolved := map[string]string{}
-
-	remotes := map[string]remote{}
-	opaque := false
-	names, _ := gitOut(ctx, dir, "remote")
-	for name := range strings.FieldsSeq(names) {
-		raw, err := gitOut(ctx, dir, "remote", "get-url", name)
-		if err != nil {
-			opaque = true
-			continue
-		}
+	parse := func(raw string) (remote, error) {
 		host, owner, repo, sshLike, err := ParseURL(raw)
 		if err != nil {
-			if !isLocalPath(raw) {
-				opaque = true
-			}
-			continue
+			return remote{}, err
 		}
 		rem := remote{hosts: []string{host}, owner: owner, repo: repo}
 		if sshLike {
@@ -160,17 +147,56 @@ func Resolve(ctx context.Context, cwd string, cfg config.Config, r Resolver) Ses
 				rem.hosts = append(rem.hosts, target)
 			}
 		}
-		remotes[name] = rem
+		return rem, nil
+	}
+
+	var all, originAll []remote
+	var origin remote
+	hasOrigin, opaque := false, false
+	raws, err := rawURLs(ctx, dir)
+	if err != nil {
+		opaque = true
+	}
+	names, _ := gitOut(ctx, dir, "remote")
+	for name := range strings.FieldsSeq(names) {
+		fetch, err := gitOut(ctx, dir, "remote", "get-url", "--all", name)
+		if err != nil {
+			opaque = true
+		}
+		push, err := gitOut(ctx, dir, "remote", "get-url", "--push", "--all", name)
+		if err != nil {
+			opaque = true
+		}
+		// The first fetch URL is the one git fetches from; it alone decides the
+		// repo name and whether the remote is unreadable.
+		urls := strings.Split(fetch, "\n")
+		urls = append(urls, strings.Split(push, "\n")...)
+		urls = append(urls, raws[name]...)
+		for i, raw := range urls {
+			rem, err := parse(raw)
+			if err != nil {
+				// An unparsable extra URL names no org it could be matched by.
+				if i == 0 && !isLocalPath(raw) {
+					opaque = true
+				}
+				continue
+			}
+			if name == "origin" {
+				originAll = append(originAll, rem)
+				if i == 0 {
+					origin, hasOrigin = rem, true
+				}
+			}
+			all = append(all, rem)
+		}
 	}
 
 	s := Session{Dir: dir}
-	origin, hasOrigin := remotes["origin"]
 	if hasOrigin {
 		s.Repo = repoName(origin.repo)
 	} else {
 		s.Repo = repoName(commonDirName(ctx, dir))
 	}
-	all := slices.Collect(maps.Values(remotes))
 	switch {
 	case slices.ContainsFunc(all, func(rem remote) bool { return rem.matches(cfg.WorkOrgs) }):
 		s.Class = ClassWork
@@ -180,7 +206,7 @@ func Resolve(ctx context.Context, cwd string, cfg config.Config, r Resolver) Ses
 		return !rem.matches(cfg.PersonalOrgs) && isWorkOwner(rem.owner, cfg.WorkOrgs)
 	}):
 		s.Class = ClassUnresolvable
-	case origin.matches(cfg.PersonalOrgs):
+	case !slices.ContainsFunc(originAll, func(rem remote) bool { return !rem.matches(cfg.PersonalOrgs) }):
 		s.Class = ClassPersonal
 	case cfg.Profile == "work":
 		s.Class = ClassUnresolvable
@@ -188,6 +214,31 @@ func Resolve(ctx context.Context, cwd string, cfg config.Config, r Resolver) Ses
 		s.Class = ClassPersonal
 	}
 	return s
+}
+
+// rawURLs returns every remote.<name>.url and .pushurl value as configured,
+// before insteadOf rewriting, keyed by remote name.
+func rawURLs(ctx context.Context, dir string) (map[string][]string, error) {
+	out, err := gitOut(ctx, dir, "config", "-z", "--get-regexp", `^remote\..*\.(url|pushurl)$`)
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 1 {
+			return nil, nil
+		}
+		return nil, err
+	}
+	raws := map[string][]string{}
+	for rec := range strings.SplitSeq(out, "\x00") {
+		key, value, _ := strings.Cut(rec, "\n")
+		rest, ok := strings.CutPrefix(key, "remote.")
+		if !ok {
+			continue
+		}
+		// A remote name may contain dots; the variable follows the last one.
+		name := rest[:strings.LastIndex(rest, ".")]
+		raws[name] = append(raws[name], value)
+	}
+	return raws, nil
 }
 
 // isLocalPath reports whether an unparsable remote URL is plainly a path on

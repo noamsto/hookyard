@@ -171,6 +171,54 @@ func TestResolve(t *testing.T) {
 	}
 }
 
+func TestResolveRewrites(t *testing.T) {
+	const (
+		noamsto   = "https://github.com/noamsto/x"
+		factify   = "https://github.com/factify-inc/x"
+		someone   = "https://github.com/someone/x"
+		insteadOf = "insteadOf"
+		pushInst  = "pushInsteadOf"
+	)
+	type rewrite struct{ base, kind, prefix string }
+	tests := []struct {
+		name     string
+		profile  string
+		origin   string
+		rewrites []rewrite
+		setup    [][]string
+		class    Class
+		repo     string
+	}{
+		{"work raw hidden by insteadOf", "personal", "git@github.com:factify-inc/x", []rewrite{{"git@github.com:noamsto/", insteadOf, "git@github.com:factify-inc/"}}, nil, ClassWork, "x"},
+		{"personal raw rewritten to work", "personal", noamsto, []rewrite{{"https://github.com/factify-inc/", insteadOf, "https://github.com/noamsto/"}}, nil, ClassWork, "x"},
+		{"pushInsteadOf to work", "personal", noamsto, []rewrite{{"https://github.com/factify-inc/", pushInst, "https://github.com/noamsto/"}}, nil, ClassWork, "x"},
+		{"second url value is work", "personal", noamsto, nil, [][]string{{"config", "--add", "remote.origin.url", factify}}, ClassWork, "x"},
+		{"pushurl via ssh alias is work", "personal", noamsto, nil, [][]string{{"config", "remote.origin.pushurl", "git@gh-work:factify-inc/x"}}, ClassWork, "x"},
+		{"work raw rewritten to local path", "personal", factify, []rewrite{{"/srv/mirror/", insteadOf, "https://github.com/factify-inc/"}}, nil, ClassWork, "clone"},
+		{"plain personal", "personal", noamsto, nil, nil, ClassPersonal, "x"},
+		{"personal raw rewritten to unlisted org on work host", "work", noamsto, []rewrite{{"https://github.com/someone/", insteadOf, "https://github.com/noamsto/"}}, nil, ClassUnresolvable, "x"},
+		{"personal rewritten to personal on work host", "work", noamsto, []rewrite{{"git@github.com:noamsto/", insteadOf, "https://github.com/noamsto/"}}, nil, ClassPersonal, "x"},
+		{"unlisted raw rewritten to personal on work host", "work", someone, []rewrite{{"https://github.com/noamsto/", insteadOf, "https://github.com/someone/"}}, nil, ClassUnresolvable, "x"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateGit(t)
+			dir := newRepo(t, "clone", map[string]string{"origin": tt.origin})
+			for _, rw := range tt.rewrites {
+				git(t, dir, "config", "--global", "url."+rw.base+"."+rw.kind, rw.prefix)
+			}
+			for _, args := range tt.setup {
+				git(t, dir, args...)
+			}
+			got := Resolve(t.Context(), dir, workCfg(tt.profile), stubResolver)
+			want := Session{Class: tt.class, Repo: tt.repo, Dir: dir}
+			if got != want {
+				t.Errorf("Resolve = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
 func TestResolveIgnoresInheritedRepoEnv(t *testing.T) {
 	isolateGit(t)
 	dir := newRepo(t, "clone", map[string]string{"origin": "https://github.com/noamsto/x"})
