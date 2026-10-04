@@ -1190,6 +1190,7 @@ const CHECKS = [
   { n: 20, title: "drill path: crumbs in click order, a crumb, browser back and Backspace step back; details follow the level", fn: check20, fresh: true },
   { n: 21, title: "drill path fits and details show the decision's words; popover and feed columns stay in bounds", fn: check21, fresh: true },
   { n: 22, title: "a fan-out event's flash animates its gate, not the rule that follows neither gate edge", fn: check22, fresh: true },
+  { n: 23, title: "bridge trail length stays continuous (no collapse below 50%) across a leg boundary", fn: check23, fresh: true },
 ];
 
 // A press released outside the body, below the drag threshold, must end the
@@ -1356,6 +1357,92 @@ async function check19(page, env) {
     assert(JSON.stringify(view) === JSON.stringify(baselineView), `${col} ${name}: view changed after the refetch resolved`);
   }
   return lines;
+}
+
+// A dot crossing a leg boundary keeps its last normal-leg trail
+// length: no collapse below 50% of the average normal-leg trail length,
+// and frame-to-frame changes no more than 20% of that baseline.
+async function check23(page, env) {
+  await openFlow(page, env.base);
+  await sleep(500);
+
+  // Sample every rAF: trail length and bridge state for every visible dot.
+  // See pulses.ts frame(): data-bridging="1" on the circle during bridge.
+  await page.evaluate(`(() => {
+    window.__probe20 = { samples: [] };
+    const frame = () => {
+      const layer = document.querySelector("#flow-body svg.flow-svg g");
+      if (layer) {
+        const trails = [...layer.querySelectorAll(".flow-trail.far")];
+        const dots = layer.querySelectorAll(".flow-dot");
+        for (let i = 0; i < dots.length; i++) {
+          const c = dots[i];
+          if (Number(c.getAttribute("r")) <= 0) continue;
+          const f = trails[i];
+          if (!f) continue;
+          const d = f.getAttribute("d") ?? "";
+          const m = d.match(/M([\\d.-]+),([\\d.-]+)/);
+          const cx = Number(c.getAttribute("cx"));
+          const cy = Number(c.getAttribute("cy"));
+          const trailLen = m ? Math.hypot(cx - Number(m[1]), cy - Number(m[2])) : 0;
+          window.__probe20.samples.push({
+            t: performance.now(),
+            bridging: c.getAttribute("data-bridging") === "1",
+            trailLen,
+          });
+        }
+      }
+      window.__probe20.raf = requestAnimationFrame(frame);
+    };
+    window.__probe20.raf = requestAnimationFrame(frame);
+  })()`);
+
+  // Generate traffic so dots cross leg boundaries: 15 records ~600ms apart.
+  // Each record creates a 2-leg flight; the first leg expires after HOP_MS
+  // (~1280ms), so bridges appear from ~1280ms onwards.
+  for (let i = 0; i < 15; i++) {
+    append(env.stateDir, [record({ ...TODAY_PATHS[i % TODAY_PATHS.length], ts: Date.now() })]);
+    await sleep(600);
+  }
+  // Wait for all bridges to finish.
+  await sleep(4000);
+
+  const probe = await page.evaluate(`(() => { cancelAnimationFrame(window.__probe20.raf); const p = window.__probe20; window.__probe20 = null; return p; })()`);
+
+  // Separate samples into normal (non-bridging with trailLen > 0) and bridge.
+  const normal = probe.samples.filter((s) => !s.bridging && s.trailLen > 0);
+  const bridge = probe.samples.filter((s) => s.bridging);
+
+  assert(normal.length > 0, "no normal-leg trail samples collected");
+  const baseline = normal.reduce((a, s) => a + s.trailLen, 0) / normal.length;
+  assert(baseline > 0, "average normal-leg trail length is zero — no trail ever drawn");
+
+  const threshold50 = baseline * 0.5;
+  const changeLimit = baseline * 0.2;
+  const violated = [];
+  let maxChange = 0;
+
+  for (const s of bridge) {
+    if (s.trailLen < threshold50) {
+      violated.push({ t: s.t, trailLen: s.trailLen, baseline, min: threshold50 });
+    }
+  }
+  for (let i = 1; i < bridge.length; i++) {
+    const change = Math.abs(bridge[i].trailLen - bridge[i - 1].trailLen);
+    if (change > maxChange) maxChange = change;
+  }
+
+  assert(bridge.length > 0, "no bridge samples collected");
+  assert(violated.length === 0,
+    `${violated.length} bridge samples collapsed below 50% of baseline (${baseline.toFixed(1)}px); min allowed ${threshold50.toFixed(1)}px, ` +
+    `worst ${violated[0]?.trailLen.toFixed(1)}px`);
+  assert(maxChange <= changeLimit,
+    `bridge frame-to-frame trail change ${maxChange.toFixed(1)}px exceeds 20% of baseline ${baseline.toFixed(1)}px (limit ${changeLimit.toFixed(1)}px)`);
+
+  return [
+    `normal-leg baseline trail length: ${baseline.toFixed(1)}px (${normal.length} samples)`,
+    `bridge samples: ${bridge.length}, max frame-to-frame change: ${maxChange.toFixed(1)}px (limit ${changeLimit.toFixed(1)}px)`,
+  ];
 }
 
 async function main() {

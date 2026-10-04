@@ -21,6 +21,7 @@ interface Leg { id: string; ms: number; last: boolean; }
 interface Flight {
   slot: number; legs: Leg[]; leg: number; t0: number; jitter: number; outcome: string; arrive: string;
   lastX?: number; lastY?: number; bridgeFrom: { x: number; y: number } | null; bridgeStart: number;
+  tail?: { near: number[]; far: number[] };
 }
 
 interface Dot { circle: SVGCircleElement; near: SVGPathElement; far: SVGPathElement; }
@@ -164,8 +165,11 @@ export class Pulses {
             const q2 = bridgeAt(a);
             return `M${q0.x.toFixed(1)},${q0.y.toFixed(1)}L${q1.x.toFixed(1)},${q1.y.toFixed(1)}L${q2.x.toFixed(1)},${q2.y.toFixed(1)}`;
           };
-          d.near.setAttribute("d", segB(0, TRAIL[0]));
-          d.far.setAttribute("d", segB(TRAIL[0], TRAIL[1]));
+          // Carry the last leg trail rigidly so its pixel length stays constant.
+          const carry = (o: number[]) =>
+            `M${(x + o[0]).toFixed(1)},${(y + o[1]).toFixed(1)}L${(x + o[2]).toFixed(1)},${(y + o[3]).toFixed(1)}L${(x + o[4]).toFixed(1)},${(y + o[5]).toFixed(1)}`;
+          d.near.setAttribute("d", f.tail ? carry(f.tail.near) : segB(0, TRAIL[0]));
+          d.far.setAttribute("d", f.tail ? carry(f.tail.far) : segB(TRAIL[0], TRAIL[1]));
           d.near.setAttribute("data-o", o);
           d.far.setAttribute("data-o", o);
           d.near.setAttribute("stroke-width", loud ? "4.4" : "3");
@@ -213,14 +217,15 @@ export class Pulses {
       d.circle.setAttribute("data-o", o);
       d.circle.removeAttribute("data-bridging");
       d.circle.setAttribute("r", loud ? "4.2" : "3");
-      const seg = (a: number, b: number) => {
-        const q0 = at(u - b);
-        const q1 = at(u - (a + b) / 2);
-        const q2 = at(u - a);
-        return `M${q0.x.toFixed(1)},${q0.y.toFixed(1)}L${q1.x.toFixed(1)},${q1.y.toFixed(1)}L${q2.x.toFixed(1)},${q2.y.toFixed(1)}`;
-      };
-      d.near.setAttribute("d", seg(0, TRAIL[0]));
-      d.far.setAttribute("d", seg(TRAIL[0], TRAIL[1]));
+      const pts = (a: number, b: number) => [at(u - b), at(u - (a + b) / 2), at(u - a)];
+      const path = (q: { x: number; y: number }[]) =>
+        `M${q[0].x.toFixed(1)},${q[0].y.toFixed(1)}L${q[1].x.toFixed(1)},${q[1].y.toFixed(1)}L${q[2].x.toFixed(1)},${q[2].y.toFixed(1)}`;
+      const nearPts = pts(0, TRAIL[0]);
+      const farPts = pts(TRAIL[0], TRAIL[1]);
+      d.near.setAttribute("d", path(nearPts));
+      d.far.setAttribute("d", path(farPts));
+      const rel = (q: { x: number; y: number }[]) => q.flatMap((v) => [v.x - p.x, v.y - p.y]);
+      f.tail = { near: rel(nearPts), far: rel(farPts) };
       d.near.setAttribute("data-o", o);
       d.far.setAttribute("data-o", o);
       d.near.setAttribute("stroke-width", loud ? "4.4" : "3");
