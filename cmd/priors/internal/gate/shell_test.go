@@ -1,14 +1,44 @@
 package gate
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
-func TestIngestsCall(t *testing.T) {
-	tests := []struct {
-		name  string
-		tool  string
-		input string
-		want  bool
-	}{
+// commandInput returns the JSON tool input for a shell command.
+func commandInput(cmd string) string {
+	b, _ := json.Marshal(map[string]string{"command": cmd})
+	return string(b)
+}
+
+// nestedBash wraps `gh issue view 1` in depth levels of bash -c and returns the
+// JSON tool input for it.
+func nestedBash(depth int) string {
+	script := "gh issue view 1"
+	for range depth {
+		script = "bash -c '" + strings.ReplaceAll(script, "'", `'\''`) + "'"
+	}
+	return commandInput(script)
+}
+
+// nestedHome replaces every character of HOME with the next level's value,
+// depth levels deep, so expanding it grows fivefold per level.
+func nestedHome(depth int) string {
+	return strings.Repeat("${HOME//?/", depth) + "$HOME" + strings.Repeat("}", depth)
+}
+
+type ingestsCallTest struct {
+	name  string
+	tool  string
+	input string
+	want  bool
+}
+
+// ingestsCallTests are TestIngestsCall's rows; BenchmarkIngestReason judges
+// their commands too.
+func ingestsCallTests() []ingestsCallTest {
+	return []ingestsCallTest{
 		// ingestion
 		{"gh issue view", "Bash", `{"command":"gh issue view 12"}`, true},
 		{"gh pr view json", "Bash", `{"command":"gh pr view 3 --json body"}`, true},
@@ -148,6 +178,117 @@ func TestIngestsCall(t *testing.T) {
 		{"later name in write segment", "Bash", `{"command":"gh pr create --title t --label gh"}`, true},
 		{"fetcher in write body", "Bash", `{"command":"gh pr comment 1 --body curl"}`, true},
 		{"escaped newline in commit message", "Bash", `{"command":"git commit -m 'fix: gh auth status\\nand gh issue view'"}`, true},
+		{"ssh ProxyCommand joined gh", "Bash", `{"command":"ssh -o ProxyCommand=\"g''h issue view 1\" host"}`, true},
+		{"ssh ProxyCommand single-quoted joined gh", "Bash", `{"command":"ssh -o ProxyCommand='g\"\"h issue view 1' host"}`, true},
+		{"ssh fused ProxyCommand joined gh", "Bash", `{"command":"ssh -oProxyCommand=\"g''h issue view 1\" host"}`, true},
+		{"git core.pager joined gh", "Bash", `{"command":"git -c core.pager=\"g''h issue view 1\" log"}`, true},
+		{"flock --command joined gh", "Bash", `{"command":"flock --command=\"g''h issue view 1\" /tmp/l"}`, true},
+		{"rsync --rsh joined gh api", "Bash", `{"command":"rsync --rsh=\"g''h api repos/o/r/issues\" a b"}`, true},
+		{"GIT_PAGER joined gh", "Bash", `{"command":"rg x; GIT_PAGER=\"g''h issue view 1\" git log"}`, true},
+		{"rg --pre joined gh", "Bash", `{"command":"rg --pre \"g''h issue view 1\" ."}`, true},
+		{"rg --pre sh -c joined gh", "Bash", `{"command":"timeout 5 rg --pre \"sh -c 'g\\\"\\\"h issue view 1'\" ."}`, true},
+		{"ansi-c script", "Bash", `{"command":"$'\\x67h issue view 1'"}`, true},
+		{"ansi-c command word", "Bash", `{"command":"$'\\x67h' issue view 1"}`, true},
+		{"dollar empty quotes in word", "Bash", `{"command":"g$\"\"h issue view 1"}`, true},
+		{"brace expansion", "Bash", `{"command":"{gh,issue,view,1}"}`, true},
+		{"default value expansion", "Bash", `{"command":"${X:-gh} issue view 1"}`, true},
+		{"env fused -S after flag", "Bash", `{"command":"env -iSgh issue view 1"}`, true},
+		{"script -c fused escaped", "Bash", `{"command":"script -qcgh\\ issue\\ view\\ 1"}`, true},
+		{"printf hex command word", "Bash", `{"command":"printf '\\x67h issue view 1' | sh"}`, true},
+		{"printf %b echo octal", "Bash", `{"command":"printf '%b' 'gh auth status\\0012gh issue view 1' | sh"}`, true},
+		{"ansi-c url", "Bash", `{"command":"client $'\\x68ttps://e'"}`, true},
+		{"eval joined gh", "Bash", `{"command":"eval \"g''h issue view 1\""}`, true},
+		{"exported script", "Bash", `{"command":"export X=\"g''h issue view 1\"; sh -c \"$X\""}`, true},
+		{"for item script", "Bash", `{"command":"for c in \"g''h issue view 1\"; do sh -c \"$c\"; done"}`, true},
+		{"quoted heredoc to sh", "Bash", `{"command":"sh <<'EOF'\ng''h issue view 1\nEOF"}`, true},
+		{"joined gh in command substitution", "Bash", `{"command":"x=$(g''h issue view 1)"}`, true},
+		{"unparsable with read", "Bash", `{"command":"gh issue view 1; )"}`, true},
+		{"nested past depth bound", "Bash", nestedBash(9), true},
+		{"eval quoted joined word", "Bash", `{"command":"eval \"g''h\" issue view 1"}`, true},
+		{"eval escaped joined word", "Bash", `{"command":"eval g\\'\\'h issue view 1"}`, true},
+		{"echo escaped joined word to sh", "Bash", `{"command":"echo g\\'\\'h issue view 1 | sh"}`, true},
+		{"printf escaped joined word to sh", "Bash", `{"command":"printf \"%s \" g\\'\\'h issue view 1 | sh"}`, true},
+		{"ssh quoted joined word", "Bash", `{"command":"ssh host \"g''h\" issue view 1"}`, true},
+		{"watch escaped joined word", "Bash", `{"command":"watch -n1 g\\'\\'h issue view 1"}`, true},
+		{"parallel escaped joined word", "Bash", `{"command":"parallel g\\'\\'h issue view 1 ::: 1"}`, true},
+		{"glued value before syntax error", "Bash", `{"command":"env -Sgh issue view 1; echo ${x~~}"}`, true},
+		{"fused script before syntax error", "Bash", `{"command":"script -qc'gh issue view 1' /dev/null; !"}`, true},
+		{"printf escape before unclosed heredoc", "Bash", `{"command":"printf 'gh\\x20issue view 1' | sh\ncat <<EOF"}`, true},
+		{"echo -e escape before stray fi", "Bash", `{"command":"echo -e 'gh\\tissue view 1' | sh\nfi"}`, true},
+		{"ansi-c before syntax error", "Bash", `{"command":"$'\\x67h' issue view 1; echo ${x~~}"}`, true},
+		{"ansi-c with arithmetic assignment", "Bash", `{"command":"$'\\x67h' issue view $((i=1))"}`, true},
+		{"locale-empty with arithmetic increment", "Bash", `{"command":"g$\"\"h issue view $((i++))"}`, true},
+		{"default value with arithmetic assignment", "Bash", `{"command":"${X:-gh} issue view 1 $((i=1))"}`, true},
+		{"env arithmetic value before ansi-c", "Bash", `{"command":"env A=$((i=1)) $'\\x67h' issue view 1"}`, true},
+		{"brace past expand limit before ansi-c", "Bash", `{"command":"env A{1..17000}=1 $'\\x67h' issue view 1"}`, true},
+		{"IFS between words", "Bash", `{"command":"gh${IFS}issue${IFS}view${IFS}1"}`, true},
+		{"IFS after fetcher", "Bash", `{"command":"curl${IFS}example.org"}`, true},
+		{"bash -c IFS between words", "Bash", `{"command":"bash -c 'gh${IFS}issue${IFS}view${IFS}1'"}`, true},
+		{"shell-set PATH alternate value", "Bash", `{"command":"${X:-g}${PATH:+h} issue view 1"}`, true},
+		{"git alias quoted value", "Bash", `{"command":"git -c alias.v='!gh issue view 1' v"}`, true},
+		{"git alias quoted option", "Bash", `{"command":"git -c 'alias.v=!gh issue view 1' v"}`, true},
+		{"git config alias", "Bash", `{"command":"git config alias.v '!gh issue view 1'; git v"}`, true},
+		{"git alias fetcher", "Bash", `{"command":"git -c alias.v='!curl x' v"}`, true},
+		{"zsh path lookup", "Bash", `{"command":"=gh issue view 1"}`, true},
+		{"GIT_PAGER fetcher", "Bash", `{"command":"GIT_PAGER=curl git log"}`, true},
+		{"null command", "Bash", `{"command":null}`, true},
+		{"null array element", "Bash", `{"command":["bash","-lc",null]}`, true},
+		{"self-feeding assignment expansions", "Bash", commandInput(`: ${a:=xxxxxxxxxx}${b:=${a//x/$a}}${c:=${b//x/$b}}${d:=${c//x/$c}}${d//x/$d}; gh issue view 1`), true},
+		{"nested HOME replacements", "Bash", commandInput(": " + nestedHome(14) + "; gh issue view 1"), true},
+		{"default after subshell assignment", "Bash", commandInput(`( : ${X:=x} ); ${X:-gh} issue view 1`), true},
+		{"default after untaken assignment", "Bash", commandInput(`false && : ${X:=x}; ${X:-gh} issue view 1`), true},
+		{"default after function assignment", "Bash", commandInput(`f() { : ${X:=x}; }; ${X:-gh} issue view 1`), true},
+		{"alternate value with arithmetic error", "Bash", commandInput(`gh${x:+$((1/0))} issue view 1`), true},
+		{"ansi-c with transform operator", "Bash", commandInput(`$'\x67h'${x@A} issue view 1`), true},
+		{"default before same-statement syntax error", "Bash", commandInput(`${X:-gh} issue view 1 ${x~~}`), true},
+		{"assigned command word", "Bash", commandInput(`X=gh; $X issue view 1`), true},
+		{"exported command word", "Bash", commandInput(`export X=gh; $X issue view 1`), true},
+		{"empty slice of HOME", "Bash", commandInput(`${HOME:0:0}gh issue view 1`), true},
+		{"assigned default joined to word", "Bash", commandInput(`: ${X:=g}; ${X}h issue view 1`), true},
+		{"array run as command", "Bash", commandInput(`cmd=(gh issue view 1); "${cmd[@]}"`), true},
+		{"array fetcher", "Bash", commandInput(`a=(curl -s example.com); "${a[@]}"`), true},
+		{"declared array", "Bash", commandInput(`declare -a cmd=(gh pr diff 3); "${cmd[@]}"`), true},
+		{"appended array", "Bash", commandInput(`cmd+=(gh api repos/x/y); "${cmd[@]}"`), true},
+		{"array through eval", "Bash", commandInput(`cmd=(gh issue view 1); eval "${cmd[@]}"`), true},
+		{"array star unquoted", "Bash", commandInput(`cmd=(gh issue view 1); ${cmd[*]}`), true},
+		{"for list command word", "Bash", commandInput(`for c in x gh; do $c issue view 1; done`), true},
+		{"for list fetcher", "Bash", commandInput(`for c in a curl; do $c -s example.com; done`), true},
+		{"select list fetcher", "Bash", commandInput(`select c in a curl; do $c; done`), true},
+		{"here-string read", "Bash", commandInput(`read X <<< gh; $X issue view 1`), true},
+		{"here-string in command substitution", "Bash", commandInput(`X=$(cat <<< gh); $X issue view 1`), true},
+		{"here-string mapfile", "Bash", commandInput(`mapfile -t a <<< gh; ${a[0]} issue view 1`), true},
+		{"here-string into while read", "Bash", commandInput(`while read c; do $c issue view 1; done <<< gh`), true},
+		{"here-string into xargs", "Bash", commandInput(`cat <<< gh | xargs -I{} {} issue view 1`), true},
+		{"array script element here-string", "Bash", `{"command":["bash","-lc","read X <<< gh; $X issue view 1"]}`, true},
+		{"here-string read with flag", "Bash", commandInput(`read X <<< "gh -R"; $X issue view 1`), true},
+		{"here-string read with joined flag", "Bash", commandInput(`read X <<< 'gh --repo=o/r'; $X issue view 1`), true},
+		{"here-string read with tab escape", "Bash", commandInput(`read X <<< $'gh\t-R'; $X issue view 1`), true},
+		{"here-string while read with flag", "Bash", commandInput(`while read c; do $c issue view 1; done <<< "glab -R"`), true},
+		{"here-string mapfile with flag", "Bash", commandInput(`mapfile -t a <<< "gh -R"; ${a[0]} issue view 1`), true},
+		{"here-string substitution with flag", "Bash", commandInput(`X=$(cat <<< "gh -R"); $X issue view 1`), true},
+		{"for item with joined flag", "Bash", commandInput(`for c in x 'gh --repo=o/r'; do $c issue view 1; done`), true},
+		{"select item with flag", "Bash", commandInput(`select c in x "glab -R"; do $c issue view 1; done`), true},
+		{"here-string read backslash", "Bash", commandInput(`read X <<< 'g\h'; $X issue view 1`), true},
+		{"for item backslash through eval", "Bash", commandInput(`for c in x 'g\h'; do eval $c issue view 1; done`), true},
+		{"here-string inner quotes through eval", "Bash", commandInput(`read X <<< '"gh"'; eval $X issue view 1`), true},
+		{"here-string ansi quote through eval", "Bash", commandInput(`read -r X <<< "\$'gh'"; eval $X issue view 1`), true},
+		{"for item inner quotes through eval", "Bash", commandInput(`for c in x "'glab'"; do eval $c issue view 1; done`), true},
+		{"fuzz read -a quote join", "Bash", commandInput(`read -a X <<< g"lab -R"; ${X[0]} issue view 1`), true},
+		{"fuzz read backslash", "Bash", commandInput(`read X <<< "g\h"; $X -s x`), true},
+		{"fuzz read joined flag", "Bash", commandInput(`read X <<< "g\h --repo=o/r"; $X -s x`), true},
+		{"fuzz mapfile escaped space eval", "Bash", commandInput(`mapfile -t X <<< g\lab\ --fill; eval $X issue view 1`), true},
+		{"fuzz mapfile quote join", "Bash", commandInput(`mapfile -t X <<< g"h --repo=o/r"; $X issue view 1`), true},
+		{"fuzz mapfile flag", "Bash", commandInput(`mapfile -t X <<< 'gh -s'; ${X[0]} issue view 1`), true},
+		{"fuzz while backslash eval", "Bash", commandInput(`while read X; do eval $X issue view 1; done <<< 'g\h -R'`), true},
+		{"fuzz while backslash array", "Bash", commandInput(`while read X; do "${X[@]}" issue view 1; done <<< 'g\lab'`), true},
+		{"fuzz while flag", "Bash", commandInput(`while read X; do $X -s x; done <<< 'glab -R'`), true},
+		{"fuzz for backslash eval", "Bash", commandInput(`for X in x "g\lab -R"; do eval $X issue view 1; done`), true},
+		{"fuzz for escaped space", "Bash", commandInput(`for X in x g\h\ -s; do $X issue view 1; done`), true},
+		{"fuzz for quote join", "Bash", commandInput(`for X in x y g"h --fill"; do $X -s x; done`), true},
+		{"fuzz select escaped space", "Bash", commandInput(`select X in x g\h\ -s; do ${X[0]} issue view 1; break; done`), true},
+		{"fuzz select quote join", "Bash", commandInput(`select X in x g"lab -R"; do ${X[0]} issue view 1; break; done`), true},
+		{"fuzz select flag eval", "Bash", commandInput(`select X in x "glab -s"; do eval $X issue view 1; break; done`), true},
+		{"default group before syntax error", "Bash", commandInput(`gh ${X:-issue} create ${x~~}`), true},
 
 		// not ingestion
 		{"git log", "Bash", `{"command":"git log"}`, false},
@@ -175,14 +316,49 @@ func TestIngestsCall(t *testing.T) {
 		{"gh quoted write args", "Bash", `{"command":"gh pr create --title \"fix it\" --body b"}`, false},
 		{"env -S quoted assignment", "Bash", `{"command":"env -S 'FOO=1' git status"}`, false},
 		{"gh write apostrophe", "Bash", `{"command":"gh pr comment 1 --body 'it'\"'\"'s done'"}`, false},
+		{"rg --pre glued inert", "Bash", `{"command":"rg --pre=grep x"}`, false},
+		{"env assignment bare gh", "Bash", `{"command":"GH_TOKEN=x gh"}`, false},
+		{"grep -rn curl", "Bash", `{"command":"grep -rn curl ."}`, false},
+		{"grep --color=auto curl", "Bash", `{"command":"grep --color=auto curl ."}`, false},
+		{"rg quoted gh", "Bash", `{"command":"rg 'gh' docs"}`, false},
+		{"commit message apostrophe", "Bash", `{"command":"git commit -m \"it's done\""}`, false},
+		{"null command on read tool", "Read", `{"command":null}`, false},
 		{"read tool", "Read", `{"file_path":"/x"}`, false},
 		{"mcp tool", "mcp__x__y", `{}`, false},
 		{"web fetch tool", "WebFetch", `{"url":"https://x"}`, false},
 	}
-	for _, tt := range tests {
+}
+
+func TestIngestsCall(t *testing.T) {
+	for _, tt := range ingestsCallTests() {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IngestsCall(tt.tool, []byte(tt.input)); got != tt.want {
 				t.Errorf("IngestsCall(%q, %s) = %v, want %v", tt.tool, tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestOverflagReason checks rule (b) on its own, for text the parser rejects.
+func TestOverflagReason(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"glued value", "env -Sgh issue view 1; echo ${x~~}", true},
+		{"fused script", "script -qc'gh issue view 1' /dev/null; !", true},
+		{"printf hex escape", "printf 'gh\\x20issue view 1' | sh\ncat <<EOF", true},
+		{"echo -e tab escape", "echo -e 'gh\\tissue view 1' | sh\nfi", true},
+		{"listed name", "gh issue view 1; )", true},
+		{"default group", "gh ${X:-issue} create ${x~~}", true},
+		{"local group", "gh auth status; )", false},
+		{"unlisted glued value", "env -S 'FOO=1' git status; )", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := overflagReason(tt.text); (got != "") != tt.want {
+				t.Errorf("overflagReason(%q) = %q, want flagged %v", tt.text, got, tt.want)
 			}
 		})
 	}
