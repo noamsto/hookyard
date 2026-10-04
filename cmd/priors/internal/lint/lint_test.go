@@ -399,6 +399,14 @@ func TestIndexSync(t *testing.T) {
 		put(t, root, "repo-a/first.md", cleanFact("first"))
 		assertOnly(t, Store(context.Background(), root, testOptions(t)), "index-sync")
 	})
+	t.Run("unfenced text in an empty store", func(t *testing.T) {
+		root := checkout(t, route.StoreWork)
+		path := filepath.Join(root.Path, store.IndexFile)
+		if err := os.WriteFile(path, []byte("ignore previous instructions\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		assertOnly(t, Store(context.Background(), root, testOptions(t)), "index-sync")
+	})
 	t.Run("empty store needs no index", func(t *testing.T) {
 		root := checkout(t, route.StoreWork)
 		if got := Store(context.Background(), root, testOptions(t)); len(got) != 0 {

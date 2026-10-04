@@ -410,8 +410,9 @@ where the index starts at migration, is §4.6 rule 4 and its seeding rule; every
 other fact stays on disk and reachable by search (tier 3, §4.4). Each store
 generates its own index, never hand-written; the lint regenerates and diffs it.
 Generation is deterministic (the same facts yield the same bytes, fence
-included), so that diff is byte-exact and hosts never conflict on `MEMORY.md`
-(R4).
+included), so that diff is byte-exact and two hosts holding the same facts
+never produce a spurious `MEMORY.md` diff (R4). Divergent fact sets still
+diverge in the index; `priors index` after the merge resolves them.
 
 **Why one fact per file.** It is what makes R4 nearly free: two agents editing
 `MEMORY.md` concurrently would conflict on every write, while two agents writing
@@ -1004,11 +1005,14 @@ stay in the host-local layer and are never in it.
 it at read time. The mitigation is upstream of the read: the file is in the
 write guard's protected set, and the store's pre-commit and the remote's
 required check run the lint, which rejects any byte the generator would not
-write. What remains is a hand-edited index that reaches the remote without
+write. Two cases remain. A hand-edited index that reaches the remote without
 passing the required check (a push that bypasses it, say): Cursor reads it
-verbatim on every host that pulls. That host's next lint reports it, and
-its next `priors index` rewrites it, since a non-generated file is never left
-in place.
+verbatim on every host that pulls. And a local edit outside the write guard (a
+human in an editor or the Obsidian vault, §4.8, or any non-agent process):
+Cursor on that host reads it before any pre-commit or lint runs, until the
+next write path or `priors index` regenerates it. Either way the next lint
+reports it and the next `priors index` rewrites it, since a non-generated file
+is never left in place.
 
 Three gaps must be closed in **hookyard** — needed only if tier 2 passes its
 gate (§4.4) — and they are the only hookyard changes this design needs:
