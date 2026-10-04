@@ -92,9 +92,8 @@ empty per-session marker under
 or not. A session the record covers but the watcher never saw, or whose
 markers cannot be read, flags `provenance:no-ingest-record`. It misses what
 the command text does not show (`git fetch` or `git pull` content without a
-URL; aliases, shell functions, scripts, `eval`, `$CMD`; a quoted command word
-like `"gh" issue view` or a quoted group like `gh -R "$REPO" pr view`; an
-unlisted fetcher with no URL literal), an unquoted
+URL; aliases, shell functions, scripts, `eval`, `$CMD`; an unlisted fetcher
+with no URL literal), an unquoted
 `rg --pre curl …` (inert search commands such as `grep` and `rg` hide a listed
 name in their arguments, and `--pre` runs a preprocessor), a lost ingest write
 in an already-seen session, and, on Codex, any `post_tool` shape mismatch (only

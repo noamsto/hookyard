@@ -775,9 +775,8 @@ distillation) and again as each store's required check on its remote:
 
    It misses what the command text does not show: content arriving through
    `git fetch` or `git pull` without a URL; aliases, shell functions, scripts,
-   `eval` and variable indirection (`$CMD`); a command word quoted or escaped
-   by quoting, or a quoted group (`"gh" issue view`, `gh "issue" view`,
-   `gh -R "$REPO" pr view`); and an unlisted fetcher with no URL literal
+   `eval` and variable indirection (`$CMD`); and an unlisted fetcher with no
+   URL literal
    (a language client reading the URL from a variable). Inert commands hide a
    listed name in their own arguments, and `rg --pre curl …` runs a
    preprocessor, so an unquoted one is a miss (a quoted `--pre 'gh …'` still

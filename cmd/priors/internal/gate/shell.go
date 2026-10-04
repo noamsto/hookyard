@@ -54,9 +54,14 @@ func IngestsCall(toolName string, toolInput json.RawMessage) bool {
 	return true
 }
 
+// segmentBreaks separate commands; pass 1 of ingestsCommand adds quotes.
+const segmentBreaks = "\n;&|(){}`"
+
 // ingestsCommand matches a listed name in any segment whose command word is not
 // inert, so `rg curl src/` stays clean while `echo x | curl …`, `setsid gh pr
-// view 2` and `bash -c "gh pr view 2"` match.
+// view 2` and `bash -c "gh pr view 2"` match. A quoted script is judged on its
+// own (quotes break segments); a quoted argument or an escape (`g\h`) stays with
+// the gh that owns it.
 func ingestsCommand(text string) bool {
 	lower := strings.ToLower(text)
 	for _, scheme := range []string{"http://", "https://", "ftp://"} {
@@ -64,18 +69,51 @@ func ingestsCommand(text string) bool {
 			return true
 		}
 	}
+	unescaped := strings.NewReplacer("\\\n", " ", "\\", "").Replace(text)
+	return ingestsSegments(text, segmentBreaks+`"'`) || ingestsSegments(unescaped, segmentBreaks)
+}
+
+func ingestsSegments(text, breaks string) bool {
 	segments := strings.FieldsFunc(text, func(r rune) bool {
-		return strings.ContainsRune("\n;&|(){}`\"'", r)
+		return strings.ContainsRune(breaks, r)
 	})
-	for _, seg := range segments {
-		words := strings.FieldsFunc(seg, func(r rune) bool {
-			return unicode.IsSpace(r) || r == '<' || r == '>'
-		})
-		if segmentIngests(words) {
-			return true
+	return slices.ContainsFunc(segments, func(seg string) bool {
+		return segmentIngests(splitWords(seg))
+	})
+}
+
+// splitWords splits a segment into words. After an env word, a flag's attached
+// value is split off as its own word, since env -S/--split-string runs it as a
+// command; over-splitting only over-flags.
+func splitWords(seg string) []string {
+	fields := strings.FieldsFunc(seg, func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune("<>\"'", r)
+	})
+	var words []string
+	seenEnv := false
+	for _, w := range fields {
+		if !seenEnv {
+			seenEnv = wordName(w) == "env"
+			words = append(words, w)
+			continue
 		}
+		i := -1
+		switch {
+		case strings.HasPrefix(w, "--"):
+			i = strings.IndexByte(w, '=')
+		case strings.HasPrefix(w, "-"):
+			i = strings.IndexByte(w, 'S')
+			if i < 1 {
+				i = -1
+			}
+		}
+		if i < 0 || i+1 >= len(w) {
+			words = append(words, w)
+			continue
+		}
+		words = append(words, w[:i+1], w[i+1:])
 	}
-	return false
+	return words
 }
 
 // segmentIngests judges one segment. Unless its command word is inert, every
