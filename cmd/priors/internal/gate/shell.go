@@ -41,6 +41,9 @@ var (
 	paramOps = []string{":-", ":+", ":=", ":?", "-", "+", "=", "?", "##", "#", "%%", "%", "//", "/", "^^", "^", ",,", ",", "@"}
 	// overflagQuotes are deleted by rule (b), as bash joins the words around them.
 	overflagQuotes = strings.NewReplacer(`"`, "", "'", "", `\`, "")
+	// evalQuotes are deleted from a value that a later eval may read as
+	// quoting: its backslashes, quotes and the $ of $'…' and $"…".
+	evalQuotes = strings.NewReplacer(`"`, "", "'", "", `\`, "", "$", "")
 )
 
 const (
@@ -386,6 +389,12 @@ func (j *judge) names(text string, words ...*syntax.Word) string {
 			return r
 		}
 		if r := namesIngest(fields, true); r != "" {
+			return r
+		}
+		// An item is split again where it is used unquoted, and its quoting
+		// is removed by a later eval: `read X <<< "gh -R"; $X …`.
+		resplit := strings.Fields(evalQuotes.Replace(strings.Join(fields, " ")))
+		if r := namesIngest(resplit, true); r != "" {
 			return r
 		}
 	}
