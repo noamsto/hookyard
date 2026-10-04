@@ -54,7 +54,7 @@ func (r Root) IndexLines(entries []Entry) []string {
 		return strings.Compare(a.Rel, b.Rel)
 	})
 
-	frame := r.indexFile("", sanitize.NewDelimiter())
+	frame := r.indexFile("")
 	maxLines := MaxIndexLines - strings.Count(frame, "\n")
 	maxBytes := MaxIndexBytes - len(frame)
 	var lines []string
@@ -128,7 +128,7 @@ func (r Root) WriteIndex(rules gate.Rules) (changed bool, reports []string, err 
 		}
 	}
 
-	if err := atomicfile.Write(path, []byte(r.indexFile(indexBody(lines), sanitize.NewDelimiter())), 0o644); err != nil {
+	if err := atomicfile.Write(path, []byte(r.indexFile(indexBody(lines))), 0o644); err != nil {
 		return false, reports, err
 	}
 	return true, reports, nil
@@ -142,11 +142,7 @@ func (r Root) IndexIntact(raw string) bool {
 	if !ok {
 		return false
 	}
-	// A delimiter taken from anywhere but the real BEGIN line renders a file
-	// that cannot equal raw.
-	_, rest, _ := strings.Cut(raw, "===== BEGIN ")
-	delim, _, _ := strings.Cut(rest, " =====")
-	return raw == r.indexFile(indexBody(lines), delim)
+	return raw == r.indexFile(indexBody(lines))
 }
 
 func indexBody(lines []string) string {
@@ -156,8 +152,8 @@ func indexBody(lines []string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-func (r Root) indexFile(body, delim string) string {
-	return indexMarker + sanitize.Fence(sanitize.Header(r.label()), body, delim)
+func (r Root) indexFile(body string) string {
+	return indexMarker + sanitize.Fence(sanitize.Header(r.label()), body, sanitize.BodyDelimiter(body))
 }
 
 func (r Root) label() string {

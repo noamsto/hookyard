@@ -317,10 +317,16 @@ func (c checker) index(entries []store.Entry) []Finding {
 	want := c.root.IndexLines(kept)
 	have, err := c.root.ReadIndex()
 	switch {
-	case err != nil && len(want) > 0:
+	case errors.Is(err, fs.ErrNotExist) && len(want) == 0:
+		return nil
+	case err != nil:
 		return []Finding{{File: store.IndexFile, Rule: "index-sync", Msg: "index is missing or unreadable"}}
-	case err == nil && !slices.Equal(have, want):
+	case !slices.Equal(have, want):
 		return []Finding{{File: store.IndexFile, Rule: "index-sync", Msg: "index lines differ from the facts on disk"}}
+	}
+	raw, err := os.ReadFile(filepath.Join(c.root.Path, store.IndexFile))
+	if err != nil || !c.root.IndexIntact(string(raw)) {
+		return []Finding{{File: store.IndexFile, Rule: "index-sync", Msg: "index is not as generated"}}
 	}
 	return nil
 }

@@ -300,6 +300,41 @@ func TestWriteIndexRewritesOnChange(t *testing.T) {
 	}
 }
 
+func TestIndexIsDeterministic(t *testing.T) {
+	write := func(root Root) []byte {
+		t.Helper()
+		writeFact(t, root, "hookyard/one.md", newFact("one", "first", stamp(1)))
+		writeFact(t, root, "hookyard/two.md", newFact("two", "second", stamp(2)))
+		if _, _, err := root.WriteIndex(testRules(t)); err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(filepath.Join(root.Path, IndexFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	a, b := checkoutRoot(t), checkoutRoot(t)
+	first, second := write(a), write(b)
+	if string(first) != string(second) {
+		t.Errorf("two checkouts disagree:\n%s\n---\n%s", first, second)
+	}
+
+	if err := os.Remove(filepath.Join(a.Path, IndexFile)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.WriteIndex(testRules(t)); err != nil {
+		t.Fatal(err)
+	}
+	again, err := os.ReadFile(filepath.Join(a.Path, IndexFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(again) {
+		t.Errorf("regenerated index differs:\n%s\n---\n%s", first, again)
+	}
+}
+
 func TestIndexIntact(t *testing.T) {
 	root := checkoutRoot(t)
 	writeFact(t, root, "hookyard/one.md", newFact("one", "first", stamp(1)))
@@ -321,6 +356,7 @@ func TestIndexIntact(t *testing.T) {
 		"blank line in fence":   strings.Replace(index, " =====\n", " =====\n\n", 1),
 		"other store's label":   strings.Replace(index, "personal store", "work store", 1),
 		"no trailing newline":   strings.TrimSuffix(index, "\n"),
+		"other valid delimiter": strings.ReplaceAll(index, delimiterOf(t, index), "priors-0123456789abcdef"),
 	} {
 		if root.IndexIntact(tampered) {
 			t.Errorf("%s: reported intact", name)
