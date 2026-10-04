@@ -55,7 +55,8 @@ type flowAgg struct {
 // minutes ending at now's minute; window == 0 collapses everything into one
 // whole-day bucket. Alongside the paths it returns each column's facet: a
 // facet is counted in the same scan and window, with every filter applied
-// except that column's own field.
+// except that column's own field. A window starting before day's UTC midnight
+// also scans the previous day's file; NextOffset still refers to day's file.
 func FlowForDay(stateDir, day string, window int, now time.Time, f Filter) (FlowResponse, error) {
 	resp := FlowResponse{
 		Day:    day,
@@ -165,7 +166,7 @@ func FlowForDay(stateDir, day string, window int, now time.Time, f Filter) (Flow
 		resp.Branches += int64(len(mb))
 	}
 
-	// Records are filed by UTC day, so a window that starts before `day` does
+	// Records are filed by UTC day, so a window that starts before `day`
 	// reaches into the previous day's file; without it every count would
 	// collapse at 00:00 UTC and rebuild over the next window minutes.
 	if window > 0 {

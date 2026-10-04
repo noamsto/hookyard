@@ -597,10 +597,10 @@ func liveWindowCounts(stamps []time.Time, now time.Time, window int) []int64 {
 	counts := make([]int64, window)
 	start := now.UTC().Truncate(time.Minute).Add(-time.Duration(window-1) * time.Minute)
 	for _, ts := range stamps {
-		for i := 0; i < window; i++ {
+		for i := range window {
 			lo := start.Add(time.Duration(i) * time.Minute)
 			hi := lo.Add(time.Minute)
-			if !ts.Before(lo) && ts.Before(hi) || i == window-1 && !ts.Before(hi) {
+			if (!ts.Before(lo) && ts.Before(hi)) || (i == window-1 && !ts.Before(hi)) {
 				counts[i]++
 				break
 			}
@@ -643,6 +643,13 @@ func TestFlowForDayLiveWindowMatchesIndependentCount(t *testing.T) {
 					time.Date(2026, 9, 11, 0, 0, 0, 0, time.UTC),
 					time.Date(2026, 9, 11, 0, 3, 0, 0, time.UTC),
 				}
+			},
+		},
+		"window spans UTC midnight, no previous-day file": {
+			day: "2026-09-11",
+			now: time.Date(2026, 9, 11, 0, 3, 20, 0, time.UTC),
+			stampsOf: func(n time.Time) []time.Time {
+				return []time.Time{time.Date(2026, 9, 11, 0, 0, 0, 0, time.UTC), time.Date(2026, 9, 11, 0, 3, 0, 0, time.UTC)}
 			},
 		},
 	}
