@@ -1,10 +1,8 @@
 // Package sanitize makes fact-derived text safe to hand to a model: it strips
 // invisible and control characters, escapes anything imitating priors' own
-// fence or attribution, and wraps output in a fence. Text strips, then
-// normalises, then matches, so nothing a later step removes can split a
-// token an earlier one saw. Injected output gets an unpredictable delimiter;
-// a committed index gets one derived from its body that never occurs in that
-// body.
+// fence or attribution, and wraps output in a fence. Injected output gets an
+// unpredictable delimiter; a committed index gets one derived from its body
+// that never occurs in that body.
 package sanitize
 
 import (
@@ -203,9 +201,9 @@ type skeletonRune struct {
 // skeleton folds the line to what it looks like: at most one rune per
 // original rune, with whitespace, blank fillers, combining marks (Mn, Me)
 // and format characters dropped because they render as nothing and must not
-// split a token. Each rune is reduced to the base of its NFD form, so a precomposed
-// accent folds too, then mapped through the upper-case confusables, else
-// lower-cased and mapped through the lower-case ones.
+// split a token. Each rune is reduced to the base of its NFD form, so a
+// precomposed accent folds too, then mapped through the upper-case
+// confusables, else lower-cased and mapped through the lower-case ones.
 func skeleton(line string) []skeletonRune {
 	var sk []skeletonRune
 	for i, r := range line {
@@ -263,8 +261,8 @@ func escapeLine(line string) string {
 	return b.String()
 }
 
-// quoteBrackets is the fail-closed backstop for the bracketed attribution
-// headers: a confusable the maps miss still cannot keep its header shape.
+// quoteBrackets is the backstop for the bracketed attribution
+// headers, for confusables the maps miss.
 // Any opener pairs with any closer, innermost first; a pair holding a
 // suspicious rune is rewritten to "(quoted: …)" with its content verbatim,
 // and so is the outermost unmatched opener when anything left open holds
