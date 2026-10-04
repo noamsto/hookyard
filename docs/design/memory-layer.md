@@ -719,10 +719,11 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
   lookalikes such as Cyrillic `а` folded to Latin `a` — is matched against
   the fence and attribution tokens anywhere in the line. Runs of three or
   more `=` or non-ASCII symbols and punctuation, the everyday punctuation
-  below aside, are quoted, so no line is fence-shaped; box-drawing rules and
-  emoji runs are quoted too. (b)
-  Fail-closed, because both attribution headers are bracketed and a curated
-  lookalike map is never complete: any bracket pair — bracket-piece
+  below aside, are replaced by `(quoted: =)` with their runes dropped, so a
+  fence rule never survives; box-drawing rules, emoji runs and runs of CJK
+  punctuation go the same way. (b) A backstop, because both attribution
+  headers are bracketed and a curated lookalike map is never complete: any
+  bracket pair — bracket-piece
   lookalikes such as `⎡ ⎤` included, and an unclosed opener running to end
   of line — holding a non-ASCII rune other than everyday punctuation (`·`,
   dashes, curly quotes, `•`, `×`, arrows) is rewritten to a `(quoted: …)`
@@ -734,7 +735,12 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
   `(quoted: текст)(url)`) is quoted, and a committed index holding such a
   line regenerates with a one-time diff. ASCII-only lookalikes (`0` for
   `o`, `rn` for `m`) and ASCII separators (`hookyard-advisory`) are not
-  folded. Each index line is capped; `priors show` and `priors search`
+  folded. The backstop is itself a curated list and does not fail closed
+  for every lookalike: a stray non-ASCII closer right after the opener, a
+  bracket shape outside the recognised set (`⊏ ⊐`, `< >`, `( )`), or an
+  unassigned default-ignorable code point splitting a token still lets a
+  spoof through. The random delimiter still guards the real fence, so the
+  residual is attribution spoofing. Each index line is capped; `priors show` and `priors search`
   fence their own output. A file opened with `cat` or `rg` (tier 3) reaches
   the model unfenced, so "fenced" below means *through `priors`*.
 - **Provenance on every fact** — §4.1's `provenance:` block (engine, session,
