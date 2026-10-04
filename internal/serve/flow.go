@@ -165,6 +165,17 @@ func FlowForDay(stateDir, day string, window int, now time.Time, f Filter) (Flow
 		resp.Branches += int64(len(mb))
 	}
 
+	// Records are filed by UTC day, so a window that starts before `day` does
+	// reaches into the previous day's file; without it every count would
+	// collapse at 00:00 UTC and rebuild over the next window minutes.
+	if window > 0 {
+		if d, err := time.Parse("2006-01-02", day); err == nil && start.Before(d) {
+			if _, err := ScanAll(stateDir, DayString(d.AddDate(0, 0, -1)), visit); err != nil {
+				return FlowResponse{}, err
+			}
+		}
+	}
+
 	nextOffset, err := ScanAll(stateDir, day, visit)
 	if err != nil {
 		return FlowResponse{}, err
