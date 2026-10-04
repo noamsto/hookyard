@@ -191,7 +191,9 @@ function columnsFor(width: number, charW: number, chars: GeoInput["chars"], head
   // the column is at least headerW - MIN_GAP wide.
   const headerW = headerChars.map((c) => Math.ceil(c * charW) + 6);
   const engineLabel = Math.max(Math.ceil(chars[0] * charW) + 8, headerW[0] - BAR_W - MIN_GAP);
-  const outcomeLabel = Math.ceil(chars[3] * charW) + 8;
+  // The header sits at the column's left edge, so outcome labels narrower
+  // than it (or none, on an empty graph) must still leave room for its text.
+  const outcomeLabel = Math.max(Math.ceil(chars[3] * charW) + 8, headerW[3] - BAR_W);
   const plate = (c: number) => Math.ceil(c * charW) + 2 * 8;
   const plateMin = Math.min(PLATE_MAX, Math.max(170, width * 0.16));
   let eventW = Math.min(Math.max(plate(chars[1]), plateMin), PLATE_MAX);

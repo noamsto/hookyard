@@ -1191,6 +1191,7 @@ const CHECKS = [
   { n: 21, title: "drill path fits and details show the decision's words; popover and feed columns stay in bounds", fn: check21, fresh: true },
   { n: 22, title: "a fan-out event's flash animates its gate, not the rule that follows neither gate edge", fn: check22, fresh: true },
   { n: 23, title: "bridge trail length stays continuous (no collapse below 50%) across a leg boundary", fn: check23, fresh: true },
+  { n: 24, title: "an empty filtered flow graph keeps every column header inside the panel", fn: check24, fresh: true },
 ];
 
 // A press released outside the body, below the drag threshold, must end the
@@ -1489,3 +1490,25 @@ main().catch((err) => {
   runCleanups();
   process.exit(2);
 });
+
+// A filter that matches no calls still draws the columns; the outcome column
+// has no nodes, so its header must still get room inside the panel.
+async function check24(page, env) {
+  await setViewport(page, 1280, 800);
+  await openFlow(page, env.base, "day=" + env.past + "&event=pre_compact");
+  await page.waitFor(`document.querySelectorAll("#flow-body .flow-colhead").length > 0`, 5000, "column headers drawn");
+  const r = await page.evaluate(`(() => {
+    const body = document.getElementById("flow-body").getBoundingClientRect();
+    const empty = document.querySelector("#flow-body .flow-empty");
+    return {
+      bodyRight: body.right,
+      emptyShown: !!empty && !empty.hidden,
+      heads: [...document.querySelectorAll("#flow-body .flow-colhead text")].map((t) => t.getBoundingClientRect().right),
+    };
+  })()`);
+  assert(!r.emptyShown, "empty state rendered instead of columns");
+  assert(r.heads.length === 4, `expected 4 column headers, got ${r.heads.length}`);
+  const over = r.heads.filter((h) => h > r.bodyRight + 0.5);
+  assert(over.length === 0, `column header right edges ${JSON.stringify(r.heads)} pass the #flow-body right edge ${r.bodyRight}`);
+  return [`header right edges ${JSON.stringify(r.heads.map(Math.round))} <= #flow-body right edge ${Math.round(r.bodyRight)}`];
+}

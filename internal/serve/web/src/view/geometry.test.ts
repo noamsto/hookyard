@@ -107,6 +107,13 @@ test("layout: no traffic at all still stacks every node", () => {
   assertNoOverlap(g, "idle");
 });
 
+test("layout: a graph with no outcome nodes still fits the outcome header in the width", () => {
+  const nodes = [node("e:cc", 0, "engine", 2), node("v:pre", 1, "event")];
+  const headerChars: GeoInput["headerChars"] = [14, 36, 18, 40];
+  const g = layoutFlow(input({ nodes, links: [], chars: [12, 20, 0, 0], headerChars, width: 600 }));
+  assert.ok(g.columns[3].x0 + Math.ceil(40 * 7.2) + 6 <= g.width, `outcome header past the layout width ${g.width}`);
+});
+
 test("rankNodes: engines by volume, idle last; decisions first; groups contiguous; outcomes by severity", () => {
   const n = (key: string, col: number, total: number, outs: [string, number][] = [], group: string | null = null, kind: RankNode["kind"] = "handler", planIdx = 0): RankNode =>
     ({ key, col, kind, name: key.slice(2), group, total, outcomes: new Map(outs), planIdx });
