@@ -13,10 +13,11 @@ import (
 
 // Strides keep the generator-driven properties inside the CI budget. Without
 // -race, strippable, bracket-like, confusables-table and assigned code points
-// are never strided; that exhaustive run is the pre-push gate. CI runs only
-// -race, where the detector multiplies the cost several times over on a
-// few-core runner and adds nothing for a pure function, so there every class
-// is sampled.
+// are never strided; that exhaustive run is gated by `nix flake check`
+// (checks.priors runs the package's tests) and the pre-push gotest hook. Under
+// -race the detector multiplies the cost several times over on a few-core
+// runner and adds nothing for a pure function, so there every class is
+// sampled.
 const (
 	chunkCount      = 32
 	unassignedStep  = 97  // Co and unassigned, non-race
