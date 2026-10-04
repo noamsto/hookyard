@@ -10,12 +10,15 @@ import (
 
 var (
 	shellTools = []string{"bash", "shell", "exec_command", "local_shell", "run_terminal_cmd"}
-	// wrappers run their arguments as another command, so the real command word
-	// is further along.
+	// wrappers run their arguments as another command; they are skipped to find
+	// the command word, so an inert command behind one stays clean.
 	wrappers = []string{"env", "sudo", "doas", "command", "exec", "time", "nice", "nohup", "xargs", "timeout", "stdbuf", "builtin"}
-	// keywords precede a command word without running one of their own.
-	keywords   = []string{"if", "then", "elif", "else", "do", "while", "until", "!"}
-	fetchers   = []string{"curl", "wget", "xh", "http", "https", "aria2c", "lynx", "w3m", "links", "elinks"}
+	// keywords precede a command word without running one of their own; they are
+	// skipped like wrappers.
+	keywords = []string{"if", "then", "elif", "else", "do", "while", "until", "!"}
+	fetchers = []string{"curl", "wget", "xh", "http", "https", "aria2c", "lynx", "w3m", "links", "elinks"}
+	// inert commands search or print their arguments and never run one as a command.
+	inert      = []string{"grep", "egrep", "fgrep", "rg", "which", "whereis", "type"}
 	forgesAny  = []string{"hub", "tea", "jira"}
 	forgeLocal = []string{"auth", "config", "alias", "completion", "help", "version", "secret", "variable", "ssh-key", "gpg-key"}
 	// forgeWrite verbs print only a URL or status the agent itself caused.
@@ -51,8 +54,9 @@ func IngestsCall(toolName string, toolInput json.RawMessage) bool {
 	return true
 }
 
-// ingestsCommand matches a listed name in command position, so `rg curl src/`
-// stays clean while `echo x | curl …` and `bash -c "gh pr view 2"` match.
+// ingestsCommand matches a listed name in any segment whose command word is not
+// inert, so `rg curl src/` stays clean while `echo x | curl …`, `setsid gh pr
+// view 2` and `bash -c "gh pr view 2"` match.
 func ingestsCommand(text string) bool {
 	lower := strings.ToLower(text)
 	for _, scheme := range []string{"http://", "https://", "ftp://"} {
@@ -74,41 +78,39 @@ func ingestsCommand(text string) bool {
 	return false
 }
 
-// segmentIngests judges one segment by its command word. After a wrapper every
-// remaining word is a candidate, since a wrapper's option value (`sudo -u bob
-// curl`) would otherwise pass for the command word: the first listed name
-// decides.
+// segmentIngests judges one segment. Unless its command word is inert, every
+// word from it on is a candidate, since any unlisted wrapper (setsid, ssh host,
+// nix shell -c) may run a later word: the first listed name decides.
 func segmentIngests(words []string) bool {
-	i, wrapped := commandWord(words)
+	i := commandWord(words)
+	if i < len(words) && slices.Contains(inert, wordName(words[i])) {
+		return false
+	}
 	for ; i < len(words); i++ {
 		switch name := wordName(words[i]); {
 		case slices.Contains(fetchers, name), slices.Contains(forgesAny, name):
 			return true
 		case name == "gh" || name == "glab":
 			return forgeIngests(words[i+1:])
-		case !wrapped:
-			return false
 		}
 	}
 	return false
 }
 
 // commandWord returns the index of the segment's command word, skipping
-// assignments, keywords, wrappers and their flags and numeric arguments, and
-// whether it skipped a wrapper; the index is len(words) when there is none.
-func commandWord(words []string) (int, bool) {
-	wrapped := false
+// assignments, keywords, wrappers and their flags and numeric arguments; the
+// index is len(words) when there is none.
+func commandWord(words []string) int {
 	for i, w := range words {
 		switch name := wordName(w); {
-		case slices.Contains(wrappers, name):
-			wrapped = true
-		case assignmentWord.MatchString(w), strings.HasPrefix(w, "-"),
+		case slices.Contains(wrappers, name),
+			assignmentWord.MatchString(w), strings.HasPrefix(w, "-"),
 			numberWord.MatchString(w), slices.Contains(keywords, name):
 		default:
-			return i, wrapped
+			return i
 		}
 	}
-	return len(words), wrapped
+	return len(words)
 }
 
 // wordName is w's last path element, without the backslash that bypasses an

@@ -757,12 +757,15 @@ distillation) and again as each store's required check on its remote:
    v0 cannot tell an owner's issue from a non-owner's: that needs the author
    of the issue and of each comment, a network call per command on a
    fire-and-forget lane. So any ingestion flags. The matcher flags a URL
-   literal anywhere in the command, a fetcher (`curl`, `wget`, …), a forge CLI
-   (`hub`, `tea`, `jira`) or a `gh` / `glab` read group (`issue view`, `pr
-   diff`, `api`, `search`, …) in command position, past shell keywords (`do`,
-   `if`, `!`, …) and wrappers (`sudo`, `env`, `timeout`, …); after a wrapper
-   any later word counts, since its option values (`sudo -u bob`) would
-   otherwise pass for the command. `gh` / `glab` write verbs (`pr create`,
+   literal anywhere in the command, and a fetcher (`curl`, `wget`, …), a forge
+   CLI (`hub`, `tea`, `jira`) or a `gh` / `glab` read group (`issue view`, `pr
+   diff`, `api`, `search`, …) as the command word or any word after it. The
+   command word is found by skipping assignments, flags, numeric arguments,
+   shell keywords (`do`, `if`, `!`, …) and wrappers (`sudo`, `env`,
+   `timeout`, …). If it is an inert search or print command (`grep`, `egrep`,
+   `fgrep`, `rg`, `which`, `whereis`, `type`), the segment is clean; otherwise
+   the first listed name from the command word on decides, so an unlisted
+   wrapper or keyword is seen through. `gh` / `glab` write verbs (`pr create`,
    `issue comment`, …) and local groups (`auth`, `config`, …) are exempt, since
    they print only what the agent itself caused.
 
@@ -770,16 +773,18 @@ distillation) and again as each store's required check on its remote:
    `git fetch` or `git pull` without a URL; aliases, shell functions, scripts,
    `eval` and variable indirection (`$CMD`); a command word quoted or escaped
    by quoting (`"gh" issue view`); and an unlisted fetcher with no URL literal
-   (a language client reading the URL from a variable). Only the wrappers
-   `env`, `sudo`, `doas`, `command`, `exec`, `time`, `nice`, `nohup`, `xargs`,
-   `timeout`, `stdbuf` and `builtin`, and the shell keywords, are seen through;
-   any other wrapper or keyword (`setsid`, `flock`, `watch`, `ssh host …`,
-   `nix shell … -c`, `coproc`) hides the command. A lost ingest write in
-   a session already seen from an earlier call also fails open. On Codex the
-   `pre_tool` shape is fixture-backed but the `post_tool` one is assumed. It
-   over-flags any URL anywhere in the command (a commit message, a PR body), a
-   listed name at the start of a quoted string (`git commit -m "curl fails"`),
-   a listed name anywhere after a wrapper (`xargs grep curl`), and `gh -R o/r
+   (a language client reading the URL from a variable). Inert commands hide a
+   listed name in their own arguments, and `rg --pre curl …` runs a
+   preprocessor, so an unquoted one is a miss (a quoted `--pre 'gh …'` still
+   flags, since quoted strings are scanned as their own segment). A lost
+   ingest write in a session already seen from an earlier call also fails
+   open. On Codex the `pre_tool` shape is fixture-backed but the `post_tool`
+   one is assumed. It over-flags any URL anywhere in the command (a commit
+   message, a PR body), a listed name at the start of a quoted string (`git
+   commit -m "curl fails"`), a listed name as an argument of any non-inert
+   command (`git log --grep curl`, `man curl`), `echo gh issue view` (echo is
+   not inert, since piped into a shell it runs), `sudo -u bob grep curl`,
+   where the option value `bob` is taken for the command word, and `gh -R o/r
    pr create`, whose flag value is taken for the group, and a shell call
    denied or rejected after `pre_tool` (a guard's deny, a declined permission
    prompt): the marker is written before the decision.
