@@ -82,17 +82,22 @@ variables in its own command; only Claude's id is verified, so elsewhere
 `priors add` trusts the id it is given.
 
 Web and MCP use is read from tool names in hookyard's event record. Shell
-ingestion is not: the record carries no command text, so the `priors-record`
-handler inspects each shell command and, when it looks like it reads an issue,
-PR or comment (`gh issue view`, `gh api`) or fetches a URL (`curl`, any
-`https://` in the command), creates an empty per-session marker under
+ingestion is not: the record carries no command text, so priors inspects each
+shell command, on `pre_tool` before it runs and on `post_tool` after, and,
+when it looks like it reads an issue, PR or comment (`gh issue view`, `gh
+api`) or fetches a URL (`curl`, any `https://` in the command), creates an
+empty per-session marker under
 `provenance/` in priors' state dir. That flags the session
 `provenance:shell`; no command text is stored. Any ingestion flags, owner's
 or not. A session the record covers but the watcher never saw, or whose
 markers cannot be read, flags `provenance:no-ingest-record`. It misses what
-the command text does not show (`git fetch` content, wrappers, aliases,
-`eval`, ingestion and `priors add` in one command) and over-flags any URL in
-an argument.
+the command text does not show (`git fetch` or `git pull` content without a
+URL; aliases, shell functions, scripts, `eval`, `$CMD`; a quoted command word
+like `"gh" issue view`; an unlisted fetcher with no URL literal), a lost ingest
+write in an already-seen session, and, on Codex, any `post_tool` shape
+mismatch (only `pre_tool` is fixture-backed). It over-flags any URL anywhere, a
+listed name at the start of a quoted string, a listed name anywhere after a
+wrapper (`xargs grep curl`) and `gh -R o/r pr create`.
 
 `list`, `show` and `search` fence what they print as reference data, with a
 delimiter drawn per call.
@@ -100,8 +105,8 @@ delimiter drawn per call.
 ## Wire it into hookyard
 
 [`cmd/priors/hookyard.json`](../../cmd/priors/hookyard.json) is an example
-manifest; point both `exec` paths at the installed binary (`nix build
-.#priors`). It registers two handlers:
+manifest; point every `exec` path at the installed binary (`nix build
+.#priors`). It registers three handlers:
 
 - `priors-index` on `session_start`, which injects the tier-1 index. It
   always exits 0 and prints nothing when anything is missing or slow
@@ -109,6 +114,10 @@ manifest; point both `exec` paths at the installed binary (`nix build
 - `priors-record` on `post_tool` with no `match`, on the fire-and-forget
   lane. It still answers nothing. It makes every tool call reach hookyard's
   event record, which gate 2 reads, and writes gate 2's shell markers.
+- `priors-provenance` on `pre_tool`, matching `Bash`, on the verdict lane
+  with a 1 s budget. It answers nothing, so it never blocks a call; it writes
+  the shell markers before the command runs, which covers a call that fails
+  (and so never reaches `post_tool`) and one that runs `priors add` itself.
 
 ## Store repositories
 

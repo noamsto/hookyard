@@ -34,17 +34,10 @@ type envelope struct {
 	ToolInput      json.RawMessage `json:"tool_input"`
 }
 
-// toolCall is a post_tool envelope; partial means the read failed partway, so
-// fields after the failure are missing.
-type toolCall struct {
-	env     envelope
-	partial bool
-}
-
 type hookResult struct {
 	text    string
 	reports []string
-	call    *toolCall
+	call    *envelope
 }
 
 type hookOutput struct {
@@ -80,8 +73,8 @@ func cmdIndex(args []string, s streams) int {
 }
 
 // cmdBare is hookyard's exec handler: priors takes no arguments there, so the
-// envelope says what to do. session_start answers with the index; post_tool
-// answers nothing and leaves gate 2's marker for the session.
+// envelope says what to do. session_start answers with the index; pre_tool
+// and post_tool answer nothing and leave gate 2's markers for the session.
 func cmdBare(s streams) int {
 	if !isPiped(s.in) {
 		s.errText(usage)
@@ -89,8 +82,8 @@ func cmdBare(s streams) int {
 	}
 	res := runHook(func(ctx context.Context) hookResult {
 		input, err := readEnvelope(s.in)
-		if input.CanonicalEvent == "post_tool" {
-			return hookResult{call: &toolCall{env: input, partial: err != nil}}
+		if input.CanonicalEvent == "pre_tool" || input.CanonicalEvent == "post_tool" {
+			return hookResult{call: &input}
 		}
 		if err != nil || input.CanonicalEvent != "session_start" {
 			return hookResult{}
@@ -105,20 +98,20 @@ func cmdBare(s streams) int {
 }
 
 // recordToolCall marks the call's session as watched, and as having ingested
-// external content when the call may have. A partial read that lost tool_input
-// counts as ingestion: the command is unknowable. Failing to mark is silent; a
-// session left unmarked is flagged by gate 2.
-func recordToolCall(c toolCall) {
+// external content when the call may have. Failing to mark is silent: a session
+// never marked seen is flagged by gate 2; a lost ingest mark in an already-seen
+// session fails open (documented in §4.4).
+func recordToolCall(call envelope) {
 	defer func() { _ = recover() }()
-	if c.env.SessionID == "" {
+	if call.SessionID == "" {
 		return
 	}
 	cfg, err := loadConfig("")
 	if err != nil {
 		return
 	}
-	ingest := (c.partial && c.env.ToolInput == nil) || gate.IngestsCall(c.env.ToolName, c.env.ToolInput)
-	_ = gate.MarkSession(cfg.ProvenanceDir(), c.env.SessionID, ingest)
+	ingest := gate.IngestsCall(call.ToolName, call.ToolInput)
+	_ = gate.MarkSession(cfg.ProvenanceDir(), call.SessionID, ingest)
 }
 
 // runHook runs job under the hook deadline and returns nothing if it is late

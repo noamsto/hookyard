@@ -213,19 +213,19 @@ func (sb *sandbox) record(session string) {
 	if err := f.Close(); err != nil {
 		sb.t.Fatal(err)
 	}
-	sb.toolCall(session, "Bash", `{"command":"go test ./..."}`)
+	sb.toolCall("post_tool", session, "Bash", `{"command":"go test ./..."}`)
 }
 
-// toolCall feeds the bare handler a post_tool envelope, as hookyard does after
-// every tool call.
-func (sb *sandbox) toolCall(session, tool, input string) {
+// toolCall feeds the bare handler a tool event's envelope, as hookyard does
+// around every tool call.
+func (sb *sandbox) toolCall(event, session, tool, input string) {
 	sb.t.Helper()
-	sb.send(sb.postToolEnvelope(session, tool, input, `"ok"`))
+	sb.send(sb.toolEnvelope(event, session, tool, input, `"ok"`))
 }
 
-func (sb *sandbox) postToolEnvelope(session, tool, input, response string) string {
-	return fmt.Sprintf(`{"engine":"claude-code","canonical_event":"post_tool","session_id":%q,"cwd":%q,"tool_name":%q,"tool_input":%s,"native":{"tool_response":%s}}`,
-		session, sb.dir, tool, input, response)
+func (sb *sandbox) toolEnvelope(event, session, tool, input, response string) string {
+	return fmt.Sprintf(`{"engine":"claude-code","canonical_event":%q,"session_id":%q,"cwd":%q,"tool_name":%q,"tool_input":%s,"native":{"tool_response":%s}}`,
+		event, session, sb.dir, tool, input, response)
 }
 
 // send runs the bare handler on envelope, which must stay silent and succeed.
@@ -234,7 +234,7 @@ func (sb *sandbox) send(envelope string) {
 	res := sb.run(envelope)
 	wantExit(sb.t, res, 0)
 	if res.stdout != "" {
-		sb.t.Fatalf("post_tool handler printed %q", res.stdout)
+		sb.t.Fatalf("tool event handler printed %q", res.stdout)
 	}
 }
 
@@ -1300,7 +1300,7 @@ func TestAddFlagsShellIngestion(t *testing.T) {
 			sb := newSandbox(t, "personal")
 			repo := sb.repo(personalRemote)
 			sb.record("sess-1")
-			sb.toolCall("sess-1", "Bash", fmt.Sprintf(`{"command":%q}`, c.command))
+			sb.toolCall("post_tool", "sess-1", "Bash", fmt.Sprintf(`{"command":%q}`, c.command))
 
 			res := sb.run("", "add", "--name", "shell-fact", "--description", "from a shell session",
 				"--type", "project", "--cwd", repo, "--session", "sess-1")
@@ -1362,9 +1362,27 @@ func wantMarkerExts(t *testing.T, names []string, exts ...string) {
 
 func TestPostToolMarkerFiles(t *testing.T) {
 	sb := newSandbox(t, "personal")
-	sb.toolCall("sess-1", "Bash", `{"command":"gh issue view 12"}`)
+	sb.toolCall("post_tool", "sess-1", "Bash", `{"command":"gh issue view 12"}`)
 
 	wantMarkerExts(t, sb.markerFiles(filepath.Join(sb.state, "provenance")), ".seen", ".ingest")
+}
+
+// TestPreToolMarksIngestion: pre_tool marks the session before the command
+// runs, so a call that fails, and never reaches post_tool, still flags it.
+func TestPreToolMarksIngestion(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.toolCall("pre_tool", "sess-1", "Bash", `{"command":"gh issue view 12"}`)
+
+	wantMarkerExts(t, sb.markerFiles(filepath.Join(sb.state, "provenance")), ".seen", ".ingest")
+	sb.record("sess-1")
+	res := sb.run("", "add", "--name", "pre-tool-fact", "--description", "from a failed shell call",
+		"--type", "project", "--cwd", repo, "--session", "sess-1")
+	wantExit(t, res, 0)
+	if !strings.HasPrefix(res.stdout, "flagged personal ") {
+		t.Fatalf("stdout %q", res.stdout)
+	}
+	wantContains(t, "stdout", res.stdout, "provenance:shell")
 }
 
 func TestPostToolMarkerHonoursXDGStateHome(t *testing.T) {
@@ -1379,17 +1397,19 @@ func TestPostToolMarkerHonoursXDGStateHome(t *testing.T) {
 		fmt.Sprintf("ssh_config = %q", sb.sshConfig),
 		fmt.Sprintf("scanner = %q", sb.scanner),
 	}, "\n")+"\n")
-	sb.toolCall("sess-1", "Bash", `{"command":"go test ./..."}`)
+	sb.toolCall("post_tool", "sess-1", "Bash", `{"command":"go test ./..."}`)
 
 	wantMarkerExts(t, sb.markerFiles(filepath.Join(sb.dir, "xdg-state", "priors", "provenance")), ".seen")
 }
 
+// TestPostToolLargeResponse: the size cap cuts native, after tool_input, so
+// the call is still judged by its command.
 func TestPostToolLargeResponse(t *testing.T) {
 	sb := newSandbox(t, "personal")
 	big := strconv.Quote(strings.Repeat("x", 2<<20))
-	sb.send(sb.postToolEnvelope("sess-1", "Bash", `{"command":"gh issue view 1"}`, big))
+	sb.send(sb.toolEnvelope("post_tool", "sess-1", "Bash", `{"command":"go test ./..."}`, big))
 
-	wantMarkerExts(t, sb.markerFiles(filepath.Join(sb.state, "provenance")), ".seen", ".ingest")
+	wantMarkerExts(t, sb.markerFiles(filepath.Join(sb.state, "provenance")), ".seen")
 }
 
 // TestPostToolTruncatedToolInput: when the size cap cuts inside tool_input the
@@ -1397,7 +1417,7 @@ func TestPostToolLargeResponse(t *testing.T) {
 func TestPostToolTruncatedToolInput(t *testing.T) {
 	sb := newSandbox(t, "personal")
 	big := strconv.Quote(strings.Repeat("x", 2<<20))
-	sb.send(sb.postToolEnvelope("sess-1", "Bash", `{"command":`+big+`}`, `"ok"`))
+	sb.send(sb.toolEnvelope("post_tool", "sess-1", "Bash", `{"command":`+big+`}`, `"ok"`))
 
 	wantMarkerExts(t, sb.markerFiles(filepath.Join(sb.state, "provenance")), ".seen", ".ingest")
 }

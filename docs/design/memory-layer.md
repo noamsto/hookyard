@@ -736,10 +736,12 @@ distillation) and again as each store's required check on its remote:
 
    Two sources feed the gate. Web and MCP ingestion is read from the tool
    names in hookyard's event record. Shell ingestion is not in the record,
-   which carries no command text, so the `priors-record` `post_tool` handler
-   writes it itself: when a shell command looks like it reads an issue, PR or
-   comment, or fetches a URL, it creates an empty per-session marker file
-   under `$XDG_STATE_HOME/priors/provenance/`, priors' own state dir. Only
+   which carries no command text, so priors' own handler writes it itself. It
+   runs on `pre_tool` for shell calls, before the command runs, and on
+   `post_tool` for every tool: when a shell command looks like it reads an
+   issue, PR or comment, or fetches a URL, it creates an empty per-session
+   marker file under `$XDG_STATE_HOME/priors/provenance/`, priors' own state
+   dir. Only
    the marker's presence is stored, never the command. Command text can carry
    secrets (`GH_TOKEN=… gh …`, an `Authorization` header), and keeping it out
    of the shared record both leaves every other reader of that record no more
@@ -750,17 +752,24 @@ distillation) and again as each store's required check on its remote:
    fire-and-forget lane. So any ingestion flags. The matcher flags a URL
    literal anywhere in the command, a fetcher (`curl`, `wget`, …), a forge CLI
    (`hub`, `tea`, `jira`) or a `gh` / `glab` read group (`issue view`, `pr
-   diff`, `api`, `search`, …) in command position; `gh` / `glab` write verbs
-   (`pr create`, `issue comment`, …) and local groups (`auth`, `config`, …) are
-   exempt, since they print only what the agent itself caused.
+   diff`, `api`, `search`, …) in command position, past shell keywords (`do`,
+   `if`, `!`, …) and wrappers (`sudo`, `env`, `timeout`, …); after a wrapper
+   any later word counts, since its option values (`sudo -u bob`) would
+   otherwise pass for the command. `gh` / `glab` write verbs (`pr create`,
+   `issue comment`, …) and local groups (`auth`, `config`, …) are exempt, since
+   they print only what the agent itself caused.
 
    It misses what the command text does not show: content arriving through
-   `git fetch` or `git pull` without a URL, wrappers, aliases and `eval`, a
-   fetch whose URL sits in a file or variable, and ingestion and `priors add`
-   in one shell command (the marker lands after the add). A lost ingest write
-   in a session already seen from an earlier call also fails open. It
-   over-flags any URL in an argument (a commit message, a PR body) and a
-   listed name at the start of a quoted string (`git commit -m "curl fails"`).
+   `git fetch` or `git pull` without a URL; aliases, shell functions, scripts,
+   `eval` and variable indirection (`$CMD`); a command word quoted or escaped
+   by quoting (`"gh" issue view`); and an unlisted fetcher with no URL literal
+   (a language client reading the URL from a variable). A lost ingest write in
+   a session already seen from an earlier call also fails open. On Codex the
+   `pre_tool` shape is fixture-backed but the `post_tool` one is assumed. It
+   over-flags any URL anywhere in the command (a commit message, a PR body), a
+   listed name at the start of a quoted string (`git commit -m "curl fails"`),
+   a listed name anywhere after a wrapper (`xargs grep curl`), and `gh -R o/r
+   pr create`, whose flag value is taken for the group.
 
    The gate fails closed on the other side. A second marker records that the
    watcher saw the session at all; a session the event record covers but the
