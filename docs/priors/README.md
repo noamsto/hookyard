@@ -93,7 +93,8 @@ or not. A session the record covers but the watcher never saw, or whose
 markers cannot be read, flags `provenance:no-ingest-record`. It misses what
 the command text does not show (`git fetch` or `git pull` content without a
 URL; aliases, shell functions, scripts, `eval`, `$CMD`; a command word spelled
-by ANSI-C quoting or brace expansion like `$'\x67h'`; an unlisted fetcher
+by shell expansion other than plain quotes and backslashes, like `$'\x67h'` or
+`/usr/bin/g[h]`; an unlisted fetcher
 with no URL literal), an unquoted
 `rg --pre curl …` (inert search commands such as `grep` and `rg` hide a listed
 name in their arguments, and `--pre` runs a preprocessor), a lost ingest write
