@@ -34,10 +34,13 @@ const (
 )
 
 // Root is one directory tree of facts. Store is empty for the quarantine.
+// State is the state dir a local or quarantine root lives under, empty for a
+// checkout.
 type Root struct {
 	Store route.StoreID
 	Kind  Kind
 	Path  string
+	State string
 }
 
 // Entry is one parsed fact file. Rel uses '/' separators; Raw is the file's
@@ -66,11 +69,11 @@ func CheckoutRoot(cfg config.Config, id route.StoreID) Root {
 }
 
 func LocalRoot(cfg config.Config, id route.StoreID) Root {
-	return Root{Store: id, Kind: KindLocal, Path: cfg.LocalDir(string(id))}
+	return Root{Store: id, Kind: KindLocal, Path: cfg.LocalDir(string(id)), State: cfg.State()}
 }
 
 func QuarantineRoot(cfg config.Config) Root {
-	return Root{Kind: KindQuarantine, Path: cfg.QuarantineDir()}
+	return Root{Kind: KindQuarantine, Path: cfg.QuarantineDir(), State: cfg.State()}
 }
 
 // ReadRoots lists, per store in order, its checkout and then its local layer.
@@ -236,4 +239,65 @@ func Lock(cfg config.Config, name string) (unlock func(), err error) {
 		return nil, fmt.Errorf("lock %s: %w", path, err)
 	}
 	return func() { _ = f.Close() }, nil
+}
+
+// CheckWrite refuses a write into dir that a symlink could steer elsewhere.
+// A checkout confines dir to its own path. A local or quarantine root
+// confines it from the state dir, since its own dir can be swapped for a
+// symlink or gain a .git after the config loads, and refuses any git work
+// tree at or above it.
+func (r Root) CheckWrite(dir string) error {
+	if r.Kind == KindCheckout {
+		return confineDir(r.Path, dir)
+	}
+	if err := confineDir(r.State, dir); err != nil {
+		return err
+	}
+	return config.RefuseWorkTree(dir)
+}
+
+// confineDir refuses a destination directory that a symlink could steer out
+// of root: a store commit can plant "repo -> ../elsewhere", and MkdirAll and
+// the write would follow it.
+func confineDir(root, dir string) error {
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || !filepath.IsLocal(rel) {
+		return fmt.Errorf("%s is not inside the store %s", dir, root)
+	}
+	// The root was resolved at Load; a symlink there now is a later swap.
+	if info, err := os.Lstat(root); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to write through the symlink %s", root)
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	existing := root
+	for seg := range strings.SplitSeq(rel, string(filepath.Separator)) {
+		p := filepath.Join(existing, seg)
+		info, err := os.Lstat(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to write through the symlink %s", p)
+		}
+		existing = p
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	resolved, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return err
+	}
+	if inside, err := filepath.Rel(resolvedRoot, resolved); err != nil || !filepath.IsLocal(inside) {
+		return fmt.Errorf("%s resolves outside the store %s", dir, root)
+	}
+	return nil
 }

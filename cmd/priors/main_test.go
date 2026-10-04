@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -653,6 +654,114 @@ func TestLayerDirInARepoRefusesTheWrite(t *testing.T) {
 				t.Errorf("repo holds %v, want only .git", top)
 			}
 		})
+	}
+}
+
+// TestLayerDirInARepoRefusesLintAndIndex: lint --move-flagged and index --write
+// re-check the local layer dir like add does, and refuse a planted one.
+func TestLayerDirInARepoRefusesLintAndIndex(t *testing.T) {
+	const (
+		lintMove   = "lint --move-flagged"
+		indexWrite = "index --write"
+	)
+	plants := []struct {
+		name     string
+		commands []string
+		wantErr  string
+		plant    func(t *testing.T, sb *sandbox) (target string, wantTop []string)
+	}{
+		{"local symlinked into a checkout", []string{lintMove, indexWrite}, "refusing to write through the symlink", func(t *testing.T, sb *sandbox) (string, []string) {
+			other := sb.repo(personalRemote)
+			if err := os.Symlink(other, filepath.Join(sb.state, "local")); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(other, "personal")
+			sb.mkdir(target)
+			return other, []string{".git", "personal"}
+		}},
+		{"local layer holding a .git", []string{lintMove, indexWrite}, "inside the git work tree", func(_ *testing.T, sb *sandbox) (string, []string) {
+			layer := filepath.Join(sb.state, "local", "personal")
+			sb.mkdir(layer)
+			sb.git(layer, "init", "-q")
+			return layer, []string{".git"}
+		}},
+		{"quarantine symlinked into a checkout", []string{indexWrite}, "refusing to write through the symlink", func(t *testing.T, sb *sandbox) (string, []string) {
+			other := sb.repo(personalRemote)
+			if err := os.Symlink(other, filepath.Join(sb.state, "quarantine")); err != nil {
+				t.Fatal(err)
+			}
+			return other, []string{".git"}
+		}},
+		{"quarantine holding a .git", []string{indexWrite}, "inside the git work tree", func(_ *testing.T, sb *sandbox) (string, []string) {
+			quarantine := filepath.Join(sb.state, "quarantine")
+			sb.mkdir(quarantine)
+			sb.git(quarantine, "init", "-q")
+			return quarantine, []string{".git"}
+		}},
+	}
+	commands := []struct {
+		name string
+		seed func(sb *sandbox)
+		args []string
+		held func(t *testing.T, sb *sandbox)
+	}{
+		{lintMove, func(sb *sandbox) {
+			flagged := newFact("linky-fact", "demo", "project")
+			flagged.Body = "see https://example.com/docs for details\n"
+			sb.putFact(sb.personal, "demo/linky-fact.md", flagged)
+			sb.indexWrite()
+		}, []string{"lint", "--move-flagged"}, func(t *testing.T, sb *sandbox) {
+			if _, err := os.Stat(filepath.Join(sb.personal, "demo", "linky-fact.md")); err != nil {
+				t.Errorf("flagged fact left the checkout: %v", err)
+			}
+		}},
+		// The checkout's own index is written before the local root is
+		// reached, so only the planted target is asserted untouched.
+		{indexWrite, func(sb *sandbox) {
+			sb.putFact(sb.personal, "demo/clean-fact.md", newFact("clean-fact", "demo", "project"))
+		}, []string{"index", "--write"}, func(*testing.T, *sandbox) {}},
+	}
+	for _, p := range plants {
+		for _, c := range commands {
+			if !slices.Contains(p.commands, c.name) {
+				continue
+			}
+			t.Run(p.name+"/"+c.name, func(t *testing.T) {
+				sb := newSandbox(t, "personal")
+				c.seed(sb)
+				sb.mkdir(sb.state)
+				target, wantTop := p.plant(t, sb)
+
+				res := sb.run("", c.args...)
+				if res.code == 0 {
+					t.Errorf("exit 0, want a refusal; stdout %q", res.stdout)
+				}
+				if !strings.Contains(res.stderr, p.wantErr) {
+					t.Errorf("stderr lacks %q:\n%s", p.wantErr, res.stderr)
+				}
+				c.held(t, sb)
+				top, err := os.ReadDir(target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var got []string
+				for _, e := range top {
+					got = append(got, e.Name())
+				}
+				if !slices.Equal(got, wantTop) {
+					t.Errorf("%s holds %v, want %v", target, got, wantTop)
+				}
+				if len(wantTop) == 2 {
+					inner, err := os.ReadDir(filepath.Join(target, "personal"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if len(inner) != 0 {
+						t.Errorf("%s/personal holds %v, want empty", target, inner)
+					}
+				}
+			})
+		}
 	}
 }
 

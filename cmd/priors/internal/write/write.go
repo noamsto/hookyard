@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -131,17 +130,7 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 		res.Path = root.PathFor(f, "")
 		res.Outcome = "published"
 	}
-	dir := filepath.Dir(res.Path)
-	if res.Outcome == "published" {
-		err = confineDir(root.Path, dir)
-	} else {
-		// The layer dirs can be swapped for symlinks or gain a .git below
-		// the state dir, so confine from the state dir itself.
-		if err = confineDir(cfg.State(), dir); err == nil {
-			err = config.RefuseWorkTree(dir)
-		}
-	}
-	if err != nil {
+	if err := root.CheckWrite(filepath.Dir(res.Path)); err != nil {
 		return Result{}, err
 	}
 	if data, err = f.Marshal(); err != nil {
@@ -207,52 +196,6 @@ func checkDuplicate(cfg config.Config, dest route.Dest, name string) error {
 		if e, ok := r.FindByName(name); ok {
 			return fmt.Errorf("a fact named %q already exists at %s", name, filepath.Join(r.Path, filepath.FromSlash(e.Rel)))
 		}
-	}
-	return nil
-}
-
-// confineDir refuses a destination directory that a symlink could steer out
-// of root: a store commit can plant "repo -> ../elsewhere", and MkdirAll and
-// the write would follow it.
-func confineDir(root, dir string) error {
-	rel, err := filepath.Rel(root, dir)
-	if err != nil || !filepath.IsLocal(rel) {
-		return fmt.Errorf("%s is not inside the store %s", dir, root)
-	}
-	// The root was resolved at Load; a symlink there now is a later swap.
-	if info, err := os.Lstat(root); err == nil && info.Mode()&fs.ModeSymlink != 0 {
-		return fmt.Errorf("refusing to write through the symlink %s", root)
-	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	existing := root
-	for seg := range strings.SplitSeq(rel, string(filepath.Separator)) {
-		p := filepath.Join(existing, seg)
-		info, err := os.Lstat(p)
-		if errors.Is(err, fs.ErrNotExist) {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		if info.Mode()&fs.ModeSymlink != 0 {
-			return fmt.Errorf("refusing to write through the symlink %s", p)
-		}
-		existing = p
-	}
-	resolvedRoot, err := filepath.EvalSymlinks(root)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	resolved, err := filepath.EvalSymlinks(existing)
-	if err != nil {
-		return err
-	}
-	if inside, err := filepath.Rel(resolvedRoot, resolved); err != nil || !filepath.IsLocal(inside) {
-		return fmt.Errorf("%s resolves outside the store %s", dir, root)
 	}
 	return nil
 }

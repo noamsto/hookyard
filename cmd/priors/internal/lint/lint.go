@@ -409,7 +409,11 @@ func MoveFlagged(ctx context.Context, root, local store.Root, opts Options) (mov
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s: %w", e.Rel, err)
 		}
-		moves = append(moves, move{e.Rel, local.PathFor(f, learnedRepo(f)), data})
+		dest := local.PathFor(f, learnedRepo(f))
+		if err := local.CheckWrite(filepath.Dir(dest)); err != nil {
+			return nil, nil, fmt.Errorf("%s: %w", e.Rel, err)
+		}
+		moves = append(moves, move{e.Rel, dest, data})
 	}
 	if len(moves) == 0 {
 		return nil, nil, nil
