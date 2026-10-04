@@ -727,7 +727,7 @@ func runGit(ctx context.Context, dir string, timeout time.Duration, stdin io.Rea
 func runGitEnv(ctx context.Context, dir string, env []string, timeout time.Duration, stdin io.Reader, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := tools.Command(ctx, tools.Git, append([]string{"-C", dir, "-c", "core.hooksPath=/dev/null"}, args...)...) //nolint:gosec // dir is the configured store checkout; args are fixed git subcommands
+	cmd := tools.Command(ctx, tools.Git, append([]string{"-C", dir, "-c", "core.hooksPath=/dev/null"}, args...)...)
 	// Checkout matches git's English "not a git repository"; literal
 	// pathspecs keep a file named like a glob from staging its neighbours.
 	// GIT_SSH_COMMAND goes last, as exec keeps the final duplicate, so git's own

@@ -37,7 +37,6 @@ const toolsPkg = "github.com/noamsto/hookyard/cmd/priors/internal/tools"
 
 func pinnedTool(name string) string { return filepath.Join(toolsDir, name) }
 
-// goBuild builds the package in the current directory to out.
 func goBuild(out string, ldflags ...string) ([]byte, error) {
 	args := []string{"build"}
 	if len(ldflags) > 0 {
@@ -66,17 +65,17 @@ func buildAndRun(m *testing.M) int {
 	}
 	toolstest.Pin()
 	var ldflags []string
-	for name, target := range map[string]struct{ target, real string }{
+	for name, tool := range map[string]struct{ variable, real string }{
 		"git":     {"Git", tools.Git},
 		"ssh":     {"SSH", tools.SSH},
 		"rg":      {"Rg", tools.Rg},
 		"scanner": {"Scanner", ""},
 	} {
-		ldflags = append(ldflags, fmt.Sprintf("-X %s.%s=%s", toolsPkg, target.target, pinnedTool(name)))
-		if target.real == "" {
+		ldflags = append(ldflags, fmt.Sprintf("-X %s.%s=%s", toolsPkg, tool.variable, pinnedTool(name)))
+		if tool.real == "" {
 			continue
 		}
-		if err := os.Symlink(target.real, pinnedTool(name)); err != nil {
+		if err := os.Symlink(tool.real, pinnedTool(name)); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
