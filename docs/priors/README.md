@@ -28,7 +28,7 @@ personal_orgs  = ["github.com/you"]
 # scanner      = ""     # default betterleaks, then gitleaks, on PATH
 # ssh_config   = ""     # passed to `ssh -G -F` when resolving host aliases
 # commit       = true   # commit published facts into the checkout
-# push         = false
+# push         = false  # needs an upstream set once (git push -u); after a failed push, git push by hand to resume
 ```
 
 `work_orgs` is required on every host. `personal_store`, `work_store` and

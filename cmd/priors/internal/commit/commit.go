@@ -114,8 +114,9 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 	if warning != "" {
 		return warning
 	}
+	var commit string
 	if tree != "" {
-		if warning := commitTree(ctx, dir, parent, tree, msg); warning != "" {
+		if commit, warning = commitTree(ctx, dir, parent, tree, msg); warning != "" {
 			return warning
 		}
 	}
@@ -128,9 +129,7 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 		return ""
 	}
 	if cfg.Push {
-		if out, err := runGit(ctx, dir, pushTimeout, nil, "push", "-q"); err != nil {
-			return gitWarning("git push", out, err)
-		}
+		return push(ctx, dir, parent, commit)
 	}
 	return ""
 }
@@ -145,17 +144,17 @@ var signTimeout = gitTimeout
 
 // commitTree commits tree on parent and moves HEAD to it, signing as the
 // store's config asks: unlike git commit, commit-tree ignores commit.gpgSign.
-func commitTree(ctx context.Context, dir, parent, tree, msg string) (warning string) {
+func commitTree(ctx context.Context, dir, parent, tree, msg string) (commit, warning string) {
 	missing, err := unlisted(ctx, dir, tree)
 	switch {
 	case err != nil:
-		return fmt.Sprintf("nothing committed in %s: checking the gated tree: %v", dir, err)
+		return "", fmt.Sprintf("nothing committed in %s: checking the gated tree: %v", dir, err)
 	case len(missing) > 0:
-		return fmt.Sprintf("nothing committed in %s: %s would list files the commit lacks: %s", dir, store.IndexFile, strings.Join(missing, ", "))
+		return "", fmt.Sprintf("nothing committed in %s: %s would list files the commit lacks: %s", dir, store.IndexFile, strings.Join(missing, ", "))
 	}
 	sign, err := signs(ctx, dir)
 	if err != nil {
-		return fmt.Sprintf("nothing committed in %s: %v", dir, err)
+		return "", fmt.Sprintf("nothing committed in %s: %v", dir, err)
 	}
 	args, timeout := []string{"commit-tree", "-m", msg}, gitTimeout
 	if parent != "" {
@@ -165,25 +164,94 @@ func commitTree(ctx context.Context, dir, parent, tree, msg string) (warning str
 		// Plain -S lets git pick the key and format from the config.
 		args, timeout = append(args, "-S"), signTimeout
 	}
-	commit, err := runGit(ctx, dir, timeout, nil, append(args, tree)...)
+	commit, err = runGit(ctx, dir, timeout, nil, append(args, tree)...)
 	switch {
 	case err != nil && sign:
-		return fmt.Sprintf("nothing committed in %s: signing the commit failed: %s", dir, gitWarning("git commit-tree", commit, err))
+		return "", fmt.Sprintf("nothing committed in %s: signing the commit failed: %s", dir, gitWarning("git commit-tree", commit, err))
 	case err != nil:
-		return gitWarning("git commit-tree", commit, err)
+		return "", gitWarning("git commit-tree", commit, err)
 	}
+	commit = strings.TrimSpace(commit)
 	// parent as the old value makes this a compare-and-swap: a HEAD that
 	// moved since the tree was built, or appeared on an unborn branch, fails it.
-	if out, err := runGit(ctx, dir, gitTimeout, nil, "update-ref", "-m", msg, "HEAD", strings.TrimSpace(commit), parent); err != nil {
-		return gitWarning("git update-ref", out, err)
+	if out, err := runGit(ctx, dir, gitTimeout, nil, "update-ref", "-m", msg, "HEAD", commit, parent); err != nil {
+		return "", gitWarning("git update-ref", out, err)
+	}
+	return commit, ""
+}
+
+// push publishes commit, the one just made on parent, to the branch's
+// upstream. The explicit refspec makes remote.<r>.push and push.default
+// irrelevant, and the flags neutralise push.followTags, push.recurseSubmodules
+// and push.gpgSign. The lease makes the push a compare-and-swap against the
+// real remote, so only commit is transferred even when the tracking ref is
+// stale or tampered with; commit being parent's child, a passing lease is a
+// fast-forward. pushurl, insteadOf, pushInsteadOf and transport config are
+// honoured: they pick where the remote is, not what is pushed, and whoever can
+// set them already controls the store's git. A branch with no fetched upstream, including a fresh unborn
+// store, is not pushed: the user's first `git push -u` sets it up.
+func push(ctx context.Context, dir, parent, commit string) (warning string) {
+	refuse := func(format string, args ...any) string {
+		return fmt.Sprintf("not pushed from %s: ", dir) + fmt.Sprintf(format, args...)
+	}
+	inspect := func(what string, args ...string) (string, string) {
+		out, err := runGit(ctx, dir, gitTimeout, nil, args...)
+		if err != nil {
+			return "", refuse("%s", gitWarning(what, out, err))
+		}
+		return strings.TrimSpace(out), ""
+	}
+	if parent == "" {
+		return refuse("the store has no earlier commit to push onto")
+	}
+	ref, err := runGit(ctx, dir, gitTimeout, nil, "symbolic-ref", "-q", "HEAD")
+	if exitsOne(err) {
+		return refuse("HEAD is not on a branch")
+	}
+	if err != nil {
+		return refuse("%s", gitWarning("git symbolic-ref", "", err))
+	}
+	ref = strings.TrimSpace(ref)
+	out, warning := inspect("git for-each-ref", "for-each-ref", "--format=%(upstream)%00%(upstream:remotename)%00%(upstream:remoteref)", ref)
+	if warning != "" {
+		return warning
+	}
+	branch := strings.TrimPrefix(ref, "refs/heads/")
+	fields := strings.Split(out, "\x00")
+	if len(fields) != 3 || fields[0] == "" || fields[1] == "" || fields[1] == "." || !strings.HasPrefix(fields[2], "refs/heads/") {
+		return refuse("%s has no upstream", branch)
+	}
+	tracking, remote, mergeRef := fields[0], fields[1], fields[2]
+	upstream, err := runGit(ctx, dir, gitTimeout, nil, "rev-parse", "-q", "--verify", tracking+"^{commit}")
+	if exitsOne(err) {
+		return refuse("upstream %s is not fetched", tracking)
+	}
+	if err != nil {
+		return refuse("%s", gitWarning("git rev-parse", "", err))
+	}
+	upstream = strings.TrimSpace(upstream)
+	if out, warning = inspect("git rev-list", "rev-list", commit, "--not", upstream); warning != "" {
+		return warning
+	}
+	if out != commit {
+		return refuse("%s has commits ahead of %s other than this one; push them yourself (git push) to resume", branch, tracking)
+	}
+	if _, err := runGit(ctx, dir, pushTimeout, nil, "push", "-q", "--no-follow-tags", "--recurse-submodules=no", "--no-signed", "--force-with-lease="+mergeRef+":"+parent, "--", remote, commit+":"+mergeRef); err != nil {
+		return refuse("git push failed: %v", err)
 	}
 	return ""
+}
+
+// exitsOne reports whether err is a git exit status of 1, the "no such thing" answer of -q queries.
+func exitsOne(err error) bool {
+	exit := (*exec.ExitError)(nil)
+	return errors.As(err, &exit) && exit.ExitCode() == 1
 }
 
 // signs reports whether the store's config sets commit.gpgSign.
 func signs(ctx context.Context, dir string) (bool, error) {
 	out, err := runGit(ctx, dir, gitTimeout, nil, "config", "--type=bool", "--get", "commit.gpgsign")
-	if exit := (*exec.ExitError)(nil); errors.As(err, &exit) && exit.ExitCode() == 1 {
+	if exitsOne(err) {
 		return false, nil
 	}
 	if err != nil {

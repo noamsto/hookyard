@@ -802,7 +802,8 @@ func TestPush(t *testing.T) {
 	remote := t.TempDir()
 	git(t, remote, "init", "-q", "--bare")
 	git(t, fx.cfg.PersonalStore, "remote", "add", "origin", remote)
-	git(t, fx.cfg.PersonalStore, "config", "push.autoSetupRemote", "true")
+	git(t, fx.cfg.PersonalStore, "commit", "-q", "--allow-empty", "-m", "base")
+	git(t, fx.cfg.PersonalStore, "push", "-q", "-u", "origin", "main")
 	fx.cfg.Push = true
 	res, err := Add(context.Background(), fx.cfg, request("pushed-fact", personalRepo), fx.deps)
 	if err != nil || res.Warning != "" {
