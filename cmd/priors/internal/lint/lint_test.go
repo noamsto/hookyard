@@ -529,7 +529,8 @@ func TestFactRulesMarshalsUnwrittenEntry(t *testing.T) {
 }
 
 func TestReposUnknownOnlyInCheckout(t *testing.T) {
-	root := store.Root{Store: route.StoreWork, Kind: store.KindLocal, Path: t.TempDir()}
+	path := t.TempDir()
+	root := store.Root{Store: route.StoreWork, Kind: store.KindLocal, Path: path, State: filepath.Dir(path)}
 	f := cleanFact("subject")
 	f.Metadata.Repos = []string{"other"}
 	put(t, root, "repo-a/subject.md", f)
@@ -666,7 +667,8 @@ func TestFindingsSorted(t *testing.T) {
 
 func TestMoveFlagged(t *testing.T) {
 	root := checkout(t, route.StorePersonal)
-	local := store.Root{Store: route.StorePersonal, Kind: store.KindLocal, Path: t.TempDir()}
+	localPath := t.TempDir()
+	local := store.Root{Store: route.StorePersonal, Kind: store.KindLocal, Path: localPath, State: filepath.Dir(localPath)}
 	flagged := cleanFact("has-url")
 	flagged.Metadata.Repos = []string{"repo-a", "repo-b"}
 	flagged.Body = "docs at https://example.com/page\n"
@@ -713,7 +715,8 @@ func TestMoveFlagged(t *testing.T) {
 
 func TestMoveFlaggedNoRepoAndSize(t *testing.T) {
 	root := checkout(t, route.StorePersonal)
-	local := store.Root{Store: route.StorePersonal, Kind: store.KindLocal, Path: t.TempDir()}
+	localPath := t.TempDir()
+	local := store.Root{Store: route.StorePersonal, Kind: store.KindLocal, Path: localPath, State: filepath.Dir(localPath)}
 	big := cleanFact("too-big")
 	big.Metadata.Scope = "global"
 	big.Metadata.Repos = nil
@@ -736,7 +739,8 @@ func TestMoveFlaggedNoRepoAndSize(t *testing.T) {
 
 func TestMoveFlaggedRefusesExistingName(t *testing.T) {
 	root := checkout(t, route.StorePersonal)
-	local := store.Root{Store: route.StorePersonal, Kind: store.KindLocal, Path: t.TempDir()}
+	localPath := t.TempDir()
+	local := store.Root{Store: route.StorePersonal, Kind: store.KindLocal, Path: localPath, State: filepath.Dir(localPath)}
 	flagged := cleanFact("has-url")
 	flagged.Body = "docs at https://example.com/page\n"
 	other := cleanFact("other-url")
@@ -762,7 +766,8 @@ func TestMoveFlaggedRefusesExistingName(t *testing.T) {
 
 func TestMoveFlaggedReturnsIndexReports(t *testing.T) {
 	root := checkout(t, route.StorePersonal)
-	local := store.Root{Store: route.StorePersonal, Kind: store.KindLocal, Path: t.TempDir()}
+	localPath := t.TempDir()
+	local := store.Root{Store: route.StorePersonal, Kind: store.KindLocal, Path: localPath, State: filepath.Dir(localPath)}
 	flagged := cleanFact("has-url")
 	flagged.Body = "docs at https://example.com/page\n"
 	put(t, root, "repo-a/has-url.md", flagged)
@@ -780,7 +785,8 @@ func TestMoveFlaggedReturnsIndexReports(t *testing.T) {
 
 func TestMoveFlaggedNothingToMove(t *testing.T) {
 	root := checkout(t, route.StorePersonal)
-	local := store.Root{Store: route.StorePersonal, Kind: store.KindLocal, Path: t.TempDir()}
+	localPath := t.TempDir()
+	local := store.Root{Store: route.StorePersonal, Kind: store.KindLocal, Path: localPath, State: filepath.Dir(localPath)}
 	put(t, root, "repo-a/keeper.md", cleanFact("keeper"))
 	index(t, root)
 

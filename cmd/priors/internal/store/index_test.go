@@ -379,7 +379,8 @@ func TestWriteIndexOverwritesGarbage(t *testing.T) {
 }
 
 func TestWriteIndexEmptyStoreCreatesRoot(t *testing.T) {
-	root := Root{Store: "work", Kind: KindLocal, Path: filepath.Join(t.TempDir(), "state", "local", "work")}
+	state := filepath.Join(t.TempDir(), "state")
+	root := Root{Store: "work", Kind: KindLocal, Path: filepath.Join(state, "local", "work"), State: state}
 
 	changed, _, err := root.WriteIndex(testRules(t))
 	if err != nil || !changed {
@@ -401,7 +402,8 @@ func TestWriteIndexEmptyStoreCreatesRoot(t *testing.T) {
 }
 
 func TestWriteIndexQuarantineLabel(t *testing.T) {
-	root := Root{Kind: KindQuarantine, Path: t.TempDir()}
+	path := t.TempDir()
+	root := Root{Kind: KindQuarantine, Path: path, State: filepath.Dir(path)}
 	if _, _, err := root.WriteIndex(testRules(t)); err != nil {
 		t.Fatal(err)
 	}
@@ -470,7 +472,8 @@ func TestWriteIndexFileFitsCaps(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			root := Root{Store: "personal", Kind: KindLocal, Path: t.TempDir()}
+			path := t.TempDir()
+			root := Root{Store: "personal", Kind: KindLocal, Path: path, State: filepath.Dir(path)}
 			for i := range tc.count {
 				name := fmt.Sprintf("fact-%03d", i)
 				writeFact(t, root, "hookyard/"+name+".md", newFact(name, tc.desc, stamp(i)))

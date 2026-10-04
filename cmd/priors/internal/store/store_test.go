@@ -255,16 +255,16 @@ func TestConfine(t *testing.T) {
 func TestRoots(t *testing.T) {
 	cfg := config.Config{PersonalStore: "/p", WorkStore: "/w", StateDir: "/state"}
 
-	if got, want := CheckoutRoot(cfg, route.StorePersonal), (Root{route.StorePersonal, KindCheckout, "/p"}); got != want {
+	if got, want := CheckoutRoot(cfg, route.StorePersonal), (Root{route.StorePersonal, KindCheckout, "/p", ""}); got != want {
 		t.Errorf("personal checkout = %+v, want %+v", got, want)
 	}
-	if got, want := CheckoutRoot(cfg, route.StoreWork), (Root{route.StoreWork, KindCheckout, "/w"}); got != want {
+	if got, want := CheckoutRoot(cfg, route.StoreWork), (Root{route.StoreWork, KindCheckout, "/w", ""}); got != want {
 		t.Errorf("work checkout = %+v, want %+v", got, want)
 	}
-	if got, want := LocalRoot(cfg, route.StoreWork), (Root{route.StoreWork, KindLocal, filepath.Join("/state", "local", "work")}); got != want {
+	if got, want := LocalRoot(cfg, route.StoreWork), (Root{route.StoreWork, KindLocal, filepath.Join("/state", "local", "work"), "/state"}); got != want {
 		t.Errorf("work local = %+v, want %+v", got, want)
 	}
-	if got, want := QuarantineRoot(cfg), (Root{"", KindQuarantine, filepath.Join("/state", "quarantine")}); got != want {
+	if got, want := QuarantineRoot(cfg), (Root{"", KindQuarantine, filepath.Join("/state", "quarantine"), "/state"}); got != want {
 		t.Errorf("quarantine = %+v, want %+v", got, want)
 	}
 
@@ -276,4 +276,69 @@ func TestRoots(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("ReadRoots = %+v, want %+v", got, want)
 	}
+}
+
+func TestCheckWrite(t *testing.T) {
+	newLocal := func(t *testing.T) Root {
+		state := t.TempDir()
+		return Root{Store: route.StoreWork, Kind: KindLocal, Path: filepath.Join(state, "local", "work"), State: state}
+	}
+
+	t.Run("clean state passes", func(t *testing.T) {
+		r := newLocal(t)
+		if err := r.CheckWrite(filepath.Join(r.Path, "repo")); err != nil {
+			t.Errorf("CheckWrite = %v, want nil", err)
+		}
+	})
+	t.Run("layer dir symlinked elsewhere", func(t *testing.T) {
+		r := newLocal(t)
+		if err := os.MkdirAll(filepath.Dir(r.Path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(t.TempDir(), r.Path); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.CheckWrite(filepath.Join(r.Path, "repo")); err == nil {
+			t.Error("CheckWrite through a symlinked layer dir = nil, want refusal")
+		}
+	})
+	t.Run("git dir inside the layer", func(t *testing.T) {
+		r := newLocal(t)
+		if err := os.MkdirAll(filepath.Join(r.Path, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.CheckWrite(filepath.Join(r.Path, "repo")); err == nil {
+			t.Error("CheckWrite inside a work tree = nil, want refusal")
+		}
+	})
+	t.Run("git dir above the state dir", func(t *testing.T) {
+		top := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(top, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		state := filepath.Join(top, "state")
+		r := Root{Store: route.StoreWork, Kind: KindLocal, Path: filepath.Join(state, "local", "work"), State: state}
+		if err := r.CheckWrite(filepath.Join(r.Path, "repo")); err == nil {
+			t.Error("CheckWrite under a work tree = nil, want refusal")
+		}
+	})
+	t.Run("empty state fails closed", func(t *testing.T) {
+		r := newLocal(t)
+		r.State = ""
+		if err := r.CheckWrite(filepath.Join(r.Path, "repo")); err == nil {
+			t.Error("CheckWrite with no state dir = nil, want refusal")
+		}
+	})
+	t.Run("checkout confines from its path", func(t *testing.T) {
+		r := Root{Store: route.StorePersonal, Kind: KindCheckout, Path: t.TempDir()}
+		if err := r.CheckWrite(filepath.Join(r.Path, "repo")); err != nil {
+			t.Fatalf("CheckWrite = %v, want nil", err)
+		}
+		if err := os.Symlink(t.TempDir(), filepath.Join(r.Path, "repo")); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.CheckWrite(filepath.Join(r.Path, "repo")); err == nil {
+			t.Error("CheckWrite through a symlink in the checkout = nil, want refusal")
+		}
+	})
 }

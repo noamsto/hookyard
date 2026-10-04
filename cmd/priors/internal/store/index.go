@@ -113,6 +113,11 @@ func (r Root) WriteIndex(rules gate.Rules) (changed bool, reports []string, err 
 	if r.Path == "" {
 		return false, nil, errors.New("store has no path")
 	}
+	if r.Kind != KindCheckout {
+		if err := r.CheckWrite(r.Path); err != nil {
+			return false, nil, err
+		}
+	}
 	entries, errs := r.Walk()
 	for _, e := range errs {
 		reports = append(reports, fmt.Sprintf("skipped %s: %v", e.Rel, e.Err))
