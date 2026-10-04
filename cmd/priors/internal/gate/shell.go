@@ -54,9 +54,20 @@ func IngestsCall(toolName string, toolInput json.RawMessage) bool {
 	return true
 }
 
+const segmentBreaks = "\n;&|(){}`"
+
+var (
+	unescape   = strings.NewReplacer("\\\n", "", "\\", "")
+	dropQuotes = strings.NewReplacer(`"`, "", "'", "")
+)
+
 // ingestsCommand matches a listed name in any segment whose command word is not
 // inert, so `rg curl src/` stays clean while `echo x | curl …`, `setsid gh pr
-// view 2` and `bash -c "gh pr view 2"` match.
+// view 2` and `bash -c "gh pr view 2"` match. Three readings are ORed: the raw
+// text with quotes as segment breaks, so a quoted script is judged on its own;
+// the unescaped text likewise, so a script with escapes is too; and the
+// unescaped text with quotes deleted, as bash joins words (`g""h`, `"g"h`,
+// `g\h`), so a quoted argument stays with the gh that owns it.
 func ingestsCommand(text string) bool {
 	lower := strings.ToLower(text)
 	for _, scheme := range []string{"http://", "https://", "ftp://"} {
@@ -64,18 +75,51 @@ func ingestsCommand(text string) bool {
 			return true
 		}
 	}
+	unescaped := unescape.Replace(text)
+	return ingestsSegments(text, segmentBreaks+`"'`) ||
+		ingestsSegments(unescaped, segmentBreaks+`"'`) ||
+		ingestsSegments(dropQuotes.Replace(unescaped), segmentBreaks)
+}
+
+// ingestsSegments also judges each segment with env's attached values split off,
+// in addition to the unsplit words, so the split can only add flags.
+func ingestsSegments(text, breaks string) bool {
 	segments := strings.FieldsFunc(text, func(r rune) bool {
-		return strings.ContainsRune("\n;&|(){}`\"'", r)
+		return strings.ContainsRune(breaks, r)
 	})
-	for _, seg := range segments {
+	return slices.ContainsFunc(segments, func(seg string) bool {
 		words := strings.FieldsFunc(seg, func(r rune) bool {
 			return unicode.IsSpace(r) || r == '<' || r == '>'
 		})
-		if segmentIngests(words) {
-			return true
+		return segmentIngests(words) || segmentIngests(splitEnvValues(words))
+	})
+}
+
+// splitEnvValues splits off, after an env word, a flag's attached value as its
+// own word, since env -S/--split-string runs it as a command.
+func splitEnvValues(fields []string) []string {
+	var words []string
+	seenEnv := false
+	for _, w := range fields {
+		if !seenEnv {
+			seenEnv = wordName(w) == "env"
+			words = append(words, w)
+			continue
 		}
+		i := -1
+		switch {
+		case strings.HasPrefix(w, "--"):
+			i = strings.IndexByte(w, '=')
+		case strings.HasPrefix(w, "-"):
+			i = strings.IndexByte(w, 'S')
+		}
+		if i < 0 || i+1 >= len(w) {
+			words = append(words, w)
+			continue
+		}
+		words = append(words, w[:i+1], w[i+1:])
 	}
-	return false
+	return words
 }
 
 // segmentIngests judges one segment. Unless its command word is inert, every
