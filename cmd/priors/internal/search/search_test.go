@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -16,12 +15,19 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
+	"github.com/noamsto/hookyard/cmd/priors/internal/tools"
+	"github.com/noamsto/hookyard/cmd/priors/internal/tools/toolstest"
 )
+
+func TestMain(m *testing.M) {
+	toolstest.Pin()
+	os.Exit(m.Run())
+}
 
 func needRg(t *testing.T) {
 	t.Helper()
-	if _, err := exec.LookPath("rg"); err != nil {
-		t.Skip("rg not on PATH")
+	if tools.Rg == "" {
+		t.Skip("rg not pinned")
 	}
 }
 

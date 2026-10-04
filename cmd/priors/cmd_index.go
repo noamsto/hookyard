@@ -142,7 +142,7 @@ func runHook(job func(ctx context.Context) hookResult) hookResult {
 func assembleIndex(ctx context.Context, cfgPath, cwd string) hookResult {
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
-		return hookResult{}
+		return hookResult{reports: []string{"priors: " + err.Error()}}
 	}
 	rules, err := gate.LoadRules(cfg.Rules)
 	if err != nil {
@@ -250,7 +250,7 @@ func writeIndexes(cfgPath string, s streams) int {
 		return 1
 	}
 	// A missing scanner leaves it zero, which fails the commit closed.
-	scanner, _ := gate.FindScanner(cfg.Scanner)
+	scanner, _ := gate.PinnedScanner()
 	ids := []route.StoreID{route.StorePersonal}
 	if cfg.WorkPresent() {
 		ids = append(ids, route.StoreWork)

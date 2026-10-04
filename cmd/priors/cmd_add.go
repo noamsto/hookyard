@@ -95,7 +95,7 @@ func cmdAdd(args []string, s streams) int {
 		s.errln("refused: redaction rule set unavailable:", err)
 		return 1
 	}
-	scanner, err := gate.FindScanner(cfg.Scanner)
+	scanner, err := gate.PinnedScanner()
 	if err != nil {
 		s.errln("refused: secret scanner unavailable:", err)
 		return 1

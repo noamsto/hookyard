@@ -70,7 +70,7 @@ func cmdLint(args []string, s streams) int {
 		return 1
 	}
 	// A missing scanner leaves sc zero, which fails the commit closed.
-	sc, scanErr := gate.FindScanner(cfg.Scanner)
+	sc, scanErr := gate.PinnedScanner()
 	var scanner *gate.Scanner
 	if scanErr == nil {
 		scanner = &sc

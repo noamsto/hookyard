@@ -24,7 +24,6 @@ type Config struct {
 	StateDir      string   `toml:"state_dir"`
 	EventRecord   string   `toml:"event_record"`
 	Rules         string   `toml:"rules"`
-	Scanner       string   `toml:"scanner"`
 	SSHConfig     string   `toml:"ssh_config"`
 	// Commit is a pointer so that unset means true.
 	Commit *bool `toml:"commit"`
@@ -54,6 +53,9 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if md.IsDefined("scanner") {
+		return Config{}, fmt.Errorf("%s: scanner is no longer a config key: the secret scanner is pinned at build time", path)
+	}
 	if undecoded := md.Undecoded(); len(undecoded) > 0 {
 		keys := make([]string, len(undecoded))
 		for i, k := range undecoded {
@@ -73,7 +75,7 @@ func Load(path string) (Config, error) {
 	if c.PersonalOrgs, err = normalizeOrgs("personal_orgs", c.PersonalOrgs); err != nil {
 		return Config{}, err
 	}
-	for _, p := range []*string{&c.PersonalStore, &c.WorkStore, &c.StateDir, &c.EventRecord, &c.Rules, &c.Scanner, &c.SSHConfig} {
+	for _, p := range []*string{&c.PersonalStore, &c.WorkStore, &c.StateDir, &c.EventRecord, &c.Rules, &c.SSHConfig} {
 		if *p, err = expandHome(*p); err != nil {
 			return Config{}, err
 		}

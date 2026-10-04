@@ -31,6 +31,7 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 	"github.com/noamsto/hookyard/cmd/priors/internal/sanitize"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
+	"github.com/noamsto/hookyard/cmd/priors/internal/tools"
 )
 
 const (
@@ -726,10 +727,15 @@ func runGit(ctx context.Context, dir string, timeout time.Duration, stdin io.Rea
 func runGitEnv(ctx context.Context, dir string, env []string, timeout time.Duration, stdin io.Reader, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir, "-c", "core.hooksPath=/dev/null"}, args...)...) //nolint:gosec // dir is the configured store checkout; args are fixed git subcommands
+	cmd := tools.Command(ctx, tools.Git, append([]string{"-C", dir, "-c", "core.hooksPath=/dev/null"}, args...)...)
 	// Checkout matches git's English "not a git repository"; literal
 	// pathspecs keep a file named like a glob from staging its neighbours.
-	cmd.Env = route.RepoEnv(append([]string{"GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "GIT_LITERAL_PATHSPECS=1"}, env...)...)
+	// GIT_SSH_COMMAND goes last, as exec keeps the final duplicate, so git's own
+	// transport cannot find ssh on PATH; GIT_EXEC_PATH would swap git's helpers.
+	cmd.Env = append(slices.DeleteFunc(
+		route.RepoEnv(append([]string{"GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "GIT_LITERAL_PATHSPECS=1"}, env...)...),
+		func(kv string) bool { return strings.HasPrefix(kv, "GIT_EXEC_PATH=") },
+	), "GIT_SSH_COMMAND="+tools.SSH)
 	cmd.Stdin = stdin
 	cmd.WaitDelay = waitDelay
 	var stdout, stderr bytes.Buffer

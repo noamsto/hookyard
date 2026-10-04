@@ -3,8 +3,8 @@
 package committest
 
 import (
+	"context"
 	"os"
-	"os/exec"
 	"slices"
 	"strings"
 	"testing"
@@ -12,6 +12,7 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 	"github.com/noamsto/hookyard/cmd/priors/internal/sanitize"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
+	"github.com/noamsto/hookyard/cmd/priors/internal/tools"
 )
 
 // UnsetRepoEnv drops route.RepoLocatingEnv, which a TestMain calls so the
@@ -27,7 +28,7 @@ func UnsetRepoEnv() {
 // not hold. An unborn HEAD, or one without a MEMORY.md, holds trivially.
 func AssertHeadIndexInTree(t testing.TB, dir string) {
 	t.Helper()
-	if err := exec.Command("git", "-C", dir, "rev-parse", "-q", "--verify", "HEAD").Run(); err != nil { //nolint:gosec // dir is the calling test's own store
+	if err := tools.Command(context.Background(), tools.Git, "-C", dir, "rev-parse", "-q", "--verify", "HEAD").Run(); err != nil {
 		return
 	}
 	tree := strings.Split(gitOut(t, dir, "ls-tree", "-r", "-z", "--name-only", "HEAD"), "\x00")
@@ -44,7 +45,7 @@ func AssertHeadIndexInTree(t testing.TB, dir string) {
 
 func gitOut(t testing.TB, dir string, args ...string) string {
 	t.Helper()
-	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).Output() //nolint:gosec // dir is the calling test's own store; args are fixed read-only git subcommands
+	out, err := tools.Command(context.Background(), tools.Git, append([]string{"-C", dir}, args...)...).Output()
 	if err != nil {
 		t.Fatalf("git %v: %v", args, err)
 	}

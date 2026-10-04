@@ -10,9 +10,12 @@ import (
 	"testing"
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
+	"github.com/noamsto/hookyard/cmd/priors/internal/tools"
+	"github.com/noamsto/hookyard/cmd/priors/internal/tools/toolstest"
 )
 
 func TestMain(m *testing.M) {
+	toolstest.Pin()
 	for _, k := range RepoLocatingEnv {
 		_ = os.Unsetenv(k)
 	}
@@ -334,8 +337,8 @@ func TestRepoName(t *testing.T) {
 }
 
 func TestResolveDefaultSSHHost(t *testing.T) {
-	if _, err := exec.LookPath("ssh"); err != nil {
-		t.Skip("ssh not on PATH")
+	if tools.SSH == "" {
+		t.Skip("ssh not pinned")
 	}
 	isolateGit(t)
 	sshConfig := filepath.Join(t.TempDir(), "ssh_config")

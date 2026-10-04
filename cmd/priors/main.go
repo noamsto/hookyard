@@ -15,6 +15,7 @@ import (
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
+	"github.com/noamsto/hookyard/cmd/priors/internal/tools"
 )
 
 const usage = `usage: priors <command> [flags]
@@ -49,6 +50,11 @@ func main() {
 func run(args []string, s streams) int {
 	if len(args) == 0 {
 		return cmdBare(s)
+	}
+	// An unpinned build would otherwise have nothing to run but what PATH offers.
+	if missing := tools.Unpinned(); len(missing) > 0 {
+		s.errf("priors: built without pinned paths for %s; build it with nix (nix build .#priors)\n", strings.Join(missing, ", "))
+		return 1
 	}
 	rest := args[1:]
 	switch args[0] {

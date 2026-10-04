@@ -4,13 +4,20 @@ import (
 	"context"
 	"maps"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/noamsto/hookyard/cmd/priors/internal/tools"
+	"github.com/noamsto/hookyard/cmd/priors/internal/tools/toolstest"
 )
+
+func TestMain(m *testing.M) {
+	toolstest.Pin()
+	os.Exit(m.Run())
+}
 
 // fakeScanner writes an executable that ignores its arguments, drains stdin,
 // prints out and exits with code.
@@ -139,75 +146,38 @@ echo '[]'
 	}
 }
 
-func TestFindScanner(t *testing.T) {
-	t.Run("empty PATH", func(t *testing.T) {
-		t.Setenv("PATH", t.TempDir())
-		if s, err := FindScanner(""); err == nil {
-			t.Fatalf("FindScanner = %+v, want error", s)
-		}
-	})
+func TestPinnedScanner(t *testing.T) {
+	saved := tools.Scanner
+	t.Cleanup(func() { tools.Scanner = saved })
 
-	t.Run("prefers betterleaks over gitleaks", func(t *testing.T) {
-		dir := t.TempDir()
-		fakeScanner(t, dir, "gitleaks", `[]`, 0)
-		fakeScanner(t, dir, "betterleaks", `[]`, 0)
-		t.Setenv("PATH", dir)
-		s, err := FindScanner("")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if filepath.Base(s.Bin) != "betterleaks" {
-			t.Errorf("Bin = %s, want betterleaks", s.Bin)
-		}
-	})
+	tools.Scanner = ""
+	if s, err := PinnedScanner(); err == nil {
+		t.Errorf("unpinned: PinnedScanner = %+v, want error", s)
+	}
 
-	t.Run("falls back to gitleaks", func(t *testing.T) {
-		dir := t.TempDir()
-		fakeScanner(t, dir, "gitleaks", `[]`, 0)
-		t.Setenv("PATH", dir)
-		s, err := FindScanner("")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if filepath.Base(s.Bin) != "gitleaks" {
-			t.Errorf("Bin = %s, want gitleaks", s.Bin)
-		}
-	})
+	tools.Scanner = filepath.Join(t.TempDir(), "absent")
+	if s, err := PinnedScanner(); err == nil {
+		t.Errorf("missing: PinnedScanner = %+v, want error", s)
+	}
 
-	t.Run("explicit path", func(t *testing.T) {
-		dir := t.TempDir()
-		exe := fakeScanner(t, dir, "custom", `[]`, 0)
-		notExe := filepath.Join(dir, "plain")
-		if err := os.WriteFile(notExe, []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if s, err := FindScanner(exe); err != nil || s.Bin != exe {
-			t.Errorf("FindScanner(%s) = %+v, %v", exe, s, err)
-		}
-		if s, err := FindScanner(notExe); err == nil {
-			t.Errorf("FindScanner(non-executable) = %+v, want error", s)
-		}
-	})
+	exe := fakeScanner(t, t.TempDir(), "custom", `[]`, 0)
+	tools.Scanner = exe
+	if s, err := PinnedScanner(); err != nil || s.Bin != exe {
+		t.Errorf("PinnedScanner = %+v, %v; want Bin %s", s, err, exe)
+	}
+}
 
-	t.Run("name on PATH", func(t *testing.T) {
-		dir := t.TempDir()
-		fakeScanner(t, dir, "myscan", `[]`, 0)
-		t.Setenv("PATH", dir)
-		if s, err := FindScanner("myscan"); err != nil || filepath.Base(s.Bin) != "myscan" {
-			t.Errorf("FindScanner(myscan) = %+v, %v", s, err)
-		}
-		if s, err := FindScanner("absent"); err == nil {
-			t.Errorf("FindScanner(absent) = %+v, want error", s)
-		}
-	})
+// realBetterleaks is the pinned scanner when it is betterleaks.
+func realBetterleaks(t *testing.T) Scanner {
+	t.Helper()
+	if filepath.Base(tools.Scanner) != "betterleaks" {
+		t.Skip("betterleaks is not the pinned scanner")
+	}
+	return Scanner{Bin: tools.Scanner}
 }
 
 func TestRealBetterleaks(t *testing.T) {
-	bin, err := exec.LookPath("betterleaks")
-	if err != nil {
-		t.Skip("betterleaks not on PATH")
-	}
-	s := Scanner{Bin: bin}
+	s := realBetterleaks(t)
 	// betterleaks' github-pat rule has an entropy floor, so a repeated
 	// pattern would not trip it; this body is varied on purpose.
 	token := "gh" + "p_" + "Zq8Kd3LmX0pR7tVb2Nw9" + "Yc4Hf6Js1GaEuQiO"
@@ -249,11 +219,7 @@ func TestRealBetterleaks(t *testing.T) {
 // TestRealBetterleaksCannotBeSuppressed plants each way the scanned content or
 // the environment could tell the scanner to look away.
 func TestRealBetterleaksCannotBeSuppressed(t *testing.T) {
-	bin, err := exec.LookPath("betterleaks")
-	if err != nil {
-		t.Skip("betterleaks not on PATH")
-	}
-	s := Scanner{Bin: bin}
+	s := realBetterleaks(t)
 	token := "gh" + "p_" + "Zq8Kd3LmX0pR7tVb2Nw9" + "Yc4Hf6Js1GaEuQiO"
 	line := "the token is " + token + "\n"
 	allowAll := "[allowlist]\npaths = [\".*\"]\nregexes = [\".*\"]\n"
