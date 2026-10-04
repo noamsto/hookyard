@@ -805,6 +805,15 @@ func TestAddRefusals(t *testing.T) {
 		wantExit(t, res, 1)
 		wantContains(t, "stderr", res.stderr, "refused: redaction rule set unavailable:")
 	})
+	t.Run("rule set cannot drop the built-ins", func(t *testing.T) {
+		rules := filepath.Join(sb.dir, "rules.toml")
+		sb.writeFile(rules, "[[rule]]\nid = \"never\"\nregex = 'NEVERMATCHES[0-9]{40}'\n")
+		sb.writeConfig(`rules = "` + rules + `"`)
+		defer sb.writeConfig()
+		res := sb.run("id: "+"AK"+"IA"+"IOSFODNN7EXAMPLE\n", append(base, "--type", "project", "--stdin")...)
+		wantExit(t, res, 1)
+		wantContains(t, "stderr", res.stderr, "refused:", "aws-access-key-id")
+	})
 	t.Run("no repo", func(t *testing.T) {
 		res := sb.run("", "add", "--name", "a-fact", "--description", "d", "--type", "project",
 			"--cwd", t.TempDir(), "--session", "sess-1")

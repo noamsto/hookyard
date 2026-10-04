@@ -56,6 +56,81 @@ func TestEmbeddedRulesIgnoreCleanText(t *testing.T) {
 	}
 }
 
+func TestLoadRulesBuiltinsOnly(t *testing.T) {
+	rules, err := LoadRules("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(rules.rules), len(ruleSamples()); got != want {
+		t.Errorf("LoadRules(\"\") has %d rules, want %d", got, want)
+	}
+}
+
+func TestConfiguredRulesAddToBuiltins(t *testing.T) {
+	aws := ruleSamples()["aws-access-key-id"]
+	tests := []struct {
+		name    string
+		body    string
+		text    string
+		want    []string
+		wantErr []string
+	}{
+		{
+			name: "no-match rule leaves built-ins in force",
+			body: "[[rule]]\nid = \"never\"\nregex = 'NEVERMATCHES[0-9]{40}'\n",
+			text: "id: " + aws,
+			want: []string{"aws-access-key-id"},
+		},
+		{
+			name: "configured rule follows built-ins",
+			body: "[[rule]]\nid = \"marker\"\nregex = 'MARK[0-9]+'\n",
+			text: aws + " MARK42",
+			want: []string{"aws-access-key-id", "marker"},
+		},
+		{
+			name:    "built-in id reused",
+			body:    "[[rule]]\nid = \"jwt\"\nregex = 'MARK[0-9]+'\n",
+			wantErr: []string{"jwt", "duplicate"},
+		},
+		{
+			name:    "id repeated in file",
+			body:    "[[rule]]\nid = \"a\"\nregex = 'A'\n[[rule]]\nid = \"a\"\nregex = 'B'\n",
+			wantErr: []string{"a", "duplicate"},
+		},
+		{
+			name:    "unknown key",
+			body:    "[[rule]]\nid = \"x\"\nregex = 'X'\nallow = [\"aws-access-key-id\"]\n",
+			wantErr: []string{"allow"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "rules.toml")
+			if err := os.WriteFile(p, []byte(tt.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			rules, err := LoadRules(p)
+			if tt.wantErr != nil {
+				if err == nil {
+					t.Fatal("LoadRules succeeded, want error")
+				}
+				for _, w := range tt.wantErr {
+					if !strings.Contains(err.Error(), w) {
+						t.Errorf("error %q lacks %q", err, w)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := rules.Match(tt.text); !slices.Equal(got, tt.want) {
+				t.Errorf("Match = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadRulesFromFile(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, body string) string {
