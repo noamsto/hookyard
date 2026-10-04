@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"net/url"
 	"os"
 	"os/exec"
@@ -132,22 +131,10 @@ func Resolve(ctx context.Context, cwd string, cfg config.Config, r Resolver) Ses
 		sshHost = func(ctx context.Context, alias string) string { return defaultSSHHost(ctx, cfg.SSHConfig, alias) }
 	}
 	resolved := map[string]string{}
-
-	remotes := map[string]remote{}
-	opaque := false
-	names, _ := gitOut(ctx, dir, "remote")
-	for name := range strings.FieldsSeq(names) {
-		raw, err := gitOut(ctx, dir, "remote", "get-url", name)
-		if err != nil {
-			opaque = true
-			continue
-		}
+	parse := func(raw string) (remote, error) {
 		host, owner, repo, sshLike, err := ParseURL(raw)
 		if err != nil {
-			if !isLocalPath(raw) {
-				opaque = true
-			}
-			continue
+			return remote{}, err
 		}
 		rem := remote{hosts: []string{host}, owner: owner, repo: repo}
 		if sshLike {
@@ -160,17 +147,72 @@ func Resolve(ctx context.Context, cwd string, cfg config.Config, r Resolver) Ses
 				rem.hosts = append(rem.hosts, target)
 			}
 		}
-		remotes[name] = rem
+		return rem, nil
+	}
+
+	var all, originAll []remote
+	var origin remote
+	hasOrigin, opaque := false, false
+	names, _ := gitOut(ctx, dir, "remote")
+	raws, err := rawURLs(ctx, dir, strings.Fields(names))
+	if err != nil {
+		opaque = true
+	}
+	rewrites, err := configGetRegexp(ctx, dir, `^url\..*\.(insteadof|pushinsteadof)$`)
+	if err != nil {
+		opaque = true
+	}
+	for name := range strings.FieldsSeq(names) {
+		fetch, err := gitOut(ctx, dir, "remote", "get-url", "--all", name)
+		if err != nil {
+			opaque = true
+		}
+		push, err := gitOut(ctx, dir, "remote", "get-url", "--push", "--all", name)
+		if err != nil {
+			opaque = true
+		}
+		// The first fetch URL is the one git fetches from; it alone decides the
+		// repo name and whether the rewritten URL is unreadable.
+		urls := strings.Split(fetch, "\n")
+		urls = append(urls, strings.Split(push, "\n")...)
+		rawStart := len(urls)
+		urls = append(urls, raws[name]...)
+		for i, raw := range urls {
+			isRaw := i >= rawStart
+			rem, err := parse(raw)
+			if err != nil {
+				// A raw value is what the repo's own config names, so one priors
+				// cannot read could hide a work org behind a rewrite. A rewritten
+				// URL priors cannot read was chosen by a rewrite it cannot classify.
+				switch {
+				case i == 0 && !isLocalPath(raw),
+					isRaw && !localRaw(raw, rewrites),
+					!isRaw && raw != "" && !slices.Contains(raws[name], raw):
+					opaque = true
+				}
+				continue
+			}
+			// A rewritten raw URL names an org only through user config, so one
+			// that does not itself name a listed org leaves git's org unknown.
+			if isRaw && rewritten(raw, rewrites) && !rem.matches(cfg.WorkOrgs) && !rem.matches(cfg.PersonalOrgs) {
+				opaque = true
+			}
+			if name == "origin" {
+				originAll = append(originAll, rem)
+				if i == 0 {
+					origin, hasOrigin = rem, true
+				}
+			}
+			all = append(all, rem)
+		}
 	}
 
 	s := Session{Dir: dir}
-	origin, hasOrigin := remotes["origin"]
 	if hasOrigin {
 		s.Repo = repoName(origin.repo)
 	} else {
 		s.Repo = repoName(commonDirName(ctx, dir))
 	}
-	all := slices.Collect(maps.Values(remotes))
 	switch {
 	case slices.ContainsFunc(all, func(rem remote) bool { return rem.matches(cfg.WorkOrgs) }):
 		s.Class = ClassWork
@@ -180,7 +222,7 @@ func Resolve(ctx context.Context, cwd string, cfg config.Config, r Resolver) Ses
 		return !rem.matches(cfg.PersonalOrgs) && isWorkOwner(rem.owner, cfg.WorkOrgs)
 	}):
 		s.Class = ClassUnresolvable
-	case origin.matches(cfg.PersonalOrgs):
+	case !slices.ContainsFunc(originAll, func(rem remote) bool { return !rem.matches(cfg.PersonalOrgs) }):
 		s.Class = ClassPersonal
 	case cfg.Profile == "work":
 		s.Class = ClassUnresolvable
@@ -188,6 +230,75 @@ func Resolve(ctx context.Context, cwd string, cfg config.Config, r Resolver) Ses
 		s.Class = ClassPersonal
 	}
 	return s
+}
+
+// rawURLs returns every remote.<name>.url and .pushurl value as configured,
+// before insteadOf rewriting, keyed by remote name. A remote with no url is
+// fetched from its name, so the name stands in as its raw URL.
+func rawURLs(ctx context.Context, dir string, names []string) (map[string][]string, error) {
+	vars, err := configGetRegexp(ctx, dir, `^remote\..*\.(url|pushurl)$`)
+	if err != nil {
+		return nil, err
+	}
+	raws := map[string][]string{}
+	hasURL := map[string]bool{}
+	for _, v := range vars {
+		rest, ok := strings.CutPrefix(v.key, "remote.")
+		if !ok {
+			continue
+		}
+		// A remote name may contain dots; the variable follows the last one.
+		dot := strings.LastIndex(rest, ".")
+		name := rest[:dot]
+		raws[name] = append(raws[name], v.value)
+		if rest[dot+1:] == "url" {
+			hasURL[name] = true
+		}
+	}
+	for _, name := range names {
+		if !hasURL[name] {
+			raws[name] = append(raws[name], name)
+		}
+	}
+	return raws, nil
+}
+
+type configVar struct{ key, value string }
+
+// configGetRegexp returns every config variable matching pattern. No match is
+// not an error.
+func configGetRegexp(ctx context.Context, dir, pattern string) ([]configVar, error) {
+	out, err := gitOut(ctx, dir, "config", "-z", "--get-regexp", pattern)
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 1 {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var vars []configVar
+	// Each record ends in NUL; a trailing empty record would read as an empty
+	// rewrite prefix, which matches every URL.
+	for rec := range strings.SplitSeq(strings.TrimSuffix(out, "\x00"), "\x00") {
+		key, value, _ := strings.Cut(rec, "\n")
+		vars = append(vars, configVar{key, value})
+	}
+	return vars, nil
+}
+
+// localRaw reports whether an unparsable raw URL is a local path git uses as
+// written. git applies insteadOf and pushInsteadOf prefixes to any value, so a
+// matching prefix means user config chose the URL git uses.
+func localRaw(raw string, rewrites []configVar) bool {
+	if rewritten(raw, rewrites) {
+		return false
+	}
+	return isLocalPath(raw) || !strings.Contains(raw, ":")
+}
+
+// rewritten reports whether any insteadOf or pushInsteadOf prefix matches raw.
+func rewritten(raw string, rewrites []configVar) bool {
+	return slices.ContainsFunc(rewrites, func(v configVar) bool { return strings.HasPrefix(raw, v.value) })
 }
 
 // isLocalPath reports whether an unparsable remote URL is plainly a path on

@@ -171,6 +171,78 @@ func TestResolve(t *testing.T) {
 	}
 }
 
+func TestResolveRewrites(t *testing.T) {
+	const (
+		noamsto   = "https://github.com/noamsto/x"
+		factify   = "https://github.com/factify-inc/x"
+		someone   = "https://github.com/someone/x"
+		insteadOf = "insteadOf"
+		pushInst  = "pushInsteadOf"
+	)
+	type rewrite struct{ base, kind, prefix string }
+	shadowFyx := []rewrite{{"https://github.com/factify-inc/", insteadOf, "fy"}, {"https://github.com/noamsto/x", insteadOf, "fyx"}}
+	tests := []struct {
+		name     string
+		profile  string
+		origin   string
+		rewrites []rewrite
+		setup    [][]string
+		class    Class
+		repo     string
+	}{
+		{"work raw hidden by insteadOf", "personal", "git@github.com:factify-inc/x", []rewrite{{"git@github.com:noamsto/", insteadOf, "git@github.com:factify-inc/"}}, nil, ClassWork, "x"},
+		{"personal raw rewritten to work", "personal", noamsto, []rewrite{{"https://github.com/factify-inc/", insteadOf, "https://github.com/noamsto/"}}, nil, ClassWork, "x"},
+		{"pushInsteadOf to work", "personal", noamsto, []rewrite{{"https://github.com/factify-inc/", pushInst, "https://github.com/noamsto/"}}, nil, ClassWork, "x"},
+		{"second url value is work", "personal", noamsto, nil, [][]string{{"config", "--add", "remote.origin.url", factify}}, ClassWork, "x"},
+		{"pushurl via ssh alias is work", "personal", noamsto, nil, [][]string{{"config", "remote.origin.pushurl", "git@gh-work:factify-inc/x"}}, ClassWork, "x"},
+		{"work raw rewritten to local path", "personal", factify, []rewrite{{"/srv/mirror/", insteadOf, "https://github.com/factify-inc/"}}, nil, ClassWork, "clone"},
+		{"plain personal", "personal", noamsto, nil, nil, ClassPersonal, "x"},
+		{"personal raw rewritten to unlisted org on work host", "work", noamsto, []rewrite{{"https://github.com/someone/", insteadOf, "https://github.com/noamsto/"}}, nil, ClassUnresolvable, "x"},
+		{"personal rewritten to personal on work host", "work", noamsto, []rewrite{{"git@github.com:noamsto/", insteadOf, "https://github.com/noamsto/"}}, nil, ClassPersonal, "x"},
+		{"unlisted raw rewritten to personal on work host", "work", someone, []rewrite{{"https://github.com/noamsto/", insteadOf, "https://github.com/someone/"}}, nil, ClassUnresolvable, "x"},
+		{"unsupported raw scheme rewritten to personal", "personal", "persistent-https://github.com/factify-inc/x", []rewrite{{"https://github.com/noamsto/", insteadOf, "persistent-https://github.com/factify-inc/"}}, nil, ClassUnresolvable, "x"},
+		{"unparsable shortcut hidden by longer rewrite", "personal", "fy:x", []rewrite{{"https://github.com/factify-inc/", insteadOf, "fy:"}, {"https://github.com/noamsto/x", insteadOf, "fy:x"}}, nil, ClassUnresolvable, "x"},
+		{"no_push pushurl is a local path", "personal", noamsto, nil, [][]string{{"config", "remote.origin.pushurl", "no_push"}}, ClassPersonal, "x"},
+		{"dotted remote name raw work hidden by insteadOf", "personal", noamsto, []rewrite{{"https://github.com/noamsto/", insteadOf, "https://github.com/factify-inc/"}}, [][]string{{"remote", "add", "up.stream", "https://github.com/factify-inc/y"}}, ClassWork, "x"},
+		// Intended: the raw gh:noamsto/x names host gh, on no list, so origin fails closed.
+		{"personal shorthand prefix is unresolvable on work host", "work", "gh:noamsto/x", []rewrite{{"https://github.com/", insteadOf, "gh:"}}, nil, ClassUnresolvable, "x"},
+		{"colon-less raw shadowed by longer rewrite", "personal", "fyx", shadowFyx, nil, ClassUnresolvable, "x"},
+		{"local-path raw shadowed by longer rewrite", "personal", "/srv/fy/x", []rewrite{{"https://github.com/factify-inc/", insteadOf, "/srv/fy/"}, {"https://github.com/noamsto/x", insteadOf, "/srv/fy/x"}}, nil, ClassUnresolvable, "x"},
+		{"local-path raw shadowed by pushInsteadOf only", "personal", "/srv/fy/x", []rewrite{{"https://github.com/factify-inc/", pushInst, "/srv/fy/"}, {"https://github.com/noamsto/x", pushInst, "/srv/fy/x"}}, nil, ClassUnresolvable, "clone"},
+		{"colon-less pushurl shadowed by longer rewrite", "personal", noamsto, shadowFyx, [][]string{{"config", "remote.origin.pushurl", "fyx"}}, ClassUnresolvable, "x"},
+		{"url-less remote name rewritten", "personal", noamsto, shadowFyx, [][]string{{"config", "remote.fyx.fetch", "+refs/heads/*:refs/remotes/fyx/*"}}, ClassUnresolvable, "x"},
+		{"colon-less raw shadowed by includeIf rewrite", "personal", "fyx", nil, [][]string{
+			{"config", "--file", ".git/rw.inc", "url.https://github.com/factify-inc/.insteadOf", "fy"},
+			{"config", "--file", ".git/rw.inc", "url.https://github.com/noamsto/x.insteadOf", "fyx"},
+			{"config", "includeIf.gitdir:**/clone/.path", "rw.inc"},
+		}, ClassUnresolvable, "x"},
+		{"no_push pushurl with unmatched rewrite", "personal", noamsto, []rewrite{{"https://github.com/", insteadOf, "gh:"}}, [][]string{{"config", "remote.origin.pushurl", "no_push"}}, ClassPersonal, "x"},
+		{"parsable shorthand shadowed by longer prefix", "personal", "fy:inc/x", []rewrite{{"https://github.com/factify-", insteadOf, "fy:"}, {"https://github.com/noamsto/", insteadOf, "fy:inc/"}}, nil, ClassUnresolvable, "x"},
+		{"shorthand repointed to personal", "personal", "fy:team/x", []rewrite{{"https://github.com/noamsto/", insteadOf, "fy:"}}, nil, ClassUnresolvable, "x"},
+		{"shorthand repointed to unlisted", "personal", "fy:team/x", []rewrite{{"https://github.com/someone/", insteadOf, "fy:"}}, nil, ClassUnresolvable, "x"},
+		{"shorthand to work stays work", "personal", "fy:team/x", []rewrite{{"https://github.com/factify-inc/", insteadOf, "fy:"}}, nil, ClassWork, "x"},
+		{"personal raw rewritten to local mirror", "personal", noamsto, []rewrite{{"/srv/mirror/factify-inc/x", insteadOf, noamsto}}, nil, ClassUnresolvable, "clone"},
+		{"personal push rewritten to unparsable", "personal", noamsto, []rewrite{{"weird", pushInst, noamsto}}, nil, ClassUnresolvable, "x"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateGit(t)
+			dir := newRepo(t, "clone", map[string]string{"origin": tt.origin})
+			for _, rw := range tt.rewrites {
+				git(t, dir, "config", "--global", "url."+rw.base+"."+rw.kind, rw.prefix)
+			}
+			for _, args := range tt.setup {
+				git(t, dir, args...)
+			}
+			got := Resolve(t.Context(), dir, workCfg(tt.profile), stubResolver)
+			want := Session{Class: tt.class, Repo: tt.repo, Dir: dir}
+			if got != want {
+				t.Errorf("Resolve = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
 func TestResolveIgnoresInheritedRepoEnv(t *testing.T) {
 	isolateGit(t)
 	dir := newRepo(t, "clone", map[string]string{"origin": "https://github.com/noamsto/x"})
