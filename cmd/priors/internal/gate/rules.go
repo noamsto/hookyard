@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -27,41 +29,64 @@ type Rules struct {
 	rules []rule
 }
 
-// LoadRules reads the rule set at path, or the built-in one when path is "".
+// LoadRules returns the built-in rule set, plus the rules in the file at path
+// when path is not "". The built-in set is always loaded and is a floor config
+// cannot remove: a configured file only adds rules. An id it shares with a
+// built-in or repeats, an unknown key, or a missing, unparsable or empty file
+// is an error, so a bad config fails closed rather than falling back.
 func LoadRules(path string) (Rules, error) {
-	data, source := builtinRules, "built-in rules"
-	if path != "" {
-		b, err := os.ReadFile(path) //nolint:gosec // path is the operator-configured rule set
-		if err != nil {
-			return Rules{}, fmt.Errorf("rules: %w", err)
-		}
-		data, source = b, path
-	}
-	r, err := parseRules(data)
+	r, err := parseRules(Rules{}, builtinRules)
 	if err != nil {
-		return Rules{}, fmt.Errorf("%s: %w", source, err)
+		return Rules{}, fmt.Errorf("built-in rules: %w", err)
+	}
+	if path == "" {
+		return r, nil
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // path is the operator-configured rule set
+	if err != nil {
+		return Rules{}, fmt.Errorf("rules: %w", err)
+	}
+	r, err = parseRules(r, data)
+	if err != nil {
+		return Rules{}, fmt.Errorf("%s: %w", path, err)
 	}
 	return r, nil
 }
 
-func parseRules(data []byte) (Rules, error) {
+// parseRules returns base extended with the rules in data.
+func parseRules(base Rules, data []byte) (Rules, error) {
 	var file struct {
 		Rule []struct {
 			ID    string `toml:"id"`
 			Regex string `toml:"regex"`
 		} `toml:"rule"`
 	}
-	if err := toml.Unmarshal(data, &file); err != nil {
+	md, err := toml.Decode(string(data), &file)
+	if err != nil {
 		return Rules{}, err
+	}
+	if undecoded := md.Undecoded(); len(undecoded) > 0 {
+		keys := make([]string, len(undecoded))
+		for i, k := range undecoded {
+			keys[i] = k.String()
+		}
+		return Rules{}, fmt.Errorf("unknown key(s) %q", strings.Join(keys, ", "))
 	}
 	if len(file.Rule) == 0 {
 		return Rules{}, errors.New("no rules")
 	}
+	r := Rules{rules: slices.Clone(base.rules)}
+	builtin := map[string]bool{}
+	for _, ru := range base.rules {
+		builtin[ru.id] = true
+	}
 	seen := map[string]bool{}
-	var r Rules
 	for i, fr := range file.Rule {
 		if fr.ID == "" || fr.Regex == "" {
 			return Rules{}, fmt.Errorf("rule %d: id and regex are required", i+1)
+		}
+		if builtin[fr.ID] {
+			return Rules{}, fmt.Errorf("rule %q: duplicate id of a built-in rule", fr.ID)
 		}
 		if seen[fr.ID] {
 			return Rules{}, fmt.Errorf("rule %q: duplicate id", fr.ID)
