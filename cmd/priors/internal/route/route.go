@@ -178,16 +178,24 @@ func Resolve(ctx context.Context, cwd string, cfg config.Config, r Resolver) Ses
 		rawStart := len(urls)
 		urls = append(urls, raws[name]...)
 		for i, raw := range urls {
+			isRaw := i >= rawStart
 			rem, err := parse(raw)
 			if err != nil {
 				// A raw value is what the repo's own config names, so one priors
-				// cannot read could hide a work org behind a rewrite. Other
-				// unparsable rewritten URLs name no org they could be matched by.
-				isRaw := i >= rawStart
-				if i == 0 && !isLocalPath(raw) || isRaw && !localRaw(raw, rewrites) {
+				// cannot read could hide a work org behind a rewrite. A rewritten
+				// URL priors cannot read was chosen by a rewrite it cannot classify.
+				switch {
+				case i == 0 && !isLocalPath(raw),
+					isRaw && !localRaw(raw, rewrites),
+					!isRaw && raw != "" && !slices.Contains(raws[name], raw):
 					opaque = true
 				}
 				continue
+			}
+			// A rewritten raw URL names an org only through user config, so one
+			// that does not itself name a listed org leaves git's org unknown.
+			if isRaw && rewritten(raw, rewrites) && !rem.matches(cfg.WorkOrgs) && !rem.matches(cfg.PersonalOrgs) {
+				opaque = true
 			}
 			if name == "origin" {
 				originAll = append(originAll, rem)
@@ -282,10 +290,15 @@ func configGetRegexp(ctx context.Context, dir, pattern string) ([]configVar, err
 // written. git applies insteadOf and pushInsteadOf prefixes to any value, so a
 // matching prefix means user config chose the URL git uses.
 func localRaw(raw string, rewrites []configVar) bool {
-	if slices.ContainsFunc(rewrites, func(v configVar) bool { return strings.HasPrefix(raw, v.value) }) {
+	if rewritten(raw, rewrites) {
 		return false
 	}
 	return isLocalPath(raw) || !strings.Contains(raw, ":")
+}
+
+// rewritten reports whether any insteadOf or pushInsteadOf prefix matches raw.
+func rewritten(raw string, rewrites []configVar) bool {
+	return slices.ContainsFunc(rewrites, func(v configVar) bool { return strings.HasPrefix(raw, v.value) })
 }
 
 // isLocalPath reports whether an unparsable remote URL is plainly a path on

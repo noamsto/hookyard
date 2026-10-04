@@ -217,6 +217,12 @@ func TestResolveRewrites(t *testing.T) {
 			{"config", "includeIf.gitdir:**/clone/.path", "rw.inc"},
 		}, ClassUnresolvable, "x"},
 		{"no_push pushurl with unmatched rewrite", "personal", noamsto, []rewrite{{"https://github.com/", insteadOf, "gh:"}}, [][]string{{"config", "remote.origin.pushurl", "no_push"}}, ClassPersonal, "x"},
+		{"parsable shorthand shadowed by longer prefix", "personal", "fy:inc/x", []rewrite{{"https://github.com/factify-", insteadOf, "fy:"}, {"https://github.com/noamsto/", insteadOf, "fy:inc/"}}, nil, ClassUnresolvable, "x"},
+		{"shorthand repointed to personal", "personal", "fy:team/x", []rewrite{{"https://github.com/noamsto/", insteadOf, "fy:"}}, nil, ClassUnresolvable, "x"},
+		{"shorthand repointed to unlisted", "personal", "fy:team/x", []rewrite{{"https://github.com/someone/", insteadOf, "fy:"}}, nil, ClassUnresolvable, "x"},
+		{"shorthand to work stays work", "personal", "fy:team/x", []rewrite{{"https://github.com/factify-inc/", insteadOf, "fy:"}}, nil, ClassWork, "x"},
+		{"personal raw rewritten to local mirror", "personal", noamsto, []rewrite{{"/srv/mirror/factify-inc/x", insteadOf, noamsto}}, nil, ClassUnresolvable, "clone"},
+		{"personal push rewritten to unparsable", "personal", noamsto, []rewrite{{"weird", pushInst, noamsto}}, nil, ClassUnresolvable, "x"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

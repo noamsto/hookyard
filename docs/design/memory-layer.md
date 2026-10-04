@@ -463,9 +463,12 @@ counts as a local path only when it has no colon or begins `/`, `./`, `../` or
 `file://`, and no `insteadOf` or `pushInsteadOf` prefix in git config matches
 it. git applies those prefixes to any value, so a match means the URL git uses
 was chosen by user config. Any other unparsable raw URL makes the repo
-unresolvable. Otherwise the repo resolves by `origin`, and `origin` counts as a
-personal org only when every one of its URLs does. On a work-profile host an org on neither list is **unresolvable**; on a
-personal host it is personal, being on no work list. The key is the repo's org,
+unresolvable. A raw URL a rewrite prefix matches counts only when it names a
+listed org itself, and a rewritten URL priors cannot parse makes the repo
+unresolvable: a rewrite whose result priors cannot classify fails closed.
+Otherwise the repo resolves by `origin`, and `origin` counts as a personal org
+only when every one of its URLs does. On a work-profile host an org on neither
+list is **unresolvable**; on a personal host it is personal, being on no work list. The key is the repo's org,
 not the machine: a work-profile host can clone a personal repo and the reverse,
 which is the rule the fleet already uses to pick Linear or GitHub issues.
 
