@@ -133,8 +133,6 @@ func forgeIngests(words []string) bool {
 	return true
 }
 
-// nextNonFlag returns the first word not starting with "-" and the words after
-// it.
 func nextNonFlag(words []string) (word string, rest []string) {
 	for i, w := range words {
 		if !strings.HasPrefix(w, "-") {
