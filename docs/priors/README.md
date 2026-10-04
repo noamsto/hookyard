@@ -24,7 +24,7 @@ personal_orgs  = ["github.com/you"]
 # work_names   = ["build.corp.internal"]  # also rejected in the personal store
 # state_dir    = ""     # default $XDG_STATE_HOME/priors
 # event_record = ""     # hookyard's state dir; default follows hookyard's own
-# rules        = ""     # redaction rule set; "" = the built-in one
+# rules        = ""     # extra redaction rules, added to the built-in set; a bad file fails closed
 # scanner      = ""     # default betterleaks, then gitleaks, on PATH
 # ssh_config   = ""     # passed to `ssh -G -F` when resolving host aliases
 # commit       = true   # commit published facts into the checkout
