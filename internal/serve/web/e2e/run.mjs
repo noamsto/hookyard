@@ -719,9 +719,8 @@ const near = (a, b, tol, what) => assert(Math.abs(a - b) <= tol, `${what}: ${a} 
 // pulse layer's rAF callback is already queued when this one registers, so it
 // re-resolves every live dot against the current geometry first, and no render
 // can interleave inside the frame's callback batch. A plain evaluate can land
-// after a relayout redrew the bands but before the pulse frame moved the dots
-// (the #120 flake: the dot still sits at its previous frame's position while
-// the bands are already redrawn).
+// after a relayout redrew the bands but before the pulse frame moved the dots,
+// leaving a dot at its previous frame's position against the new bands.
 const strayDotsInFrame = (page) =>
   page.evaluate("(() => new Promise((res) => requestAnimationFrame(() => res(__e2e.strayDots()))))()");
 
