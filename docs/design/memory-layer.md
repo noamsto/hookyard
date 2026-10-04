@@ -808,24 +808,29 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
   A second, blunt pass backs the skeleton up: any line that is header-shaped
   or bracket-shaped and holds a non-ASCII rune outside the quoted tokens is
   quoted whole as `(quoted line: …)`, shown, not dropped. A line separator
-  (U+2028, U+2029) starts a new line. Bracket-shaped means the line, after
-  any leading Markdown or list markup (`- * + > # | ! . )`, digits, bullets)
-  and any leading quoted token, opens on an ASCII ``[ ( { < " ' ` ``, or on
-  a non-ASCII opening or quote punctuation, symbol, modifier letter or UTS #39
-  punctuation lookalike, and closes later on a matching-class rune after a
-  letter; a bracket or quote opener may also run to the end of the line.
+  (U+2028, U+2029) starts a new line, and a combining mark stays glued to
+  its base. Bracket-shaped means a bracket or quote opener (ASCII
+  ``[ ( { < " ' ` ``, non-ASCII opening or quote punctuation, or a UTS #39
+  bracket or quote lookalike) comes before the line's first letter — past
+  any leading quoted token, punctuation, symbol, digit or one-letter list
+  marker (`a.`, `b)`) — and closes after a letter or runs to the end of the
+  line; or that the line opens on a symbol or modifier letter that closes
+  later on one after a letter (`★…★`).
   Header-shaped means three or more dash, symbol, modifier-letter, `=`/`-`
-  lookalike or ASCII `= - _ ~ * # : +` runes in a row (an ASCII one beside a
-  space breaks the row), a loose token match in which a non-ASCII rune the
-  table does not map always counts as a lookalike, or a delimiter: a dash or
-  `_` inside a word followed by eight or more hex characters or digits of any
-  script, or a word of sixteen. The accepted cost is false positives:
+  lookalike or ASCII `= - _ ~ * # : +` runes in a row (a space breaks the
+  row only between two different runes when one is ASCII, so `= = = = =`
+  is a rule and `— --flag` is not), a loose token match in which a
+  non-ASCII rune the table does not map always counts as a lookalike, or a
+  delimiter: any punctuation or symbol followed by eight or more glued hex
+  characters or digits of any script, or a word of sixteen. The accepted cost is false positives:
   non-ASCII lines that open on a bracket, quote or symbol and close after a
   letter or run to its end (`[Søren]`, `「こんにちは」`, `“a” — “b” → ‘c’`,
   `««priors`), non-ASCII lines with a run of three symbols, emoji or ASCII
   rule runes (`rating ★★★`, `| ═══ table ═══ |`, `🎉🎉🎉 priors shipped`,
-  `### Café notes`), non-ASCII lines holding a hex id after a dash
-  (`commit-3bde9c4a`), and ASCII identifiers that join both token words
+  `### Café notes`, Arabic justified with tatweel `مـــحمد`), non-ASCII lines
+  holding eight or more digits or hex characters after punctuation
+  (`commit-3bde9c4a`, a Hebrew phone number `ל-0541234567`), and ASCII
+  identifiers that join both token words
   with `-` or `_` (`priors-memory-layer.md`) are quoted. Plain ASCII prose,
   smart-quoted prose and unbracketed non-ASCII prose (a Hebrew sentence) are
   unchanged. The #200 accepted costs (`like 🎉🎉🎉 priors`,

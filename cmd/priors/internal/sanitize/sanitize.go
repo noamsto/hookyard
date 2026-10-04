@@ -267,15 +267,16 @@ func skeleton(line string) []skelRune {
 			newWord = true
 			continue
 		}
-		if unicode.Is(unicode.M, r) {
-			continue
-		}
 		b := r
 		if d := norm.NFD.PropertiesString(line[s.start:]).Decomposition(); len(d) > 0 {
 			b, _ = utf8.DecodeRune(d)
-			if unicode.Is(unicode.M, b) {
-				continue
+		}
+		if unicode.Is(unicode.M, r) || unicode.Is(unicode.M, b) {
+			// A mark stays glued to the rune it sits on.
+			if n := len(sk); n > 0 && sk[n-1].end == s.start {
+				sk[n-1].end = s.end
 			}
+			continue
 		}
 		lb := unicode.ToLower(b)
 		if lb < utf8.RuneSelf {
@@ -565,23 +566,45 @@ func runeAt(line string, s skelRune) rune {
 	return r
 }
 
-// bracketed reports a line opening, past markup and quoted tokens, on a
-// bracket-like rune that a later one closes around a letter. A bracket or
-// quote needs no closer: the line's end closes it.
+// bracketed reports a line whose first bracket or quote, past list
+// markup, punctuation, symbols and quoted tokens but before any word, opens
+// it: a later closer after a letter or the line's end closes it. A line
+// starting with a word may still open on a symbol that a later one closes
+// around a letter (★…★).
 func bracketed(line string, sk []skelRune) bool {
+	for k := 0; k < len(sk); k++ {
+		s := sk[k]
+		if s.masked {
+			continue
+		}
+		r := runeAt(line, s)
+		if bracket(r) {
+			return closes(line, sk[k+1:], true)
+		}
+		if !unicode.Is(unicode.L, r) || unicode.Is(unicode.Lm, r) {
+			continue
+		}
+		if listMarker(line, sk, k) {
+			k++
+			continue
+		}
+		break
+	}
 	k := 0
 	for k < len(sk) && (sk[k].masked || markup(runeAt(line, sk[k]))) {
 		k++
 	}
-	if k == len(sk) {
+	if k == len(sk) || !opener(runeAt(line, sk[k]), sk[k].set) {
 		return false
 	}
-	o := runeAt(line, sk[k])
-	if !opener(o, sk[k].set) {
-		return false
-	}
+	return closes(line, sk[k+1:], false)
+}
+
+// closes reports a closer after a letter in sk or, for an open bracket, a
+// letter before the line's end.
+func closes(line string, sk []skelRune, open bool) bool {
 	content := false
-	for _, s := range sk[k+1:] {
+	for _, s := range sk {
 		if s.masked {
 			continue
 		}
@@ -590,7 +613,17 @@ func bracketed(line string, sk []skelRune) bool {
 		}
 		content = content || s.lc == anchor || s.letter
 	}
-	return content && bracket(o)
+	return content && open
+}
+
+// listMarker reports a one-letter word at k ending in '.' or ')': "a." or
+// "b)".
+func listMarker(line string, sk []skelRune, k int) bool {
+	if k > 0 && sk[k-1].word == sk[k].word || k+1 == len(sk) || sk[k+1].word != sk[k].word {
+		return false
+	}
+	r := runeAt(line, sk[k+1])
+	return r == '.' || r == ')'
 }
 
 // markup is Markdown or list syntax that may precede a header: rules,
@@ -599,11 +632,12 @@ func markup(r rune) bool {
 	if r < utf8.RuneSelf {
 		return '0' <= r && r <= '9' || strings.ContainsRune("-*+>#|!.)", r)
 	}
-	return unicode.Is(unicode.Po, r)
+	return unicode.Is(unicode.Po, r) && !bracket(r)
 }
 
-// ruled reports three or more rule-like runes in a row. ASCII ones must be
-// glued: a spaced "* * *" or "a - b - c" is prose.
+// ruled reports three or more rule-like runes in a row. Space between two
+// of them breaks the run when either is ASCII and they differ, so "* * *"
+// and "= = =" chain but "— --flag" is prose.
 func ruled(line string, sk []skelRune) bool {
 	n := 0
 	for i, s := range sk {
@@ -612,8 +646,12 @@ func ruled(line string, sk []skelRune) bool {
 			n = 0
 			continue
 		}
-		if n > 0 && sk[i-1].end != s.start && (r < utf8.RuneSelf || runeAt(line, sk[i-1]) < utf8.RuneSelf) {
-			n = 0
+		if n > 0 {
+			prev := sk[i-1]
+			p := runeAt(line, prev)
+			if p != r && (r < utf8.RuneSelf || p < utf8.RuneSelf) && strings.IndexFunc(line[prev.end:s.start], spaceLike) >= 0 {
+				n = 0
+			}
 		}
 		if n++; n >= 3 {
 			return true
@@ -625,21 +663,18 @@ func ruled(line string, sk []skelRune) bool {
 // hexBits are the imageBit bits of the hex digits.
 const hexBits = 1<<6 - 1 | 0x3ff<<26
 
-// delimited reports the "priors-<hex>" of a fence: a dash or underscore
-// glued inside a word and followed by eight glued digit-like runes, or a
-// word opening on sixteen of them.
+// delimited reports the "priors-<hex>" of a fence: a separator, any rune
+// but a letter or digit, followed by eight glued digit-like runes, or a word
+// opening on sixteen of them.
 func delimited(line string, sk []skelRune) bool {
 	for i, s := range sk {
 		if s.masked {
 			continue
 		}
-		if i == 0 || sk[i-1].word != s.word {
-			if digitRun(line, sk, i, s.start, 16) == 16 {
-				return true
-			}
-			continue
+		if (i == 0 || sk[i-1].word != s.word) && digitRun(line, sk, i, s.start, 16) == 16 {
+			return true
 		}
-		if r := runeAt(line, s); (dashRune(r) || r == '_') && digitRun(line, sk, i+1, s.end, 8) == 8 {
+		if !unicode.In(runeAt(line, s), unicode.L, unicode.N) && digitRun(line, sk, i+1, s.end, 8) == 8 {
 			return true
 		}
 	}
@@ -722,19 +757,23 @@ func ruleRune(r rune, set uint64) bool {
 		img != "" && strings.Trim(img, "=-_~") == ""
 }
 
-func dashRune(r rune) bool {
-	return r == '-' || r >= utf8.RuneSelf && (unicode.Is(unicode.Pd, r) || punctImage(r) == "-")
-}
-
 // swallow widens each token span by one adjacent rune per side that is not a
-// letter, digit or space, so a bracket of any shape goes with it. A '-' on
-// the right stays, keeping "priors-<hex>" readable.
+// letter, digit or space, so a bracket of any shape goes with it, together
+// with its marks. A '-' on the right stays, keeping "priors-<hex>" readable.
 func swallow(line string, spans []span) {
 	prev := 0
 	for x := range spans {
 		sp := &spans[x]
-		if r, size := utf8.DecodeLastRuneInString(line[prev:sp.start]); size > 0 && swallowable(r) {
-			sp.start -= size
+		start := sp.start
+		for {
+			r, size := utf8.DecodeLastRuneInString(line[prev:start])
+			if size == 0 || !unicode.Is(unicode.M, r) {
+				break
+			}
+			start -= size
+		}
+		if r, size := utf8.DecodeLastRuneInString(line[prev:start]); size > 0 && swallowable(r) {
+			sp.start = start - size
 		}
 		limit := len(line)
 		if x+1 < len(spans) {
@@ -742,6 +781,13 @@ func swallow(line string, spans []span) {
 		}
 		if r, size := utf8.DecodeRuneInString(line[sp.end:limit]); size > 0 && r != '-' && swallowable(r) {
 			sp.end += size
+			for {
+				r, size := utf8.DecodeRuneInString(line[sp.end:limit])
+				if size == 0 || !unicode.Is(unicode.M, r) {
+					break
+				}
+				sp.end += size
+			}
 		}
 		prev = sp.end
 	}

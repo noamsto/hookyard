@@ -497,6 +497,13 @@ func chains(ck *checker, c rune, p protected) {
 	}
 }
 
+// quoteLike is punctuation whose UTS #39 image is an ASCII bracket or quote
+// (geresh, prime, ditto mark).
+func quoteLike(c rune) bool {
+	img := punctImages[c]
+	return img != "" && strings.Trim(img, "[({<\"'`") == "" && unicode.Is(unicode.P, c)
+}
+
 // TestPropertyGluedForeignBenign: a foreign rune or two glued to, or set
 // beside, an ASCII word must not complete a fence word from it.
 func TestPropertyGluedForeignBenign(t *testing.T) {
@@ -520,7 +527,7 @@ func TestPropertyGluedForeignBenign(t *testing.T) {
 			got := Text(in)
 			// A line opening on a bracket or quote is bracket-shaped and
 			// quoted whole: the blunt rule's accepted cost, not a fence word.
-			if bracketLike(c) && strings.HasPrefix(in, s+s) && got == "(quoted line: "+want+")" {
+			if (bracketLike(c) || quoteLike(c)) && strings.HasPrefix(in, s+s) && got == "(quoted line: "+want+")" {
 				continue
 			}
 			if got != want {
