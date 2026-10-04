@@ -609,6 +609,53 @@ func TestStateDirInARepoFailsClosed(t *testing.T) {
 	}
 }
 
+// TestLayerDirInARepoRefusesTheWrite: a quarantine or local dir that is a
+// symlink into a checkout, or holds its own .git, never receives a fact.
+func TestLayerDirInARepoRefusesTheWrite(t *testing.T) {
+	linkInto := func(t *testing.T, layer, repo string) {
+		if err := os.Symlink(repo, layer); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name   string
+		layer  string
+		remote string
+		args   []string
+		plant  func(t *testing.T, sb *sandbox, layer, repo string)
+	}{
+		{"quarantine symlinked into a repo", "quarantine", workRemote, []string{"--session", "sess-1"},
+			func(t *testing.T, _ *sandbox, layer, repo string) { linkInto(t, layer, repo) }},
+		{"local symlinked into a repo", "local", personalRemote, nil,
+			func(t *testing.T, _ *sandbox, layer, repo string) { linkInto(t, layer, repo) }},
+		{"quarantine holding a .git", "quarantine", workRemote, []string{"--session", "sess-1"},
+			func(_ *testing.T, sb *sandbox, layer, _ string) { sb.mkdir(filepath.Join(layer, ".git")) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := newSandbox(t, "personal")
+			sb.record("sess-1")
+			repo := sb.repo(tc.remote)
+			other := sb.repo(personalRemote)
+			sb.mkdir(sb.state)
+			tc.plant(t, sb, filepath.Join(sb.state, tc.layer), other)
+
+			args := append([]string{"add", "--name", "a-fact", "--description", "d", "--type", "project", "--cwd", repo}, tc.args...)
+			res := sb.run("", args...)
+			if res.code == 0 {
+				t.Fatalf("exit 0, want a refusal; stdout %q", res.stdout)
+			}
+			top, err := os.ReadDir(other)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(top) != 1 {
+				t.Errorf("repo holds %v, want only .git", top)
+			}
+		})
+	}
+}
+
 func TestAddRefusals(t *testing.T) {
 	sb := newSandbox(t, "personal")
 	repo := sb.repo(personalRemote)

@@ -171,12 +171,22 @@ func (c Config) checkDirs() error {
 			}
 		}
 	}
-	root, err := gitWorkTree(c.State())
+	if err := RefuseWorkTree(c.State()); err != nil {
+		return fmt.Errorf("%s: %w", stateKey, err)
+	}
+	return nil
+}
+
+// RefuseWorkTree errors when dir is inside a git work tree. Load checks the
+// state dir once; a writer re-checks the layer dir it is about to write,
+// since a .git or symlink can appear below the state dir afterwards.
+func RefuseWorkTree(dir string) error {
+	root, err := gitWorkTree(dir)
 	if err != nil {
-		return fmt.Errorf("%s (%s): %w", stateKey, c.State(), err)
+		return fmt.Errorf("%s: %w", dir, err)
 	}
 	if root != "" {
-		return fmt.Errorf("%s (%s) is inside the git work tree at %s: the quarantine and local layers must stay off any checkout", stateKey, c.State(), root)
+		return fmt.Errorf("%s is inside the git work tree at %s: the quarantine and local layers must stay off any checkout", dir, root)
 	}
 	return nil
 }
