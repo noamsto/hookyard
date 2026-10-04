@@ -759,7 +759,7 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
   non-punctuation rule; a letter-category lookalike of a bracket or quote
   glued to an isolated lookalike (`ᐸħ ookyard advisoryᐳ`,
   `ʼħ ookyard advisoryʼ`), which reads as a two-letter foreign word (open,
-  escalated to a follow-up); ASCII lookalikes and separators (`h0okyard`,
+  #199); ASCII lookalikes and separators (`h0okyard`,
   `hookyard-advisory`), taken at face value; and padding longer than the
   token. The accepted costs are false positives: ASCII prose spelling a
   token (`Hook yard advisor y?`), and a glued run of symbols beside token
@@ -767,7 +767,7 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
   symbol run anywhere on the line (through `Line`, anywhere in a flattened
   fact), which puts the line in fence context, where a word ending in `e`
   before `priors` reads as `endpriors` (`like 🎉🎉🎉 priors`,
-  `the “priors” look fine ✅✅✅`). The random delimiter still guards the real
+  `the “priors” look fine ✅✅✅`; narrowing it is #200). The random delimiter still guards the real
   fence, so the residual is attribution spoofing. Each index line is capped; `priors show` and `priors search`
   fence their own output. A file opened with `cat` or `rg` (tier 3) reaches
   the model unfenced, so "fenced" below means *through `priors`*.

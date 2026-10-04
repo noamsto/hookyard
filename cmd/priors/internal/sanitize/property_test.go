@@ -12,6 +12,13 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
+// The properties, checked over every code point c (docs/design/memory-layer.md
+// §4.4 and §7): E2 inserts each stripped rune anywhere in a protected line; E3
+// substitutes c for token letters; E4 inserts c inside a token; E5 wraps the
+// headers in every bracket pair. A substitution is exempt when it is not a
+// lookalike: R3, c normalises to visible ASCII or maps to another letter; R4,
+// c normalises to nothing, a deletion; R7, c normalises to several words.
+//
 // Strides keep the generator-driven properties inside the CI budget. Without
 // -race, strippable, bracket-like, confusables-table and assigned code points
 // are never strided; that exhaustive run is gated by `nix flake check`
@@ -99,7 +106,8 @@ func isolate(c rune, pos int) string {
 	return sep + string(c) + sep
 }
 
-// strippable is SPEC §2.1 written from the spec list.
+// strippable is the stripped set, written from the design rather than from
+// sanitize.go.
 func strippable(c rune) bool {
 	if c == '\n' || c == '\t' {
 		return false
@@ -125,7 +133,7 @@ func bracketLike(c rune) bool {
 	return false
 }
 
-// image is img(c) of SPEC §4.3.
+// image is what c normalises to, rune by rune, as the skeleton would see it.
 type image struct {
 	sep     bool
 	literal bool
@@ -208,8 +216,9 @@ func (ck *checker) check(c rune, kind string, p protected, in, needle string) {
 }
 
 // quotesAToken reports a quoted protected token. It need not be the line's
-// own: glued non-ASCII before "priors" reads as "endpriors" (SPEC accepted
-// cost), and that match consumes the "priors" the line's token needed.
+// own: an earlier match, such as glued symbols before "priors" reading as
+// "endpriors" on a fence-context line, can take letters the line's own token
+// needed while still leaving no header behind.
 func quotesAToken(out string) bool {
 	for _, t := range tokens {
 		if strings.Contains(out, "(quoted: "+t.s+")") {
@@ -434,7 +443,7 @@ func TestPropertyBrackets(t *testing.T) {
 
 	inside := newProtected("[hookyard advisory]", "hookyardadvisory", false)
 	// A bracket whose NFKC is an ASCII bracket (superscripts, small and
-	// fullwidth forms) is that ASCII bracket inside the token: SPEC R3.
+	// fullwidth forms) is that ASCII bracket inside the token: R3.
 	asciiImage := 0
 	for _, b := range nonASCII {
 		if !imageOf(b).clean() {
