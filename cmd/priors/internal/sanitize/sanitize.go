@@ -205,7 +205,7 @@ type skeletonRune struct {
 // precomposed accent folds too, then mapped through the upper-case
 // confusables, else lower-cased and mapped through the lower-case ones.
 func skeleton(line string) []skeletonRune {
-	var sk []skeletonRune
+	sk := make([]skeletonRune, 0, len(line))
 	for i, r := range line {
 		if unicode.IsSpace(r) || isBlank(r) || unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf) {
 			continue
@@ -272,7 +272,7 @@ func quoteBrackets(line string) string {
 		idx int
 		hit bool
 	}
-	var open []opener
+	open := []opener{}
 	var quote []int // byte offsets of the brackets to rewrite
 	for i, r := range line {
 		switch {
