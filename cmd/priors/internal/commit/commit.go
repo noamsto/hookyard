@@ -207,8 +207,11 @@ func push(ctx context.Context, dir, parent, commit string) (warning string) {
 		return refuse("the store has no earlier commit to push onto")
 	}
 	ref, err := runGit(ctx, dir, gitTimeout, nil, "symbolic-ref", "-q", "HEAD")
-	if err != nil {
+	if exitsOne(err) {
 		return refuse("HEAD is not on a branch")
+	}
+	if err != nil {
+		return refuse("%s", gitWarning("git symbolic-ref", "", err))
 	}
 	ref = strings.TrimSpace(ref)
 	out, warning := inspect("git for-each-ref", "for-each-ref", "--format=%(upstream)%00%(upstream:remotename)%00%(upstream:remoteref)", ref)
@@ -222,15 +225,18 @@ func push(ctx context.Context, dir, parent, commit string) (warning string) {
 	}
 	tracking, remote, mergeRef := fields[0], fields[1], fields[2]
 	upstream, err := runGit(ctx, dir, gitTimeout, nil, "rev-parse", "-q", "--verify", tracking+"^{commit}")
-	if err != nil {
+	if exitsOne(err) {
 		return refuse("upstream %s is not fetched", tracking)
+	}
+	if err != nil {
+		return refuse("%s", gitWarning("git rev-parse", "", err))
 	}
 	upstream = strings.TrimSpace(upstream)
 	if out, warning = inspect("git rev-list", "rev-list", commit, "--not", upstream); warning != "" {
 		return warning
 	}
 	if out != commit {
-		return refuse("%s is not exactly one priors commit ahead of %s", branch, tracking)
+		return refuse("%s has commits ahead of %s other than this one; push them yourself (git push) to resume", branch, tracking)
 	}
 	if _, err := runGit(ctx, dir, pushTimeout, nil, "push", "-q", "--no-follow-tags", "--recurse-submodules=no", "--no-signed", "--force-with-lease="+mergeRef+":"+parent, "--", remote, commit+":"+mergeRef); err != nil {
 		return refuse("git push failed: %v", err)
@@ -238,10 +244,16 @@ func push(ctx context.Context, dir, parent, commit string) (warning string) {
 	return ""
 }
 
+// exitsOne reports whether err is a git exit status of 1, the "no such thing" answer of -q queries.
+func exitsOne(err error) bool {
+	exit := (*exec.ExitError)(nil)
+	return errors.As(err, &exit) && exit.ExitCode() == 1
+}
+
 // signs reports whether the store's config sets commit.gpgSign.
 func signs(ctx context.Context, dir string) (bool, error) {
 	out, err := runGit(ctx, dir, gitTimeout, nil, "config", "--type=bool", "--get", "commit.gpgsign")
-	if exit := (*exec.ExitError)(nil); errors.As(err, &exit) && exit.ExitCode() == 1 {
+	if exitsOne(err) {
 		return false, nil
 	}
 	if err != nil {

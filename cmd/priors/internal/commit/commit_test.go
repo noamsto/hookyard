@@ -840,7 +840,7 @@ func TestPushRefusesUngatedCommitsAhead(t *testing.T) {
 	fx.index(t)
 
 	w := fx.checkout(t)
-	for _, want := range []string{"not pushed", "is not exactly one priors commit ahead"} {
+	for _, want := range []string{"not pushed", "other than this one"} {
 		if !strings.Contains(w, want) {
 			t.Errorf("warning %q lacks %q", w, want)
 		}
@@ -871,6 +871,35 @@ func TestPushFailureQuotesNoRemoteOutput(t *testing.T) {
 	}
 	if strings.Contains(w, echo) {
 		t.Errorf("warning quotes remote output: %q", w)
+	}
+}
+
+func TestPushRefusesAfterFailedPush(t *testing.T) {
+	fx, bare := withRemote(t)
+	pushed := rev(t, bare, "main")
+	script := filepath.Join(t.TempDir(), "receive-pack")
+	writeFile(t, script, []byte("#!/bin/sh\nexit 1\n"))
+	if err := os.Chmod(script, 0o755); err != nil { //nolint:gosec // a test executable
+		t.Fatal(err)
+	}
+	git(t, fx.dir(), "config", "remote.origin.receivepack", script)
+	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+	fx.index(t)
+	if w := fx.checkout(t); !strings.Contains(w, "git push failed") {
+		t.Fatalf("warning = %q, want a failed push", w)
+	}
+
+	git(t, fx.dir(), "config", "--unset", "remote.origin.receivepack")
+	fx.put(t, "_global/second-fact.md", cleanFact("second-fact"))
+	fx.index(t)
+	w := fx.checkout(t)
+	for _, want := range []string{"other than this one", "git push"} {
+		if !strings.Contains(w, want) {
+			t.Errorf("warning %q lacks %q", w, want)
+		}
+	}
+	if got := rev(t, bare, "main"); got != pushed {
+		t.Errorf("remote main moved: %s -> %s", pushed, got)
 	}
 }
 
