@@ -107,7 +107,8 @@ an inert command after any wrapper flag (`xargs -0 grep curl`,
 path argument whose last element is a listed name (`go test ./internal/http`),
 `gh` / `glab` with no group anywhere but as the first word of its command
 (`xargs gh`: its arguments may come from stdin or a placeholder), a listed
-name later in a `gh` / `glab` write segment (`gh pr comment 1 --body curl`), a
+name later in a `gh` / `glab` write or local segment
+(`gh pr comment 1 --body curl`), a
 printf / echo escape inside a quoted message (`git commit -m 'gh auth
 status\nand gh issue view'`), `gh -R o/r pr create` and a shell call denied or
 rejected after `pre_tool` (a guard's deny, a declined permission prompt): the
