@@ -3,6 +3,12 @@
 // fence or attribution, and wraps output in a fence. Injected output gets an
 // unpredictable delimiter; a committed index gets one derived from its body
 // that never occurs in that body.
+//
+// Imitations are found on a per-line skeleton: each rune folds to the ASCII
+// letters it looks like, through UTS #39 confusables, or stays an unknown
+// that may stand for up to two token letters unless its word reads as foreign
+// prose. A token matches when recognised letters spell at least half of each
+// of its two words within twice its length.
 package sanitize
 
 import (
@@ -23,62 +29,40 @@ const IndexLineMax = 300
 
 const ellipsis = "…"
 
-// fenceTokens are the skeleton forms of everything Text refuses to let
-// through: the attribution header, the fence markers, and the fence rule.
-var fenceTokens = [][]rune{
-	[]rune("hookyardadvisory"),
-	[]rune("priorsmemory"),
-	[]rune("beginpriors"),
-	[]rune("endpriors"),
-}
+//go:generate go run gen_confusables.go
 
-// confusables folds lookalikes of Latin letters and of '=', keyed by their
-// lower-case form. Runes are given by code point so the source carries no
-// homoglyphs.
-var confusables = map[rune]rune{
-	// Cyrillic
-	0x0430: 'a', 0x0432: 'b', 0x0435: 'e', 0x043a: 'k', 0x043c: 'm',
-	0x043d: 'h', 0x043e: 'o', 0x0440: 'p', 0x0441: 'c', 0x0442: 't',
-	0x0443: 'y', 0x0445: 'x', 0x0456: 'i', 0x0458: 'j', 0x0455: 's',
-	0x04bb: 'h', 0x0501: 'd', 0x051b: 'q', 0x051d: 'w', 0x04af: 'y',
-	0x0433: 'r',
-	// Armenian
-	0x0585: 'o', 0x0570: 'h', 0x057d: 'u', 0x0578: 'n', 0x0566: 'q',
-	// Greek
-	0x03b1: 'a', 0x03b2: 'b', 0x03b5: 'e', 0x03b9: 'i', 0x03ba: 'k',
-	0x03bd: 'v', 0x03bf: 'o', 0x03c1: 'p', 0x03c4: 't', 0x03c5: 'u',
-	0x03c7: 'x',
-	// Latin and IPA lookalikes that NFKC leaves alone
-	0x0131: 'i', 0x017f: 's',
-	0x0251: 'a', 0x0252: 'a', 0x0299: 'b', 0x1d04: 'c', 0x1d05: 'd',
-	0x1d07: 'e', 0x0261: 'g', 0x0262: 'g', 0x029c: 'h', 0x026a: 'i',
-	0x0269: 'i', 0x1d0a: 'j', 0x1d0b: 'k', 0x029f: 'l', 0x1d0d: 'm',
-	0x0274: 'n', 0x1d0f: 'o', 0x1d18: 'p', 0x0280: 'r', 0xa731: 's',
-	0x1d1b: 't', 0x1d1c: 'u', 0x1d20: 'v', 0x1d21: 'w', 0x028f: 'y',
-	0x1d22: 'z',
-	// lookalikes of the fence rule's '='
-	0x30a0: '=', 0x2e40: '=', 0x1400: '=', 0xa4ff: '=', 0x2550: '=',
-	0xa78a: '=',
-}
+// equalsBit is the confusable-set bit for '='; see imageBit.
+const equalsBit = 1 << 36
 
-// upperConfusables folds upper-case lookalikes whose lower case does not look
-// Latin, so it is checked before lower-casing.
-var upperConfusables = map[rune]rune{
-	0x0396: 'z', 0x0397: 'h', 0x039c: 'm', 0x039d: 'n', 0x03a5: 'y',
+// imageBit maps a lowercase ASCII letter, digit or '=' to its bit in a
+// confusableSets mask: letters 0-25, digits 26-35, '=' 36. Anything else is 0.
+func imageBit(r rune) uint64 {
+	switch {
+	case 'a' <= r && r <= 'z':
+		return 1 << (r - 'a')
+	case '0' <= r && r <= '9':
+		return 1 << (26 + r - '0')
+	case r == '=':
+		return equalsBit
+	}
+	return 0
 }
 
 var beginLine = regexp.MustCompile(`^===== BEGIN (priors-[0-9a-f]{16}) =====$`)
 
-// Text is safe for multi-line output: stripped of control, format and
-// variation-selector characters, NFKC-normalised, and with fence and
-// attribution imitations escaped line by line. Stripping comes first so NFKC
-// composes across a removed character and the output is truly normalised.
-// Newlines and tabs are kept.
+// Text is safe for multi-line output: stripped of control, format,
+// default-ignorable and variation-selector characters, NFKC-normalised, and
+// with fence and attribution imitations escaped line by line. Each imitated
+// token becomes "(quoted: <token>)", taking an adjacent bracket or symbol on
+// each side with it; on a line imitating a fence, runs of three or more
+// rule-like runes become "(quoted: =)". Everything else is kept as
+// normalised. Stripping comes first so NFKC composes across a removed
+// character and the output is truly normalised. Newlines and tabs are kept.
 func Text(s string) string {
 	s = norm.NFKC.String(strings.Map(keepRune, s))
 	lines := strings.Split(s, "\n")
 	for i, l := range lines {
-		lines[i] = quoteBrackets(escapeLine(l))
+		lines[i] = escapeLine(l)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -174,224 +158,374 @@ func nonEmpty(lines []string) []string {
 	return out
 }
 
-// keepRune drops control, format (bidi, zero-width, soft hyphen, invisible
-// operators, tags) and variation-selector characters.
+// keepRune drops control, format and default-ignorable characters (bidi,
+// zero-width, soft hyphen, invisible operators, tags, Hangul fillers,
+// unassigned ignorables) and variation selectors.
 func keepRune(r rune) rune {
-	switch {
-	case r == '\n', r == '\t':
+	if r == '\n' || r == '\t' {
 		return r
-	case r < 0x20, r >= 0x7f && r <= 0x9f:
-		return -1
-	case unicode.Is(unicode.Cf, r),
-		r >= 0xe0000 && r <= 0xe007f,
-		r >= 0xfe00 && r <= 0xfe0f,
-		r >= 0xe0100 && r <= 0xe01ef:
+	}
+	if unicode.In(r, unicode.Cc, unicode.Cf, unicode.Other_Default_Ignorable_Code_Point, unicode.Variation_Selector) {
 		return -1
 	}
 	return r
 }
 
-// skeletonRune is one rune of a line's skeleton and the byte span of the
-// original rune it stands for.
-type skeletonRune struct {
-	r          rune
-	start, end int
+// token is a skeleton Text refuses to let through: two words, split at split.
+type token struct {
+	s     string
+	split int
 }
 
-// skeleton folds the line to what it looks like: at most one rune per
-// original rune, with whitespace, blank fillers, combining marks (Mn, Me)
-// and format characters dropped because they render as nothing and must not
-// split a token. Each rune is reduced to the base of its NFD form, so a
-// precomposed accent folds too, then mapped through the upper-case
-// confusables, else lower-cased and mapped through the lower-case ones.
-func skeleton(line string) []skeletonRune {
-	sk := make([]skeletonRune, 0, len(line))
-	for i, r := range line {
-		if unicode.IsSpace(r) || isBlank(r) || unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf) {
+// tokens are in match priority.
+var tokens = []token{{"hookyardadvisory", 8}, {"priorsmemory", 6}, {"beginpriors", 5}, {"endpriors", 3}}
+
+// maxToken bounds the matcher's fixed DP arrays: one state per token rune
+// consumed, plus none.
+const maxToken = 16
+
+// class is how a skeleton rune takes part in a token match.
+type class uint8
+
+const (
+	anchor   class = iota // looks like an ASCII letter or digit: must match it
+	literal               // breaks a match
+	wild                  // stands for none, one or two token runes
+	gap                   // may only be skipped inside a match
+	unmapped              // non-ASCII the table does not know; the word pass resolves it
+)
+
+// skelRune is one rune of a line's skeleton and the byte span of the rune it
+// stands for.
+type skelRune struct {
+	set        uint64 // imageBit set an anchor may match
+	start, end int
+	word       int
+	c          class
+	rule       bool // can draw a fence rule: '=' or a non-letter, non-digit
+	letter     bool // unmapped letter or digit
+}
+
+// word counts what the word pass needs: whether it has an anchor, and how
+// many unmapped letters or digits it holds.
+type word struct {
+	anchored bool
+	letters  int
+}
+
+// blank reports a symbol that renders as an empty cell, so it reads as space.
+func blank(r rune) bool {
+	return r == 0x2800 || r == 0x1d159
+}
+
+// skeleton folds line to what it looks like. Spaces, separators, blanks and
+// marks render as nothing or as space, so they are dropped rather than
+// splitting a token; all but marks still end a word. Every other rune is judged
+// on the lower case of its NFD base, so a precomposed accent folds too.
+func skeleton(line string) []skelRune {
+	sk := make([]skelRune, 0, utf8.RuneCountInString(line))
+	words := []word{}
+	newWord := true
+	for i := 0; i < len(line); {
+		r, size := utf8.DecodeRuneInString(line[i:])
+		s := skelRune{start: i, end: i + size}
+		i += size
+		if unicode.IsSpace(r) || unicode.Is(unicode.Z, r) || blank(r) {
+			newWord = true
 			continue
 		}
-		end := i + utf8.RuneLen(r)
-		if r >= utf8.RuneSelf {
-			r, _ = utf8.DecodeRuneInString(norm.NFD.String(string(r)))
-			if unicode.IsMark(r) {
+		if unicode.Is(unicode.M, r) {
+			continue
+		}
+		b := r
+		if d := norm.NFD.PropertiesString(line[s.start:]).Decomposition(); len(d) > 0 {
+			b, _ = utf8.DecodeRune(d)
+			if unicode.Is(unicode.M, b) {
 				continue
 			}
 		}
-		if f, ok := upperConfusables[r]; ok {
-			r = f
+		lb := unicode.ToLower(b)
+		if lb < utf8.RuneSelf {
+			s.set = imageBit(lb)
 		} else {
-			r = unicode.ToLower(r)
-			if f, ok := confusables[r]; ok {
-				r = f
-			}
+			s.set = confusableSets[b] | confusableSets[lb]
 		}
-		sk = append(sk, skeletonRune{r, i, end})
+		switch {
+		case s.set&^equalsBit != 0:
+			s.c = anchor
+		case s.set == equalsBit:
+			s.c, s.rule = literal, true
+		case lb < utf8.RuneSelf:
+			s.c = literal
+		default:
+			s.c, s.letter = unmapped, unicode.In(b, unicode.L, unicode.N)
+			s.rule = !s.letter
+		}
+		if newWord {
+			words = append(words, word{})
+			newWord = false
+		}
+		s.word = len(words) - 1
+		w := &words[s.word]
+		w.anchored = w.anchored || s.c == anchor
+		if s.letter {
+			w.letters++
+		}
+		sk = append(sk, s)
+	}
+	// An unmapped rune in a word with an anchor is a lookalike. A word with no
+	// anchor and two or more unmapped letters is foreign prose: its letters
+	// are literal and its symbols may only pad a match. In any other word each
+	// glued run of unmapped runes is one lookalike, whatever surrounds it: its
+	// first rune is wild and the rest pad.
+	glued := false
+	for i := range sk {
+		s := &sk[i]
+		if s.c != unmapped {
+			glued = false
+			continue
+		}
+		w := words[s.word]
+		switch {
+		case w.anchored:
+			s.c = wild
+		case w.letters >= 2 && s.letter:
+			s.c = literal
+		case w.letters >= 2 || glued && sk[i-1].word == s.word:
+			s.c = gap
+		default:
+			s.c = wild
+		}
+		glued = true
 	}
 	return sk
 }
 
-// escapeLine replaces every fence or attribution imitation in line with a
-// quoted form, left to right and without overlap.
+// matchAt returns the length of the shortest window of sk from i that spells
+// t: anchors consume the next token rune and must equal it, a wild consumes
+// one or two (a digraph such as ꝏ) or is skipped, a gap is skipped, a
+// literal ends the window, the first rune consumes t's first rune, and
+// anchors consume at least half of each of t's two words (of the whole token
+// when t.split is 0). It returns 0 when there is none. anchors is sk's prefix
+// count of anchors.
+func matchAt(sk []skelRune, anchors []int, i int, t token) int {
+	m, b := len(t.s), t.split
+	need1, need2 := (b+1)/2, (m-b+1)/2
+	switch sk[i].c {
+	case wild:
+	case anchor:
+		if sk[i].set&imageBit(rune(t.s[0])) == 0 {
+			return 0
+		}
+	default:
+		return 0
+	}
+	end := min(i+2*m, len(sk))
+	if anchors[end]-anchors[i] < need1+need2 {
+		return 0
+	}
+	// best[j] is the most anchors over alignments that consumed j token
+	// runes, counted within the token word j falls in: crossing into the
+	// second word needs need1 and starts the count again. -1 is unreachable.
+	// Fixed arrays keep the DP allocation-free.
+	var bestArr, nextArr [maxToken + 1]int8
+	best, next := bestArr[:m+1], nextArr[:m+1]
+	for j := 1; j <= m; j++ {
+		best[j] = -1
+	}
+	for n := i; n < end; n++ {
+		s := sk[n]
+		if s.c == literal {
+			return 0
+		}
+		alive := false
+		for j := range next {
+			next[j] = -1
+		}
+		for j, a := range best {
+			if a < 0 {
+				continue
+			}
+			switch s.c {
+			case anchor:
+				if j < m && s.set&imageBit(rune(t.s[j])) != 0 {
+					alive = advance(next, j, j+1, a+1, b, need1) || alive
+				}
+			case wild:
+				if n > i {
+					next[j], alive = max(next[j], a), true
+				}
+				if j < m {
+					alive = advance(next, j, j+1, a, b, need1) || alive
+				}
+				if j+2 <= m {
+					advance(next, j, j+2, a, b, need1)
+				}
+			default: // gap
+				next[j], alive = max(next[j], a), true
+			}
+		}
+		if int(next[m]) >= need2 {
+			return n - i + 1
+		}
+		if !alive {
+			return 0
+		}
+		best, next = next, best
+	}
+	return 0
+}
+
+// advance records reaching state to from j with a anchors. Leaving the
+// token's first word (split b) needs need1 of them, and the count restarts.
+func advance(next []int8, j, to int, a int8, b, need1 int) bool {
+	if j < b && to >= b {
+		if int(a) < need1 {
+			return false
+		}
+		a = 0
+	}
+	next[to] = max(next[to], a)
+	return true
+}
+
+// span is a byte range of a line to replace with "(quoted: tok)".
+type span struct {
+	start, end int
+	tok        string
+}
+
+// escapeLine replaces every token imitation in line with its quoted form,
+// left to right and without overlap. On a line imitating a fence it also
+// quotes every run of three or more rule runes left outside the tokens.
 func escapeLine(line string) string {
 	sk := skeleton(line)
-	var b strings.Builder
-	done := 0 // bytes of line already emitted
+	anchors := make([]int, len(sk)+1)
+	for i, s := range sk {
+		anchors[i+1] = anchors[i]
+		if s.c == anchor {
+			anchors[i+1]++
+		}
+	}
+	ruled := hasRuleRun(line, sk)
+	var spans []span
+	fenced := false
 	for i := 0; i < len(sk); {
-		n, tok := matchAt(sk, i)
+		n, tok := 0, ""
+		for _, t := range tokens {
+			// On a line drawing a rule, the fence words need only half the
+			// whole token, so a mangled BEGIN or END still matches.
+			if ruled && (t.s == "beginpriors" || t.s == "endpriors") {
+				t.split = 0
+			}
+			if n = matchAt(sk, anchors, i, t); n > 0 {
+				tok = t.s
+				break
+			}
+		}
 		if n == 0 {
 			i++
 			continue
 		}
-		start, end := sk[i].start, sk[i+n-1].end
-		if before, _ := utf8.DecodeLastRuneInString(line[:start]); before == '[' || before == '<' {
-			if after, size := utf8.DecodeRuneInString(line[end:]); after == ']' || after == '>' {
-				start--
-				end += size
-			}
-		}
-		b.WriteString(line[done:start])
-		b.WriteString("(quoted: " + tok + ")")
-		done = end
+		spans = append(spans, span{sk[i].start, sk[i+n-1].end, tok})
+		fenced = fenced || tok == "beginpriors" || tok == "endpriors"
 		i += n
 	}
-	if done == 0 {
+	if len(spans) == 0 {
 		return line
+	}
+	swallow(line, spans)
+	if fenced {
+		spans = mergeSpans(spans, ruleRuns(sk, spans))
+	}
+	var b strings.Builder
+	done := 0
+	for _, sp := range spans {
+		b.WriteString(line[done:sp.start])
+		b.WriteString("(quoted: " + sp.tok + ")")
+		done = sp.end
 	}
 	b.WriteString(line[done:])
 	return b.String()
 }
 
-// quoteBrackets is the backstop for the bracketed attribution
-// headers, for confusables the maps miss.
-// Any opener pairs with any closer, innermost first; a pair holding a
-// suspicious rune is rewritten to "(quoted: …)" with its content verbatim,
-// and so is the outermost unmatched opener when anything left open holds
-// one, up to the end of the line. One pass, so hostile nesting stays linear.
-func quoteBrackets(line string) string {
-	type opener struct {
-		idx int
-		hit bool
-	}
-	open := []opener{}
-	var quote []int // byte offsets of the brackets to rewrite
-	for i, r := range line {
-		switch {
-		case isOpener(r):
-			open = append(open, opener{idx: i})
-		case isCloser(r) && len(open) > 0:
-			o := open[len(open)-1]
-			open = open[:len(open)-1]
-			if o.hit {
-				quote = append(quote, o.idx, i)
-				if len(open) > 0 {
-					open[len(open)-1].hit = true
-				}
-			}
-		case len(open) > 0 && isSuspicious(r):
-			open[len(open)-1].hit = true
-		}
-	}
-	tail := ""
-	if slices.ContainsFunc(open, func(o opener) bool { return o.hit }) {
-		quote = append(quote, open[0].idx)
-		tail = ")"
-	}
-	if len(quote) == 0 {
-		return line
-	}
-	slices.Sort(quote)
-	var b strings.Builder
+// swallow widens each token span by one adjacent rune per side that is not a
+// letter, digit or space, so a bracket of any shape goes with it. A '-' on
+// the right stays, keeping "priors-<hex>" readable.
+func swallow(line string, spans []span) {
 	prev := 0
-	for _, i := range quote {
-		r, size := utf8.DecodeRuneInString(line[i:])
-		b.WriteString(line[prev:i])
-		if isOpener(r) {
-			b.WriteString("(quoted: ")
-		} else {
-			b.WriteString(")")
+	for x := range spans {
+		sp := &spans[x]
+		if r, size := utf8.DecodeLastRuneInString(line[prev:sp.start]); size > 0 && swallowable(r) {
+			sp.start -= size
 		}
-		prev = i + size
+		limit := len(line)
+		if x+1 < len(spans) {
+			limit = spans[x+1].start
+		}
+		if r, size := utf8.DecodeRuneInString(line[sp.end:limit]); size > 0 && r != '-' && swallowable(r) {
+			sp.end += size
+		}
+		prev = sp.end
 	}
-	b.WriteString(line[prev:])
-	b.WriteString(tail)
-	return b.String()
 }
 
-// isOpener and isCloser count the bracket-piece symbols too, since a stacked
-// pair of them draws a bracket.
-func isOpener(r rune) bool {
-	switch r {
-	case '[', 0x23a1, 0x23a3, 0x231c, 0x231e:
-		return true
-	}
-	return r >= utf8.RuneSelf && unicode.Is(unicode.Ps, r)
+func swallowable(r rune) bool {
+	return !unicode.IsSpace(r) && !unicode.In(r, unicode.L, unicode.N, unicode.Z)
 }
 
-func isCloser(r rune) bool {
-	switch r {
-	case ']', 0x23a4, 0x23a6, 0x231d, 0x231f:
-		return true
+// ruleRuns returns every maximal run of three or more rule runes in sk
+// outside the token spans, which never cross one.
+func ruleRuns(sk []skelRune, spans []span) []span {
+	var runs []span
+	from, n, p := 0, 0, 0
+	for i := 0; i <= len(sk); i++ {
+		if i < len(sk) {
+			for p < len(spans) && spans[p].end <= sk[i].start {
+				p++
+			}
+			inToken := p < len(spans) && spans[p].start <= sk[i].start
+			if sk[i].rule && !inToken {
+				if n == 0 {
+					from = i
+				}
+				n++
+				continue
+			}
+		}
+		if n >= 3 {
+			runs = append(runs, span{sk[from].start, sk[i-1].end, "="})
+		}
+		n = 0
 	}
-	return r >= utf8.RuneSelf && unicode.Is(unicode.Pe, r)
+	return runs
 }
 
-// everyday is the non-ASCII punctuation genuine headers and prose put in
-// brackets: middle dot, dashes, curly quotes, bullet, times and arrows.
-var everyday = []rune{0x00b7, 0x2013, 0x2014, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x00d7, 0x2192, 0x2190}
-
-// isSuspicious judges r on its NFD base, so accented Latin passes. Every
-// other non-ASCII rune counts, Latin letters without a decomposition
-// included: exempting them would admit unmapped lookalikes such as U+0266.
-func isSuspicious(r rune) bool {
-	if r < utf8.RuneSelf {
-		return false
+// mergeSpans merges two sorted lists of disjoint spans.
+func mergeSpans(a, b []span) []span {
+	out := make([]span, 0, len(a)+len(b))
+	for len(a) > 0 && len(b) > 0 {
+		if a[0].start < b[0].start {
+			out, a = append(out, a[0]), a[1:]
+		} else {
+			out, b = append(out, b[0]), b[1:]
+		}
 	}
-	base, _ := utf8.DecodeRuneInString(norm.NFD.String(string(r)))
-	return base >= utf8.RuneSelf && !slices.Contains(everyday, base)
+	return append(append(out, a...), b...)
 }
 
-// isBlank reports non-space runes that render as blank space.
-func isBlank(r rune) bool {
-	switch r {
-	case 0x2800, 0x3164, 0x115f, 0x1160:
-		return true
+// hasRuleRun reports three or more rule runes in a row in sk that are not
+// punctuation, so CJK runs such as 。」「 draw no rule.
+func hasRuleRun(line string, sk []skelRune) bool {
+	n := 0
+	for _, s := range sk {
+		if r, _ := utf8.DecodeRuneInString(line[s.start:]); !s.rule || unicode.Is(unicode.P, r) {
+			n = 0
+			continue
+		}
+		if n++; n >= 3 {
+			return true
+		}
 	}
 	return false
-}
-
-// isRuleRune reports a rune that can draw a fence rule: '=' or any non-ASCII
-// symbol or punctuation, so an unmapped lookalike of '=' still fails closed.
-// Everyday punctuation is exempt: the skeleton drops spaces, so prose such as
-// a dash between quotes would otherwise form a run.
-func isRuleRune(r rune) bool {
-	return r == '=' || r >= utf8.RuneSelf && unicode.In(r, unicode.S, unicode.P) && !slices.Contains(everyday, r)
-}
-
-// matchAt reports how many skeleton runes from i form a token, and the token
-// to show in its place; 0 when none starts there.
-func matchAt(sk []skeletonRune, i int) (n int, tok string) {
-	for _, t := range fenceTokens {
-		if hasPrefix(sk[i:], t) {
-			return len(t), string(t)
-		}
-	}
-	for n < len(sk)-i && isRuleRune(sk[i+n].r) {
-		n++
-	}
-	if n >= 3 {
-		return n, "="
-	}
-	return 0, ""
-}
-
-func hasPrefix(sk []skeletonRune, tok []rune) bool {
-	if len(sk) < len(tok) {
-		return false
-	}
-	for i, r := range tok {
-		if sk[i].r != r {
-			return false
-		}
-	}
-	return true
 }
