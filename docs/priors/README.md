@@ -91,18 +91,21 @@ empty per-session marker under
 `provenance:shell`; no command text is stored. Any ingestion flags, owner's
 or not. A session the record covers but the watcher never saw, or whose
 markers cannot be read, flags `provenance:no-ingest-record`. The command is
-parsed as bash and every simple command in it is judged on its expanded
-words (quotes, `$'…'`, brace expansion, `${X:-…}` defaults and `${IFS}`
-resolved); every word, and a command's arguments joined back together, is
-also re-read as a script, so a script quoted, glued to `--opt=` or nested in
-`sh -c` is judged too. Statements before a syntax error are still judged, and
-the text then also gets a token scan; a command past a bound (re-read depth
-8, 1 MiB of parsed and expanded text, 256 KiB per text, bracket nesting 256)
+parsed as bash and every simple command in it is judged on its words,
+rendered without evaluating anything (quotes, `$'…'`, brace expansion,
+`${X:-…}` operands, `${IFS}` and a variable's first literal assignment
+resolved; arithmetic left to the token scan); every word, and a command's
+arguments joined back together, is also re-read as a script, so a script
+quoted, glued to `--opt=` or nested in `sh -c` is judged too. Statements
+before a syntax error are still judged, and the text then also gets a token
+scan; a command past a bound (every rendered byte charged to a 1 MiB budget
+before it is written, re-read depth 8, 128 KiB per text, bracket nesting 256)
 flags. It misses what the command text does not show (`git fetch` or `git
 pull` content without a URL; aliases, shell functions, scripts on disk; an
 unlisted fetcher with no URL literal), a command word built at run time or
-from a variable's value (`$CMD`, `$(printf g)h`, `eval "$X"`, `${0/bas/g}`,
-`/usr/bin/g[h]`), a script another program decodes before a shell runs it
+from a variable's value beyond its first literal assignment (`$CMD`,
+`$(printf g)h`, `eval "$X"`, `${0/bas/g}`, `X=xgh; ${X#x}`, `/usr/bin/g[h]`),
+a script another program decodes before a shell runs it
 (`base64 -d | sh`, `rev`, `xxd -r`), statements after syntax the parser
 rejects beyond what the token scan sees, an
 unquoted `rg --pre curl …` (inert search commands such as `grep` and `rg`
@@ -119,8 +122,8 @@ with no group anywhere but as the first word of its command (`xargs gh`,
 later in a `gh` / `glab` write or local segment (`gh pr comment 1 --body
 curl`), a listed name glued to `--opt=`, `KEY=` or a fused short option
 (`--title=curl`, `GIT_PAGER=curl`, `rsync -avxh`, whose `xh` is a fetcher),
-a command the parser cannot read, a command past a bound, a word starting `!`
-or `=`, a printf / echo escape inside a quoted message (`git
+a command the parser cannot read, a command past a bound (any over 128
+KiB), a word starting `!` or `=`, a printf / echo escape inside a quoted message (`git
 commit -m 'gh auth status\nand gh issue view'`), `gh -R o/r pr create` and a
 shell call denied or rejected after `pre_tool` (a guard's deny, a declined
 permission prompt): the marker is written before the decision.

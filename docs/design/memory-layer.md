@@ -792,12 +792,16 @@ distillation) and again as each store's required check on its remote:
    flags a URL literal anywhere in the command, and a fetcher (`curl`,
    `wget`, …), a forge CLI (`hub`, `tea`, `jira`) or a `gh` / `glab` read
    group (`issue view`, `pr diff`, `api`, `search`, …) as the command word or
-   any word after it. A simple command's words are expanded the way the shell
-   would expand them: quote removal, backslashes, `$'…'`, `$""`, brace
-   expansion and `${X:-…}` defaults, a variable being read both unset and as
-   a placeholder (the shell's own `IFS`, `PATH`, … always set), so
-   `$'\x67h'`, `g$""h`, `{gh,issue,view,1}` and `gh${IFS}issue` all read as
-   `gh`. The command word is found by skipping assignments, flags, numeric
+   any word after it. A simple command's words are rendered as the shell
+   would read them, without evaluating anything: quote removal, backslashes,
+   `$'…'`, `$""` and brace expansion are applied; a parameter expansion's
+   operand (`${X:-…}`, `${X:+…}`, a `//` replacement) is read as text, never
+   run or repeated; and a variable is read three ways: unset, as a
+   placeholder, and as the first literal value the command assigns it (the
+   shell's own `IFS`, `PATH`, … always set). So `$'\x67h'`, `g$""h`,
+   `{gh,issue,view,1}`, `gh${IFS}issue` and `X=gh; $X` all read as `gh`.
+   Arithmetic is not evaluated; its text goes to the token scan below. The
+   command word is found by skipping assignments, flags, numeric
    arguments and wrappers (`sudo`, `env`, `timeout`, …), and is read without
    a leading `!` or `=` (a git alias `!gh …`, zsh's `=gh`). If it is an inert
    search or print command (`grep`, `egrep`, `fgrep`, `rg`, `which`,
@@ -817,19 +821,25 @@ distillation) and again as each store's required check on its remote:
    prefix assignment (`--split-string=gh`, `-Sgh`, `GIT_PAGER=curl`) is also
    judged as the command the following words continue. Statements before a
    syntax error are still judged; the whole text then also goes to a token
-   scan with quotes stripped and no inert exemption, and so does a word the
-   parser cannot expand. The work is bounded (re-read depth 8, 1 MiB of
-   parsed and expanded text, 256 KiB per text, bracket nesting 256, brace
-   expansion estimated before it runs), and past a bound the command flags.
+   scan with quotes stripped and no inert exemption. The work is bounded by
+   construction: every rendered byte is charged to a 1 MiB budget before it
+   is written, and a parse is charged four times its length; a brace
+   expansion pays for its whole output up front; re-reading stops at depth
+   8, a text at 128 KiB, bracket nesting at 256 and the syntax-tree walk at
+   512 levels. Past a bound the command flags.
 
    It misses what the command text does not show: content arriving through
    `git fetch` or `git pull` without a URL; aliases, shell functions and
    scripts on disk; and an unlisted fetcher with no URL literal (a language
    client reading the URL from a variable). It misses a command word the
-   parser cannot resolve: variable indirection (`$CMD`, `G=gh; $G issue view
-   1`), a spelling built by command substitution (`$(printf g)h`), `eval` of
-   a variable, a spelling that depends on a variable's actual value
-   (`${0/bas/g}`), and globs (`/usr/bin/g[h]`), since globbing is off. It
+   parser cannot resolve: a variable set outside the command (`$CMD`), a
+   value other than a variable's first literal assignment (a reassignment,
+   `+=`, `a=gh; b=$a`, arrays, `read`, `printf -v`, a loop item after the
+   first), a pattern removal or replacement on an
+   assigned value (`X=xgh; ${X#x}`), a spelling built by command
+   substitution (`$(printf g)h`), a spelling that depends on a variable's
+   real value (`${0/bas/g}`), a command inside arithmetic beyond what the
+   token scan sees, and globs (`/usr/bin/g[h]`), since globbing is off. It
    misses a script another program transforms or assembles before it reaches
    a shell: `base64 -d | sh`, `rev`, `tr` or `xxd -r` pipes, and a name split
    across printf arguments. An inert command hides a plain listed name in its
@@ -859,8 +869,10 @@ distillation) and again as each store's required check on its remote:
    name glued to `--opt=`, `KEY=` or a fused short option (`--title=curl`,
    `GIT_PAGER=curl`, `rsync -avxh`, whose `xh` is a fetcher), a command the
    parser cannot read, whose token scan flags a listed name even as an inert
-   command's argument, a command past a bound (a heredoc of a few hundred
-   KiB), a word starting `!` or `=` (`!gh`), and a shell call
+   command's argument, a listed name inside arithmetic, a command past a
+   bound (any command over 128 KiB, and one of roughly 60–100 KiB holding
+   nested scripts, such as a large heredoc), a word starting `!` or `=`
+   (`!gh`), and a shell call
    denied or rejected after `pre_tool` (a guard's deny, a declined
    permission prompt): the marker is written before the decision.
 

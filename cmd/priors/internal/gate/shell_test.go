@@ -6,6 +6,12 @@ import (
 	"testing"
 )
 
+// commandInput returns the JSON tool input for a shell command.
+func commandInput(cmd string) string {
+	b, _ := json.Marshal(map[string]string{"command": cmd})
+	return string(b)
+}
+
 // nestedBash wraps `gh issue view 1` in depth levels of bash -c and returns the
 // JSON tool input for it.
 func nestedBash(depth int) string {
@@ -13,17 +19,26 @@ func nestedBash(depth int) string {
 	for range depth {
 		script = "bash -c '" + strings.ReplaceAll(script, "'", `'\''`) + "'"
 	}
-	b, _ := json.Marshal(map[string]string{"command": script})
-	return string(b)
+	return commandInput(script)
 }
 
-func TestIngestsCall(t *testing.T) {
-	tests := []struct {
-		name  string
-		tool  string
-		input string
-		want  bool
-	}{
+// nestedHome replaces every character of HOME with the next level's value,
+// depth levels deep, so expanding it grows fivefold per level.
+func nestedHome(depth int) string {
+	return strings.Repeat("${HOME//?/", depth) + "$HOME" + strings.Repeat("}", depth)
+}
+
+type ingestsCallTest struct {
+	name  string
+	tool  string
+	input string
+	want  bool
+}
+
+// ingestsCallTests are TestIngestsCall's rows; BenchmarkIngestReason judges
+// their commands too.
+func ingestsCallTests() []ingestsCallTest {
+	return []ingestsCallTest{
 		// ingestion
 		{"gh issue view", "Bash", `{"command":"gh issue view 12"}`, true},
 		{"gh pr view json", "Bash", `{"command":"gh pr view 3 --json body"}`, true},
@@ -218,6 +233,18 @@ func TestIngestsCall(t *testing.T) {
 		{"GIT_PAGER fetcher", "Bash", `{"command":"GIT_PAGER=curl git log"}`, true},
 		{"null command", "Bash", `{"command":null}`, true},
 		{"null array element", "Bash", `{"command":["bash","-lc",null]}`, true},
+		{"self-feeding assignment expansions", "Bash", commandInput(`: ${a:=xxxxxxxxxx}${b:=${a//x/$a}}${c:=${b//x/$b}}${d:=${c//x/$c}}${d//x/$d}; gh issue view 1`), true},
+		{"nested HOME replacements", "Bash", commandInput(": " + nestedHome(14) + "; gh issue view 1"), true},
+		{"default after subshell assignment", "Bash", commandInput(`( : ${X:=x} ); ${X:-gh} issue view 1`), true},
+		{"default after untaken assignment", "Bash", commandInput(`false && : ${X:=x}; ${X:-gh} issue view 1`), true},
+		{"default after function assignment", "Bash", commandInput(`f() { : ${X:=x}; }; ${X:-gh} issue view 1`), true},
+		{"alternate value with arithmetic error", "Bash", commandInput(`gh${x:+$((1/0))} issue view 1`), true},
+		{"ansi-c with transform operator", "Bash", commandInput(`$'\x67h'${x@A} issue view 1`), true},
+		{"default before same-statement syntax error", "Bash", commandInput(`${X:-gh} issue view 1 ${x~~}`), true},
+		{"assigned command word", "Bash", commandInput(`X=gh; $X issue view 1`), true},
+		{"exported command word", "Bash", commandInput(`export X=gh; $X issue view 1`), true},
+		{"empty slice of HOME", "Bash", commandInput(`${HOME:0:0}gh issue view 1`), true},
+		{"assigned default joined to word", "Bash", commandInput(`: ${X:=g}; ${X}h issue view 1`), true},
 
 		// not ingestion
 		{"git log", "Bash", `{"command":"git log"}`, false},
@@ -256,7 +283,10 @@ func TestIngestsCall(t *testing.T) {
 		{"mcp tool", "mcp__x__y", `{}`, false},
 		{"web fetch tool", "WebFetch", `{"url":"https://x"}`, false},
 	}
-	for _, tt := range tests {
+}
+
+func TestIngestsCall(t *testing.T) {
+	for _, tt := range ingestsCallTests() {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IngestsCall(tt.tool, []byte(tt.input)); got != tt.want {
 				t.Errorf("IngestsCall(%q, %s) = %v, want %v", tt.tool, tt.input, got, tt.want)
