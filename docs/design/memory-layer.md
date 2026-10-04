@@ -763,13 +763,19 @@ distillation) and again as each store's required check on its remote:
    `git fetch` or `git pull` without a URL; aliases, shell functions, scripts,
    `eval` and variable indirection (`$CMD`); a command word quoted or escaped
    by quoting (`"gh" issue view`); and an unlisted fetcher with no URL literal
-   (a language client reading the URL from a variable). A lost ingest write in
+   (a language client reading the URL from a variable). Only the wrappers
+   `env`, `sudo`, `doas`, `command`, `exec`, `time`, `nice`, `nohup`, `xargs`,
+   `timeout`, `stdbuf` and `builtin`, and the shell keywords, are seen through;
+   any other wrapper or keyword (`setsid`, `flock`, `watch`, `ssh host …`,
+   `nix shell … -c`, `coproc`) hides the command. A lost ingest write in
    a session already seen from an earlier call also fails open. On Codex the
    `pre_tool` shape is fixture-backed but the `post_tool` one is assumed. It
    over-flags any URL anywhere in the command (a commit message, a PR body), a
    listed name at the start of a quoted string (`git commit -m "curl fails"`),
    a listed name anywhere after a wrapper (`xargs grep curl`), and `gh -R o/r
-   pr create`, whose flag value is taken for the group.
+   pr create`, whose flag value is taken for the group, and a shell call
+   denied or rejected after `pre_tool` (a guard's deny, a declined permission
+   prompt): the marker is written before the decision.
 
    The gate fails closed on the other side. A second marker records that the
    watcher saw the session at all; a session the event record covers but the

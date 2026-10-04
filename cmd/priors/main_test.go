@@ -1422,6 +1422,16 @@ func TestPostToolTruncatedToolInput(t *testing.T) {
 	wantMarkerExts(t, sb.markerFiles(filepath.Join(sb.state, "provenance")), ".seen", ".ingest")
 }
 
+// TestPostToolTruncatedNonShellInput: the same cut on a non-shell tool loses
+// input that was never a command, so it is not ingestion.
+func TestPostToolTruncatedNonShellInput(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	big := strconv.Quote(strings.Repeat("x", 2<<20))
+	sb.send(sb.toolEnvelope("post_tool", "sess-1", "Write", `{"content":`+big+`}`, `"ok"`))
+
+	wantMarkerExts(t, sb.markerFiles(filepath.Join(sb.state, "provenance")), ".seen")
+}
+
 func TestAddUnreadableMarkerDir(t *testing.T) {
 	sb := newSandbox(t, "personal")
 	repo := sb.repo(personalRemote)
