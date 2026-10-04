@@ -23,6 +23,25 @@ const IndexLineMax = 300
 
 const ellipsis = "…"
 
+//go:generate go run gen_confusables.go
+
+// equalsBit is the confusable-set bit for '='; see imageBit.
+const equalsBit = 1 << 36
+
+// imageBit maps a lowercase ASCII letter, digit or '=' to its bit in a
+// confusableSets mask: letters 0-25, digits 26-35, '=' 36. Anything else is 0.
+func imageBit(r rune) uint64 {
+	switch {
+	case 'a' <= r && r <= 'z':
+		return 1 << (r - 'a')
+	case '0' <= r && r <= '9':
+		return 1 << (26 + r - '0')
+	case r == '=':
+		return equalsBit
+	}
+	return 0
+}
+
 // fenceTokens are the skeleton forms of everything Text refuses to let
 // through: the attribution header, the fence markers, and the fence rule.
 var fenceTokens = [][]rune{
