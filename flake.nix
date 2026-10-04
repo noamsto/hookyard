@@ -72,7 +72,7 @@
         };
 
         packages = let
-          vendorHash = "sha256-vrX9aKypJjlpyWY3zlEgrajxqPDW2W3EUPZ4xPGdBs0=";
+          vendorHash = "sha256-7WjrSgJ3hDpt+YTUZpmB5O6iWnQEw/trYARrbmGFWDg=";
           hookyard = pkgs.buildGoModule {
             pname = "hookyard";
             version = "0.1.0";

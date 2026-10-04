@@ -786,49 +786,73 @@ distillation) and again as each store's required check on its remote:
 
    v0 cannot tell an owner's issue from a non-owner's: that needs the author
    of the issue and of each comment, a network call per command on a
-   fire-and-forget lane. So any ingestion flags. The matcher flags a URL
-   literal anywhere in the command, and a fetcher (`curl`, `wget`, …), a forge
-   CLI (`hub`, `tea`, `jira`) or a `gh` / `glab` read group (`issue view`, `pr
-   diff`, `api`, `search`, …) as the command word or any word after it. The
-   command word is found by skipping assignments, flags, numeric arguments,
-   shell keywords (`do`, `if`, `!`, …) and wrappers (`sudo`, `env`,
-   `timeout`, …). If it is an inert search or print command (`grep`, `egrep`,
-   `fgrep`, `rg`, `which`, `whereis`, `type`), the segment is clean; otherwise
-   every listed name from the command word on is judged, so an unlisted
-   wrapper or keyword is seen through and an earlier harmless name (`gh auth
-   status`) cannot hide a later read. `gh` / `glab` write verbs (`pr create`,
-   `issue comment`, …) and local groups (`auth`, `config`, …) are exempt, since
-   they print only what the agent itself caused.
+   fire-and-forget lane. So any ingestion flags. The matcher parses the
+   command as bash (`mvdan.cc/sh`) and judges every simple command in it,
+   however nested (pipelines, lists, subshells, `$(…)`, loop bodies). It
+   flags a URL literal anywhere in the command, and a fetcher (`curl`,
+   `wget`, …), a forge CLI (`hub`, `tea`, `jira`) or a `gh` / `glab` read
+   group (`issue view`, `pr diff`, `api`, `search`, …) as the command word or
+   any word after it. A simple command's words are expanded the way the shell
+   would expand them: quote removal, backslashes, `$'…'`, `$""`, brace
+   expansion and `${X:-…}` defaults, a variable being read both unset and as
+   a placeholder, so `$'\x67h'`, `g$""h` and `{gh,issue,view,1}` all read as
+   `gh`. The command word is found by skipping assignments, flags, numeric
+   arguments and wrappers (`sudo`, `env`, `timeout`, …). If it is an inert
+   search or print command (`grep`, `egrep`, `fgrep`, `rg`, `which`,
+   `whereis`, `type`), the segment is clean; otherwise every listed name from
+   the command word on is judged, so an unlisted wrapper is seen through and
+   an earlier harmless name (`gh auth status`) cannot hide a later read.
+   `gh` / `glab` write verbs (`pr create`, `issue comment`, …) and local
+   groups (`auth`, `config`, …) are exempt, since they print only what the
+   agent itself caused.
+
+   Every word, assignment value and heredoc, and the value after a word's
+   first `=`, is also re-read as a script, recursively, so a script quoted,
+   glued to `--opt=` or `KEY=`, or nested in `sh -c` is judged too. printf /
+   `echo -e` escapes are decoded first, since a script printed into a shell
+   runs decoded. A listed name glued to an option (`--split-string=gh`,
+   `-Sgh`) is also judged as the command the following words continue. A
+   command the parser cannot read or expand falls back to a token scan with
+   quotes stripped and no inert exemption. Nesting is bounded (depth 8, 1 MiB
+   per call), and past the bound the command flags.
 
    It misses what the command text does not show: content arriving through
-   `git fetch` or `git pull` without a URL; aliases, shell functions, scripts,
-   `eval` and variable indirection (`$CMD`); a command word spelled by shell
-   expansion other than plain quotes and backslashes (`$'\x67h'`, `g$""h`,
-   `{gh,issue,view,1}`, `/usr/bin/g[h]`); and an unlisted fetcher with no URL
-   literal
-   (a language client reading the URL from a variable). Inert commands hide a
-   listed name in their own arguments, and `rg --pre curl …` runs a
-   preprocessor, so an unquoted one is a miss (a quoted `--pre 'gh …'` still
-   flags, since quoted strings are scanned as their own segment). A lost
-   ingest write in a session already seen from an earlier call also fails
-   open. On Codex the `pre_tool` shape is fixture-backed but the `post_tool`
-   one is assumed. It over-flags any URL anywhere in the command (a commit
-   message, a PR body), a listed name in a quoted string (`git
-   commit -m "curl fails"`), a listed name as an argument of any non-inert
-   command (`git log --grep curl`, `man curl`), `echo gh issue view` (echo is
-   not inert, since piped into a shell it runs), an inert command after any
-   wrapper flag (`xargs -0 grep curl`, `sudo -u bob grep curl`), since the
-   flag may take it as its value, a path argument whose last element is a
-   listed name (`go test ./internal/http`), since every word is matched by its
-   last path element, `gh` / `glab` with no group anywhere but as the first
-   word of its command (`xargs gh`, `sudo gh`, `GH_TOKEN=x gh`: its arguments
-   may come from stdin or a placeholder), a listed name later in a `gh` /
-   `glab` write or local segment (`gh pr comment 1 --body curl`), a printf /
-   echo escape inside a quoted message (`git commit -m 'gh auth status\nand gh
-   issue view'`), and `gh -R o/r pr create`, whose flag value is
-   taken for the group, and a shell call denied or rejected after `pre_tool`
-   (a guard's deny, a declined permission prompt): the marker is written
-   before the decision.
+   `git fetch` or `git pull` without a URL; aliases, shell functions and
+   scripts on disk; and an unlisted fetcher with no URL literal (a language
+   client reading the URL from a variable). It misses a command word the
+   parser cannot resolve: variable indirection (`$CMD`, `G=gh; $G issue view
+   1`), a spelling built by command substitution (`$(printf g)h`), `eval` of
+   a variable, and globs (`/usr/bin/g[h]`), since globbing is off. It misses
+   a script another program transforms or assembles before it reaches a
+   shell: `base64 -d | sh`, `rev`, `tr` or `xxd -r` pipes, and a name split
+   across printf arguments. An inert command hides a plain listed name in its
+   own arguments, so an unquoted `rg --pre curl …` is a miss (a quoted or
+   glued `--pre` script is re-read as a script). Syntax the parser rejects
+   (zsh- or fish-only forms) falls to the token scan, and where it and bash
+   split words differently a gap remains. A lost ingest write in a session
+   already seen from an earlier call also fails open. On Codex the `pre_tool`
+   shape is fixture-backed but the `post_tool` one is assumed.
+
+   It over-flags any URL anywhere in the command (a commit message, a PR
+   body), a listed name in a quoted string (`git commit -m "curl fails"`), a
+   listed name as an argument of any non-inert command (`git log --grep
+   curl`, `man curl`), `echo gh issue view` (echo is not inert, since piped
+   into a shell it runs), an inert command after any wrapper flag (`xargs -0
+   grep curl`, `sudo -u bob grep curl`), since the flag may take it as its
+   value, a path argument whose last element is a listed name (`go test
+   ./internal/http`), since every word is matched by its last path element,
+   `gh` / `glab` with no group anywhere but as the first word of its command
+   (`xargs gh`, `sudo gh`: its arguments may come from stdin or a
+   placeholder), a listed name later in a `gh` / `glab` write or local
+   segment (`gh pr comment 1 --body curl`), a printf / echo escape inside a
+   quoted message (`git commit -m 'gh auth status\nand gh issue view'`),
+   `gh -R o/r pr create`, whose flag value is taken for the group, a listed
+   name glued to `--opt=`, `KEY=` or a fused short option (`--title=curl`,
+   `GIT_PAGER=curl`, `rsync -avxh`, whose `xh` is a fetcher), a command the
+   parser cannot read, whose token scan flags a listed name even as an inert
+   command's argument, a command nested past the bound, and a shell call
+   denied or rejected after `pre_tool` (a guard's deny, a declined
+   permission prompt): the marker is written before the decision.
 
    The gate fails closed on the other side. A second marker records that the
    watcher saw the session at all; a session the event record covers but the

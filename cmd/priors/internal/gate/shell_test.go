@@ -1,6 +1,21 @@
 package gate
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+// nestedBash wraps `gh issue view 1` in depth levels of bash -c and returns the
+// JSON tool input for it.
+func nestedBash(depth int) string {
+	script := "gh issue view 1"
+	for range depth {
+		script = "bash -c '" + strings.ReplaceAll(script, "'", `'\''`) + "'"
+	}
+	b, _ := json.Marshal(map[string]string{"command": script})
+	return string(b)
+}
 
 func TestIngestsCall(t *testing.T) {
 	tests := []struct {
@@ -148,6 +163,32 @@ func TestIngestsCall(t *testing.T) {
 		{"later name in write segment", "Bash", `{"command":"gh pr create --title t --label gh"}`, true},
 		{"fetcher in write body", "Bash", `{"command":"gh pr comment 1 --body curl"}`, true},
 		{"escaped newline in commit message", "Bash", `{"command":"git commit -m 'fix: gh auth status\\nand gh issue view'"}`, true},
+		{"ssh ProxyCommand joined gh", "Bash", `{"command":"ssh -o ProxyCommand=\"g''h issue view 1\" host"}`, true},
+		{"ssh ProxyCommand single-quoted joined gh", "Bash", `{"command":"ssh -o ProxyCommand='g\"\"h issue view 1' host"}`, true},
+		{"ssh fused ProxyCommand joined gh", "Bash", `{"command":"ssh -oProxyCommand=\"g''h issue view 1\" host"}`, true},
+		{"git core.pager joined gh", "Bash", `{"command":"git -c core.pager=\"g''h issue view 1\" log"}`, true},
+		{"flock --command joined gh", "Bash", `{"command":"flock --command=\"g''h issue view 1\" /tmp/l"}`, true},
+		{"rsync --rsh joined gh api", "Bash", `{"command":"rsync --rsh=\"g''h api repos/o/r/issues\" a b"}`, true},
+		{"GIT_PAGER joined gh", "Bash", `{"command":"rg x; GIT_PAGER=\"g''h issue view 1\" git log"}`, true},
+		{"rg --pre joined gh", "Bash", `{"command":"rg --pre \"g''h issue view 1\" ."}`, true},
+		{"rg --pre sh -c joined gh", "Bash", `{"command":"timeout 5 rg --pre \"sh -c 'g\\\"\\\"h issue view 1'\" ."}`, true},
+		{"ansi-c script", "Bash", `{"command":"$'\\x67h issue view 1'"}`, true},
+		{"ansi-c command word", "Bash", `{"command":"$'\\x67h' issue view 1"}`, true},
+		{"dollar empty quotes in word", "Bash", `{"command":"g$\"\"h issue view 1"}`, true},
+		{"brace expansion", "Bash", `{"command":"{gh,issue,view,1}"}`, true},
+		{"default value expansion", "Bash", `{"command":"${X:-gh} issue view 1"}`, true},
+		{"env fused -S after flag", "Bash", `{"command":"env -iSgh issue view 1"}`, true},
+		{"script -c fused escaped", "Bash", `{"command":"script -qcgh\\ issue\\ view\\ 1"}`, true},
+		{"printf hex command word", "Bash", `{"command":"printf '\\x67h issue view 1' | sh"}`, true},
+		{"printf %b echo octal", "Bash", `{"command":"printf '%b' 'gh auth status\\0012gh issue view 1' | sh"}`, true},
+		{"ansi-c url", "Bash", `{"command":"client $'\\x68ttps://e'"}`, true},
+		{"eval joined gh", "Bash", `{"command":"eval \"g''h issue view 1\""}`, true},
+		{"exported script", "Bash", `{"command":"export X=\"g''h issue view 1\"; sh -c \"$X\""}`, true},
+		{"for item script", "Bash", `{"command":"for c in \"g''h issue view 1\"; do sh -c \"$c\"; done"}`, true},
+		{"quoted heredoc to sh", "Bash", `{"command":"sh <<'EOF'\ng''h issue view 1\nEOF"}`, true},
+		{"joined gh in command substitution", "Bash", `{"command":"x=$(g''h issue view 1)"}`, true},
+		{"unparsable with read", "Bash", `{"command":"gh issue view 1; )"}`, true},
+		{"nested past depth bound", "Bash", nestedBash(9), true},
 
 		// not ingestion
 		{"git log", "Bash", `{"command":"git log"}`, false},
@@ -175,6 +216,12 @@ func TestIngestsCall(t *testing.T) {
 		{"gh quoted write args", "Bash", `{"command":"gh pr create --title \"fix it\" --body b"}`, false},
 		{"env -S quoted assignment", "Bash", `{"command":"env -S 'FOO=1' git status"}`, false},
 		{"gh write apostrophe", "Bash", `{"command":"gh pr comment 1 --body 'it'\"'\"'s done'"}`, false},
+		{"rg --pre glued inert", "Bash", `{"command":"rg --pre=grep x"}`, false},
+		{"env assignment bare gh", "Bash", `{"command":"GH_TOKEN=x gh"}`, false},
+		{"grep -rn curl", "Bash", `{"command":"grep -rn curl ."}`, false},
+		{"grep --color=auto curl", "Bash", `{"command":"grep --color=auto curl ."}`, false},
+		{"rg quoted gh", "Bash", `{"command":"rg 'gh' docs"}`, false},
+		{"commit message apostrophe", "Bash", `{"command":"git commit -m \"it's done\""}`, false},
 		{"read tool", "Read", `{"file_path":"/x"}`, false},
 		{"mcp tool", "mcp__x__y", `{}`, false},
 		{"web fetch tool", "WebFetch", `{"url":"https://x"}`, false},

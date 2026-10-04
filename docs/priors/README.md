@@ -90,29 +90,35 @@ empty per-session marker under
 `provenance/` in priors' state dir. That flags the session
 `provenance:shell`; no command text is stored. Any ingestion flags, owner's
 or not. A session the record covers but the watcher never saw, or whose
-markers cannot be read, flags `provenance:no-ingest-record`. It misses what
-the command text does not show (`git fetch` or `git pull` content without a
-URL; aliases, shell functions, scripts, `eval`, `$CMD`; a command word spelled
-by shell expansion other than plain quotes and backslashes, like `$'\x67h'` or
-`/usr/bin/g[h]`; an unlisted fetcher
-with no URL literal), an unquoted
-`rg --pre curl …` (inert search commands such as `grep` and `rg` hide a listed
-name in their arguments, and `--pre` runs a preprocessor), a lost ingest write
-in an already-seen session, and, on Codex, any `post_tool` shape mismatch (only
-`pre_tool` is fixture-backed). It over-flags any URL anywhere, a listed name
-in a quoted string, a listed name as an argument of any non-inert
-command (`git log --grep curl`, `man curl`), `echo gh issue view`,
-an inert command after any wrapper flag (`xargs -0 grep curl`,
-`sudo -u bob grep curl`: the flag may take it as its value), a
-path argument whose last element is a listed name (`go test ./internal/http`),
-`gh` / `glab` with no group anywhere but as the first word of its command
-(`xargs gh`: its arguments may come from stdin or a placeholder), a listed
-name later in a `gh` / `glab` write or local segment
-(`gh pr comment 1 --body curl`), a
-printf / echo escape inside a quoted message (`git commit -m 'gh auth
-status\nand gh issue view'`), `gh -R o/r pr create` and a shell call denied or
-rejected after `pre_tool` (a guard's deny, a declined permission prompt): the
-marker is written before the decision.
+markers cannot be read, flags `provenance:no-ingest-record`. The command is
+parsed as bash and every simple command in it is judged on its expanded
+words (quotes, `$'…'`, brace expansion and `${X:-…}` defaults resolved);
+every word is also re-read as a script, so a script quoted, glued
+to `--opt=` or nested in `sh -c` is judged too. A command that does not parse
+falls back to a token scan, and one nested past the bound (depth 8, 1 MiB)
+flags. It misses what the command text does not show (`git fetch` or `git
+pull` content without a URL; aliases, shell functions, scripts on disk; an
+unlisted fetcher with no URL literal), a command word built at run time
+(`$CMD`, `$(printf g)h`, `eval "$X"`, `/usr/bin/g[h]`), a script another program
+decodes before a shell runs it (`base64 -d | sh`, `rev`, `xxd -r`), an
+unquoted `rg --pre curl …` (inert search commands such as `grep` and `rg`
+hide a listed name in their arguments, and `--pre` runs a preprocessor), a
+lost ingest write in an already-seen session, and, on Codex, any `post_tool`
+shape mismatch (only `pre_tool` is fixture-backed). It over-flags any URL
+anywhere, a listed name in a quoted string, a listed name as an argument of
+any non-inert command (`git log --grep curl`, `man curl`), `echo gh issue
+view`, an inert command after any wrapper flag (`xargs -0 grep curl`,
+`sudo -u bob grep curl`: the flag may take it as its value), a path argument
+whose last element is a listed name (`go test ./internal/http`), `gh` / `glab`
+with no group anywhere but as the first word of its command (`xargs gh`,
+`sudo gh`: its arguments may come from stdin or a placeholder), a listed name
+later in a `gh` / `glab` write or local segment (`gh pr comment 1 --body
+curl`), a listed name glued to `--opt=`, `KEY=` or a fused short option
+(`--title=curl`, `rsync -avxh`, whose `xh` is a fetcher), a command the
+parser cannot read, a printf / echo escape inside a quoted message (`git
+commit -m 'gh auth status\nand gh issue view'`), `gh -R o/r pr create` and a
+shell call denied or rejected after `pre_tool` (a guard's deny, a declined
+permission prompt): the marker is written before the decision.
 
 `list`, `show` and `search` fence what they print as reference data, with a
 delimiter drawn per call.
