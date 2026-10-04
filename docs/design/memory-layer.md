@@ -2,11 +2,11 @@
 
 **Status:** design, **ready to implement.** `priors` v0 can be built now for
 tiers 1 and 3, the stores, the gates, the lint, redaction and the host-local
-layer. Only promoting a *flagged* fact to `reviewed` (§4.4's attestation)
-waits on [#130](https://github.com/noamsto/hookyard/issues/130), attestation
-hardening, and it is not a v0 blocker: unflagged facts publish through the
-gates, and flagged ones stay `proposed` in their host-local layer until #130
-lands.
+layer. [#130](https://github.com/noamsto/hookyard/issues/130) settled the
+attestation design (§4.4, *Attestation*); promoting a *flagged* fact to
+`reviewed` waits on its implementation (§10 workstream 5) and is not a v0
+blocker: unflagged facts publish through the gates, and flagged ones stay
+`proposed` in their host-local layer until it lands.
 
 - *Resolved.* The corrections from the independent adversarial review (PR #83,
   whose full findings are on the PR): the corpus counts (§1, now re-counted),
@@ -22,7 +22,8 @@ lands.
   [`recall-evaluation.md`](recall-evaluation.md) (PR #126, #128). It
   complements §4 — deja-vu holds session history, §4 holds durable cross-repo
   facts — and does not replace it.
-- *Waiting.* Promotion of flagged facts by attestation, on #130 — not a v0
+- *Waiting.* Promotion of flagged facts by attestation, on the attestation
+  check designed in §4.4 (*Attestation*; #130), workstream 5 — not a v0
   blocker.
 
 **Scope:** a memory store shared by Claude Code, Codex, Cursor and Pi, delivered
@@ -381,14 +382,16 @@ Observed 2026-09-16 (crew 1789561716-857282, PR #205): ...
 **How to apply:** ...
 ```
 
-Three fields are new beyond Claude's. `confidence` (`proposed` | `reviewed`)
-is already used by §4.3b's drafts; what each value means for injection is set
-by §4.4's trust model (option A with gates): `proposed` means no human review (published if it passed the gates, held
-locally if flagged), and `reviewed` holds only with a human's attestation over the file digest (§4.4). `provenance` records the writing
-engine, session and host, which §4.4 needs, so a writer can be filtered or purged. `source` appears on imported facts only: the
-engine, the native `path` (Claude) or `thread_id` (Codex), and the `sha256` of
-the native source at import — the keys §4.9's dedup and §4.6's use count match
-on, and never the attestation's file digest.
+Three fields are new beyond Claude's. `confidence` (`proposed` | `reviewed`) is
+already used by §4.3b's drafts; what each value means for injection is set by
+§4.4's trust model (option A with gates): `proposed` means no human review
+(published if it passed the gates, held locally if flagged), and `reviewed`
+holds only with a human's attestation bound to the fact's store, name, path,
+digest and sequence (§4.4). `provenance` records the writing engine, session and
+host, which §4.4 needs, so a writer can be filtered or purged. `source` appears
+on imported facts only: the engine, the native `path` (Claude) or `thread_id`
+(Codex), and the `sha256` of the native source at import — the keys §4.9's dedup
+and §4.6's use count match on, and never the attestation's digest.
 
 Two conventions carry meaning without a schema engine, following Pi-memory's
 "tags are content conventions, not enforced metadata" and the markdown-vault
@@ -430,21 +433,22 @@ the org of the repo a session runs in.
 | **personal** | personal tooling, the machine, the person; facts from personal-org repos | every host, work-profile hosts included |
 | **work** | facts learned in work-org repos, tooling facts among them | work-profile hosts only; never a personal host |
 
-**Host kind.** A **work-profile host** is one configured as such — the same
-profile setting that decides whether the work store is cloned — and every other
-host is a **personal host**. The kind is never inferred from whether a work
-checkout exists: a work-profile host whose work clone is missing (a fresh
-bootstrap, a failed clone) quarantines every write bound for work, and never
-writes it personal.
+**Host kind.** A **work-profile host** is one configured as such — the host
+profile in the root-owned trust file (§4.4), which also decides whether the
+work store is cloned — and every other host is a **personal host**. The kind is
+never inferred from whether a work checkout exists: a work-profile host whose
+work clone is missing (a fresh bootstrap, a failed clone) quarantines every
+write bound for work, and never writes it personal.
 
 **Resolving the org.** A session's org is the owner of its repo's `origin`
 remote, matched against **two lists configured on every host** — work orgs and
-personal orgs — personal hosts too, so a personal host can recognise a work
-repo it holds no store for. `origin` is parsed into host and owner: case-folded,
-`.git` stripped, SSH host aliases resolved, and the host compared as well as
-the owner. A repo with several remotes resolves by `origin` only, with one
-exception that fails closed: a repo any of whose remotes names a work org
-counts as work, whatever `origin` resolves to. On a work-profile host an org on
+personal orgs, both in the trust file (§4.4), never in user config — personal
+hosts too, so a personal host can recognise a work repo it holds no store for.
+`origin` is parsed into host and owner: case-folded, `.git` stripped, SSH host
+aliases resolved, and the host compared as well as the owner. A repo with
+several remotes resolves by `origin` only, with one exception that fails
+closed: a repo any of whose remotes names a work org counts as work, whatever
+`origin` resolves to. On a work-profile host an org on
 neither list is **unresolvable**; on a personal host it is personal, being on
 no work list. The key is the repo's org, not the machine: a work-profile host
 can clone a personal repo and the reverse, which is the rule the fleet already
@@ -886,41 +890,232 @@ and has had no human review; `reviewed` means a human attested it. Both are
 injected from a checkout, fenced. A flagged fact is `proposed` in the local
 layer. A human clears the flag with `priors publish`, which commits it to the
 checkout as `proposed`; promoting it to `reviewed` is the separate,
-attested step that waits on #130.
+attested step of *Attestation* below.
 
 **Promoting a flagged fact, `reviewed` is an attestation, not a field.** A
-fact's `reviewed` state is valid only when an attest entry signs its **file
-digest** (`attested_sha256`): sha256 over the whole fact file's bytes,
-frontmatter included, as the reviewer leaves it with `confidence: reviewed`
-set. Any later
-edit — body, `description`, `scope`, `repos`, anything, an approved
-near-duplicate merge included — invalidates it, and the fact reads as
-`proposed`. It is never `source.sha256`, the native source's hash at import
-(§4.1). The attest entry is kept outside the fact file, so recording it does
-not change the bytes it covers.
-
-The signature is by the **attestation key**, a key separate from the
-commit-signing key and never readable by an agent session — held on a hardware
-token, or behind a passphrase or touch prompt a human answers. A commit
-signature, which an agent can produce with the configured signing key, never
-counts as an attestation, and nor does any commit an agent makes.
-`priors index` checks attestations at generation time and accepts only keys on
-an allowlist kept where agents cannot write. A `pre_tool` write guard denies
-agent writes to attest entries, to `confidence: reviewed`, to the checkout
-indexes (§4.7) and to `priors`'s config and state dirs. It is a tripwire like
-§4.2's read guard — a small deterministic check of the call's paths and text
-that loads neither the rule set nor a store, sees only the tool calls hookyard
-sees, and fails open (R8) — so the key's unreadability, not the guard, is what
-makes attestation hold. The attestation requirements above stand as decided.
-They apply only to promoting flagged facts, and hardening them is
-[#130](https://github.com/noamsto/hookyard/issues/130): that path waits on
-#130, but v0 does not — unflagged facts publish through the gates, and flagged
-ones stay `proposed` in the local layer until #130 lands.
+fact reads `reviewed` only when a human-signed attest entry bound to its
+identity and current bytes verifies; *Attestation*, below, defines the key,
+the trust file, the entry and the checks.
 
 What the gates mean for the other writers: distillation (§4.3b), the importer
 (§4.9) and the migration (decision 2) all go through the same gates. An
 unflagged fact publishes to its store; a flagged one lands `proposed` in the
 host-local layer.
+
+#### Attestation: promoting a flagged fact to `reviewed`
+
+**What `reviewed` means.** A fact is `reviewed` only when its attest entry
+passes every check below. The frontmatter's `confidence: reviewed` alone is a
+claim and never conveys review: `priors index`, `show`, `search` and `list`
+print the verified state, so an unverified `reviewed` prints as `proposed`,
+and a tier-3 reader that `cat`s the file sees only the raw claim. The entry
+signs the sha256 of the whole fact file, frontmatter included, as the reviewer
+leaves it with `confidence: reviewed` set, so any later edit — body,
+`description`, `scope`, `repos`, anything, an approved near-duplicate merge
+included — makes the fact read `proposed`. That digest is never
+`source.sha256`, the native source's hash at import (§4.1). The entry lives
+outside the fact file, so recording it does not change the bytes it covers. A
+commit signature, which an agent can produce with the configured signing key,
+never counts as an attestation, and nor does any commit an agent makes.
+
+**The attestation key** is an OpenSSH FIDO2 key (`ed25519-sk` or `ecdsa-sk`)
+on a hardware authenticator, generated with
+`ssh-keygen -t ed25519-sk -O verify-required` so every signature takes a PIN
+and a touch, separate from the commit-signing key, and used with nixpkgs'
+OpenSSH (built with FIDO2 support). The verifier reads the human act from the
+signature itself: the key type is `sk-ssh-ed25519@openssh.com` or
+`sk-ecdsa-sha2-nistp256@openssh.com`, and the signature's flags byte carries
+both user-presence (`0x01`) and user-verified (`0x04`). The allowed-signers
+format offers only `cert-authority`, `namespaces=`, `valid-after=` and
+`valid-before=`, so it cannot require either; the verifier parses the flags
+itself rather than relying on `ssh-keygen -Y verify` alone.
+
+The flags prove a human act only for a key generated on hardware: anyone
+holding a software ed25519 key can build an sk-format signature with any flags
+byte. So enrolment takes **hardware evidence**. The key is generated with
+`-O challenge=<file> -O write-attestation=<file>`, and each allowlist entry
+carries the FIDO attestation blob (`ssh-sk-attest-v01`) and the challenge it
+was made over. **`priors trust check`** verifies that the blob chains to a
+vendor root pinned in `priors`' own source and covers that public key; the
+NixOS and nix-darwin module runs it at Nix build time when it builds the trust
+file, and `priors index` runs it again. An allowlist entry without valid
+evidence is ignored. Self-attestation and "none" attestation are rejected, so
+a token with no FIDO attestation cannot be enrolled. With no key enrolled, no
+fact is `reviewed` and flagged facts stay `proposed`.
+
+Rejected: a software key behind a passphrase in a caching `ssh-agent` or
+`gpg-agent`, which any same-user process can ask to sign; and `ssh-add -c` or
+a gpg smartcard with a forced-touch policy, which take a human act the
+signature carries no evidence of, so the verifier cannot tell them from a
+cached key. One verifiable mechanism, not a menu.
+
+**Confused deputy (residual).** An agent can run `ssh-keygen -Y sign` itself
+and make the token blink. The PIN prompt goes to the invoking process — its
+tty, or an askpass dialog on the desktop (`SSH_ASKPASS_REQUIRE=force`). The
+human enters the PIN and touches the token only for a `priors attest` they
+started; that is a human rule, stated as one.
+
+**The trust file**, `/etc/priors/trust.toml`, is written by the NixOS and
+nix-darwin modules through `environment.etc` (a root-owned link into the Nix
+store). It holds the host **profile** and the **work and personal org lists**
+(§4.2), each store's **store id**, and the **attestation allowlist**: each
+public key with its hardware evidence. Its path is fixed in the build: no
+flag, environment variable (`PRIORS_CONFIG` included) or user config names it
+or overrides its keys. Before any use, `priors` checks ownership: every
+component of the path as traversed, symlinks and their targets included, is
+owned by root; the file is writable by root only; and each directory is
+writable by root only or is sticky. `/nix/store` (`1775 root:nixbld`) passes,
+since no non-root user can replace an entry in it; a home-manager
+`xdg.configFile` link fails, since the link sits in the user-owned
+`~/.config`. A trust file that is missing, fails the check or does not parse
+is a missing config: `priors` writes nothing, injects nothing (R8) and reports
+it. An empty allowlist means no fact reads `reviewed`. A home-manager-only
+host has no trust file, so `priors` is inert there until one is placed
+root-owned by other means. `config.toml` keeps everything else (state dir,
+rules, scanner, store paths, …); those keys also steer routing and the gates,
+and auditing them is a follow-up.
+
+**Unwritable means no agent write takes effect without a human's root act.**
+The trust file's source lives in nix-config, which agents edit, and the
+rebuild that deploys it is the human act, so that act must be informed. The
+allowlist sits in its own small file in nix-config; the module's activation
+prints every change to it (keys added or removed) on every rebuild; and an
+added key must carry hardware evidence that verifies against roots pinned in
+another repo (`priors`' source). The evidence check does not stop a foreign
+genuine token — an attacker's own key with its real attestation — added to
+nix-config; only the activation diff and the human's review of it do. The
+allowlist is as trustworthy as that review.
+
+**The attest entry.** One per fact name, at `.attest/<name>` in the store
+checkout — a dot directory, so never walked as a fact and never in the index:
+
+```
+priors-attest v1
+store: <store id from the trust file>
+name: <fact name>
+path: <path relative to the store root, slash-separated>
+sha256: <lowercase hex sha256 of the fact file's bytes>
+sequence: <decimal, 1 to 2^63-1, no leading zeros>
+op: attest | revoke
+-----BEGIN SSH SIGNATURE-----
+...
+-----END SSH SIGNATURE-----
+```
+
+The signed message is exactly the seven lines before the armour, each ending
+in `\n`, signed with `ssh-keygen -Y sign -n priors-attest@hookyard`, a
+namespace no git or file signature uses. For `op: revoke`, `path` and
+`sha256` name the last attested bytes and are not matched against the tree.
+
+**`priors attest <name>`** is the human command, run in an interactive
+terminal. The fact body is agent-written and the human must sign exactly the
+bytes they saw, so it reads the fact file once; renders those bytes with every
+control, bidi, tag and other non-printing character visibly escaped, never
+sent raw to the terminal; sets `confidence: reviewed` on the in-memory bytes;
+shows the payload; and signs the sha256 of the resulting bytes (PIN and
+touch). It writes the fact file only if the file still holds the bytes it
+read, and otherwise aborts with nothing signed written. It then writes
+`.attest/<name>` with sequence one above the highest well-formed sequence in
+the name's history (check 7) and commits the fact and its entry together.
+`priors attest --revoke <name>` writes a signed `op: revoke` entry the same
+way.
+
+**The verifier** runs in `priors index`; `priors lint` runs the same checks.
+A fact reads `reviewed` only if every check holds; otherwise it reads
+`proposed`, reported with the failing check, and the run exits 0:
+
+1. the trust file passes the ownership check and lists at least one key;
+2. the fact's frontmatter says `confidence: reviewed`, and the fact sits in a
+   checkout (a local-layer fact is never `reviewed`);
+3. `.attest/<name>` in the working tree equals its blob at `HEAD` (an
+   uncommitted entry does not count) and parses as one v1 entry with
+   `op: attest`;
+4. the signature is a valid SSHSIG over that payload, namespace
+   `priors-attest@hookyard`, by a key on the allowlist;
+5. the key is an sk type and the signature's flags carry user-presence and
+   user-verified;
+6. `store`, `name`, `path` and `sha256` equal the trust file's id for the
+   store being indexed, the fact's `name`, its path relative to the store
+   root, and the sha256 of its bytes now;
+7. its sequence is the highest among every well-formed entry (parses as v1
+   with an in-range sequence, `store` and `name` match this store and name;
+   any other entry is ignored), regardless of signer or signature validity,
+   across every version of `.attest/<name>` in every commit reachable from
+   `HEAD` or from the store's remote-tracking default branch, found without
+   history simplification (a merge that takes one side's version must not
+   hide the other side's revoke); a different entry at the same sequence (a
+   tie) fails. Git runs with replace objects disabled; a shallow, partial or
+   blobless clone, or a repository with grafts, fails this check. Counting
+   unsigned junk is fail-safe: an agent entry with a high sequence can only
+   make the fact read `proposed`.
+
+The commit gate runs the same checks against the commit it is making, that
+commit standing in for `HEAD`, and refuses a `confidence: reviewed` fact that
+fails them (`unattested-review`).
+
+**Sequence and revocation.**
+
+- A new entry for a name takes the highest sequence in its history + 1. If
+  junk exhausts the sequence space for a name, the human re-attests the fact
+  under a new name.
+- A `revoke` as the latest entry makes the fact `proposed`; re-attesting takes
+  a higher sequence.
+- Retiring an attested fact — deleting, superseding, archiving, renaming,
+  moving — takes a revoke first. An entry file is never deleted; the revoke
+  stays as a tombstone, and the commit gate refuses a commit that deletes one.
+- An edit without a re-attest leaves the fact `proposed`; restoring the exact
+  attested bytes makes it `reviewed` again, since those are bytes a human
+  attested. A human correcting an attested fact therefore revokes or
+  re-attests, and `priors lint` reports an entry whose fact bytes no longer
+  match ("stale attestation: re-attest or revoke").
+- Removing a key from the allowlist voids every attestation it signed and
+  never resurrects a fact it revoked, since check 7 counts entries regardless
+  of signer.
+
+**What this closes.** Replay by a forward commit or a merge (the old bytes
+and old entry restored after a revoke or re-attest): the sequence is below
+history's highest, so `proposed`. A copy to another store: store id mismatch.
+A copy to another path or name in one store: mismatch. A git commit or file
+signature: namespace mismatch.
+
+**What it does not close (residual).** Anything that changes one host's local
+view of history — a reset, rebase or detached checkout that also moves or
+rewrites the remote-tracking ref, or a `config.toml` store path pointed at
+another checkout — can drop a revoke from that view and resurrect an
+attestation a human revoked, in that host's index, until the next fetch
+restores the remote-tracking ref (unless the agent repeats the rewrite). A
+store with no remote anchors on `HEAD` alone. The store remotes refuse force
+pushes, so a rewrite never leaves the host, and the bytes it resurrects are
+bytes a human once attested. An agent that rewrites the engine's own hook
+wiring (user-writable engine settings) can inject anything with no label at
+all: attestation protects the `reviewed` label, not the session's whole
+context. The guarantee also assumes `priors` runs from the root-owned system
+profile, as `cmd/priors/hookyard.json` wires it
+(`/run/current-system/sw/bin/priors`).
+
+**Cost.** Check 7 is one walk per index run over `.attest/` history only
+(`git log --full-history` restricted to that directory, every reachable
+commit), not one per name. Junk entries count, so an agent can grow that
+history; the walk is capped in commits and bytes read, and past the cap every
+fact reads `proposed` and `priors lint` reports it. That is fail-safe, and it
+keeps `priors index` inside its 1000 ms `session_start` handler timeout
+rather than timing out and injecting nothing.
+
+**The write guard.** A `pre_tool` guard denies agent writes to attest entries
+(`.attest/`), to `confidence: reviewed`, to the checkout indexes (§4.7) and to
+`priors`'s config and state dirs; the root-owned trust file needs no guard.
+It is a tripwire like §4.2's read guard — a small deterministic check of the
+call's paths and text that loads neither the rule set nor a store, sees only
+the tool calls hookyard sees, and fails open (R8). The key's non-usability
+plus an unwritable allowlist, and an entry bound to the fact's identity — not
+the guard — is what makes attestation hold.
+
+**v0 builds none of this.** Its commit gate refuses every
+`confidence: reviewed` fact as `unattested-review`
+(`cmd/priors/internal/commit/commit.go`), which stays correct until the
+verifier exists, since nothing can be validly reviewed yet. v0 does not wait
+on it: unflagged facts publish through the gates, and flagged ones stay
+`proposed`. The implementation is §10 workstream 5.
 
 ### 4.5 Retrieval backend: one interface, three implementations
 
@@ -1320,8 +1515,8 @@ change.
 | --- | --- | --- |
 | **hookyard** | *only if tier 2 passes its gate (§4.4):* `prompt_submit` added to `HasAdvisorySlot` for Claude and Pi (Codex already has `session_start` and `prompt_submit` since #101, so needs no hookyard change for tiers 1 and 2); Pi bridge's `input` reply delivered (not discarded); `before_agent_start` registration made a real per-prompt handler | the only router changes this design can require; tier 2 is impossible on Claude and Pi without them (R2, §4.7), and v0 needs none of them |
 | **hookyard** | *only if tier 2 passes its gate (§4.4):* captured `prompt_submit` advisory payload fixtures per engine, per its own evidentiary convention | a claimed-advisory engine with no fixture is a claim, not a capability |
-| **`priors`** (separate package and binary, built from the hookyard repo) | `cmd/priors` and its own tree, with its own manifest, reached through hookyard's `exec` handler contract; it speaks the envelope as JSON like any third-party handler and imports no `internal/` package, so moving it to its own repo is moving files. `add` / `list` (`--flagged`) / `show` / `search` / `lint` / `index` / `import` / `touch` / `move` / `publish`; both store paths, the host profile and both org lists from config; write-time redaction and §4.2's routing; v0 `rg` backend | the owner's decision 4: the router stays small and auditable, and the store keeps a schema cadence of its own; §4.4's fail-open contract lives here, and covers its `pre_tool` guards too, since the router cannot deny on handler error (§4.2) |
-| **nix-config** | install `priors` and its manifest, wiring `session_start` to `priors index` and `post_tool` to the `priors touch` usage logger (`fire_and_forget`, §4.6), and `prompt_submit` only if tier 2 passes its gate; clone the personal store on every host incl. `halo` and `mbp`, and the work store on work-profile hosts only (§4.2, §4.8); the host profile and both org lists on every host, personal ones included; the host-level include of the personal index in a Cursor-only rule file, never the shared instruction file Claude, Codex and Cursor all read, and no repo-level work include (§4.7); optional Obsidian `programs.obsidian.vaults` entries, one vault per store | one manifest, four engines — the pattern `programs.hookyard.manifests` already exists for; clone placement is the first of §4.2's two layers |
+| **`priors`** (separate package and binary, built from the hookyard repo) | `cmd/priors` and its own tree, with its own manifest, reached through hookyard's `exec` handler contract; it speaks the envelope as JSON like any third-party handler and imports no `internal/` package, so moving it to its own repo is moving files. `add` / `list` (`--flagged`) / `show` / `search` / `lint` / `index` / `import` / `touch` / `move` / `publish` / `attest` / `trust check`; both store paths from config; the host profile, both org lists, the store ids and the attestation allowlist from the root-owned trust file (§4.4); write-time redaction and §4.2's routing; v0 `rg` backend | the owner's decision 4: the router stays small and auditable, and the store keeps a schema cadence of its own; §4.4's fail-open contract lives here, and covers its `pre_tool` guards too, since the router cannot deny on handler error (§4.2) |
+| **nix-config** | install `priors` and its manifest, wiring `session_start` to `priors index` and `post_tool` to the `priors touch` usage logger (`fire_and_forget`, §4.6), and `prompt_submit` only if tier 2 passes its gate; clone the personal store on every host incl. `halo` and `mbp`, and the work store on work-profile hosts only, as full (not shallow, partial or blobless) clones (§4.2, §4.4, §4.8); the trust file (§4.4) via `environment.etc` on every host, personal ones included: the host profile, both org lists, the store ids and the attestation allowlist in its own file, checked by `priors trust check` when the module builds the trust file, with an activation-time diff of the allowlist; the host-level include of the personal index in a Cursor-only rule file, never the shared instruction file Claude, Codex and Cursor all read, and no repo-level work include (§4.7); optional Obsidian `programs.obsidian.vaults` entries, one vault per store | one manifest, four engines — the pattern `programs.hookyard.manifests` already exists for; clone placement is the first of §4.2's two layers |
 | **dispatcher** | `crew reap` runs `priors import` (§4.9), then distillation proposals (§4.3b); the judge consults `priors search` before choosing tier/engine/model | closes failure mode 2 — the judge currently decides from a static table while `ratings.jsonl` holds the evidence |
 | **nix-config** | worker MCP profile unchanged (zero servers) | memory must not be the reason a worker grows an MCP dependency (R1) |
 
@@ -1377,6 +1572,9 @@ flagged facts stops being optional.
   would first need a routing answer.
 - **Cursor ships a local memory store, or documents its knowledge-base API.**
   Then Cursor joins §4.9's table; until then v0 imports nothing from Cursor.
+- **Flagged facts pile up unpromoted.** Each attestation takes a PIN and a
+  token touch per fact. If the backlog grows, revisit with batch attestation
+  (one signature over several bound tuples, each shown), never a weaker key.
 - **A work fact is ever found in the personal store.** The write rule, or both
   of §4.2's layers, failed, and a leak cannot be recalled (R9). Stop writing and
   revisit §4.2 before anything else. The personal store's lint scans for
@@ -1418,12 +1616,12 @@ flagged facts stops being optional.
   link target resolves outside the routed store's tree;
 - **routing and the read rule** (§4.2): with both stores present, a
   personal-repo session never receives a work fact — from an index, a search
-  or a local layer; host kind comes from the profile setting, so a
-  work-profile host with its work clone missing quarantines a work-bound
-  write; an unresolvable session reads personal only and writes work on a
-  work-profile host and to the quarantine on a personal one, never personal; a
-  no-repo session writes work on a work-profile host and personal on a
-  personal one; an org on neither list routes as unresolvable on a
+  or a local layer; host kind comes from the trust file's host profile
+  (§4.4), so a work-profile host with its work clone missing quarantines a
+  work-bound write; an unresolvable session reads personal only and writes
+  work on a work-profile host and to the quarantine on a personal one, never
+  personal; a no-repo session writes work on a work-profile host and personal
+  on a personal one; an org on neither list routes as unresolvable on a
   work-profile host and personal on a personal one; a work-org session on a
   personal host quarantines the fact; `origin` parsing case-folds, strips
   `.git`, resolves SSH aliases and compares the host, and a repo with any
@@ -1451,11 +1649,50 @@ flagged facts stops being optional.
 - **attestation** (§4.4): a `confidence: reviewed` fact with no valid
   attestation is treated as `proposed`; editing any byte of an attested fact —
   body, `description` or `scope`, an approved merge included — resets it to
-  `proposed`; recording the attest entry leaves the fact's bytes unchanged; a
+  `proposed`, and restoring the exact attested bytes makes it `reviewed`
+  again; recording the attest entry leaves the fact's bytes unchanged; a
   signed commit, any agent-made commit, and a signature by a key off the
-  allowlist do not attest; an agent's write to an attest entry, to
-  `confidence: reviewed`, to a checkout index, or under `priors`'s config or
-  state dirs is denied;
+  allowlist do not attest; a local-layer fact is never `reviewed` (check 2);
+  *trust file* (check 1), with a fake stat source: a file owned by a user, a
+  user-owned directory or symlink on the path, and a file or directory that is
+  group- or world-writable each fail, a missing or unparsable file is a
+  missing config that writes and injects nothing and is reported, and a
+  root-owned file under root-owned or sticky directories passes;
+  `PRIORS_CONFIG` or a user config naming a trust file or its keys is ignored;
+  an empty allowlist leaves no fact `reviewed`; *key and evidence* (checks 4
+  and 5): an allowlist entry without valid hardware evidence, or with
+  self-attestation or none, is ignored; an allowlisted key that is not an sk
+  type, a signature missing user-presence, one missing user-verified, and a
+  signature in another namespace (a git or file signature) leave the fact
+  `proposed`; *binding* (check 6): a wrong store id, `path`, `name`, `sha256`
+  or namespace leaves it `proposed`, so a copy to another store, path or name
+  does not carry the attestation; *sequence and replay* (checks 3 and 7): a
+  forward-commit replay of the old bytes and entry after a revoke and after a
+  re-attest is `proposed`, as is a merge replay (a side branch restoring the
+  old entry, then merged), a tie at the highest sequence and an entry
+  uncommitted at `HEAD`; a shallow or partial clone and a graft each make
+  every fact `proposed`, and a replace ref hiding a revoke is ignored; an entry with an out-of-range sequence is
+  ignored, while a junk entry with a high sequence makes the fact `proposed`;
+  a revoke as the latest entry makes the fact `proposed`, and a re-attest at a
+  higher sequence makes it `reviewed`; removing a key from the allowlist makes
+  its attestations `proposed` while the facts it revoked stay revoked;
+  *history integrity and cost*: a history past the walk cap makes every fact
+  `proposed` and `priors lint` reports it, and lint reports an entry whose
+  fact bytes no longer match as a stale attestation; *commit gate and
+  `priors attest`*: the gate checks against the commit it is making and
+  refuses a `confidence: reviewed` fact that fails the checks
+  (`unattested-review`) and a commit that deletes an attest entry, and
+  accepts a reviewed fact committed with its valid entry; `priors attest`
+  renders the fact with control, bidi, tag and other non-printing characters
+  escaped, never raw, signs the bytes with `confidence: reviewed` set,
+  aborts with nothing written when the fact file changed after it was read,
+  and numbers the entry one above the highest well-formed sequence in the
+  name's history, `--revoke` included; *display*: `show` and `search` print an
+  unverified `reviewed` as `proposed`; *the guard*: an agent's write to an
+  attest entry (`.attest/` included), to `confidence: reviewed`, to a
+  checkout index, or under `priors`'s config or state dirs is denied.
+  Fixtures sign with a software stand-in authenticator that sets the flags
+  byte per case, and the hardware evidence check is faked the same way;
 - **injection hygiene** (§4.4): bidi, zero-width and tag characters reach
   the model stripped; each protected string — `[hookyard advisory]`, the
   store header, the BEGIN and END fence lines — in another case, with other
@@ -1551,8 +1788,8 @@ hookyard gaps behind it (§4.7, §5).
 ## 9. Decisions
 
 Decided by the owner on 2026-09-30 unless marked. Decision 5 is settled
-(see below); promoting flagged facts waits on #130, which is not a v0 blocker
-(status line).
+(see below); promoting flagged facts waits on implementing §4.4's attestation
+(designed in #130), which is not a v0 blocker (status line).
 
 1. **Store placement — decided: two stores, keyed by repo org** (§4.2). A
    personal store on every host, a work store on work-profile hosts only; a
@@ -1607,7 +1844,8 @@ Decided by the owner on 2026-09-30 unless marked. Decision 5 is settled
    every fact is git-revertable with its origin session recorded. B and C were
    rejected (§4.4). Migration, the importer and distillation go through the
    same gates. Review is by exception plus a periodic digest. Attestation
-   (#130) applies only to promoting flagged facts, so it does not block v0.
+   (§4.4, designed in #130) applies only to promoting flagged facts, so it
+   does not block v0.
 7. **Tier 2 — decided: out of v0, gated on the A/B** (§4.4; the owner,
    2026-09-30). v0 ships tiers 1 and 3. Tier 2 — with the hookyard
    gaps behind it (§4.7, §5, workstream 8 below) — is built only if §7's
@@ -1619,11 +1857,11 @@ Decided by the owner on 2026-09-30 unless marked. Decision 5 is settled
 
 | # | workstream | repo | delivers |
 | --- | --- | --- | --- |
-| 1 | the two store repos, each remote running the lint as a required check (§4.3); `priors` v0 (`add`/`list`/`show`/`search`/`lint`/`index`), §4.4's gates and the host-local layer, write-time redaction (§4.3), §4.2's routing and read rule | hookyard (`cmd/priors`) | tier 1 + tier 3 on all four engines; the gates and the host-local layer for flagged facts |
-| 2 | nix-config wiring: install, clone per §4.2, the host profile and both org lists on every host, the personal index's host-level include in a Cursor-only rule file, never the shared instruction file Claude, Codex and Cursor all read, and dropped wherever Cursor's `session_start` hook runs `priors index` (#140), and no repo-level work include (§4.7) | nix-config | reach with no hookyard change |
+| 1 | the two store repos, each remote running the lint as a required check and refusing force pushes (§4.3); `priors` v0 (`add`/`list`/`show`/`search`/`lint`/`index`), §4.4's gates and the host-local layer, write-time redaction (§4.3), §4.2's routing and read rule | hookyard (`cmd/priors`) | tier 1 + tier 3 on all four engines; the gates and the host-local layer for flagged facts |
+| 2 | nix-config wiring: install, clone per §4.2 (full clones, never shallow or partial), the trust file (§4.4) on every host, checked at build time by `priors trust check`, the personal index's host-level include in a Cursor-only rule file, never the shared instruction file Claude, Codex and Cursor all read, and dropped wherever Cursor's `session_start` hook runs `priors index` (#140), and no repo-level work include (§4.7) | nix-config | reach with no hookyard change |
 | 3 | importer v0 (Claude; Codex stage-1 rows behind the schema pin, §4.9) and the per-host migration with dedup proposals (decision 2) | hookyard (`priors`) | content to actually retrieve |
 | 4 | usage log and promotion/demotion: `post_tool → priors touch`, `fire_and_forget` (§4.6) | hookyard (`priors`) | strengthening and forgetting |
-| 5 | the attestation check in `priors index` against the key allowlist, and the `pre_tool` tripwires: the write guard (§4.4), before the stores go to a second host; the read guard (§4.2), before the work store is cloned on a host that also runs non-work sessions | hookyard (`priors`) | the review boundary holds by the key; the guards catch what hookyard sees. The attestation check, used only to promote flagged facts, waits on [#130](https://github.com/noamsto/hookyard/issues/130) and does not block v0; the guards are not blocked |
+| 5 | `priors attest`, `priors trust check` and the attestation check (§4.4: the bound entry, its sequence and revocation, the sk flags, the trust file) in `priors index`, and the `pre_tool` tripwires: the write guard (§4.4), before the stores go to a second host; the read guard (§4.2), before the work store is cloned on a host that also runs non-work sessions | hookyard (`priors`) | the review boundary holds by the key; the guards catch what hookyard sees. The attestation check, used only to promote flagged facts, is designed in [#130](https://github.com/noamsto/hookyard/issues/130), not a v0 blocker; the guards are not blocked |
 | 6 | dispatcher: `crew reap` runs the import, then distillation proposals; the judge consults `priors` | dispatcher | closes failure mode 2 |
 | 7 | Obsidian as a viewer, one vault per store; Bases table for the stale sweep (§4.8 step 1) | nix-config | §4.6 curation, if it earns it |
 | 8 | *gated:* hookyard `prompt_submit` advisory slot for Claude and Pi + Pi bridge `input` reply + fixtures — only if §7's A/B passes (decision 7) | hookyard | tier 2 on Claude and Pi (Codex already has the slot via #101); a conditional later workstream, not v0 |
@@ -1633,7 +1871,8 @@ Workstream 0, settling the trust model (§4.4, decision 6), is **done**: the
 owner chose option A with automatic gates on 2026-09-30, so workstreams that
 write a fact are unblocked. Building starts at workstream 1, which covers the
 stores, the gates, the lint, redaction, the local layer and tiers 1 and 3;
-only promoting flagged facts to `reviewed` waits on #130, and v0 does not.
+only promoting flagged facts to `reviewed` waits on implementing §4.4's
+attestation (designed in #130), and v0 does not.
 
 **Order.** For anyone outside this fleet, hookyard running without Nix
 (roadmap stage 1) comes first: without it, a memory layer delivered through
