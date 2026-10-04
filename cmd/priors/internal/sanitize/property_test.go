@@ -199,12 +199,16 @@ type checker struct {
 	cases  int64
 }
 
-// check runs Text on in and applies the oracle. A non-empty needle is c's
-// image, placed inside the token: outside quoted spans it may occur only as
-// often as in the protected line itself (the store header's own '·').
+// check runs Text on in and applies the oracle: every line is quoted whole,
+// or a token is quoted and the line's own is escaped. A non-empty needle is
+// c's image, placed inside the token: outside quoted spans it may occur only
+// as often as in the protected line itself (the store header's own '·').
 func (ck *checker) check(c rune, kind string, p protected, in, needle string) {
 	ck.cases++
 	out := Text(in)
+	if linesQuoted(out) {
+		return
+	}
 	if quotesAToken(out) && escaped(out, p.token) && (!p.fence || !ruleRunLeft(out)) &&
 		(needle == "" || strings.Count(unquoted(out), needle) <= strings.Count(p.text, needle)) {
 		return
@@ -213,6 +217,15 @@ func (ck *checker) check(c rune, kind string, p protected, in, needle string) {
 	if ck.failed++; ck.failed >= maxChunkFailure {
 		ck.t.Fatalf("stopping chunk after %d failures", ck.failed)
 	}
+}
+
+func linesQuoted(out string) bool {
+	for l := range strings.SplitSeq(out, "\n") {
+		if !strings.HasPrefix(l, "(quoted line: ") {
+			return false
+		}
+	}
+	return true
 }
 
 // quotesAToken reports a quoted protected token. It need not be the line's
@@ -512,4 +525,50 @@ func TestPropertyGluedForeignBenign(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestPropertyPunctWrappers: a rune that looks like punctuation, or a
+// modifier letter, set around or inside a header or fence must not hide it
+// (#199). Wrappers whose NFKC is ASCII or holds a separator are exempt (R3,
+// R7).
+func TestPropertyPunctWrappers(t *testing.T) {
+	if testing.Short() {
+		t.Skip("generator-driven property test")
+	}
+	var xs []rune
+	for r := range punctImages {
+		xs = append(xs, r)
+	}
+	for c := rune(0x80); c <= unicode.MaxRune; c++ {
+		if unicode.Is(unicode.Lm, c) {
+			xs = append(xs, c)
+		}
+	}
+	xs = append(xs, 0x3108, 0x30b3, 0x30fc, 0x318d)
+	slices.Sort(xs)
+	xs = slices.Compact(xs)
+
+	forms := []struct {
+		token string
+		fence bool
+		of    func(x string) string
+	}{
+		{"hookyardadvisory", false, func(x string) string { return x + "\u0127 ookyard advisory" + x }},
+		{"priorsmemory", false, func(x string) string { return x + "\u01a5 riors memory \u00b7 work" + x }},
+		{"hookyardadvisory", false, func(x string) string { return "[hookyard advis \ua74b" + x + " ry]" }},
+		{"endpriors", true, func(x string) string { return "===== " + x + "\u0190 \u004eD priors-0123456789abcdef =====" }},
+	}
+	ck := &checker{t: t}
+	skipped := 0
+	for _, x := range xs {
+		if im := imageOf(x); im.sep || needleOf(x) == "" {
+			skipped++
+			continue
+		}
+		for _, f := range forms {
+			in := f.of(string(x))
+			ck.check(x, "punct wrapper", protected{text: in, token: f.token, fence: f.fence}, in, "")
+		}
+	}
+	t.Logf("wrappers: %d, skipped as ASCII or separator images (R3, R7): %d; Text calls: %d", len(xs), skipped, ck.cases)
 }
