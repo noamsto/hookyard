@@ -588,3 +588,110 @@ func TestClampWindow(t *testing.T) {
 		})
 	}
 }
+
+// liveWindowCounts counts the 10-minute live window straight from the
+// timestamps, without FlowForDay's bucket arithmetic: bucket i covers
+// [start+i min, start+(i+1) min) where start is the minute 9 minutes before
+// now's minute, and anything past now's minute lands in the last bucket.
+func liveWindowCounts(stamps []time.Time, now time.Time, window int) []int64 {
+	counts := make([]int64, window)
+	start := now.UTC().Truncate(time.Minute).Add(-time.Duration(window-1) * time.Minute)
+	for _, ts := range stamps {
+		for i := range window {
+			lo := start.Add(time.Duration(i) * time.Minute)
+			hi := lo.Add(time.Minute)
+			if (!ts.Before(lo) && ts.Before(hi)) || (i == window-1 && !ts.Before(hi)) {
+				counts[i]++
+				break
+			}
+		}
+	}
+	return counts
+}
+
+func TestFlowForDayLiveWindowMatchesIndependentCount(t *testing.T) {
+	now := time.Date(2026, 9, 10, 12, 10, 30, 0, time.UTC)
+	cases := map[string]struct {
+		day      string
+		prevDay  string
+		now      time.Time
+		stampsOf func(now time.Time) []time.Time
+	}{
+		"mid-day edges": {
+			day: "2026-09-10", now: now,
+			stampsOf: func(n time.Time) []time.Time {
+				s := n.Truncate(time.Minute).Add(-9 * time.Minute) // window start
+				return []time.Time{
+					s.Add(-time.Nanosecond), // just before the window: out
+					s,                       // first instant: bucket 0
+					s.Add(time.Minute - time.Nanosecond),
+					s.Add(time.Minute), // bucket boundary: bucket 1
+					s.Add(time.Minute), // two calls in the same instant
+					n.Truncate(time.Minute),
+					n, // now itself
+				}
+			},
+		},
+		"window spans UTC midnight": {
+			day: "2026-09-11", prevDay: "2026-09-10",
+			now: time.Date(2026, 9, 11, 0, 3, 20, 0, time.UTC),
+			stampsOf: func(n time.Time) []time.Time {
+				return []time.Time{
+					time.Date(2026, 9, 10, 23, 53, 59, 0, time.UTC), // out
+					time.Date(2026, 9, 10, 23, 54, 0, 0, time.UTC),  // bucket 0
+					time.Date(2026, 9, 10, 23, 59, 59, 0, time.UTC),
+					time.Date(2026, 9, 11, 0, 0, 0, 0, time.UTC),
+					time.Date(2026, 9, 11, 0, 3, 0, 0, time.UTC),
+				}
+			},
+		},
+		"window spans UTC midnight, no previous-day file": {
+			day: "2026-09-11",
+			now: time.Date(2026, 9, 11, 0, 3, 20, 0, time.UTC),
+			stampsOf: func(n time.Time) []time.Time {
+				return []time.Time{time.Date(2026, 9, 11, 0, 0, 0, 0, time.UTC), time.Date(2026, 9, 11, 0, 3, 0, 0, time.UTC)}
+			},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			stamps := tc.stampsOf(tc.now)
+			var today, prev []string
+			for _, ts := range stamps {
+				line := recLine(t, record.Record{TS: ts.Format(time.RFC3339Nano), Engine: "codex", Verdict: "allow", Router: "ok"})
+				if DayString(ts) == tc.day {
+					today = append(today, line)
+				} else {
+					prev = append(prev, line)
+				}
+			}
+			writeDayFile(t, stateDir, tc.day, today)
+			if tc.prevDay != "" {
+				writeDayFile(t, stateDir, tc.prevDay, prev)
+			}
+
+			resp, err := FlowForDay(stateDir, tc.day, 10, tc.now, Filter{})
+			if err != nil {
+				t.Fatalf("FlowForDay: %v", err)
+			}
+			want := liveWindowCounts(stamps, tc.now, 10)
+			got := make([]int64, 10)
+			for _, p := range resp.Paths {
+				for i, c := range p.Counts {
+					got[i] += c
+				}
+			}
+			var wantTotal int64
+			for i := range want {
+				wantTotal += want[i]
+				if got[i] != want[i] {
+					t.Errorf("bucket %d = %d, want %d (got %v, want %v)", i, got[i], want[i], got, want)
+				}
+			}
+			if resp.Calls != wantTotal {
+				t.Errorf("calls = %d, want %d", resp.Calls, wantTotal)
+			}
+		})
+	}
+}
