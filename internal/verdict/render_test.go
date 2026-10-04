@@ -170,8 +170,10 @@ func TestRenderOnDecisionCapableEvents(t *testing.T) {
 			delivered: true,
 		},
 		{
-			// No advisory-only response Cursor honours has been confirmed, so
-			// standalone advice is dropped rather than claimed as delivered.
+			// A decision slot carries advice only beside a rendered permission
+			// (user_message), so standalone advice there is dropped rather than
+			// claimed as delivered; session_start and post_tool are the
+			// standalone slots (TestRenderAdvisoryOnlyEvents).
 			name:     "cursor standalone advice is not delivered",
 			in:       Input{Engine: vocab.Cursor, CanonicalEvent: vocab.PreTool, NativeEvent: "preToolUse", Verdict: Abstain, Advice: "a"},
 			enforced: true,
@@ -273,11 +275,11 @@ func TestRenderOffADecisionSlotPrintsNothing(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s has no native post_tool event", engine)
 		}
-		// Pi has a post_tool advisory slot too, so the case that prints nothing
-		// is its no-advice one; the advice case is in
-		// TestRenderPiAdvisoryOnlyEvents.
+		// Pi and Cursor have a post_tool advisory slot too, so the case that
+		// prints nothing is their no-advice one; the advice cases are in
+		// TestRenderPiAdvisoryOnlyEvents and TestRenderAdvisoryOnlyEvents.
 		advice := "a"
-		if engine == vocab.Pi {
+		if engine == vocab.Pi || engine == vocab.Cursor {
 			advice = ""
 		}
 		for _, v := range lattice {
@@ -422,10 +424,99 @@ func TestRenderAdvisoryOnlyEvents(t *testing.T) {
 			stdout:    `{"hookSpecificOutput":{"hookEventName":"SubagentStart","additionalContext":"a"}}`,
 			delivered: true,
 		},
+		{
+			name:      "cursor session_start abstain with advice",
+			in:        Input{Engine: vocab.Cursor, CanonicalEvent: vocab.SessionStart, NativeEvent: "sessionStart", Verdict: Abstain, Advice: "a"},
+			stdout:    `{"additional_context":"a"}`,
+			enforced:  true,
+			delivered: true,
+		},
+		{
+			name:      "cursor post_tool abstain with advice",
+			in:        Input{Engine: vocab.Cursor, CanonicalEvent: vocab.PostTool, NativeEvent: "postToolUse", Verdict: Abstain, Advice: "a"},
+			stdout:    `{"additional_context":"a"}`,
+			enforced:  true,
+			delivered: true,
+		},
+		{
+			// No permission key and no reason: neither has a channel here.
+			name:      "cursor session_start deny with advice renders advice only, unenforced",
+			in:        Input{Engine: vocab.Cursor, CanonicalEvent: vocab.SessionStart, NativeEvent: "sessionStart", Verdict: Deny, Reason: "r", Advice: "a"},
+			stdout:    `{"additional_context":"a"}`,
+			delivered: true,
+		},
+		{
+			name:      "cursor post_tool deny with advice renders advice only, unenforced",
+			in:        Input{Engine: vocab.Cursor, CanonicalEvent: vocab.PostTool, NativeEvent: "postToolUse", Verdict: Deny, Reason: "r", Advice: "a"},
+			stdout:    `{"additional_context":"a"}`,
+			delivered: true,
+		},
+		{
+			name: "cursor session_start allow, no advice prints nothing, unenforced",
+			in:   Input{Engine: vocab.Cursor, CanonicalEvent: vocab.SessionStart, NativeEvent: "sessionStart", Verdict: Allow},
+		},
+		{
+			name: "cursor post_tool allow, no advice prints nothing, unenforced",
+			in:   Input{Engine: vocab.Cursor, CanonicalEvent: vocab.PostTool, NativeEvent: "postToolUse", Verdict: Allow},
+		},
+		{
+			name:     "cursor session_start abstain, no advice",
+			in:       Input{Engine: vocab.Cursor, CanonicalEvent: vocab.SessionStart, NativeEvent: "sessionStart", Verdict: Abstain},
+			enforced: true,
+		},
+		{
+			name:     "cursor post_tool abstain, no advice",
+			in:       Input{Engine: vocab.Cursor, CanonicalEvent: vocab.PostTool, NativeEvent: "postToolUse", Verdict: Abstain},
+			enforced: true,
+		},
+		{
+			// Cursor drops whitespace-only context, so it is printed but not
+			// claimed as delivered.
+			name:     "cursor session_start whitespace-only advice is printed but not delivered",
+			in:       Input{Engine: vocab.Cursor, CanonicalEvent: vocab.SessionStart, NativeEvent: "sessionStart", Verdict: Abstain, Advice: "   "},
+			stdout:   `{"additional_context":"   "}`,
+			enforced: true,
+		},
+		{
+			name:     "cursor post_tool whitespace-only advice is printed but not delivered",
+			in:       Input{Engine: vocab.Cursor, CanonicalEvent: vocab.PostTool, NativeEvent: "postToolUse", Verdict: Abstain, Advice: "   "},
+			stdout:   `{"additional_context":"   "}`,
+			enforced: true,
+		},
 	}
 
 	for _, c := range cases {
 		checkRendered(t, c.name, Render(c.in), c.stdout, c.enforced, c.delivered)
+	}
+}
+
+// TestRenderCursorAdvisoryCap pins the additional_context cap. It counts UTF-16
+// units, not bytes or runes, because that is how cursor-agent measures the
+// string, and the advice is measured after trimming.
+func TestRenderCursorAdvisoryCap(t *testing.T) {
+	cases := []struct {
+		name      string
+		advice    string
+		delivered bool
+	}{
+		{"ascii at the cap", strings.Repeat("a", 10000), true},
+		{"ascii over the cap", strings.Repeat("a", 10001), false},
+		{"astral at the cap, two units per rune", strings.Repeat("\U0001F600", 5000), true},
+		{"astral over the cap", strings.Repeat("\U0001F600", 5001), false},
+		{"two-byte runes at the cap, one unit per rune", strings.Repeat("é", 4000) + strings.Repeat("a", 6000), true},
+		{"two-byte runes over the cap", strings.Repeat("é", 4000) + strings.Repeat("a", 6001), false},
+		{"measured after trim", " " + strings.Repeat("a", 10000) + "\n", true},
+	}
+
+	for _, c := range cases {
+		in := Input{Engine: vocab.Cursor, CanonicalEvent: vocab.SessionStart, NativeEvent: "sessionStart", Verdict: Abstain, Advice: c.advice}
+		got := Render(in)
+		if got.Stdout == nil {
+			t.Errorf("%s: stdout is nil, want the advice printed whether or not it is deliverable", c.name)
+		}
+		if got.AdviceDelivered != c.delivered {
+			t.Errorf("%s: advice delivered = %v, want %v", c.name, got.AdviceDelivered, c.delivered)
+		}
 	}
 }
 
@@ -733,6 +824,11 @@ func TestCapabilityTable(t *testing.T) {
 			if engine == vocab.Codex {
 				wantAdvisory = event == vocab.SessionStart || event == vocab.PromptSubmit ||
 					event == vocab.PreTool || event == vocab.PostTool
+			}
+			// Cursor's decision events plus the standalone additional_context
+			// slots on sessionStart and postToolUse.
+			if engine == vocab.Cursor {
+				wantAdvisory = event == vocab.PreTool || event == vocab.SessionStart || event == vocab.PostTool
 			}
 			if got := HasAdvisorySlot(engine, event, native); got != wantAdvisory {
 				t.Errorf("HasAdvisorySlot(%s, %s) = %v, want %v", engine, event, got, wantAdvisory)

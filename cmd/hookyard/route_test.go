@@ -40,6 +40,14 @@ const cursorSessionEnd = `{"cursor_version":"2026.09.18-9a7762b","hook_event_nam
 	`"workspace_roots":["/work"],"reason":"completed","duration_ms":1234,` +
 	`"is_background_agent":false,"final_status":"completed","model":"gpt-5"}`
 
+// cursorSessionStart is synthesized from the fields cursor-agent
+// 2026.10.01-e373342's bundle passes to its sessionStart hook (executeHookForStep
+// plus the common fields every hook gets), not captured from a live run.
+const cursorSessionStart = `{"cursor_version":"2026.10.01-e373342","hook_event_name":"sessionStart",` +
+	`"session_id":"sess-1","conversation_id":"c1","generation_id":"g1","model":"gpt-5",` +
+	`"is_background_agent":false,"composer_mode":"agent","workspace_roots":["/work"],` +
+	`"user_email":"user@example.com","transcript_path":null}`
+
 // denyStdout is what verdict.Render prints for that payload consolidated to a
 // deny whose reason is "A".
 const denyStdout = `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",` +
@@ -841,6 +849,44 @@ func TestRunRouteClaudeCodeStopObserverPrintsNothing(t *testing.T) {
 	}
 }
 
+// The issue #140 repro: an advising handler on Cursor's session_start used to
+// print nothing; Cursor's standalone additional_context slot now carries it.
+func TestRunRouteCursorSessionStartDeliversAdvice(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	h := handlerScript(t, dir, "advisor",
+		`printf '%s' '{"hookSpecificOutput":{"additionalContext":"note"}}'`)
+	h.Engines = []string{"cursor"}
+	h.Events = []string{"session_start"}
+	writeTable(t, stateDir, h)
+	opts := routeOpts(stateDir)
+	opts.registeredFor = "cursor"
+	opts.event = "session_start"
+
+	printed := runPipeline(t, opts, cursorSessionStart)
+
+	want := `{"additional_context":"note"}` + "\n"
+	if printed != want {
+		t.Errorf("want %q printed, got %q", want, printed)
+	}
+	rec := readRecord(t, stateDir)
+	if rec.Router == record.RouterError {
+		t.Fatalf("want a routed run, got a router error: %q", rec.Reason)
+	}
+	if rec.Engine != "cursor" {
+		t.Errorf("Engine = %q, want cursor", rec.Engine)
+	}
+	if rec.CanonicalEvent != "session_start" {
+		t.Errorf("CanonicalEvent = %q, want session_start", rec.CanonicalEvent)
+	}
+	if len(rec.Handlers) != 1 {
+		t.Fatalf("want one handler entry, got %+v", rec.Handlers)
+	}
+	if rec.Handlers[0].Delivered == nil || !*rec.Handlers[0].Delivered {
+		t.Errorf("want the advisory entry marked delivered, got %+v", rec.Handlers[0])
+	}
+}
+
 // Whether advice reached the model is the render's answer, not the handler's,
 // and only an advisory entry has anywhere to put it.
 func TestRunRouteRecordsDeliveryOnAdvisoryEntriesAlone(t *testing.T) {
@@ -1012,6 +1058,37 @@ func TestRunRouteSuppressesAPayloadFromAnotherEngine(t *testing.T) {
 	}
 	if rec.Engine != "claude-code" {
 		t.Errorf("want the payload's engine on the record, got %q", rec.Engine)
+	}
+	if len(rec.Handlers) != 0 {
+		t.Errorf("want no handler entries, got %+v", rec.Handlers)
+	}
+}
+
+// Cursor also runs hooks imported from Claude Code's settings, so a Cursor
+// payload reaching a claude-code entry must not double-deliver.
+func TestRunRouteSuppressesACursorSessionStartOnAClaudeRegistration(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	h := handlerScript(t, dir, "advisor",
+		`printf '%s' '{"hookSpecificOutput":{"additionalContext":"note"}}'`)
+	h.Engines = []string{"claude-code", "cursor"}
+	h.Events = []string{"session_start"}
+	writeTable(t, stateDir, h)
+	opts := routeOpts(stateDir)
+	opts.registeredFor = "claude-code"
+	opts.event = "SessionStart"
+
+	printed := runPipeline(t, opts, cursorSessionStart)
+
+	if printed != "" {
+		t.Errorf("want nothing printed, got %q", printed)
+	}
+	rec := readRecord(t, stateDir)
+	if rec.Verdict != record.OutcomeSuppressed {
+		t.Errorf("want verdict %q, got %q", record.OutcomeSuppressed, rec.Verdict)
+	}
+	if rec.Router != record.RouterOK {
+		t.Errorf("want router %q, got %q", record.RouterOK, rec.Router)
 	}
 	if len(rec.Handlers) != 0 {
 		t.Errorf("want no handler entries, got %+v", rec.Handlers)

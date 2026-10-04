@@ -21,6 +21,15 @@ var codexScopedAdvisoryEvents = map[string]bool{
 	"SubagentStart": true,
 }
 
+// cursorAdvisoryOnlyEvents is the canonical-event half of Cursor's advisory set
+// beyond its decision set: sessionStart and postToolUse take a top-level
+// additional_context with no permission beside it. Keyed canonical, unlike the
+// scoped maps, because both events map one-to-one onto a canonical event.
+var cursorAdvisoryOnlyEvents = map[string]bool{
+	vocab.SessionStart: true,
+	vocab.PostTool:     true,
+}
+
 // HasDecisionSlot reports whether engine can act on a verdict for this event.
 // permissionDecision is a PreToolUse contract, not a universal one, and a
 // manifest may register a handler on any of the six canonical events or on an
@@ -93,11 +102,13 @@ func HasGuardSlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bool 
 // subagent, which is why the earlier unauthenticated run could not reach them.
 // pre_tool is both a decision slot (above) and an advisory slot: a deny carries
 // the advice in the same permissionDecision payload, and an abstain/allow
-// carries additionalContext alone. Cursor's advisory set is the user_message
-// field of the decision object itself, so its advisory set is exactly its
-// decision set — and advice only rides there
-// alongside a rendered permission, which Render is what enforces. Pi's set is
-// wider than its decision set: on pre_tool, advice rides the block reason on
+// carries additionalContext alone. On its decision events Cursor's advice
+// rides only the user_message field beside a rendered permission, which Render
+// is what enforces (abstain+advice there is still dropped); session_start and
+// post_tool carry it standalone in a top-level additional_context, per
+// cursor.com/docs/agent/hooks and the cursor-agent 2026.10.01 bundle's hook
+// output validator (docs/design/fixtures/cursor-advisory/, not live-probed).
+// Pi's set is wider than its decision set: on pre_tool, advice rides the block reason on
 // a deny, and a standalone advisory is appended to that call's own tool
 // result, which the model reads in the next request beside the result — the
 // same place Claude Code's pre_tool additionalContext lands (§11.1). The bridge
@@ -114,7 +125,7 @@ func HasAdvisorySlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bo
 	case vocab.ClaudeCode:
 		return canonicalEvent == vocab.PreTool || canonicalEvent == vocab.SessionStart || canonicalEvent == vocab.PostTool
 	case vocab.Cursor:
-		return HasDecisionSlot(engine, canonicalEvent, nativeEvent)
+		return HasDecisionSlot(engine, canonicalEvent, nativeEvent) || cursorAdvisoryOnlyEvents[canonicalEvent]
 	case vocab.Pi:
 		return canonicalEvent == vocab.PreTool || canonicalEvent == vocab.SessionStart || canonicalEvent == vocab.PostTool
 	case vocab.Codex:
