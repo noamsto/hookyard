@@ -59,15 +59,19 @@ const segmentBreaks = "\n;&|(){}`"
 var (
 	unescape   = strings.NewReplacer("\\\n", "", "\\", "")
 	dropQuotes = strings.NewReplacer(`"`, "", "'", "")
+	// printf, echo -e and %b turn these into whitespace.
+	whitespaceEscape = regexp.MustCompile(`\\([ntrvf]|0?[0-7]{1,3}|x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4})`)
 )
 
 // ingestsCommand matches a listed name in any segment whose command word is not
 // inert, so `rg curl src/` stays clean while `echo x | curl …`, `setsid gh pr
-// view 2` and `bash -c "gh pr view 2"` match. Three readings are ORed: the raw
+// view 2` and `bash -c "gh pr view 2"` match. Four readings are ORed: the raw
 // text with quotes as segment breaks, so a quoted script is judged on its own;
-// the unescaped text likewise, so a script with escapes is too; and the
-// unescaped text with quotes deleted, as bash joins words (`g""h`, `"g"h`,
-// `g\h`), so a quoted argument stays with the gh that owns it.
+// the unescaped text likewise, so a script with escapes is too; the unescaped
+// text with quotes deleted, as bash joins words (`g""h`, `"g"h`, `g\h`, a line
+// continuation), so a quoted argument stays with the gh that owns it; and that
+// reading with printf and echo -e whitespace escapes as breaks, since a script
+// printed into a shell splits there.
 func ingestsCommand(text string) bool {
 	lower := strings.ToLower(text)
 	for _, scheme := range []string{"http://", "https://", "ftp://"} {
@@ -78,7 +82,8 @@ func ingestsCommand(text string) bool {
 	unescaped := unescape.Replace(text)
 	return ingestsSegments(text, segmentBreaks+`"'`) ||
 		ingestsSegments(unescaped, segmentBreaks+`"'`) ||
-		ingestsSegments(dropQuotes.Replace(unescaped), segmentBreaks)
+		ingestsSegments(dropQuotes.Replace(unescaped), segmentBreaks) ||
+		ingestsSegments(dropQuotes.Replace(unescape.Replace(whitespaceEscape.ReplaceAllString(text, "\n"))), segmentBreaks)
 }
 
 // ingestsSegments also judges each segment with env's attached values split off,
@@ -124,7 +129,8 @@ func splitEnvValues(fields []string) []string {
 
 // segmentIngests judges one segment. Unless its command word is inert, every
 // word from it on is a candidate, since any unlisted wrapper (setsid, ssh host,
-// nix shell -c) may run a later word: the first listed name decides. A command
+// nix shell -c) may run a later word: every listed name is judged, so an
+// earlier harmless one (`gh auth status`) cannot hide a later read. A command
 // word found after a wrapper's flag may be that flag's value (`sudo -u grep gh
 // ...`), so it is not trusted to be inert. A gh/glab word with no group after
 // it that is not the segment's first word may take its arguments from stdin or
@@ -142,7 +148,9 @@ func segmentIngests(words []string) bool {
 			if group, _ := nextNonFlag(words[i+1:]); group == "" && i > 0 {
 				return true
 			}
-			return forgeIngests(words[i+1:])
+			if forgeIngests(words[i+1:]) {
+				return true
+			}
 		}
 	}
 	return false

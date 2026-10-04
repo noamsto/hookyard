@@ -794,8 +794,9 @@ distillation) and again as each store's required check on its remote:
    shell keywords (`do`, `if`, `!`, …) and wrappers (`sudo`, `env`,
    `timeout`, …). If it is an inert search or print command (`grep`, `egrep`,
    `fgrep`, `rg`, `which`, `whereis`, `type`), the segment is clean; otherwise
-   the first listed name from the command word on decides, so an unlisted
-   wrapper or keyword is seen through. `gh` / `glab` write verbs (`pr create`,
+   every listed name from the command word on is judged, so an unlisted
+   wrapper or keyword is seen through and an earlier harmless name (`gh auth
+   status`) cannot hide a later read. `gh` / `glab` write verbs (`pr create`,
    `issue comment`, …) and local groups (`auth`, `config`, …) are exempt, since
    they print only what the agent itself caused.
 
@@ -812,7 +813,7 @@ distillation) and again as each store's required check on its remote:
    ingest write in a session already seen from an earlier call also fails
    open. On Codex the `pre_tool` shape is fixture-backed but the `post_tool`
    one is assumed. It over-flags any URL anywhere in the command (a commit
-   message, a PR body), a listed name at the start of a quoted string (`git
+   message, a PR body), a listed name in a quoted string (`git
    commit -m "curl fails"`), a listed name as an argument of any non-inert
    command (`git log --grep curl`, `man curl`), `echo gh issue view` (echo is
    not inert, since piped into a shell it runs), an inert command after any
@@ -821,7 +822,10 @@ distillation) and again as each store's required check on its remote:
    listed name (`go test ./internal/http`), since every word is matched by its
    last path element, `gh` / `glab` with no group anywhere but as the first
    word of its command (`xargs gh`, `sudo gh`, `GH_TOKEN=x gh`: its arguments
-   may come from stdin or a placeholder), and `gh -R o/r pr create`, whose flag value is
+   may come from stdin or a placeholder), a listed name later in a `gh` /
+   `glab` write or local segment (`gh pr comment 1 --body curl`), a printf /
+   echo escape inside a quoted message (`git commit -m 'gh auth status\nand gh
+   issue view'`), and `gh -R o/r pr create`, whose flag value is
    taken for the group, and a shell call denied or rejected after `pre_tool`
    (a guard's deny, a declined permission prompt): the marker is written
    before the decision.

@@ -99,17 +99,20 @@ with no URL literal), an unquoted
 `rg --pre curl …` (inert search commands such as `grep` and `rg` hide a listed
 name in their arguments, and `--pre` runs a preprocessor), a lost ingest write
 in an already-seen session, and, on Codex, any `post_tool` shape mismatch (only
-`pre_tool` is fixture-backed). It over-flags any URL anywhere, a listed name at
-the start of a quoted string, a listed name as an argument of any non-inert
+`pre_tool` is fixture-backed). It over-flags any URL anywhere, a listed name
+in a quoted string, a listed name as an argument of any non-inert
 command (`git log --grep curl`, `man curl`), `echo gh issue view`,
 an inert command after any wrapper flag (`xargs -0 grep curl`,
 `sudo -u bob grep curl`: the flag may take it as its value), a
 path argument whose last element is a listed name (`go test ./internal/http`),
 `gh` / `glab` with no group anywhere but as the first word of its command
-(`xargs gh`: its arguments may come from stdin or a placeholder),
-`gh -R o/r pr create` and a shell call denied or rejected after `pre_tool` (a
-guard's deny, a declined permission prompt): the marker is written before the
-decision.
+(`xargs gh`: its arguments may come from stdin or a placeholder), a listed
+name later in a `gh` / `glab` write or local segment
+(`gh pr comment 1 --body curl`), a
+printf / echo escape inside a quoted message (`git commit -m 'gh auth
+status\nand gh issue view'`), `gh -R o/r pr create` and a shell call denied or
+rejected after `pre_tool` (a guard's deny, a declined permission prompt): the
+marker is written before the decision.
 
 `list`, `show` and `search` fence what they print as reference data, with a
 delimiter drawn per call.
