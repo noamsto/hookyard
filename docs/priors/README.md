@@ -93,16 +93,22 @@ or not. A session the record covers but the watcher never saw, or whose
 markers cannot be read, flags `provenance:no-ingest-record`. It misses what
 the command text does not show (`git fetch` or `git pull` content without a
 URL; aliases, shell functions, scripts, `eval`, `$CMD`; a quoted command word
-like `"gh" issue view`; an unlisted fetcher with no URL literal), any wrapper or
-keyword outside the ones it sees through (`env`, `sudo`, `doas`, `command`,
-`exec`, `time`, `nice`, `nohup`, `xargs`, `timeout`, `stdbuf`, `builtin`;
-`setsid`, `flock`, `watch`, `ssh host …`, `nix shell … -c` and `coproc` hide the
-command), a lost ingest write in an already-seen session, and, on Codex, any
-`post_tool` shape mismatch (only `pre_tool` is fixture-backed). It over-flags any
-URL anywhere, a listed name at the start of a quoted string, a listed name
-anywhere after a wrapper (`xargs grep curl`), `gh -R o/r pr create` and a shell
-call denied or rejected after `pre_tool` (a guard's deny, a declined permission
-prompt): the marker is written before the decision.
+like `"gh" issue view` or a quoted group like `gh -R "$REPO" pr view`; an
+unlisted fetcher with no URL literal), an unquoted
+`rg --pre curl …` (inert search commands such as `grep` and `rg` hide a listed
+name in their arguments, and `--pre` runs a preprocessor), a lost ingest write
+in an already-seen session, and, on Codex, any `post_tool` shape mismatch (only
+`pre_tool` is fixture-backed). It over-flags any URL anywhere, a listed name at
+the start of a quoted string, a listed name as an argument of any non-inert
+command (`git log --grep curl`, `man curl`), `echo gh issue view`,
+an inert command after any wrapper flag (`xargs -0 grep curl`,
+`sudo -u bob grep curl`: the flag may take it as its value), a
+path argument whose last element is a listed name (`go test ./internal/http`),
+`gh` / `glab` with no group anywhere but as the first word of its command
+(`xargs gh`: its arguments may come from stdin or a placeholder),
+`gh -R o/r pr create` and a shell call denied or rejected after `pre_tool` (a
+guard's deny, a declined permission prompt): the marker is written before the
+decision.
 
 `list`, `show` and `search` fence what they print as reference data, with a
 delimiter drawn per call.
