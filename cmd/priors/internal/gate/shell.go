@@ -54,7 +54,6 @@ func IngestsCall(toolName string, toolInput json.RawMessage) bool {
 	return true
 }
 
-// segmentBreaks separate commands; two readings of ingestsCommand add quotes.
 const segmentBreaks = "\n;&|(){}`"
 
 var (
@@ -89,15 +88,10 @@ func ingestsSegments(text, breaks string) bool {
 		return strings.ContainsRune(breaks, r)
 	})
 	return slices.ContainsFunc(segments, func(seg string) bool {
-		words := splitWords(seg)
+		words := strings.FieldsFunc(seg, func(r rune) bool {
+			return unicode.IsSpace(r) || r == '<' || r == '>'
+		})
 		return segmentIngests(words) || segmentIngests(splitEnvValues(words))
-	})
-}
-
-// splitWords splits a segment into words.
-func splitWords(seg string) []string {
-	return strings.FieldsFunc(seg, func(r rune) bool {
-		return unicode.IsSpace(r) || strings.ContainsRune("<>", r)
 	})
 }
 
@@ -118,9 +112,6 @@ func splitEnvValues(fields []string) []string {
 			i = strings.IndexByte(w, '=')
 		case strings.HasPrefix(w, "-"):
 			i = strings.IndexByte(w, 'S')
-			if i < 1 {
-				i = -1
-			}
 		}
 		if i < 0 || i+1 >= len(w) {
 			words = append(words, w)
