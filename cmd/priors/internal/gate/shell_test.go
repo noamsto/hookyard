@@ -1,7 +1,6 @@
 package gate
 
 import (
-	"slices"
 	"testing"
 )
 
@@ -132,6 +131,25 @@ func TestIngestsCall(t *testing.T) {
 		{"parallel bare gh joined", "Bash", `{"command":"parallel ::: 'gh auth status' gh' issue view 1'"}`, true},
 		{"bash -c joined word script", "Bash", `{"command":"bash -c 'gh auth status' \"gh\"' issue view 1'"}`, true},
 		{"quotes restart in command substitution", "Bash", `{"command":"sh -c \"$(printf '%s\\n' 'gh auth status' \"g''h issue view 1\")\""}`, true},
+		{"line continuation joins gh", "Bash", `{"command":"printf '%s\\n' 'gh auth status' gh\\\n' issue view 1' | sh"}`, true},
+		{"line continuation inside word", "Bash", `{"command":"printf '%s\\n' 'gh auth status' g\\\nh' issue view 1' | sh"}`, true},
+		{"line continuation in double quotes", "Bash", `{"command":"printf '%s\\n' 'gh auth status' g\"\\\n\"h' issue view 1' | sh"}`, true},
+		{"line continuation between quoted parts", "Bash", `{"command":"printf '%s\\n' 'gh auth status' 'g'\\\n'h issue view 1' | sh"}`, true},
+		{"glab line continuation", "Bash", `{"command":"printf '%s\\n' 'glab auth status' gl\\\nab' mr view 1' | sh"}`, true},
+		{"printf newline escape", "Bash", `{"command":"printf 'gh auth status\\ngh issue view 1\\n' | sh"}`, true},
+		{"echo -e newline escape", "Bash", `{"command":"echo -e 'gh auth status\\ngh issue view 1' | sh"}`, true},
+		{"printf %b escape", "Bash", `{"command":"printf '%b' 'gh auth status\\ngh issue view 1' | sh"}`, true},
+		{"printf octal newline", "Bash", `{"command":"printf 'gh auth status\\012gh issue view 1' | sh"}`, true},
+		{"printf hex newline", "Bash", `{"command":"printf 'gh auth status\\x0agh issue view 1' | sh"}`, true},
+		{"printf tab escape", "Bash", `{"command":"printf 'gh\\tissue view 1' | sh"}`, true},
+		{"printf hex space", "Bash", `{"command":"printf 'gh\\x20issue view 1' | sh"}`, true},
+		{"printf joined quoted gh", "Bash", `{"command":"printf 'gh auth status\\n'\"g''h issue view 1\" | sh"}`, true},
+		{"plain earlier gh hides later gh", "Bash", `{"command":"printf '%s %s %s %s\\n' gh auth status x gh issue view 1 | sh"}`, true},
+		// a later listed name flags even in a write or local segment, by design:
+		// every listed name is judged.
+		{"later name in write segment", "Bash", `{"command":"gh pr create --title t --label gh"}`, true},
+		{"fetcher in write body", "Bash", `{"command":"gh pr comment 1 --body curl"}`, true},
+		{"escaped newline in commit message", "Bash", `{"command":"git commit -m 'fix: gh auth status\\nand gh issue view'"}`, true},
 
 		// not ingestion
 		{"git log", "Bash", `{"command":"git log"}`, false},
@@ -167,51 +185,6 @@ func TestIngestsCall(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IngestsCall(tt.tool, []byte(tt.input)); got != tt.want {
 				t.Errorf("IngestsCall(%q, %s) = %v, want %v", tt.tool, tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestShellWords(t *testing.T) {
-	tests := []struct {
-		name string
-		text string
-		want []string
-	}{
-		{"quoted tail joined", `gh' issue view 1'`, []string{"gh issue view 1"}},
-		{"plain words omitted", `a b`, nil},
-		{"empty quotes and escaped space", `g''h\ x`, []string{"gh x"}},
-		{"escaped quote in double", `"a\"b" c`, []string{`a"b`}},
-		{"command substitution restarts quoting", `x "a $(b 'c d')"`, []string{"a ", "c d", ""}},
-		{"unterminated", `'unterminated`, []string{"unterminated"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := shellWords(tt.text); !slices.Equal(got, tt.want) {
-				t.Errorf("shellWords(%s) = %q, want %q", tt.text, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestQuotedStrings(t *testing.T) {
-	tests := []struct {
-		name string
-		text string
-		want []string
-	}{
-		{"two strings", `'a' "b"`, []string{"a", "b"}},
-		{"escaped single quote", `\'a`, nil},
-		{"escaped double quote", `"a\"b"`, []string{`a"b`}},
-		{"other backslash kept", `"a\xb"`, []string{`a\xb`}},
-		{"unterminated", `'unterminated`, []string{"unterminated"}},
-		{"single quotes inside double", `"x'y'z"`, []string{"x'y'z"}},
-		{"backslash literal in single", `'a\'`, []string{`a\`}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := quotedStrings(tt.text); !slices.Equal(got, tt.want) {
-				t.Errorf("quotedStrings(%s) = %q, want %q", tt.text, got, tt.want)
 			}
 		})
 	}
