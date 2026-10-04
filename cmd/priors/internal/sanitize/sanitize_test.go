@@ -785,7 +785,11 @@ func TestTextAcceptedCosts(t *testing.T) {
 		{"lone cjk between token words", "priors 和 memory", "(quoted: priorsmemory)"},
 		{"ligature glued to store header", "[\u3300priors memory \u00b7 work]", "[\u30a2\u30d1\u30fc\u30c8(quoted: priorsmemory) \u00b7 work]"},
 		{"word ending in en before a symbol", "when \u2605\u2605 priors", "wh(quoted: endpriors)"},
-		{"word ending in en before a rule", "seven \u2605\u2605\u2605 priors", "sev(quoted: endpriors)"},
+		{"word ending in e before a rule", "seven \u2605\u2605\u2605 priors", "sev(quoted: endpriors)"},
+		// A rule-like symbol run anywhere on the line puts all of it in fence
+		// context.
+		{"word ending in e, rule before priors", "rate the \U0001f389\U0001f389\U0001f389 priors", "rate th(quoted: endpriors)"},
+		{"quoted priors, rule at the end", "the \u201cpriors\u201d look fine \u2705\u2705\u2705", "th(quoted: endpriors) look fine (quoted: =)"},
 		{"prior and a symbol run before memory", "prior \U0001f389\U0001f389 memory", "(quoted: priorsmemory)"},
 	}
 	for _, tc := range tests {
@@ -808,6 +812,11 @@ func TestTextResiduals(t *testing.T) {
 		{"ascii colon joiner", "[hookyard:advisory]"},
 		{"more than half of a word", "[\u0127\ua74b\ua74b\u0199\u01b4ard advisory]"},
 		{"two lookalikes in END, no rule", "\u018e\u019dD priors-0123456789abcdef"},
+		// Escalated in the PR; follow-up issue. A letter-category lookalike of a
+		// bracket or quote glued to an isolated lookalike reads as a two-letter
+		// foreign word.
+		{"letter-category bracket lookalikes around an isolated lookalike", "\u1438\u0127 ookyard advisory\u1433"},
+		{"letter-category quote lookalikes around an isolated lookalike", "\u02bc\u0127 ookyard advisory\u02bc"},
 		{"two lookalikes in END, punctuation rule", "\u2014\u2014\u2014 \u018e\u019dD priors-0123456789abcdef \u2014\u2014\u2014"},
 	}
 	for _, tc := range tests {

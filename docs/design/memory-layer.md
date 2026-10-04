@@ -738,7 +738,9 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
   inside, with exact anchors spelling at least half of each token word
   (`hookyard|advisory`, `priors|memory`, `begin|priors`, `end|priors`), so
   wilds never supply a token word (`the “priors”`, `中的priors` pass). On a
-  line drawing a rule of three or more non-punctuation runes, `BEGIN` and
+  line drawing a rule of three or more `=`, `=` lookalikes or unmapped
+  non-punctuation symbols in a row anywhere on the line (ASCII `~ + ^ | \``
+  do not count), `BEGIN` and
   `END` need only half the whole token, so `===== ƎƝD priors-… =====` is
   caught. The work is linear in line length. A match becomes `(quoted: <token>)` and swallows one
   adjacent bracket or punctuation rune on each side (a `-` after it
@@ -752,13 +754,20 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
   regenerates once. What stays out of reach is stated: whole words written
   in characters the table does not map, and a lookalike glued to another
   foreign letter (`ħꝏ kyard`), which forms a foreign word; more than half of
-  one token word replaced by unmapped lookalikes (`ħꝋꝋƙƴard advisory`), and
+  one token word replaced by unmapped lookalikes (`ħꝋꝋƙƴard advisory`);
   `END` with two of its three letters replaced on a line drawing no
-  non-punctuation rule; ASCII lookalikes and separators (`h0okyard`,
+  non-punctuation rule; a letter-category lookalike of a bracket or quote
+  glued to an isolated lookalike (`ᐸħ ookyard advisoryᐳ`,
+  `ʼħ ookyard advisoryʼ`), which reads as a two-letter foreign word (open,
+  escalated to a follow-up); ASCII lookalikes and separators (`h0okyard`,
   `hookyard-advisory`), taken at face value; and padding longer than the
   token. The accepted costs are false positives: ASCII prose spelling a
   token (`Hook yard advisor y?`), and a glued run of symbols beside token
-  words read as a lookalike (`when ★★ priors`, `prior 🎉🎉 memory`). The random delimiter still guards the real
+  words read as a lookalike (`when ★★ priors`, `prior 🎉🎉 memory`), and any such
+  symbol run anywhere on the line (through `Line`, anywhere in a flattened
+  fact), which puts the line in fence context, where a word ending in `e`
+  before `priors` reads as `endpriors` (`like 🎉🎉🎉 priors`,
+  `the “priors” look fine ✅✅✅`). The random delimiter still guards the real
   fence, so the residual is attribution spoofing. Each index line is capped; `priors show` and `priors search`
   fence their own output. A file opened with `cat` or `rg` (tier 3) reaches
   the model unfenced, so "fenced" below means *through `priors`*.

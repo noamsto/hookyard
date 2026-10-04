@@ -395,7 +395,7 @@ func shapedSubstitutions(ck *checker, c rune, needle string) {
 			ck.check(c, "E3 one-sided before", p, p.replace(i, sep+s), needle)
 			ck.check(c, "E3 one-sided after", p, p.replace(i, s+sep), needle)
 			ck.check(c, "E3 blank companion", p, p.replace(i, sep+s+"\u2800"+sep), needle)
-			if k+1 < len(p.letters) && p.letters[k+1] == i+1 && pairKeepsHalf(p.token, k) {
+			if k+1 < len(p.letters) && p.letters[k+1] == i+1 {
 				ck.check(c, "E3 pair", p, p.replaceRange(i, i+2, s), needle)
 			}
 		}
@@ -446,22 +446,6 @@ func TestPropertyBrackets(t *testing.T) {
 		}
 	}
 	t.Logf("E5 inserted: %d non-ASCII brackets skipped as ASCII images (R3); Text calls: %d", asciiImage, ck.cases)
-}
-
-// pairKeepsHalf reports whether replacing token runes k and k+1 by one rune
-// leaves at least half of their token word as anchors.
-func pairKeepsHalf(tok string, k int) bool {
-	for _, t := range tokens {
-		if t.s != tok {
-			continue
-		}
-		n := t.split
-		if k >= t.split {
-			n = len(t.s) - t.split
-		}
-		return n-2 >= (n+1)/2
-	}
-	return true
 }
 
 // chains replaces runs of up to half of each token word with c, each copy
