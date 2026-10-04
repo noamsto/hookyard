@@ -1212,8 +1212,10 @@ tree.
 fact's repo comes from decoding its project dir (§4.2). A Codex row carries a
 `thread_id` and no path; the rollout for that thread under
 `~/.codex/sessions/**` begins with a `session_meta` record whose payload
-carries `cwd` (on disk), and that `cwd`'s `origin` names the org. No rollout,
-or a `cwd` that is not a git checkout, is unresolvable. Write-time redaction
+carries `cwd` (on disk). A `cwd` inside a git checkout, at its root or in a
+subdirectory, is that checkout's repo, read from its `origin`; an existing
+directory in no checkout is **no repo**; no rollout, a missing `cwd`, or a
+checkout with no `origin` is **unresolvable**. Write-time redaction
 (§4.3) runs first: a secret-shaped item is skipped and reported.
 
 **Trust.** Imported facts land as `confidence: proposed`. The importer is a
@@ -1365,8 +1367,10 @@ flagged facts stops being optional.
   claiming `confidence: reviewed` and `scope: global` lands `proposed` and
   `scope: repo`, with `verified: null`, `superseded_by: null`, `provenance`
   from its `originSessionId` and the host, and its native `modified` kept, and
-  the native file's bytes are unchanged; a Codex row with no rollout is
-  unresolvable;
+  the native file's bytes are unchanged; a Codex row whose rollout `cwd` is a
+  checkout's subdirectory resolves to that repo, one whose rollout `cwd` is an
+  existing directory in no checkout is no repo, and one with no rollout, a
+  missing `cwd`, or a checkout without `origin` is unresolvable;
 - **names and paths** (§4.9): a `rollout_slug` or `name` such as
   `../../personal/x` is slugified or skipped and reported, and no write or
   link target resolves outside the routed store's tree;
