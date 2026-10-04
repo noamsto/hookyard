@@ -1060,6 +1060,9 @@ func TestSearchWithoutRgFailsOpen(t *testing.T) {
 	sb.putFact(sb.personal, "demo/needle-fact.md", newFact("needle-fact", "demo", "project"))
 
 	rg := pinnedTool("rg")
+	if tools.Rg == "" {
+		t.Skip("rg not pinned")
+	}
 	if err := os.Rename(rg, rg+".away"); err != nil {
 		t.Fatal(err)
 	}
@@ -1181,6 +1184,19 @@ func TestIndexWriteThenHookOutput(t *testing.T) {
 	wantExit(t, other, 0)
 	if other.stdout != "" {
 		t.Errorf("a pre_tool envelope printed %q", other.stdout)
+	}
+}
+
+func TestHookReportsConfigError(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.writeConfig(`scanner = "x"`)
+
+	res := sb.run(sessionStartEnvelope(repo))
+	wantExit(t, res, 0)
+	wantContains(t, "stderr", res.stderr, "pinned at build time")
+	if res.stdout != "" {
+		t.Errorf("stdout %q", res.stdout)
 	}
 }
 

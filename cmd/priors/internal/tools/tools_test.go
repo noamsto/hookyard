@@ -86,6 +86,8 @@ func TestNoPATHExec(t *testing.T) {
 	toolsGo := filepath.Join(root, "internal", "tools", "tools.go")
 	toolstestDir := filepath.Join(root, "internal", "tools", "toolstest")
 
+	const toolstestPkg = "github.com/noamsto/hookyard/cmd/priors/internal/tools/toolstest"
+
 	var sawToolsGo bool
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
@@ -100,7 +102,11 @@ func TestNoPATHExec(t *testing.T) {
 		}
 		local := ""
 		for _, imp := range f.Imports {
-			if p, _ := strconv.Unquote(imp.Path.Value); p != "os/exec" {
+			p, _ := strconv.Unquote(imp.Path.Value)
+			if p == toolstestPkg && filepath.Dir(path) != toolstestDir {
+				t.Errorf("%s: imports toolstest; production code must not pin from PATH", path)
+			}
+			if p != "os/exec" {
 				continue
 			}
 			local = "exec"

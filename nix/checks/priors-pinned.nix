@@ -1,7 +1,7 @@
 # priors execs git, ssh, rg and the secret scanner through store paths fixed at
-# build time. This runs the real binary with look-alike shims first on PATH and
-# fails if any of them is ever executed, so a PATH lookup coming back, in a
-# gate or in routing, is caught here.
+# build time. This runs the real binary (index, lint, search, add) with
+# look-alike shims first on PATH and fails if any of them is ever executed, so
+# a PATH lookup coming back on those paths is caught here.
 {
   pkgs,
   priors,
@@ -80,6 +80,9 @@ pkgs.runCommand "priors-pinned" {} ''
   echo "$hits"
   echo "$hits" | ${pkgs.gnugrep}/bin/grep -qF needle-fact \
     || { echo "search did not find needle-fact through the pinned git and rg"; exit 1; }
+
+  PRIORS_CONFIG=$cfg ${priors}/bin/priors add --name clean-fact --description "a clean fact" --type project \
+    --cwd "$repo" --session s1 </dev/null
 
   if [ -e "$marker" ]; then
     echo "a PATH shim ran"
