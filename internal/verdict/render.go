@@ -3,6 +3,8 @@ package verdict
 import (
 	"encoding/json"
 	"strings"
+	"unicode"
+	"unicode/utf16"
 
 	"github.com/noamsto/hookyard/internal/vocab"
 )
@@ -72,6 +74,18 @@ type cursorResponse struct {
 	UserMessage string `json:"user_message,omitempty"`
 }
 
+// cursorAdvisory is Cursor's standalone advisory shape on sessionStart and postToolUse.
+type cursorAdvisory struct {
+	AdditionalContext string `json:"additional_context"`
+}
+
+// cursorAdditionalContextMax is cursor-agent's hooks-carriers cap on
+// additional_context (2026.10.01 bundle; docs/design/fixtures/cursor-advisory/).
+// The carrier trims the value, then measures JS string length — UTF-16 code
+// units, not bytes or runes — and drops an over-cap value with a warning.
+// cursorDeliverable trims the way JS does, so the measured length matches.
+const cursorAdditionalContextMax = 10000
+
 // piResponse is the bridge's wire shape on both of Pi's reply paths: a block
 // with its reason, which the bridge answers by refusing the call (returning
 // nothing is allow), or a standalone advisory it delivers as a message — on
@@ -127,9 +141,8 @@ func Render(in Input) Rendered {
 		}
 		return Rendered{Enforced: in.Verdict == Abstain}
 	}
-	// Cursor's advisory set is identical to its decision set (already false
-	// here). Claude Code, Pi, and Codex reach this branch on events that have
-	// an advisory slot and no decision slot.
+	// All four engines reach this branch on events that have an advisory slot
+	// and no decision slot.
 	if HasAdvisorySlot(in.Engine, in.CanonicalEvent, in.NativeEvent) {
 		switch in.Engine {
 		case vocab.ClaudeCode:
@@ -139,6 +152,7 @@ func Render(in Input) Rendered {
 		case vocab.Pi:
 			return renderPiAdvisoryOnly(in)
 		case vocab.Cursor:
+			return renderCursorAdvisoryOnly(in)
 		}
 	}
 	return Rendered{Enforced: in.Verdict == Abstain}
@@ -239,10 +253,12 @@ func renderCodexDeny(nativeEvent, reason, advice string) Rendered {
 	return Rendered{Stdout: marshal(hookResponse{out}), Enforced: true, AdviceDelivered: advice != ""}
 }
 
-// renderCursor drops standalone advice: §7 identified no advisory-only
-// response Cursor honours, and the one captured shape pairs user_message with
-// a permission, i.e. as a deny reason. Recording delivery for a slot that may
-// be ignored would convert a stated loss back into a silent one.
+// renderCursor renders the decision-slot path. Standalone advice on a decision
+// event (abstain+advice) is dropped: the one confirmed decision shape pairs
+// user_message with a permission, i.e. as a deny reason, and recording delivery
+// for a slot that may be ignored would convert a stated loss back into a silent
+// one. Standalone advice on session_start and post_tool goes through
+// renderCursorAdvisoryOnly instead.
 func renderCursor(in Input) Rendered {
 	if in.Verdict == Abstain {
 		return Rendered{Enforced: true}
@@ -257,6 +273,43 @@ func renderCursor(in Input) Rendered {
 	}
 	out := cursorResponse{Permission: string(in.Verdict), UserMessage: strings.Join(message, "\n\n")}
 	return Rendered{Stdout: marshal(out), Enforced: true, AdviceDelivered: in.Advice != ""}
+}
+
+// renderCursorAdvisoryOnly renders additional_context on the Cursor events with
+// an advisory slot but no decision slot: session_start and post_tool. There is
+// no permission to put beside it, so a non-Abstain verdict is recorded
+// unenforced and only the advice is printed. The payload is printed even when
+// cursorDeliverable says the engine will drop it: sessionStart on the CLI was
+// not seen passing through the capped carrier path, so AdviceDelivered
+// under-claims rather than over-claims.
+func renderCursorAdvisoryOnly(in Input) Rendered {
+	if in.Advice == "" {
+		return Rendered{Enforced: in.Verdict == Abstain}
+	}
+	return Rendered{
+		Stdout:          marshal(cursorAdvisory{in.Advice}),
+		Enforced:        in.Verdict == Abstain,
+		AdviceDelivered: cursorDeliverable(in.Advice),
+	}
+}
+
+// cursorDeliverable reports whether Cursor keeps advice as additional_context:
+// non-empty after trim and within cursorAdditionalContextMax UTF-16 units.
+func cursorDeliverable(advice string) bool {
+	t := strings.TrimFunc(advice, isJSTrimmed)
+	units := 0
+	for _, r := range t {
+		// A Go string never yields a surrogate: invalid bytes decode to U+FFFD.
+		units += utf16.RuneLen(r)
+	}
+	return t != "" && units <= cursorAdditionalContextMax
+}
+
+// isJSTrimmed reports whether String.prototype.trim strips r. ECMAScript trims
+// WhiteSpace (U+FEFF and every Zs) and LineTerminators; unicode.IsSpace is that
+// set minus U+FEFF, plus U+0085, which JS leaves alone.
+func isJSTrimmed(r rune) bool {
+	return r == '\uFEFF' || (r != '\u0085' && unicode.IsSpace(r))
 }
 
 // renderPi renders the deny arm, plus ask degraded to deny per §7's rule for

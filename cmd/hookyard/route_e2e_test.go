@@ -404,7 +404,9 @@ func TestRouteAgainstTheRealBinary(t *testing.T) {
 // binary that Claude Code's widened advisory set (§7: pre_tool,
 // session_start, post_tool) actually reaches stdout on the two events that
 // carry no decision slot, and that a computed deny on those events never
-// leaks permissionDecision/Reason into the advisory-only shape.
+// leaks permissionDecision/Reason into the advisory-only shape. Cursor's
+// session_start and post_tool advice rides its standalone additional_context
+// slot the same way.
 //
 // Each subtest gets its own t.TempDir(): manifest.ReadTable rejects a
 // duplicate handler id, and ids here are derived as engine+"-advise"/
@@ -455,6 +457,33 @@ func TestRouteDeliversAdvisoryOnAdvisoryOnlyEvents(t *testing.T) {
 		}
 		wantDelivered(t, rec.Handlers[0], true)
 	})
+
+	for _, tc := range []struct{ name, event, payload string }{
+		{"cursor session_start advice is delivered", "session_start", cursorSessionStart},
+		{"cursor post_tool advice is delivered", "post_tool", readFixture(t, "cursor-postToolUse.json")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			stateDir := filepath.Join(dir, "state")
+			writeTable(t, stateDir, e2eAdvise(t, dir, "cursor", tc.event, "fyi"))
+
+			printed, code := runRouteBinary(t, bin, nil, tc.payload,
+				routeArgs("cursor", tc.event, stateDir)...)
+			if code != 0 {
+				t.Fatalf("want exit 0, got %d", code)
+			}
+			want := `{"additional_context":"fyi"}` + "\n"
+			if printed != want {
+				t.Errorf("printed = %q, want %q", printed, want)
+			}
+
+			rec := readRecord(t, stateDir)
+			if len(rec.Handlers) != 1 {
+				t.Fatalf("want 1 handler entry, got %+v", rec.Handlers)
+			}
+			wantDelivered(t, rec.Handlers[0], true)
+		})
+	}
 
 	t.Run("post_tool deny does not leak into the advisory-only slot", func(t *testing.T) {
 		dir := t.TempDir()

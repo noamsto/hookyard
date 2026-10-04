@@ -298,7 +298,7 @@ several of them rule out otherwise-attractive designs.
 | # | requirement | evidence |
 | --- | --- | --- |
 | R1 | **Readable and writable with ordinary file tools, and injectable without an MCP server** | workers are launched with one fixed `--mcp-config` chosen at dispatch time (`adapters/core/dispatch.sh:2423`), so making memory an MCP dependency means editing the worker launch path and widening every worker's tool surface; Pi and Cursor have no MCP registration path in this fleet at all; and a file the agent *writes* needs no tool surface, which no MCP design gives you. (An earlier revision justified this with a zero-server worker profile that no longer exists — see the PR review.) |
-| R2 | **Reaches all four engines** | Cursor's advisory rides only a rendered permission (`internal/verdict/capability.go`). So the store must be readable as *files* regardless, and injection covers a subset even at best — **and that subset is larger than this document first claimed: Codex's advisory channel is confirmed on all five events its docs name**, `session_start`, `prompt_submit`, `pre_tool`, `post_tool` and `subagent_start` (PR #101 for the first two, issue #87 for the rest; `docs/design/fixtures/codex-advisory/outcome-0.156.1-positive.md`) |
+| R2 | **Reaches all four engines** | Cursor's standalone advisory reaches only `session_start` and `post_tool` (`internal/verdict/capability.go`, issue #140: documented and code-read, not live-probed). So the store must be readable as *files* regardless, and injection covers a subset even at best — **and that subset is larger than this document first claimed: Codex's advisory channel is confirmed on all five events its docs name**, `session_start`, `prompt_submit`, `pre_tool`, `post_tool` and `subagent_start` (PR #101 for the first two, issue #87 for the rest; `docs/design/fixtures/codex-advisory/outcome-0.156.1-positive.md`) |
 | R3 | **Works on a host with no GUI** | `halo` runs `desktop.mode = "none"`. The `obsidian-cli` binary is a Unix-socket client to a *running* Obsidian app (`$XDG_RUNTIME_DIR/.obsidian-cli.sock`; verified on this machine: *"The CLI is unable to find Obsidian"*), so it is not an agent interface |
 | R4 | **Survives concurrent writers on two or more machines** | agents run on `tp-g5`/`tp-g6` and `mbp-m4-pro`, sometimes simultaneously in worktrees off one repo |
 | R5 | **Human-curatable and retireable** | agent memory's dominant real failure is a stale fact that keeps being injected. It needs a surface for review, correction, and deletion |
@@ -1016,20 +1016,23 @@ What each engine can actually receive, read off `internal/verdict/capability.go`
 | --- | --- | --- | --- |
 | Claude Code | ✅ advisory | ⚠️ **channel exists upstream, not rendered yet** | ✅ |
 | Pi | ✅ advisory (queued → `before_agent_start`) | ⚠️ **reply currently discarded** | ✅ |
-| Cursor | ❌ | ❌ | ✅ |
+| Cursor | ✅ advisory (`additional_context`; documented and code-read, not live-probed — #140) | ❌ | ✅ |
 | Codex | ✅ advisory | ✅ advisory | ✅ |
 
-So the reach matrix is the requirement R2 in practice: **the store has to be the mechanism because files are the only path all four engines share**, injection being an optimisation layered on top. That optimisation now reaches three of four engines for tier 1 (Claude Code, Pi, Codex) — Cursor's advisory still rides only a rendered permission — and **Codex is the only engine with a tier-2 `prompt_submit` slot today**. That is why the store must be file-native rather than hook-native: the hook is an optimisation for three engines now, but files are the mechanism for all four.
+So the reach matrix is the requirement R2 in practice: **the store has to be the mechanism because files are the only path all four engines share**, injection being an optimisation layered on top. That optimisation now reaches all four engines for tier 1. Cursor joined in #140, on its documented `sessionStart` `additional_context` field and the `cursor-agent` bundle that accepts it, not on a live probe (`docs/design/fixtures/cursor-advisory/`). And **Codex is the only engine with a tier-2 `prompt_submit` slot today**. That is why the store must be file-native rather than hook-native: the hook is an optimisation on all four engines now, but files are still the mechanism.
 
 The instruction-file path reaches an engine with no hook at all: an include
 line naming an index. There is one, host-level, naming the **personal** index
 only, and it lives in a **Cursor-only rule file** — never the shared
 instruction file that Claude, Codex and Cursor all read — so no engine whose
-`session_start` hook already delivers tier 1 reads it. There is **no
+`session_start` hook already delivers tier 1 reads it. Since #140 that includes
+Cursor: where Cursor's own `session_start` entry runs `priors index`, the
+include delivers the personal index a second time and should be dropped. It
+remains the path for a Cursor host without that hook entry. There is **no
 repo-level work include**: a work repo's own `AGENTS.md` is read natively by
 Codex, which would get the work index twice and unfenced. Work sessions get
-the work index through the `session_start` hook only, so Cursor reaches work
-facts by tier 3 alone. The included `MEMORY.md` is written only by
+the work index through the `session_start` hook only. Before #140 Cursor therefore reached work facts
+by tier 3 alone; with its hook entry it gets the work index like the other three. The included `MEMORY.md` is written only by
 `priors index`; it carries tier 1's stripping and escaping (§4.4) and its own
 opening *and* closing fence inside the file, with a delimiter drawn at each
 generation, and the checkout indexes are in the write guard's protected set
@@ -1268,8 +1271,8 @@ which shows the contract is enough for someone else to build on.
 
 Ordering matters: v0 needs no router change at all. The store, tiers 1 and 3,
 and the usage logger ride slots and lanes hookyard already has, and a git repo,
-an index, the hook on three engines and a Cursor-only rule-file include (§4.7)
-reach all four on day one.
+an index and the hook reach all four on day one (Cursor through the hook since
+#140, or through the Cursor-only rule-file include on a host without it, §4.7).
 The hookyard gaps are prerequisites for tier 2 only, and tier 2 is itself gated
 on §7's recall A/B (§4.4), so they are built only if that A/B shows its delta.
 
@@ -1531,7 +1534,7 @@ Decided by the owner on 2026-09-30 unless marked. Decision 5 is settled
 | # | workstream | repo | delivers |
 | --- | --- | --- | --- |
 | 1 | the two store repos, each remote running the lint as a required check (§4.3); `priors` v0 (`add`/`list`/`show`/`search`/`lint`/`index`), §4.4's gates and the host-local layer, write-time redaction (§4.3), §4.2's routing and read rule | hookyard (`cmd/priors`) | tier 1 + tier 3 on all four engines; the gates and the host-local layer for flagged facts |
-| 2 | nix-config wiring: install, clone per §4.2, the host profile and both org lists on every host, the personal index's host-level include in a Cursor-only rule file, never the shared instruction file Claude, Codex and Cursor all read, and no repo-level work include (§4.7) | nix-config | reach with no hookyard change |
+| 2 | nix-config wiring: install, clone per §4.2, the host profile and both org lists on every host, the personal index's host-level include in a Cursor-only rule file, never the shared instruction file Claude, Codex and Cursor all read, and dropped wherever Cursor's `session_start` hook runs `priors index` (#140), and no repo-level work include (§4.7) | nix-config | reach with no hookyard change |
 | 3 | importer v0 (Claude; Codex stage-1 rows behind the schema pin, §4.9) and the per-host migration with dedup proposals (decision 2) | hookyard (`priors`) | content to actually retrieve |
 | 4 | usage log and promotion/demotion: `post_tool → priors touch`, `fire_and_forget` (§4.6) | hookyard (`priors`) | strengthening and forgetting |
 | 5 | the attestation check in `priors index` against the key allowlist, and the `pre_tool` tripwires: the write guard (§4.4), before the stores go to a second host; the read guard (§4.2), before the work store is cloned on a host that also runs non-work sessions | hookyard (`priors`) | the review boundary holds by the key; the guards catch what hookyard sees. The attestation check, used only to promote flagged facts, waits on [#130](https://github.com/noamsto/hookyard/issues/130) and does not block v0; the guards are not blocked |
