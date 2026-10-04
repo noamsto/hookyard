@@ -306,8 +306,8 @@ func cursorDeliverable(advice string) bool {
 }
 
 // isJSTrimmed reports whether String.prototype.trim strips r. ECMAScript trims
-// WhiteSpace (U+FEFF and every Zs) and LineTerminators; unicode.IsSpace is the
-// same set plus U+0085, which JS leaves alone.
+// WhiteSpace (U+FEFF and every Zs) and LineTerminators; unicode.IsSpace is that
+// set minus U+FEFF, plus U+0085, which JS leaves alone.
 func isJSTrimmed(r rune) bool {
 	return r == '\uFEFF' || (r != '\u0085' && unicode.IsSpace(r))
 }
