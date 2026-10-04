@@ -50,3 +50,24 @@ func TestRunGitEnvTransportUsesPinnedSSH(t *testing.T) {
 		}
 	}
 }
+
+// git resolves a subcommand it does not build in through GIT_EXEC_PATH first,
+// so an inherited one would let a shim stand in for git's own helpers.
+func TestRunGitEnvDropsExecPath(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "ran")
+	execPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(execPath, "git-frobnicate"), []byte("#!/bin/sh\necho ran > "+marker+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_EXEC_PATH", execPath)
+
+	repo := t.TempDir()
+	if out, err := exec.Command(tools.Git, "init", "-q", repo).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	_, _ = runGitEnv(context.Background(), repo, nil, time.Minute, nil, "frobnicate")
+
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("a helper from the inherited GIT_EXEC_PATH ran")
+	}
+}
