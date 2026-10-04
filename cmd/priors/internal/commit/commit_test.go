@@ -16,9 +16,11 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
+	"github.com/noamsto/hookyard/cmd/priors/internal/tools/toolstest"
 )
 
 func TestMain(m *testing.M) {
+	toolstest.Pin()
 	committest.UnsetRepoEnv()
 	os.Exit(m.Run())
 }

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
+	"github.com/noamsto/hookyard/cmd/priors/internal/tools"
 )
 
 type Class string
@@ -223,7 +224,7 @@ func commonDirName(ctx context.Context, dir string) string {
 func gitOut(ctx context.Context, dir string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...) //nolint:gosec // fixed git subcommands; only the directory and a remote name vary
+	cmd := tools.Command(ctx, tools.Git, append([]string{"-C", dir}, args...)...) //nolint:gosec // fixed git subcommands; only the directory and a remote name vary
 	// Resolve matches git's English "not a git repository".
 	cmd.Env = RepoEnv("LC_ALL=C")
 	out, err := cmd.Output()
@@ -257,7 +258,7 @@ func defaultSSHHost(ctx context.Context, sshConfig, alias string) string {
 	if sshConfig != "" {
 		args = append(args, "-F", sshConfig)
 	}
-	out, err := exec.CommandContext(ctx, "ssh", append(args, alias)...).Output() //nolint:gosec // ssh -G only prints config; ParseURL rejects a host that would parse as an option
+	out, err := tools.Command(ctx, tools.SSH, append(args, alias)...).Output() //nolint:gosec // ssh -G only prints config; ParseURL rejects a host that would parse as an option
 	if err != nil {
 		return alias
 	}

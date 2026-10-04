@@ -250,7 +250,7 @@ func writeIndexes(cfgPath string, s streams) int {
 		return 1
 	}
 	// A missing scanner leaves it zero, which fails the commit closed.
-	scanner, _ := gate.FindScanner(cfg.Scanner)
+	scanner, _ := gate.PinnedScanner()
 	ids := []route.StoreID{route.StorePersonal}
 	if cfg.WorkPresent() {
 		ids = append(ids, route.StoreWork)

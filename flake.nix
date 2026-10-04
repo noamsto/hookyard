@@ -61,6 +61,10 @@
           pi-bridge = import ./nix/checks/pi_bridge.nix {inherit pkgs;};
           flow-bundle = import ./nix/checks/flow-bundle.nix {inherit pkgs;};
           priors = config.packages.priors;
+          priors-pinned = import ./nix/checks/priors-pinned.nix {
+            inherit pkgs;
+            priors = config.packages.priors;
+          };
         };
 
         treefmt = {
@@ -92,7 +96,8 @@
           # The memory layer's CLI and session_start handler
           # (docs/design/memory-layer.md §5).
           priors = let
-            # ssh resolves host aliases when routing a repo to its store.
+            tools = "github.com/noamsto/hookyard/cmd/priors/internal/tools";
+            # The tests exec these; the binary gets them as pinned paths.
             runtimeDeps = [pkgs.git pkgs.ripgrep pkgs.betterleaks pkgs.openssh];
           in
             pkgs.buildGoModule {
@@ -101,17 +106,18 @@
               src = ./.;
               inherit vendorHash;
               subPackages = ["cmd/priors"];
-              nativeBuildInputs = [pkgs.makeWrapper];
+              # Pinned so that neither the config nor PATH can swap them.
+              ldflags = [
+                "-X ${tools}.Git=${pkgs.git}/bin/git"
+                "-X ${tools}.SSH=${pkgs.openssh}/bin/ssh"
+                "-X ${tools}.Rg=${pkgs.ripgrep}/bin/rg"
+                "-X ${tools}.Scanner=${pkgs.betterleaks}/bin/betterleaks"
+              ];
               nativeCheckInputs = runtimeDeps;
               # subPackages alone would test only cmd/priors; the gates,
               # routing and store live in its internal packages.
               preCheck = ''
                 subPackages=cmd/priors/...
-              '';
-              # A hook runs with the engine's PATH, not the user's shell's, so
-              # the tools the gates and search shell out to travel with it.
-              postInstall = ''
-                wrapProgram $out/bin/priors --suffix PATH : ${pkgs.lib.makeBinPath runtimeDeps}
               '';
               meta = {
                 description = "Cross-harness agent memory: markdown fact stores, write gates, tier-1 index and search";

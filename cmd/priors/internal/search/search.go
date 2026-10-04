@@ -18,6 +18,7 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
+	"github.com/noamsto/hookyard/cmd/priors/internal/tools"
 )
 
 const (
@@ -35,7 +36,7 @@ type Backend interface {
 	Candidates(ctx context.Context, roots []string, term string) ([]string, error)
 }
 
-// Rg is the ripgrep backend. An empty Bin means "rg" on PATH.
+// Rg is the ripgrep backend. An empty Bin means the rg pinned at build time.
 type Rg struct{ Bin string }
 
 // Candidates runs ripgrep over the roots that exist. No match is not an error;
@@ -43,12 +44,11 @@ type Rg struct{ Bin string }
 func (r Rg) Candidates(ctx context.Context, roots []string, term string) ([]string, error) {
 	bin := r.Bin
 	if bin == "" {
-		bin = "rg"
+		bin = tools.Rg
 	}
-	// Looked up before the roots are checked, so a missing rg fails even a
+	// Checked before the roots are, so a missing rg fails even a
 	// root that does not exist and the search reads as unavailable.
-	bin, err := exec.LookPath(bin)
-	if err != nil {
+	if err := tools.Check(bin); err != nil {
 		return nil, fmt.Errorf("rg: %w", err)
 	}
 	var existing []string
@@ -64,7 +64,7 @@ func (r Rg) Candidates(ctx context.Context, roots []string, term string) ([]stri
 		"--no-config", "--files-with-matches", "--ignore-case", "--fixed-strings", "--no-messages",
 		"--glob", "*.md", "-e", term, "--",
 	}, existing...)
-	out, err := exec.CommandContext(ctx, bin, args...).Output() //nolint:gosec // bin is the operator's rg; term is passed after -e, never parsed as a flag
+	out, err := tools.Command(ctx, bin, args...).Output()
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, ctxErr
 	}

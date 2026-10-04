@@ -25,11 +25,14 @@ personal_orgs  = ["github.com/you"]
 # state_dir    = ""     # default $XDG_STATE_HOME/priors
 # event_record = ""     # hookyard's state dir; default follows hookyard's own
 # rules        = ""     # extra redaction rules, added to the built-in set; a bad file fails closed
-# scanner      = ""     # default betterleaks, then gitleaks, on PATH
 # ssh_config   = ""     # passed to `ssh -G -F` when resolving host aliases
 # commit       = true   # commit published facts into the checkout
 # push         = false  # needs an upstream set once (git push -u); after a failed push, git push by hand to resume
 ```
+
+`git`, `ssh`, `rg` and the secret scanner (betterleaks) are pinned at build time
+(`nix build .#priors`) and never looked up on `PATH`, so the `scanner` key is gone;
+a plain `go build` binary refuses every subcommand.
 
 `work_orgs` is required on every host. `personal_store`, `work_store` and
 `state_dir` must be absolute once `~/` is expanded, and none may be the same

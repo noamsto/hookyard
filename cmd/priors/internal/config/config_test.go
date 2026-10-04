@@ -38,7 +38,6 @@ work_names     = ["corp-host.internal"]
 state_dir      = "~/state"
 event_record   = "/abs/record"
 rules          = "~/rules.toml"
-scanner        = "gitleaks"
 ssh_config     = "~/ssh_config"
 commit         = false
 push           = true
@@ -63,7 +62,6 @@ func TestLoadFullSample(t *testing.T) {
 		StateDir:      filepath.Join(home, "state"),
 		EventRecord:   "/abs/record",
 		Rules:         filepath.Join(home, "rules.toml"),
-		Scanner:       "gitleaks",
 		SSHConfig:     filepath.Join(home, "ssh_config"),
 		Commit:        &no,
 		Push:          true,
@@ -360,6 +358,14 @@ func TestLoadNamesTheUnknownKey(t *testing.T) {
 	_, err := Load(writeConfig(t, "profile = \"work\"\nwork_path = \"x\"\n"))
 	if err == nil || !strings.Contains(err.Error(), "work_path") {
 		t.Errorf("err = %v, want it to name work_path", err)
+	}
+}
+
+func TestLoadRejectsTheScannerKey(t *testing.T) {
+	isolate(t)
+	_, err := Load(writeConfig(t, "profile = \"work\"\nscanner = \"x\"\n"))
+	if err == nil || !strings.Contains(err.Error(), "pinned at build time") {
+		t.Errorf("err = %v, want it to say the scanner is pinned at build time", err)
 	}
 }
 

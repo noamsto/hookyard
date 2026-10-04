@@ -20,9 +20,31 @@ import (
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/commit/committest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
+	"github.com/noamsto/hookyard/cmd/priors/internal/tools"
+	"github.com/noamsto/hookyard/cmd/priors/internal/tools/toolstest"
 )
 
-var binPath string
+var (
+	binPath string
+	// binDir is where the pinned binary and the tools it is pinned to live.
+	binDir string
+	// toolsDir holds the pinned git, ssh, rg and scanner. Tests run serially,
+	// so they share the scanner.
+	toolsDir string
+)
+
+const toolsPkg = "github.com/noamsto/hookyard/cmd/priors/internal/tools"
+
+func pinnedTool(name string) string { return filepath.Join(toolsDir, name) }
+
+// goBuild builds the package in the current directory to out.
+func goBuild(out string, ldflags ...string) ([]byte, error) {
+	args := []string{"build"}
+	if len(ldflags) > 0 {
+		args = append(args, "-ldflags", strings.Join(ldflags, " "))
+	}
+	return exec.Command("go", append(args, "-o", out, ".")...).CombinedOutput()
+}
 
 func TestMain(m *testing.M) {
 	os.Exit(buildAndRun(m))
@@ -36,8 +58,31 @@ func buildAndRun(m *testing.M) int {
 		return 1
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
+	binDir = dir
+	toolsDir = filepath.Join(dir, "tools")
+	if err := os.Mkdir(toolsDir, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	toolstest.Pin()
+	var ldflags []string
+	for name, target := range map[string]struct{ target, real string }{
+		"git":     {"Git", tools.Git},
+		"ssh":     {"SSH", tools.SSH},
+		"rg":      {"Rg", tools.Rg},
+		"scanner": {"Scanner", ""},
+	} {
+		ldflags = append(ldflags, fmt.Sprintf("-X %s.%s=%s", toolsPkg, target.target, pinnedTool(name)))
+		if target.real == "" {
+			continue
+		}
+		if err := os.Symlink(target.real, pinnedTool(name)); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+	}
 	binPath = filepath.Join(dir, "priors")
-	if out, err := exec.Command("go", "build", "-o", binPath, ".").CombinedOutput(); err != nil {
+	if out, err := goBuild(binPath, ldflags...); err != nil {
 		fmt.Fprintf(os.Stderr, "go build: %v\n%s", err, out)
 		return 1
 	}
@@ -85,7 +130,7 @@ func newSandbox(t *testing.T, profile string) *sandbox {
 		gitConfig:  filepath.Join(dir, "gitconfig"),
 		sshConfig:  filepath.Join(dir, "ssh_config"),
 		configPath: filepath.Join(dir, "config.toml"),
-		scanner:    filepath.Join(dir, "scanner"),
+		scanner:    pinnedTool("scanner"),
 		path:       os.Getenv("PATH"),
 		profile:    profile,
 	}
@@ -134,7 +179,6 @@ func (sb *sandbox) writeConfig(extra ...string) {
 		`work_orgs = ["github.com/factify-inc"]`,
 		`personal_orgs = ["github.com/noamsto"]`,
 		fmt.Sprintf("ssh_config = %q", sb.sshConfig),
-		fmt.Sprintf("scanner = %q", sb.scanner),
 	}
 	sb.writeFile(sb.configPath, strings.Join(append(lines, extra...), "\n")+"\n")
 }
@@ -154,7 +198,7 @@ func (sb *sandbox) childEnv() []string {
 
 func (sb *sandbox) git(dir string, args ...string) {
 	sb.t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd := exec.Command(tools.Git, append([]string{"-C", dir}, args...)...)
 	cmd.Env = sb.childEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		sb.t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -787,12 +831,14 @@ func TestAddRefusals(t *testing.T) {
 		wantContains(t, "stderr", res.stderr, "refused:", "fake-rule")
 	})
 	t.Run("scanner missing", func(t *testing.T) {
-		good := sb.scanner
-		sb.scanner = "/nonexistent/scanner"
-		sb.writeConfig()
+		hidden := sb.scanner + ".away"
+		if err := os.Rename(sb.scanner, hidden); err != nil {
+			t.Fatal(err)
+		}
 		defer func() {
-			sb.scanner = good
-			sb.writeConfig()
+			if err := os.Rename(hidden, sb.scanner); err != nil {
+				t.Fatal(err)
+			}
 		}()
 		res := sb.run("", append(base, "--type", "project")...)
 		wantExit(t, res, 1)
@@ -1013,15 +1059,15 @@ func TestSearchWithoutRgFailsOpen(t *testing.T) {
 	repo := sb.repo(personalRemote)
 	sb.putFact(sb.personal, "demo/needle-fact.md", newFact("needle-fact", "demo", "project"))
 
-	gitBin, err := exec.LookPath("git")
-	if err != nil {
+	rg := pinnedTool("rg")
+	if err := os.Rename(rg, rg+".away"); err != nil {
 		t.Fatal(err)
 	}
-	bin := t.TempDir()
-	if err := os.Symlink(gitBin, filepath.Join(bin, "git")); err != nil {
-		t.Fatal(err)
-	}
-	sb.path = bin
+	t.Cleanup(func() {
+		if err := os.Rename(rg+".away", rg); err != nil {
+			t.Error(err)
+		}
+	})
 
 	res := sb.run("", "search", "needle", "--cwd", repo)
 	wantExit(t, res, 0)
@@ -1052,13 +1098,6 @@ func TestLintConfiguredStores(t *testing.T) {
 
 func TestLintDirWithKind(t *testing.T) {
 	sb := newSandbox(t, "personal")
-	// The store-CI form needs no config, only a scanner on PATH.
-	bin := t.TempDir()
-	sb.writeFile(filepath.Join(bin, "betterleaks"), cleanScanner)
-	if err := os.Chmod(filepath.Join(bin, "betterleaks"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	sb.path = bin + string(os.PathListSeparator) + sb.path
 	sb.writeFile(sb.configPath, "not toml at all = = =\n")
 
 	store := t.TempDir()
@@ -1718,7 +1757,6 @@ func TestPostToolMarkerHonoursXDGStateHome(t *testing.T) {
 		`work_orgs = ["github.com/factify-inc"]`,
 		`personal_orgs = ["github.com/noamsto"]`,
 		fmt.Sprintf("ssh_config = %q", sb.sshConfig),
-		fmt.Sprintf("scanner = %q", sb.scanner),
 	}, "\n")+"\n")
 	sb.toolCall("post_tool", "sess-1", "Bash", `{"command":"go test ./..."}`)
 
@@ -1772,4 +1810,66 @@ func TestAddUnreadableMarkerDir(t *testing.T) {
 		t.Fatalf("stdout %q", res.stdout)
 	}
 	wantContains(t, "stdout", res.stdout, "provenance:no-ingest-record")
+}
+
+func TestUnpinnedBinaryRefuses(t *testing.T) {
+	bin := filepath.Join(binDir, "priors-unpinned")
+	if out, err := goBuild(bin); err != nil {
+		t.Skipf("go build: %v\n%s", err, out)
+	}
+	sb := newSandbox(t, "personal")
+	var stderr bytes.Buffer
+	cmd := exec.Command(bin, "lint")
+	cmd.Env = sb.childEnv()
+	cmd.Stderr = &stderr
+	var exit *exec.ExitError
+	if err := cmd.Run(); !errors.As(err, &exit) || exit.ExitCode() == 0 {
+		t.Fatalf("exit: %v", err)
+	}
+	wantContains(t, "stderr", stderr.String(), "built without pinned paths")
+}
+
+func TestScannerConfigKeyRejected(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	sb.writeConfig(`scanner = "x"`)
+	res := sb.run("", "lint")
+	wantExit(t, res, 2)
+	wantContains(t, "stderr", res.stderr, "pinned at build time")
+}
+
+// TestPinnedToolsIgnorePATH: fakes that shadow every tool on PATH are never
+// run, because priors execs only the paths pinned at build time.
+func TestPinnedToolsIgnorePATH(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+
+	marker := filepath.Join(t.TempDir(), "marker")
+	fakes := t.TempDir()
+	for _, name := range []string{"git", "ssh", "betterleaks", "gitleaks"} {
+		sb.writeFile(filepath.Join(fakes, name), fmt.Sprintf("#!/bin/sh\ntouch %q\necho '[]'\n", marker))
+	}
+	sb.writeFile(filepath.Join(fakes, "rg"), fmt.Sprintf("#!/bin/sh\ntouch %q\n", marker))
+	for _, name := range []string{"git", "ssh", "rg", "betterleaks", "gitleaks"} {
+		if err := os.Chmod(filepath.Join(fakes, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sb.path = fakes + string(os.PathListSeparator) + sb.path
+
+	add := []string{"add", "--name", "pinned-fact", "--description", "needle in a haystack",
+		"--type", "project", "--cwd", repo}
+	sb.setScanner(dirtyScanner)
+	res := sb.run("", add...)
+	wantExit(t, res, 1)
+	wantContains(t, "stderr", res.stderr, "refused:", "fake-rule")
+
+	sb.setScanner(cleanScanner)
+	wantExit(t, sb.run("", add...), 0)
+	res = sb.run("", "search", "needle", "--cwd", repo)
+	wantExit(t, res, 0)
+	wantContains(t, "stdout", res.stdout, "pinned-fact")
+
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("a tool from PATH ran")
+	}
 }

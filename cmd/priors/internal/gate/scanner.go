@@ -4,43 +4,32 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/noamsto/hookyard/cmd/priors/internal/tools"
 )
 
 const scanTimeout = 30 * time.Second
 
 // Scanner runs an external secret scanner. betterleaks and gitleaks share the
-// flags used here, so either binary works.
+// flags used here, so either binary works. Bin is an absolute path.
 type Scanner struct {
 	Bin string
 }
 
-// FindScanner resolves v to a scanner binary: "" tries betterleaks then
-// gitleaks on PATH; a value containing '/' must itself be executable; any
-// other value is looked up on PATH.
-func FindScanner(v string) (Scanner, error) {
-	if v != "" {
-		bin, err := exec.LookPath(v)
-		if err != nil {
-			return Scanner{}, fmt.Errorf("secret scanner: %w", err)
-		}
-		return Scanner{Bin: bin}, nil
+// PinnedScanner returns the scanner fixed at build time.
+func PinnedScanner() (Scanner, error) {
+	if err := tools.Check(tools.Scanner); err != nil {
+		return Scanner{}, fmt.Errorf("secret scanner: %w", err)
 	}
-	for _, name := range []string{"betterleaks", "gitleaks"} {
-		if bin, err := exec.LookPath(name); err == nil {
-			return Scanner{Bin: bin}, nil
-		}
-	}
-	return Scanner{}, errors.New("secret scanner: neither betterleaks nor gitleaks is on PATH")
+	return Scanner{Bin: tools.Scanner}, nil
 }
 
 type finding struct {
@@ -169,7 +158,7 @@ func (s Scanner) run(ctx context.Context, sb sandbox, stdin io.Reader, args ...s
 	name := filepath.Base(s.Bin)
 	args = append(args, reportFlags...)
 	args = append(args, "--config", sb.config(), "--ignore-gitleaks-allow", "--gitleaks-ignore-path", sb.ignore())
-	cmd := exec.CommandContext(ctx, s.Bin, args...) //nolint:gosec // Bin is the scanner resolved from config/PATH by FindScanner, run by design
+	cmd := tools.Command(ctx, s.Bin, args...)
 	cmd.Dir = sb.dir
 	cmd.Env = slices.DeleteFunc(os.Environ(), func(kv string) bool {
 		k, _, _ := strings.Cut(kv, "=")
