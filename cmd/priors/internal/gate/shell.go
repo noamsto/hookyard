@@ -63,13 +63,15 @@ var (
 
 // ingestsCommand matches a listed name in any segment whose command word is not
 // inert, so `rg curl src/` stays clean while `echo x | curl …`, `setsid gh pr
-// view 2` and `bash -c "gh pr view 2"` match. Four readings are ORed: the raw
+// view 2` and `bash -c "gh pr view 2"` match. Five readings are ORed: the raw
 // text with quotes as segment breaks, so a quoted script is judged on its own;
 // the unescaped text likewise, so a script with escapes is too; the unescaped
 // text with quotes deleted, as bash joins words (`g""h`, `"g"h`, `g\h`), so a
-// quoted argument stays with the gh that owns it; and each quoted string's
+// quoted argument stays with the gh that owns it; each quoted string's
 // content as a command of its own, so an earlier gh in the segment cannot hide
-// a quote-joined one (`'gh auth status' 'g""h issue view 1'`).
+// a quote-joined one (`'gh auth status' 'g""h issue view 1'`); and each shell
+// word with its quotes and escapes removed, as a command of its own, so a
+// script built from quoted and bare parts (`gh' issue view 1'`) is judged whole.
 func ingestsCommand(text string) bool {
 	lower := strings.ToLower(text)
 	for _, scheme := range []string{"http://", "https://", "ftp://"} {
@@ -81,7 +83,69 @@ func ingestsCommand(text string) bool {
 	return ingestsSegments(text, segmentBreaks+`"'`) ||
 		ingestsSegments(unescaped, segmentBreaks+`"'`) ||
 		ingestsSegments(dropQuotes.Replace(unescaped), segmentBreaks) ||
-		slices.ContainsFunc(quotedStrings(text), ingestsCommand)
+		slices.ContainsFunc(quotedStrings(text), ingestsCommand) ||
+		slices.ContainsFunc(shellWords(text), ingestsCommand)
+}
+
+// shellWords splits text into words the way bash does and returns only those
+// that had a quote or backslash removed, since a plain word is already judged
+// by the segment readings and could equal text. Every result is therefore
+// strictly shorter than text, so recursing on it terminates. A `$(` or backtick
+// inside double quotes ends the word and restarts quoting, as in bash; an
+// unterminated quote runs to the end of text.
+func shellWords(text string) []string {
+	var out []string
+	var cur strings.Builder
+	var stripped, double bool
+	flush := func() {
+		if stripped {
+			out = append(out, cur.String())
+		}
+		cur.Reset()
+		stripped = false
+	}
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		switch {
+		case double && c == '"':
+			double = false
+		case double && c == '\\' && i+1 < len(text) && strings.IndexByte("$`\"\\\n", text[i+1]) >= 0:
+			i++
+			cur.WriteByte(text[i])
+		case double && c == '$' && i+1 < len(text) && text[i+1] == '(':
+			flush()
+			double = false
+			i++
+		case double && c == '`':
+			flush()
+			double = false
+		case double:
+			cur.WriteByte(c)
+		case c == '\\':
+			stripped = true
+			if i+1 < len(text) {
+				i++
+				cur.WriteByte(text[i])
+			}
+		case c == '\'':
+			stripped = true
+			end := strings.IndexByte(text[i+1:], '\'')
+			if end < 0 {
+				end = len(text) - i - 1
+			}
+			cur.WriteString(text[i+1 : i+1+end])
+			i += end + 1
+		case c == '"':
+			stripped = true
+			double = true
+		case unicode.IsSpace(rune(c)) || c == '<' || c == '>' || strings.IndexByte(segmentBreaks, c) >= 0:
+			flush()
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	flush()
+	return out
 }
 
 // quotedStrings returns the content of each quoted string in text, as a shell

@@ -123,6 +123,15 @@ func TestIngestsCall(t *testing.T) {
 		{"nested quoted joined gh", "Bash", `{"command":"bash -c \"sh -c 'gh auth status' \\\"g''h issue view 1\\\"\""}`, true},
 		{"escaped quote before quoted scripts", "Bash", `{"command":"echo \\\" 'gh auth status' \"g''h issue view 1\""}`, true},
 		{"single-quoted joined gh", "Bash", `{"command":"printf '%s\\n' 'gh auth status' 'g\"\"h issue view 1' | sh"}`, true},
+		{"bare gh joined to single-quoted args", "Bash", `{"command":"printf '%s\\n' 'gh auth status' gh' issue view 1' | sh"}`, true},
+		{"bare gh joined to double-quoted args", "Bash", `{"command":"printf '%s\\n' 'gh auth status' gh\" issue view 1\" | sh"}`, true},
+		{"quoted gh joined to quoted args", "Bash", `{"command":"printf '%s\\n' 'gh auth status' \"gh\"' issue view 1' | sh"}`, true},
+		{"empty quotes and quoted args", "Bash", `{"command":"printf '%s\\n' 'gh auth status' g''h' issue view 1' | sh"}`, true},
+		{"escaped spaces joined gh", "Bash", `{"command":"printf '%s\\n' 'gh auth status' g''h\\ issue\\ view\\ 1 | sh"}`, true},
+		{"escaped spaces earlier gh", "Bash", `{"command":"printf '%s\\n' gh\\ auth\\ status gh\\ issue\\ view\\ 1 | sh"}`, true},
+		{"parallel bare gh joined", "Bash", `{"command":"parallel ::: 'gh auth status' gh' issue view 1'"}`, true},
+		{"bash -c joined word script", "Bash", `{"command":"bash -c 'gh auth status' \"gh\"' issue view 1'"}`, true},
+		{"quotes restart in command substitution", "Bash", `{"command":"sh -c \"$(printf '%s\\n' 'gh auth status' \"g''h issue view 1\")\""}`, true},
 
 		// not ingestion
 		{"git log", "Bash", `{"command":"git log"}`, false},
@@ -158,6 +167,28 @@ func TestIngestsCall(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IngestsCall(tt.tool, []byte(tt.input)); got != tt.want {
 				t.Errorf("IngestsCall(%q, %s) = %v, want %v", tt.tool, tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShellWords(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want []string
+	}{
+		{"quoted tail joined", `gh' issue view 1'`, []string{"gh issue view 1"}},
+		{"plain words omitted", `a b`, nil},
+		{"empty quotes and escaped space", `g''h\ x`, []string{"gh x"}},
+		{"escaped quote in double", `"a\"b" c`, []string{`a"b`}},
+		{"command substitution restarts quoting", `x "a $(b 'c d')"`, []string{"a ", "c d", ""}},
+		{"unterminated", `'unterminated`, []string{"unterminated"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shellWords(tt.text); !slices.Equal(got, tt.want) {
+				t.Errorf("shellWords(%s) = %q, want %q", tt.text, got, tt.want)
 			}
 		})
 	}
