@@ -710,13 +710,39 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
 - **Injection hygiene.** The fence and attribution wrapper is applied *after*
   truncation and outside the budget, so truncation can never cut the closing
   fence, and its delimiter is random per injection, so fact text cannot
-  predict it. Injected text is NFKC-normalised, then has control, bidi and
-  Unicode tag characters stripped and imitations of the fence or attribution —
-  a fake `[hookyard advisory]` or store header, in any case, spacing or
-  look-alike characters — escaped; each index line is capped;
-  `priors show` and `priors search` fence their own output. A file opened with
-  `cat` or `rg` (tier 3) reaches the model unfenced, so "fenced" below means
-  *through `priors`*.
+  predict it. Injected text is sanitised in a fixed order: strip control,
+  bidi, zero-width and other format, Unicode tag and variation-selector
+  characters; NFKC-normalise; then match, per line, two ways. (a) A
+  UTS #39-style confusable skeleton of the line — case-folded, accents and
+  marks dropped, whitespace, blank fillers (braille blank, Hangul fillers)
+  and format characters ignored, Cyrillic, Greek, Armenian and IPA
+  lookalikes such as Cyrillic `а` folded to Latin `a` — is matched against
+  the fence and attribution tokens anywhere in the line. Runs of three or
+  more `=` or non-ASCII symbols and punctuation, the everyday punctuation
+  below aside, are replaced by `(quoted: =)` with their runes dropped, so a
+  fence rule never survives; box-drawing rules, emoji runs and runs of CJK
+  punctuation go the same way. (b) A backstop, because both attribution
+  headers are bracketed and a curated lookalike map is never complete: any
+  bracket pair — bracket-piece
+  lookalikes such as `⎡ ⎤` included, and an unclosed opener running to end
+  of line — holding a non-ASCII rune other than everyday punctuation (`·`,
+  dashes, curly quotes, `•`, `×`, arrows) is rewritten to a `(quoted: …)`
+  wrapper. Letters with a decomposable accent (`é`, `ñ`) pass; letters
+  without one (`ø`, `ł`, `ß`, `æ`), non-Latin text and symbols are quoted —
+  deliberately, since exempting Latin-script letters would admit unmapped
+  Latin lookalikes. The cost is intended: bracketed non-Latin text
+  (`[שלום]`, or a non-Latin markdown link `[текст](url)` →
+  `(quoted: текст)(url)`) is quoted, and a committed index holding such a
+  line regenerates with a one-time diff. ASCII-only lookalikes (`0` for
+  `o`, `rn` for `m`) and ASCII separators (`hookyard-advisory`) are not
+  folded. The backstop is itself a curated list and does not fail closed
+  for every lookalike: a stray non-ASCII closer right after the opener, a
+  bracket shape outside the recognised set (`⊏ ⊐`, `< >`, `( )`), or an
+  unassigned default-ignorable code point splitting a token still lets a
+  spoof through. The random delimiter still guards the real fence, so the
+  residual is attribution spoofing. Each index line is capped; `priors show` and `priors search`
+  fence their own output. A file opened with `cat` or `rg` (tier 3) reaches
+  the model unfenced, so "fenced" below means *through `priors`*.
 - **Provenance on every fact** — §4.1's `provenance:` block (engine, session,
   host) — so the index can be filtered by writer and a compromised writer's
   facts purged.
@@ -1426,13 +1452,22 @@ flagged facts stops being optional.
   allowlist do not attest; an agent's write to an attest entry, to
   `confidence: reviewed`, to a checkout index, or under `priors`'s config or
   state dirs is denied;
-- **injection hygiene** (§4.4): a description carrying a fake fence — in
-  another case, with other whitespace, or in homoglyphs — a fake
-  `[hookyard advisory]` or store header, or bidi and tag characters reaches
-  the model NFKC-normalised, escaped and stripped; the delimiter differs per
-  injection, while the included index file's delimiter is derived from its
-  body and never occurs in it; no truncation cuts the closing fence, and that
-  file carries its own closing fence (§4.7);
+- **injection hygiene** (§4.4): bidi, zero-width and tag characters reach
+  the model stripped; each protected string — `[hookyard advisory]`, the
+  store header, the BEGIN and END fence lines — in another case, with other
+  whitespace, or spoofed with Cyrillic, Greek (upper case included),
+  mixed-script, accented, zero-width-joined, bidi-wrapped and fullwidth
+  lookalikes, with blank fillers between words, with symbol lookalikes
+  (`⍺`, `○`, `∨`), between bracket-piece lookalikes, behind an unclosed
+  opener, and with a lookalike absent from the confusable map (which
+  exercises the bracket rule), reaches the model escaped; a fence with `=`
+  lookalikes, mapped or not, is escaped too; genuine ASCII headers behave
+  as before; benign non-ASCII prose (Hebrew, accented names) is unchanged,
+  except bracketed non-Latin or undecomposable-letter spans and symbol
+  runs, which are quoted; the delimiter differs per injection, while the
+  included index file's delimiter is derived from its body and never occurs
+  in it; no truncation cuts the closing fence, and that file carries its own
+  closing fence (§4.7);
 - **double injection** (§4.9): the canonical copy is skipped only when native
   memory is on, the native source exists and the fact is inside the native
   window; it is injected when native memory is off, the source is gone, the
