@@ -144,7 +144,6 @@ var signTimeout = gitTimeout
 
 // commitTree commits tree on parent and moves HEAD to it, signing as the
 // store's config asks: unlike git commit, commit-tree ignores commit.gpgSign.
-// It returns the new commit's oid.
 func commitTree(ctx context.Context, dir, parent, tree, msg string) (commit, warning string) {
 	missing, err := unlisted(ctx, dir, tree)
 	switch {
@@ -187,10 +186,9 @@ func commitTree(ctx context.Context, dir, parent, tree, msg string) (commit, war
 // and push.gpgSign. The lease makes the push a compare-and-swap against the
 // real remote, so only commit is transferred even when the tracking ref is
 // stale or tampered with; commit being parent's child, a passing lease is a
-// fast-forward. No pre-push hook runs (core.hooksPath=/dev/null). pushurl,
-// insteadOf, pushInsteadOf and transport config are honoured: they pick where
-// the remote is, not what is pushed, and whoever can set them already controls
-// the store's git. A branch with no fetched upstream, including a fresh unborn
+// fast-forward. pushurl, insteadOf, pushInsteadOf and transport config are
+// honoured: they pick where the remote is, not what is pushed, and whoever can
+// set them already controls the store's git. A branch with no fetched upstream, including a fresh unborn
 // store, is not pushed: the user's first `git push -u` sets it up.
 func push(ctx context.Context, dir, parent, commit string) (warning string) {
 	refuse := func(format string, args ...any) string {
