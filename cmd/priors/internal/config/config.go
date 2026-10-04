@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/BurntSushi/toml"
 )
@@ -155,8 +156,13 @@ func (c Config) checkDirs() error {
 			return fmt.Errorf("%s must be an absolute path, got %q", d.key, d.path)
 		}
 	}
+	stateKey := "state_dir"
 	if c.StateDir == "" {
-		dirs = append(dirs, dir{"the default state dir", c.State()})
+		stateKey = "the default state dir"
+		if !filepath.IsAbs(c.State()) {
+			return fmt.Errorf("%s must be an absolute path, got %q", stateKey, c.State())
+		}
+		dirs = append(dirs, dir{stateKey, c.State()})
 	}
 	for i, a := range dirs {
 		for _, b := range dirs[i+1:] {
@@ -165,7 +171,34 @@ func (c Config) checkDirs() error {
 			}
 		}
 	}
+	root, err := gitWorkTree(c.State())
+	if err != nil {
+		return fmt.Errorf("%s (%s): %w", stateKey, c.State(), err)
+	}
+	if root != "" {
+		return fmt.Errorf("%s (%s) is inside the git work tree at %s: the quarantine and local layers must stay off any checkout", stateKey, c.State(), root)
+	}
 	return nil
+}
+
+// gitWorkTree returns the nearest dir at or above p holding a .git entry (a
+// repo's dir, a linked worktree's gitfile, or a symlink), or "" if none. It
+// walks rather than running git, whose env and config an agent can set. An
+// Lstat error other than absence is returned so the caller fails closed.
+func gitWorkTree(p string) (string, error) {
+	for dir := p; ; dir = filepath.Dir(dir) {
+		_, err := os.Lstat(filepath.Join(dir, ".git"))
+		if err == nil {
+			return dir, nil
+		}
+		// ENOTDIR: a regular file at an ancestor cannot hold a .git.
+		if !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
+			return "", err
+		}
+		if filepath.Dir(dir) == dir {
+			return "", nil
+		}
+	}
 }
 
 // within reports whether p is dir or lies under it.
@@ -174,7 +207,9 @@ func within(p, dir string) bool {
 	return err == nil && filepath.IsLocal(rel)
 }
 
-// State is where priors keeps its local layer, quarantine and locks.
+// State is where priors keeps its local layer, quarantine, locks and
+// provenance markers. Every path under it, and any guard over it, derives from
+// the functions below so all of them see the same resolved directory.
 func (c Config) State() string {
 	if c.StateDir != "" {
 		return c.StateDir
@@ -184,6 +219,15 @@ func (c Config) State() string {
 	}
 	return stateHome("priors")
 }
+
+// QuarantineDir holds quarantined facts.
+func (c Config) QuarantineDir() string { return filepath.Join(c.State(), "quarantine") }
+
+// LocalDir holds the local layer of store id.
+func (c Config) LocalDir(id string) string { return filepath.Join(c.State(), "local", id) }
+
+// LockDir holds the writers' flock files.
+func (c Config) LockDir() string { return filepath.Join(c.State(), "locks") }
 
 // ProvenanceDir holds gate 2's per-session shell markers.
 func (c Config) ProvenanceDir() string { return filepath.Join(c.State(), "provenance") }

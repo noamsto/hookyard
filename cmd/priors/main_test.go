@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -538,6 +539,73 @@ func TestAddQuarantinesWorkRepoOnPersonalHost(t *testing.T) {
 	path := filepath.Join(sb.state, "quarantine", "app", "work-fact.md")
 	if !strings.HasPrefix(res.stdout, "quarantined "+path+": work repo on a personal host") {
 		t.Fatalf("stdout %q", res.stdout)
+	}
+}
+
+// TestSymlinkedStateDirIsOneDir: the marker handler and the write path both
+// land under the symlink's target, never under the link.
+func TestSymlinkedStateDirIsOneDir(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	real := filepath.Join(sb.dir, "real-state")
+	sb.mkdir(real)
+	sb.state = filepath.Join(sb.dir, "state-link")
+	if err := os.Symlink(real, sb.state); err != nil {
+		t.Fatal(err)
+	}
+	sb.writeConfig()
+	repo := sb.repo(workRemote)
+	sb.record("sess-1")
+
+	res := sb.run("", "add", "--name", "work-fact", "--description", "from work", "--type", "project",
+		"--cwd", repo, "--session", "sess-1")
+	sb.toolCall("pre_tool", "sess-1", "Bash", `{"command":"gh issue view 12"}`)
+
+	wantExit(t, res, 0)
+	path := filepath.Join(real, "quarantine", "app", "work-fact.md")
+	if !strings.HasPrefix(res.stdout, "quarantined "+path+": work repo on a personal host") {
+		t.Fatalf("stdout %q", res.stdout)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Error(err)
+	}
+	wantMarkerExts(t, sb.markerFiles(filepath.Join(real, "provenance")), ".seen", ".ingest")
+}
+
+// TestStateDirInARepoFailsClosed: a state dir that resolves into a git work
+// tree stops every command, and the marker handler writes nothing, neither
+// there nor at the default state path.
+func TestStateDirInARepoFailsClosed(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	inside := filepath.Join(repo, "sub")
+	sb.mkdir(inside)
+	sb.state = filepath.Join(sb.dir, "state-link")
+	if err := os.Symlink(inside, sb.state); err != nil {
+		t.Fatal(err)
+	}
+	sb.writeConfig()
+
+	res := sb.run("", "add", "--name", "a-fact", "--description", "d", "--type", "project",
+		"--cwd", repo, "--session", "sess-1")
+	sb.toolCall("pre_tool", "sess-1", "Bash", `{"command":"gh issue view 12"}`)
+
+	wantExit(t, res, 2)
+	wantContains(t, "stderr", res.stderr, "inside the git work tree")
+	for _, dir := range []string{inside, filepath.Join(sb.dir, "xdg-state")} {
+		entries, err := os.ReadDir(dir)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("%s holds %v, want it untouched", dir, entries)
+		}
+	}
+	top, err := os.ReadDir(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(top) != 2 {
+		t.Errorf("repo holds %v, want only .git and sub", top)
 	}
 }
 
