@@ -1250,10 +1250,11 @@ URL by §4.2's clean push with the explicit refspec
 `HEAD:refs/heads/<that branch>`, never the checkout's own branch or push
 config; a non-fast-forward push is reported as not pushed. It pokes its
 store's trigger socket, waits up to 60 s for the verdict file to show the
-entry's new state, and tells the human one of:
+entry's new state, or an `ok` verdict whose `tip` descends from the entry's
+commit (below), prints the entry's commit id, and tells the human one of:
 
 - in effect: the verdict file lists the entry `reviewed` for an attest; for a
-  revoke, only a `revoked` line counts.
+  revoke, only a `revoked` line counts, at the tip or not (below).
 - observed but not in effect: the verdict file lists the entry `superseded`
   or `lapsed`, with the action. For `superseded`, attest or revoke — a remote
   rewrite hid a higher entry the per-name record keeps — the human re-runs
@@ -1265,11 +1266,24 @@ entry's new state, and tells the human one of:
   sequence space. A revoke is in effect only on a `revoked` line; any other
   result means the human retries the revoke. Removing the revoke from
   history takes a second remote rewrite, which needs Administration again
-  (residual (b)). For `lapsed`, the human re-attests.
-- pushed but not yet observed, with the reason the job reported. Other hosts
-  see the entry at their next run of that store's unit, within
-  15 min + 2 × 300 s, about 25 min, of the push landing while they can
-  fetch.
+  (residual (b)). For `lapsed`, the human re-attests. The same holds, and the
+  human retries, when the verdict file reads `status: ok`, lists no line for
+  the entry, and its `tip` descends from the entry's commit: the job walked
+  the entry, and junk at a lower sequence on top keeps an attest out of effect
+  (a revoke there has a `revoked` line). An agent that pushes junk again after
+  each retry keeps the attest `proposed`, a denial of the label only (residual
+  (d)). To test descent, on each new `ok` verdict whose `tip` is not in the
+  local repo, `priors attest` fetches the pinned URL's default branch once by
+  the same clean fetch and walk settings; a `tip` it still does not find is
+  not this case.
+- pushed but not yet observed, with the reason the job reported. That is not
+  final: the human checks again with `priors attest --check <commit>`, naming
+  the commit id it printed, which signs and pushes nothing, reads that
+  commit's `.attest/<name>`, and reports by the same rules against the current
+  verdict file, so an entry the job walks after the wait, under junk or a
+  restore pushed on top, still reads observed but not in effect. Other hosts
+  see the entry at their next run of that store's unit, within 15 min + 2 ×
+  300 s, about 25 min, of the push landing while they can fetch.
 - not pushed: the commit exists only in this working tree. An attest reads
   `proposed` everywhere, and a revoke is in effect nowhere (residual (e)).
 
@@ -1370,17 +1384,23 @@ progress checkpointed.
 
 **The per-name record.** Beside the mirror the job keeps a state file, mode
 0600, owned by `priors-verify`, in the 0700 private dir
-`/var/lib/priors/<store id>/private/` that also holds `mirror.git`; the
-record names work facts, so it is never in the world-readable store dir. Per
-name it records the highest well-formed sequence seen and the entry digest at
-it, whether that sequence is tied, and the entry digests seen revoked,
-superseded or lapsed, keeping each allowlisted-signed digest seen superseded
-so the verdict file can list it (below). Checks 7
-and 8 read the observed set **and** this record, and the record only grows.
-A human mirror reset (the `oversize` way out) deletes `mirror.git` and keeps
-the record, so a reset re-fetches history without forgetting a revoke or a
-lapse; only wiping `/var/lib/priors/<store id>/` forgets them (residual (a),
-below).
+`/var/lib/priors/<store id>/private/` that also holds `mirror.git`; the record
+names work facts, so it is never in the world-readable store dir. Per name it
+records the highest well-formed sequence seen, the entry digest at it and,
+when that entry is signed by an allowlisted key with check 6's binding, its
+signing key; whether that sequence is tied; and the entry digests seen
+revoked, superseded or lapsed. The walk checks every version of
+`.attest/<name>` it walks, at the tip or not: a version signed by an
+allowlisted key, with check 6's binding, goes into the record as superseded,
+with its signing key, once it fails check 7 — as it is walked, or later, when
+a different entry at its sequence, or any entry above it, is walked — so the
+verdict file can list it (below) against the current allowlist. A revoke that
+junk covers before the job's first fetch of it is therefore recorded, though
+the job never sees it at the tip. Checks 7 and 8 read the observed set **and**
+this record, and the record only grows. A human mirror reset (the `oversize`
+way out) deletes `mirror.git` and keeps the record, so a reset re-fetches
+history without forgetting a revoke or a lapse; only wiping
+`/var/lib/priors/<store id>/` forgets them (residual (a), below).
 
 **Budget**, per store per run: 300 s of wall clock, the fetch included;
 50,000 newly walked commits; the mirror capped at 2 GiB, counting leftover
@@ -1444,23 +1464,54 @@ index hash the same bytes with no serialization to agree on. Then comes one
 line, `<sha256 of the entry file's bytes> <state>`, for each name whose tip
 entry is a well-formed v1 entry, `op: attest` or `op: revoke`, with a valid
 SSHSIG by an allowlisted key, sk flags (check 5) and check 6's binding. The
-state is decided in this order, for an attest and a revoke alike:
-`superseded` when check 7 fails (not the highest sequence, or tied); else
-`revoked` for a revoke; else `lapsed` when check 8 fails; else `reviewed`
-when checks 4–8 all hold. A `superseded` line also carries the record's highest
-sequence for that name, `<digest> superseded <sequence>`, so `priors attest`
-can number above it; a sequence names nothing. Check 7 takes
-precedence for a revoke too, so a revoke below the record's highest reads
-`superseded`, not `revoked`. Besides the tip-entry lines, the file carries a
-`<digest> superseded <sequence>` line, with the record's current highest for
-that name, for every other entry digest the per-name record holds that was
-signed by an allowlisted key, with check 6's binding, and fails check 7, so
-junk pushed on top of a human's superseded entry does not hide its line. A
-non-tip digest gets no other state, never `reviewed`. Only
-`reviewed` makes a fact `reviewed`. The file holds **no names or paths**: the
-entry digest is the key, so it tells a non-work session nothing about the
-work store, and copies of one signed entry under junk names fail check 6 and
-add no line, so its size is bounded by human signatures.
+state is decided in this order, for an attest and a revoke alike: `superseded`
+when check 7 fails (not the highest sequence, or tied); else `revoked` for a
+revoke; else `lapsed` when check 8 fails; else `reviewed` when checks 4–8 all
+hold. A `superseded` line also carries the record's highest sequence for that
+name, `<digest> superseded <sequence>`, so `priors attest` can number above
+it; a sequence names nothing. Check 7 takes precedence for a revoke too, so a
+revoke below the record's highest reads `superseded`, not `revoked`. Besides
+the tip-entry lines, the file carries non-tip lines, built from the per-name
+record and kept only while the signing key the record holds for the digest is
+on the current allowlist:
+
+- `<digest> revoked` for the record's highest entry when it is an
+  `op: revoke`, untied, signed by an allowlisted key with check 6's binding,
+  and not the tip entry, so junk at a lower sequence pushed on top of a revoke
+  does not hide that it is in effect: every other entry for that name fails
+  check 7;
+- while a name's tip line is not `reviewed`, `revoked` or `lapsed` — its tip
+  entry is junk, missing, unsigned or `superseded` — a
+  `<digest> superseded <sequence>` line, with the record's current highest for
+  that name, for every other entry digest the record holds as superseded, so
+  junk pushed on top of a human's superseded entry does not hide its line.
+
+Once the name's tip line is `reviewed`, `revoked` or `lapsed`, its
+`superseded` non-tip lines are dropped: that tip entry holds the record's
+highest and sits in the local history of any checkout that descends from the
+verdict file's `tip`, so a retry numbers above it with no line. If a remote
+rewrite has since dropped that entry, a retry numbers too low once and reads
+`superseded`, and its own line carries the highest, so the next retry wins.
+The lines are recomputed from the record on every run, so junk pushed on top
+later lists them again. A non-tip digest gets no state but these two, never
+`reviewed`. Only `reviewed` makes a fact `reviewed`. The file holds **no names
+or paths**: the entry digest is the key, so it tells a non-work session
+nothing about the work store, and copies of one signed entry under junk names
+fail check 6 and add no line.
+
+**Size.** While every name's tip line is `reviewed`, `revoked` or `lapsed`,
+the file holds the header and one line per name with a signed tip entry;
+ordinary re-attests and revokes add no non-tip line. Non-tip lines, about 96
+bytes each, exist only for names whose tip is not a human's winning entry — at
+most one `revoked` line, plus the name's superseded digests — and check 1's 1
+MiB cap holds about 10,900 of them. An agent that pushes junk on top of enough
+names can grow the file past it; check 1 then fails for every fact in the
+store, a denial of the label only (residual (d)), never a false `reviewed`.
+`priors attest` still reads such a file's `superseded` lines to number its
+retry, and each retry that wins drops its name's lines until the file fits
+again. These lines, like all of the job's state, hold only while
+`/var/lib/priors` is out of an agent's reach, which on a single-user admin
+host is #171's open decision.
 
 Check 1's ownership test extends to this file: every directory component of
 its path above the store dir is owned by root and writable by root only, or
@@ -1637,8 +1688,10 @@ stay open either way:
   every fact `proposed`, and one push is enough: a pack past the 1 GiB file
   limit or one that cannot transfer within 300 s, or junk that takes the
   mirror to 2 GiB. Recovery needs an admin rewrite of the remote, off-host
-  under the deployment requirement, and for `oversize` a mirror reset. It is
-  a denial of the label only, never a false `reviewed`;
+  under the deployment requirement, and for `oversize` a mirror reset. Junk on
+  top of enough names can also grow the verdict file past check 1's 1 MiB cap
+  (*Size*, above), with the same effect; there the human's winning retries
+  recover it. It is a denial of the label only, never a false `reviewed`;
 - **(e)** the window: other hosts see a push, attest or revoke, at their
   next run of that store's unit, within 15 min + 2 × 300 s, about 25 min,
   per store, of it landing while they can fetch. A revoke takes effect
@@ -2294,8 +2347,27 @@ flagged facts stops being optional.
   restoring H's bytes and entry reads `proposed`; with an agent instead
   pushing an unsigned junk entry at sequence 5 on top of the superseded
   revoke before the retry, the retry still numbers 11, from the revoke's own
-  `superseded` line found in local history, and reads `revoked`, and a
-  restore of H reads `proposed`; *lapse*
+  `superseded` line found in local history, and reads `revoked`, and a restore
+  of H reads `proposed`; with H at 10 observed, the remote rewritten to drop
+  it, a human revoke at 4 pushed, and an unsigned junk entry pushed on top
+  before the job's first fetch of the revoke, the job records the revoke
+  superseded though it never sees it at the tip, the file lists `<digest>
+  superseded 10` for it, `priors attest` reports it not in effect, the retry
+  numbers 11 and reads `revoked`, and a restore of H reads `proposed`; a
+  revoke walked on one side of a merge before a higher entry on the other side
+  is recorded superseded once that entry is walked; a revoke that is the
+  record's highest under an unsigned junk entry at a lower sequence gets a
+  non-tip `revoked` line and is reported in effect, and junk pushed again
+  changes nothing; an attest in that place, with `status: ok` and no line, is
+  reported observed but not in effect and the retry reads `reviewed`, while an
+  `ok` verdict whose `tip` does not descend from the entry's commit, or is not
+  found after the re-fetch, reports pushed but not yet observed; with the
+  job's run still going past the 60 s wait, so the revoke reports pushed but
+  not yet observed, and junk then a restore of H pushed on top before the next
+  run, `priors attest --check` on the revoke's commit reports it observed but
+  not in effect, and the retry numbers 11 and reads `revoked`; with the remote
+  rewritten after the job's last fetch to drop a name's winning entry, a retry
+  reads `superseded` once and the next retry wins; *lapse*
   (check 8): an archive or delete without a revoke, then a forward-commit
   restore, is `proposed`, as is an edit followed by a revert to the attested
   bytes, over the observed set, commits no longer reachable from the remote
@@ -2331,8 +2403,16 @@ flagged facts stops being optional.
   commit recomputes the verdicts over the observed set and the per-name
   record against the current trust file (`stale-remote`), and with unwalked
   commits from an earlier run reads `behind` with an empty set; the verdict file
-  holds no names or paths, and an entry copied under junk
-  names adds no line; a store with no remote URL has no verdicts; *trigger*: a
+  holds no names or paths, and an entry copied under junk names adds no line;
+  once a name's tip reads `reviewed`, `revoked` or `lapsed`, its non-tip
+  `superseded` lines are dropped while the record keeps the digests, a lapsed
+  tip's re-attest numbering above it with no line, and junk then pushed on top
+  lists them again; removing the key that signed a superseded entry drops that
+  entry's line; ordinary re-attests and revokes leave no non-tip
+  line; junk on top of enough names to pass 1 MiB fails check 1 for the store,
+  every fact `proposed`, `priors attest` still numbers its retries from that
+  file, and winning retries bring it back under; a store with no remote URL
+  has no verdicts; *trigger*: a
   connection to a store's socket runs that store's job early and carries no
   input, and a flood queues at most one run; *remote check*, with no trust
   file: a non-v1 entry, a deleted entry file and a commit leaving a
@@ -2361,7 +2441,10 @@ flagged facts stops being optional.
   default branch or reports not pushed, while a checkout whose `HEAD` does
   not descend from that branch's fetched tip is refused; it pokes its
   store's socket and reports the entry as in effect, observed but not in effect
-  (`superseded` or `lapsed`, with the action), pushed but not yet observed,
+  (`superseded` or `lapsed`, with the action, or an `ok` verdict with no line
+  whose `tip` descends from the entry's commit), pushed but not yet observed
+  (re-checked by `priors attest --check <commit>`, which signs and pushes
+  nothing),
   or not pushed; the environment it runs `ssh-keygen` in is exactly the four
   allowlisted variables, so a planted `SSH_SK_HELPER`, `SSH_SK_PROVIDER`,
   `OPENSSL_CONF`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `LIBPCSCLITE_DELEGATE` or
