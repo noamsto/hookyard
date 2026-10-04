@@ -1,6 +1,9 @@
 package sanitize
 
-import "testing"
+import (
+	"testing"
+	"unicode"
+)
 
 func TestConfusablesTable(t *testing.T) {
 	const allBits = 1<<37 - 1
@@ -38,5 +41,34 @@ func TestConfusablesTable(t *testing.T) {
 	}
 	if got := confusableSets[0xa60c]; got != equalsBit {
 		t.Errorf("U+A60C = %#x, want %#x", got, uint64(equalsBit))
+	}
+}
+
+func TestPunctImages(t *testing.T) {
+	for r, img := range punctImages {
+		if r < 0x80 {
+			t.Errorf("U+%04X: ASCII key", r)
+		}
+		if img == "" {
+			t.Errorf("U+%04X: empty image", r)
+		}
+		for _, c := range img {
+			if c < 0x21 || c > 0x7e || unicode.IsLetter(c) || unicode.IsDigit(c) {
+				t.Errorf("U+%04X: image %q has non-punctuation %q", r, img, c)
+			}
+		}
+	}
+
+	for r, want := range map[rune]string{
+		0x1438: "<",
+		0x1433: ">",
+		0x02bc: "'",
+		0x01c3: "!",
+		0xa4f8: ".",
+		0x02ee: `"`,
+	} {
+		if got := punctImages[r]; got != want {
+			t.Errorf("U+%04X = %q, want %q", r, got, want)
+		}
 	}
 }
