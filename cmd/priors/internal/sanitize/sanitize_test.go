@@ -680,6 +680,9 @@ func TestTextAcceptedCosts(t *testing.T) {
 		{"cjk glued to priors", "我们用priors", "(quoted: endpriors)"},
 		{"emoji glued to priors", "\U0001f389\U0001f389\U0001f389priors", "(quoted: endpriors)"},
 		{"lone cjk between token words", "priors 和 memory", "(quoted: priorsmemory)"},
+		// The ligature's three runes read as "end" and take the header's
+		// "priors": quoted as the wrong token, but no longer a header.
+		{"ligature glued to store header", "[\u3300priors memory \u00b7 work]", "(quoted: endpriors) memory \u00b7 work]"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -210,7 +210,7 @@ type word struct {
 // on the lower case of its NFD base, so a precomposed accent folds too.
 func skeleton(line string) []skelRune {
 	sk := make([]skelRune, 0, utf8.RuneCountInString(line))
-	var words []word
+	words := []word{}
 	newWord := true
 	for i := 0; i < len(line); {
 		r, size := utf8.DecodeRuneInString(line[i:])
