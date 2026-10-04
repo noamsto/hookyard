@@ -627,19 +627,26 @@ lowest priority upward.
 | tier | trigger | source | budget | truncation |
 | --- | --- | --- | --- | --- |
 | **1** | `session_start` | `MEMORY.md` index(es) per §4.2's read rule | 4 K chars | from the middle |
+| **1** (continuity, decision 5) | `session_start` | deja-vu session digest | 4 K chars | inside its own fence |
 | **2** | `prompt_submit` — **gated on §7's A/B, not v0** | ranked `priors search "<prompt>"` → top 3 | 2.5 K chars | from the start |
 | **3** | any time | agent runs `priors search` / `rg` / reads a file | unbounded | — |
-| | | **total injected** | **8 K chars** | |
+| | | **total injected, v0 (tier 1 + continuity)** | **8 K chars** | |
+| | | **total injected, with tier 2** | **10.5 K chars** | |
 
-The 8 K total is the ceiling if tier 2 passes its gate (below); in v0 only
-tier 1 injects, so the ceiling there is tier 1's 4 K.
+The total is the sum of the per-source caps in play. In v0 that is tier 1's
+4 K plus the continuity digest's 4 K — **8 K chars**, with the continuity digest
+sitting on top of tier 1's 4 K but still inside that 8 K total, not as a fourth
+tier. Tier 2's 2.5 K is added only if its gate passes (below), for **10.5 K
+chars**; tier 3 is unbounded and outside the total.
 
 **Per-source caps.** [PR #126](https://github.com/noamsto/hookyard/pull/126)
 measured one session-continuity digest at 8190 B, 9056 B with its fence: a
-digest alone can exceed the 8 K total. So tier 1 and the session-continuity
-tool (decision 5) each get their own cap inside the total, for example tier 1
-4 K plus the continuity tool 4 K, and a source over its cap is truncated inside
-its own fence rather than crowding out the other. This holds for deja-vu (§9).
+digest alone can exceed the v0 total. So tier 1 and the session-continuity tool
+(decision 5) each get their own cap — tier 1 4 K chars, the continuity digest
+4 K chars — and the total is their sum: 8 K chars in v0. Tier 2's 2.5 K is
+counted into the total only when it is built (10.5 K chars). A source over its
+cap is truncated inside its own fence rather than crowding out the other. This
+holds for deja-vu (§9).
 
 Tier 1 is cheap and unconditional, and it is what makes the system work when
 everything else fails — a session with a broken retrieval backend still sees the
@@ -649,7 +656,7 @@ hatch, and is the reason R1 matters: the agent can always grep.
 
 **Two indexes.** Each store generates its own index (§4.1), so a work-org
 session has two to inject. Tier 1 injects both, each attributed with the store
-it came from. The 4 K-char budget goes to the session's own store — work —
+it came from. Tier 1's 4 K-char budget goes to the session's own store — work —
 first, and the personal index takes what remains; each index keeps its own
 200-line/25 KB cap. A session in any other repo, with no repo, or unresolvable,
 gets the personal index alone, with the whole budget.
@@ -1233,8 +1240,8 @@ Stated so the design can be falsified rather than defended:
   §4.4's gates and review-by-exception path carry more weight, and the digest of
 flagged facts stops being optional.
 - **Injection starts costing measurable tokens per turn.** The budget is the
-  lever — 4 K in v0, 8 K if tier 2 is built — and tier 1's promoted subset
-  (§4.6) is the first thing to shrink.
+  lever — 8 K in v0 (tier 1 4 K + the continuity digest 4 K), 10.5 K if tier 2
+  is built — and tier 1's promoted subset (§4.6) is the first thing to shrink.
 - **Codex changes its memory schema, or ships the v2 database.** The importer's
   pin on `_sqlx_migrations` (§4.9) is the tripwire: an unknown version is
   skipped and reported, never guessed. A schema that moves every release would
@@ -1261,9 +1268,10 @@ flagged facts stops being optional.
   §4.6 (one test per rule);
 - **fail-open**: missing binary, missing index, unreadable file, and a
   deliberately hung search each yield empty injection and exit 0;
-- budget: each tier's truncation order, asserted positionally, and the total
-  cap; with two indexes, the session's own store fills the tier-1 budget first
-  and each index keeps its own 200-line/25 KB cap (§4.4);
+- budget: each tier's truncation order, asserted positionally, and the
+  per-source caps with their v0 total; with two indexes, the session's own
+  store fills the tier-1 budget first, and each index keeps its own
+  200-line/25 KB cap (§4.4);
 - **the importer**, per engine, against fixtures — a Claude project dir, and a
   Codex SQLite built at the pinned migration version — and an unknown migration
   version is skipped and reported, writes nothing, and exits 0; a byte-identical
@@ -1447,7 +1455,8 @@ Decided by the owner on 2026-09-30 unless marked. Decision 5 is settled
    does not replace it: deja-vu answers "where were we?"; §4 answers "what
    is true about this tooling, and should we act on it?". The per-source cap
    (§4.4) still applies: deja-vu's digest and tier 1 each have their own
-   budget inside the 8 K total.
+   budget, and together they are v0's 8 K total (10.5 K once tier 2's 2.5 K is
+   added).
 6. **Trust model — decided: option A with automatic gates** (§4.4; the owner,
    2026-09-30). Facts that pass the mechanical gates — secret scan and
    redaction, provenance, content heuristics, lint and size cap, always
