@@ -100,9 +100,8 @@ func cmdList(args []string, s streams) int {
 	if len(rows) > 0 {
 		s.outText(sanitize.Fence(sanitize.Header("list"), strings.Join(rows, "\n"), sanitize.NewDelimiter()))
 	}
-	// A skipped file makes the listing incomplete, so it exits non-zero even
-	// when some rows printed, matching index --write. A redaction exclusion is
-	// a policy filter reported on stderr and does not change the exit code.
+	// A skipped file makes the listing incomplete, so exit non-zero even when
+	// some rows printed; a redaction exclusion is reported and does not.
 	if skipped > 0 {
 		return 1
 	}
@@ -114,8 +113,8 @@ func readRoots(cfg config.Config, sess route.Session) []store.Root {
 }
 
 // walk is root.Walk with a missing checkout and every skipped file reported
-// on stderr. skipped counts the files the walk could not read or parse; a
-// missing root is empty, not skipped.
+// on stderr. skipped counts the walk errors; a missing root is empty, not
+// skipped.
 func walk(root store.Root, s streams) (entries []store.Entry, skipped int) {
 	if root.Kind == store.KindCheckout {
 		if _, err := os.Stat(root.Path); errors.Is(err, fs.ErrNotExist) {
@@ -131,8 +130,7 @@ func walk(root store.Root, s streams) (entries []store.Entry, skipped int) {
 }
 
 // visibleEntries are the root's facts the session may see: a checkout's that
-// apply to repo, a local layer's learned in the session's repo. skipped is the
-// number of walk errors the root reported.
+// apply to repo, a local layer's learned in the session's repo.
 func visibleEntries(root store.Root, sess route.Session, repo string, s streams) (entries []store.Entry, skipped int) {
 	entries, skipped = walk(root, s)
 	return slices.DeleteFunc(entries, func(e store.Entry) bool {
