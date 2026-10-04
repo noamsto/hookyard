@@ -104,7 +104,7 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 		}
 	}
 
-	flags := gate.Provenance(cfg.RecordDir(), req.SessionID, req.External)
+	flags := gate.Provenance(cfg.RecordDir(), cfg.ProvenanceDir(), req.SessionID, req.External)
 	if req.IdentityConflict {
 		flags = append(flags, "provenance:asserted-identity")
 	}

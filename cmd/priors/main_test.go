@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -211,6 +212,29 @@ func (sb *sandbox) record(session string) {
 	}
 	if err := f.Close(); err != nil {
 		sb.t.Fatal(err)
+	}
+	sb.toolCall("post_tool", session, "Bash", `{"command":"go test ./..."}`)
+}
+
+// toolCall feeds the bare handler a tool event's envelope, as hookyard does
+// around every tool call.
+func (sb *sandbox) toolCall(event, session, tool, input string) {
+	sb.t.Helper()
+	sb.send(sb.toolEnvelope(event, session, tool, input, `"ok"`))
+}
+
+func (sb *sandbox) toolEnvelope(event, session, tool, input, response string) string {
+	return fmt.Sprintf(`{"engine":"claude-code","canonical_event":%q,"session_id":%q,"cwd":%q,"tool_name":%q,"tool_input":%s,"native":{"tool_response":%s}}`,
+		event, session, sb.dir, tool, input, response)
+}
+
+// send runs the bare handler on envelope, which must stay silent and succeed.
+func (sb *sandbox) send(envelope string) {
+	sb.t.Helper()
+	res := sb.run(envelope)
+	wantExit(sb.t, res, 0)
+	if res.stdout != "" {
+		sb.t.Fatalf("tool event handler printed %q", res.stdout)
 	}
 }
 
@@ -1355,4 +1379,164 @@ func TestIndexWithCwdIgnoresOpenStdin(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantContains(t, "index", additionalContext(t, string(out)), "[indexed-fact](demo/indexed-fact.md)")
+}
+
+func TestAddFlagsShellIngestion(t *testing.T) {
+	for name, c := range map[string]struct{ command, prefix, reason string }{
+		"gh issue view 12": {"gh issue view 12", "flagged personal ", "provenance:shell"},
+		"go test":          {"go test ./...", "published personal ", ""},
+	} {
+		t.Run(strings.ReplaceAll(name, " ", "_"), func(t *testing.T) {
+			sb := newSandbox(t, "personal")
+			repo := sb.repo(personalRemote)
+			sb.record("sess-1")
+			sb.toolCall("post_tool", "sess-1", "Bash", fmt.Sprintf(`{"command":%q}`, c.command))
+
+			res := sb.run("", "add", "--name", "shell-fact", "--description", "from a shell session",
+				"--type", "project", "--cwd", repo, "--session", "sess-1")
+			wantExit(t, res, 0)
+			if !strings.HasPrefix(res.stdout, c.prefix) {
+				t.Fatalf("stdout %q, want prefix %q", res.stdout, c.prefix)
+			}
+			if c.reason != "" {
+				wantContains(t, "stdout", res.stdout, c.reason)
+			}
+		})
+	}
+}
+
+// markerFiles lists the names in the sandbox's marker dir, failing if it is
+// not a private directory holding only private files.
+func (sb *sandbox) markerFiles(dir string) []string {
+	sb.t.Helper()
+	info, err := os.Stat(dir)
+	if err != nil {
+		sb.t.Fatal(err)
+	}
+	if !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+		sb.t.Fatalf("%s: mode %v, want a private directory", dir, info.Mode())
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		sb.t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		fi, err := e.Info()
+		if err != nil {
+			sb.t.Fatal(err)
+		}
+		if fi.Mode().Perm()&0o077 != 0 {
+			sb.t.Errorf("%s: mode %v has group or other bits", e.Name(), fi.Mode())
+		}
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+func wantMarkerExts(t *testing.T, names []string, exts ...string) {
+	t.Helper()
+	if len(names) != len(exts) {
+		t.Fatalf("marker files %v, want extensions %v", names, exts)
+	}
+	for _, ext := range exts {
+		found := false
+		for _, n := range names {
+			found = found || filepath.Ext(n) == ext
+		}
+		if !found {
+			t.Errorf("marker files %v lack %s", names, ext)
+		}
+	}
+}
+
+func TestPostToolMarkerFiles(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	sb.toolCall("post_tool", "sess-1", "Bash", `{"command":"gh issue view 12"}`)
+
+	wantMarkerExts(t, sb.markerFiles(filepath.Join(sb.state, "provenance")), ".seen", ".ingest")
+}
+
+// TestPreToolMarksIngestion: pre_tool marks the session before the command
+// runs, so a call that fails, and never reaches post_tool, still flags it.
+func TestPreToolMarksIngestion(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.toolCall("pre_tool", "sess-1", "Bash", `{"command":"gh issue view 12"}`)
+
+	wantMarkerExts(t, sb.markerFiles(filepath.Join(sb.state, "provenance")), ".seen", ".ingest")
+	sb.record("sess-1")
+	res := sb.run("", "add", "--name", "pre-tool-fact", "--description", "from a failed shell call",
+		"--type", "project", "--cwd", repo, "--session", "sess-1")
+	wantExit(t, res, 0)
+	if !strings.HasPrefix(res.stdout, "flagged personal ") {
+		t.Fatalf("stdout %q", res.stdout)
+	}
+	wantContains(t, "stdout", res.stdout, "provenance:shell")
+}
+
+func TestPostToolMarkerHonoursXDGStateHome(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	sb.configPath = filepath.Join(sb.dir, "config-no-state.toml")
+	sb.writeFile(sb.configPath, strings.Join([]string{
+		fmt.Sprintf("profile = %q", sb.profile),
+		fmt.Sprintf("personal_store = %q", sb.personal),
+		fmt.Sprintf("work_store = %q", sb.work),
+		`work_orgs = ["github.com/factify-inc"]`,
+		`personal_orgs = ["github.com/noamsto"]`,
+		fmt.Sprintf("ssh_config = %q", sb.sshConfig),
+		fmt.Sprintf("scanner = %q", sb.scanner),
+	}, "\n")+"\n")
+	sb.toolCall("post_tool", "sess-1", "Bash", `{"command":"go test ./..."}`)
+
+	wantMarkerExts(t, sb.markerFiles(filepath.Join(sb.dir, "xdg-state", "priors", "provenance")), ".seen")
+}
+
+// TestPostToolLargeResponse: the size cap cuts native, after tool_input, so
+// the call is still judged by its command.
+func TestPostToolLargeResponse(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	big := strconv.Quote(strings.Repeat("x", 2<<20))
+	sb.send(sb.toolEnvelope("post_tool", "sess-1", "Bash", `{"command":"go test ./..."}`, big))
+
+	wantMarkerExts(t, sb.markerFiles(filepath.Join(sb.state, "provenance")), ".seen")
+}
+
+// TestPostToolTruncatedToolInput: when the size cap cuts inside tool_input the
+// command is unreadable, and an unreadable shell command counts as ingestion.
+func TestPostToolTruncatedToolInput(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	big := strconv.Quote(strings.Repeat("x", 2<<20))
+	sb.send(sb.toolEnvelope("post_tool", "sess-1", "Bash", `{"command":`+big+`}`, `"ok"`))
+
+	wantMarkerExts(t, sb.markerFiles(filepath.Join(sb.state, "provenance")), ".seen", ".ingest")
+}
+
+// TestPostToolTruncatedNonShellInput: the same cut on a non-shell tool loses
+// input that was never a command, so it is not ingestion.
+func TestPostToolTruncatedNonShellInput(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	big := strconv.Quote(strings.Repeat("x", 2<<20))
+	sb.send(sb.toolEnvelope("post_tool", "sess-1", "Write", `{"content":`+big+`}`, `"ok"`))
+
+	wantMarkerExts(t, sb.markerFiles(filepath.Join(sb.state, "provenance")), ".seen")
+}
+
+func TestAddUnreadableMarkerDir(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.record("sess-1")
+	markers := filepath.Join(sb.state, "provenance")
+	if err := os.RemoveAll(markers); err != nil {
+		t.Fatal(err)
+	}
+	sb.writeFile(markers, "not a directory")
+
+	res := sb.run("", "add", "--name", "unwatched-fact", "--description", "markers unreadable",
+		"--type", "project", "--cwd", repo, "--session", "sess-1")
+	wantExit(t, res, 0)
+	if !strings.HasPrefix(res.stdout, "flagged personal ") {
+		t.Fatalf("stdout %q", res.stdout)
+	}
+	wantContains(t, "stdout", res.stdout, "provenance:no-ingest-record")
 }

@@ -23,8 +23,9 @@ var webTools = []string{"webfetch", "websearch", "web_search", "web_fetch"}
 
 // Provenance returns the gate-2 flag reasons for a fact written by session.
 // A session is trusted only when the record positively covers it with tool
-// events and none of them ingested external content.
-func Provenance(recordDir, session string, external bool) []string {
+// events, the watcher saw it, and neither the record nor the watcher saw
+// external content ingested.
+func Provenance(recordDir, markerDir, session string, external bool) []string {
 	var reasons []string
 	add := func(r string) {
 		if !slices.Contains(reasons, r) {
@@ -63,6 +64,13 @@ func Provenance(recordDir, session string, external bool) []string {
 	}
 	if !covered {
 		add("provenance:no-tool-record")
+	}
+	seen, ingest, err := sessionMarkers(markerDir, session)
+	if ingest {
+		add("provenance:shell")
+	}
+	if err != nil || (covered && !seen) {
+		add("provenance:no-ingest-record")
 	}
 	return reasons
 }

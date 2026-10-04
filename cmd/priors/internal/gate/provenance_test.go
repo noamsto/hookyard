@@ -65,41 +65,81 @@ func TestProvenance(t *testing.T) {
 		name     string
 		days     map[string][]recLine
 		raw      map[string]string
+		markers  map[string]bool
 		session  string
 		external bool
 		want     []string
 	}{
 		{
 			name:    "bash post_tool only",
+			markers: map[string]bool{s: false},
 			days:    map[string][]recLine{"2026-09-29": {{s, "pre_tool", "Bash"}, {s, "post_tool", "Bash"}, other}},
 			session: s,
 		},
 		{
 			name:    "WebFetch",
+			markers: map[string]bool{s: false},
 			days:    map[string][]recLine{"2026-09-29": {{s, "post_tool", "Bash"}, {s, "post_tool", "WebFetch"}}},
 			session: s,
 			want:    []string{"provenance:web"},
 		},
 		{
 			name:    "codex web_search",
+			markers: map[string]bool{s: false},
 			days:    map[string][]recLine{"2026-09-29": {{s, "post_tool", "web_search"}}},
 			session: s,
 			want:    []string{"provenance:web"},
 		},
 		{
 			name:    "mcp tool",
+			markers: map[string]bool{s: false},
 			days:    map[string][]recLine{"2026-09-29": {{s, "pre_tool", "mcp__x__y"}}},
 			session: s,
 			want:    []string{"provenance:mcp"},
 		},
 		{
-			name: "session across two day files",
+			name:    "session across two day files",
+			markers: map[string]bool{s: false},
 			days: map[string][]recLine{
 				"2026-09-28": {{s, "session_start", ""}, {s, "post_tool", "WebSearch"}},
 				"2026-09-29": {{s, "post_tool", "mcp__gh__issue"}},
 			},
 			session: s,
 			want:    []string{"provenance:web", "provenance:mcp"},
+		},
+		{
+			name:    "shell ingest",
+			days:    map[string][]recLine{"2026-09-29": {{s, "post_tool", "Bash"}}},
+			markers: map[string]bool{s: true},
+			session: s,
+			want:    []string{"provenance:shell"},
+		},
+		{
+			name:    "covered but unseen",
+			days:    map[string][]recLine{"2026-09-29": {{s, "post_tool", "Bash"}}},
+			session: s,
+			want:    []string{"provenance:no-ingest-record"},
+		},
+		{
+			name:    "web and shell",
+			days:    map[string][]recLine{"2026-09-29": {{s, "post_tool", "WebFetch"}}},
+			markers: map[string]bool{s: true},
+			session: s,
+			want:    []string{"provenance:web", "provenance:shell"},
+		},
+		{
+			name:    "not covered, ingest marker",
+			days:    map[string][]recLine{"2026-09-29": {{s, "session_start", ""}}},
+			markers: map[string]bool{s: true},
+			session: s,
+			want:    []string{"provenance:no-tool-record", "provenance:shell"},
+		},
+		{
+			name:    "other session's markers",
+			days:    map[string][]recLine{"2026-09-29": {{s, "post_tool", "Bash"}}},
+			markers: map[string]bool{"sess-other": true},
+			session: s,
+			want:    []string{"provenance:no-ingest-record"},
 		},
 		{
 			name:    "session absent",
@@ -121,6 +161,7 @@ func TestProvenance(t *testing.T) {
 		},
 		{
 			name:     "external",
+			markers:  map[string]bool{s: false},
 			days:     map[string][]recLine{"2026-09-29": {{s, "post_tool", "Bash"}}},
 			session:  s,
 			external: true,
@@ -128,6 +169,7 @@ func TestProvenance(t *testing.T) {
 		},
 		{
 			name:    "torn last line ignored",
+			markers: map[string]bool{s: false},
 			days:    map[string][]recLine{"2026-09-29": {{s, "post_tool", "Bash"}}},
 			raw:     map[string]string{"2026-09-29": `{"session_id":"sess-1","canonical_event":"post_tool","tool_name":"WebFe`},
 			session: s,
@@ -136,7 +178,13 @@ func TestProvenance(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := recordDir(t, tt.days, tt.raw)
-			got := Provenance(dir, tt.session, tt.external)
+			markerDir := filepath.Join(t.TempDir(), "provenance")
+			for session, ingest := range tt.markers {
+				if err := MarkSession(markerDir, session, ingest); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := Provenance(dir, markerDir, tt.session, tt.external)
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("Provenance = %v, want %v", got, tt.want)
 			}
@@ -145,8 +193,21 @@ func TestProvenance(t *testing.T) {
 }
 
 func TestProvenanceMissingStreamDir(t *testing.T) {
-	got := Provenance(t.TempDir(), "sess-1", false)
+	got := Provenance(t.TempDir(), filepath.Join(t.TempDir(), "provenance"), "sess-1", false)
 	if want := []string{"provenance:no-record"}; !slices.Equal(got, want) {
+		t.Errorf("Provenance = %v, want %v", got, want)
+	}
+}
+
+func TestProvenanceUnreadableMarkers(t *testing.T) {
+	const s = "sess-1"
+	dir := recordDir(t, map[string][]recLine{"2026-09-29": {{s, "post_tool", "Bash"}}}, nil)
+	markerDir := filepath.Join(t.TempDir(), "provenance")
+	if err := os.WriteFile(markerDir, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := Provenance(dir, markerDir, s, false)
+	if want := []string{"provenance:no-ingest-record"}; !slices.Equal(got, want) {
 		t.Errorf("Provenance = %v, want %v", got, want)
 	}
 }
