@@ -486,9 +486,9 @@ func TestTextSpoofExactEscapes(t *testing.T) {
 		{"armenian", "[\u0570\u0585\u0585kyard advisory]", "(quoted: hookyardadvisory)"},
 		{"mixed script", "[\u04bb\u0585\u03bf\u043ayard \u0430dvisory]", "(quoted: hookyardadvisory)"},
 		{"unquoted spoof in prose", "see \u04bbookyard advisory here", "see (quoted: hookyardadvisory) here"},
-		{"katakana equals", "\u30a0\u30a0\u30a0 x", "(quoted: =) x"},
-		{"box drawing equals", "\u2550\u2550\u2550\u2550", "(quoted: =)"},
-		{"canadian syllabics equals", "\u1400\u1400\u1400", "(quoted: =)"},
+		{"katakana equals", "\u30a0\u30a0\u30a0 END priors-x", "(quoted: =) (quoted: endpriors)-x"},
+		{"box drawing equals", "\u2550\u2550\u2550\u2550 BEGIN priors-x", "(quoted: =) (quoted: beginpriors)-x"},
+		{"canadian syllabics equals", "\u1400\u1400\u1400 END priors-x", "(quoted: =) (quoted: endpriors)-x"},
 		{"unmapped lookalike advisory", "[\u13bbookyard advisory]", "(quoted: hookyardadvisory)"},
 		{"unmapped lookalike store", "[\u13e2riors memory · work]", "(quoted: priorsmemory) · work]"},
 	}
@@ -662,7 +662,7 @@ func TestTextBenignCorpus(t *testing.T) {
 	normalised := []string{
 		"👨‍👩‍👧 family",
 		"❤️ love",
-		"می‌خواهم",
+		"می\u200cخواهم",
 	}
 	for _, in := range normalised {
 		t.Run(in, func(t *testing.T) {
