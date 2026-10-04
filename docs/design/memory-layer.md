@@ -988,10 +988,20 @@ carries the FIDO attestation blob (`ssh-sk-attest-v01`) and the challenge it
 was made over. **`priors trust check`** verifies that the blob chains to a
 vendor root pinned in `priors`' own source and covers that public key; the
 NixOS and nix-darwin module runs it at Nix build time when it builds the trust
-file, and the verdict job runs it again. An allowlist entry without valid
-evidence is ignored. Self-attestation and "none" attestation are rejected, so
-a token with no FIDO attestation cannot be enrolled. With no key enrolled, no
-fact is `reviewed` and flagged facts stay `proposed`.
+file, and the verdict job runs it again. The module fails the build when any
+allowlist entry fails it: the rebuild fails naming the entry, no new trust
+file is built, and the previous generation's trust file stays; the job's own
+run still ignores a failing entry. A failed precondition (below) is host state
+the rebuild cannot fix, and the profile and org lists must still reach §4.2's
+routing, so it writes an empty allowlist and warns; a key without evidence is
+a defect in the reviewed allowlist itself, and failing loudly puts it in front
+of the human's review. When both apply the allowlist is empty, there is
+nothing to check, and the build succeeds with the warning. A hookyard bump
+that changes the pinned vendor roots can invalidate an existing key's
+evidence; the rebuild error names the entry, and the fix is to remove or
+re-enrol it. Self-attestation and "none" attestation are rejected, so a token
+with no FIDO attestation cannot be enrolled. With no key enrolled, no fact is
+`reviewed` and flagged facts stay `proposed`.
 
 Rejected: a software key behind a passphrase in a caching `ssh-agent` or
 `gpg-agent`, which any same-user process can ask to sign; and `ssh-add -c` or
@@ -1062,9 +1072,10 @@ opt-in session-trust mode whose residual is stated; or a trust root outside
 the owner's session, such as an allowlist signed by a hardware key, or a root
 credential entered outside the owner's terminal (polkit outside tmux, a
 separate admin account). Whether the verdict job's account and its
-credentials need a root outside the owner's session there too — a separate
-admin account, or verdicts signed by a key held outside that session — is
-part of the same decision, #171's to decide. Tracked in
+credentials, and its per-store units, need a root outside the owner's session
+there too — a separate admin account, or verdicts signed by a key held
+outside that session — is part of the same decision, #171's to decide.
+Tracked in
 [#171](https://github.com/noamsto/hookyard/issues/171).
 
 **Unwritable means no agent write takes effect without a human's root act.**
@@ -1111,15 +1122,20 @@ namespace no git or file signature uses. For `op: revoke`, `path` and
 **`priors attest <name>`** is the human command, run in an interactive
 terminal. The fact body is agent-written and the human must sign exactly the
 bytes they saw, so it computes everything the payload holds before it signs,
-in this order. It reads the fact file once. In §4.2's clean environment it
-resolves the remote's default branch from the pinned URL — the branch the
-verdict job fetches — fetches it, and refuses unless the checkout's `HEAD`
-descends from that fetched tip. It computes the sequence: one above the
-larger of the highest well-formed sequence in the name's local history after
-that fetch (check 7), walked with replace objects off
-(`GIT_NO_REPLACE_OBJECTS=1`) and refusing a checkout with `info/grafts`, so
-an entry already on the remote is counted; and the sequence on the verdict
-file's `superseded` line for the name's current entry, if any. It builds the
+in this order. It reads the fact file once. Before its first git command it
+refuses a checkout with `info/grafts` or a `shallow` file in its git common
+dir (a file check, no git run; §5's nix-config row requires a full clone),
+and every walk it runs — the `HEAD` check and the sequence walk below — uses
+replace objects off (`GIT_NO_REPLACE_OBJECTS=1`) and
+`-c core.commitGraph=false` (covering `objects/info/commit-graph` and a
+`commit-graphs/` chain). In §4.2's clean environment it resolves the
+remote's default branch from the pinned URL — the branch the verdict job
+fetches — fetches it, and refuses unless the checkout's `HEAD` descends from
+that fetched tip. It computes the sequence: one above the larger of the
+highest well-formed sequence in the name's local history after that fetch
+(check 7), so an entry already on the remote is counted; and the largest
+sequence on any `superseded` line of the verdict file whose digest matches
+any version of `.attest/<name>` in that history, if any. It builds the
 seven-line payload over the sha256 of the fact's bytes with
 `confidence: reviewed` set in memory, and renders those bytes and the
 payload with every control, bidi, tag and other non-printing character
@@ -1129,20 +1145,28 @@ otherwise aborts with nothing written. It then writes `.attest/<name>`,
 commits the fact and its entry together, and pushes the commit to the pinned
 URL by §4.2's clean push with the explicit refspec
 `HEAD:refs/heads/<that branch>`, never the checkout's own branch or push
-config; a non-fast-forward push is reported as not pushed. It pokes the
-trigger, waits up to 60 s for the verdict file to show the entry's new state,
-and tells the human one of:
+config; a non-fast-forward push is reported as not pushed. It pokes its
+store's trigger socket, waits up to 60 s for the verdict file to show the
+entry's new state, and tells the human one of:
 
-- in effect: the verdict file lists the entry `reviewed`, or, for a revoke,
-  `revoked`.
+- in effect: the verdict file lists the entry `reviewed` for an attest; for a
+  revoke, only a `revoked` line counts.
 - observed but not in effect: the verdict file lists the entry `superseded`
-  or `lapsed`, with the action. For `superseded` — a remote rewrite hid a
-  higher entry the per-name record keeps — the human re-attests under a new
-  name, as when junk exhausts the sequence space; for `lapsed`, the human
-  re-attests.
+  or `lapsed`, with the action. For `superseded`, attest or revoke — a remote
+  rewrite hid a higher entry the per-name record keeps — the human re-runs
+  the same command under the same name first: the superseded entry is now in
+  the name's local history, and its `superseded` line, which carries the
+  record's highest, stays in the verdict file even under junk pushed on top,
+  so the retry numbers above it. Only an attest retry that is still
+  `superseded` is re-attested under a new name, as when junk exhausts the
+  sequence space. A revoke is in effect only on a `revoked` line; any other
+  result means the human retries the revoke. Removing the revoke from
+  history takes a second remote rewrite, which needs Administration again
+  (residual (b)). For `lapsed`, the human re-attests.
 - pushed but not yet observed, with the reason the job reported. Other hosts
-  see the entry at their next run, within one timer interval plus one run,
-  about 20 min (15 min + 300 s), of the push landing while they can fetch.
+  see the entry at their next run of that store's unit, within
+  15 min + 2 × 300 s, about 25 min, of the push landing while they can
+  fetch.
 - not pushed: the commit exists only in this working tree. An attest reads
   `proposed` everywhere, and a revoke is in effect nowhere (residual (e)).
 
@@ -1185,15 +1209,27 @@ terminal and the shell the human types into are user-controlled.
 `session_start`, as a dedicated system account, `priors-verify`, whose uid is
 fixed in the build: not root, not the owner's user, not root-equivalent. It
 fetches and parses agent-pushable content (packs, blobs), so a git or parser
-bug must not hand an agent root. On NixOS it is a systemd service, timer and
-socket with the usual sandboxing (`ProtectSystem=strict`, `ProtectHome=yes`,
+bug must not hand an agent root. On NixOS it is a template unit per store,
+`priors-verify@<store id>`: a systemd service, timer and socket instance with
+the usual sandboxing (`ProtectSystem=strict`, `ProtectHome=yes`,
 `NoNewPrivileges`, `PrivateTmp`, `StateDirectory=priors/<store id>`); on
-nix-darwin, a `launchd` daemon with `UserName`. It runs every 15 min (systemd
-`AccuracySec=1s`, so the timer does not drift; launchd `StartInterval=900`),
-at boot and on the trigger (below), for each store the trust file lists with
-a remote URL. One run per store holds a lock on the store's state dir; a
-trigger during a run queues at most one more. The job runs only for the
-stores the host's profile clones (§4.2): the personal store everywhere, the
+nix-darwin, one `launchd` daemon per store with `UserName`. It runs every
+15 min counted start to start (systemd `OnUnitActiveSec=15min` with
+`OnActiveSec=0` for the run at boot and on first start, and `AccuracySec=1s`,
+so the timer does not drift; never `OnUnitInactiveSec`, which counts from the
+end of every run and so adds a run's length to every interval, not only to
+one that overlaps a run; launchd `StartInterval=900` with `RunAtLoad`), at boot and on
+the trigger (below), for each store the trust file lists with a remote URL.
+A tick that elapses while the instance is active, socket-triggered runs
+included, starts nothing, and the next tick counts from it; with a run of at
+most 300 s, a run starts within 15 min + 300 s of any instant and observes a
+push within 15 min + 2 × 300 s, about 25 min, of it landing, per store.
+launchd `StartInterval` likewise skips a tick while the job runs. Each
+instance has its own lock on the store's state dir and its own budget, so
+stores run concurrently and residual (e)'s bound holds per store whatever
+the store count; a trigger during a run queues at most one more. The job
+runs only for the stores the host's profile clones (§4.2): the personal
+store everywhere, the
 work store on work-profile hosts only. The trust file lists, and the module
 provisions read-only credentials for, only those stores, so a personal host
 has no work mirror, no work verdict file and no work credential.
@@ -1233,7 +1269,8 @@ progress checkpointed.
 record names work facts, so it is never in the world-readable store dir. Per
 name it records the highest well-formed sequence seen and the entry digest at
 it, whether that sequence is tied, and the entry digests seen revoked,
-superseded or lapsed. Checks 7
+superseded or lapsed, keeping each allowlisted-signed digest seen superseded
+so the verdict file can list it (below). Checks 7
 and 8 read the observed set **and** this record, and the record only grows.
 A human mirror reset (the `oversize` way out) deletes `mirror.git` and keeps
 the record, so a reset re-fetches history without forgetting a revoke or a
@@ -1249,15 +1286,20 @@ CPU limits on the unit. Since each run deletes a cut-short transfer, a
 transfer that cannot finish within one run never progresses. A run ends in
 one of four statuses, each reported:
 
-- `ok`: every commit reachable from every tip the job has recorded has been
-  walked, and the verdicts are rewritten. Anything less — including a new
-  tip that is an ancestor of an unwalked recorded tip — is `behind`.
-- `behind`: some commit reachable from a recorded tip is unwalked: it could
-  not walk the backlog inside the budget, or the transfer was cut short (the
-  wall clock or the file-size limit killed it mid-fetch). The verdict set is
-  **empty**. A backlog that one run can transfer is walked from its
-  checkpoint over later runs and recovers on its own, never touching
-  `session_start`. A single push whose pack exceeds the 1 GiB file limit, or
+- `ok`: this run's fetch completed (the transfer finished and its tip is
+  recorded) and every commit reachable from every tip the job has recorded
+  has been walked, and the verdicts are rewritten. Anything less — including
+  a new tip that is an ancestor of an unwalked recorded tip — is `behind`.
+- `behind`: every other outcome. Some commit reachable from a recorded tip is
+  unwalked (it could not walk the backlog inside the budget), or the fetch
+  failed or timed out after the remote accepted authentication, even with no
+  unwalked commit: during ref advertisement or negotiation, in a server-side
+  stall before the pack starts, or with the pack cut short (the wall clock or
+  the file-size limit killed it mid-fetch). So a remote an agent can slow
+  after authentication, by pushing many refs, empties the labels instead of
+  keeping old verdicts for up to 24 h. The verdict set is **empty**. A
+  backlog that one run can transfer is walked from its checkpoint over later
+  runs and recovers on its own, never touching `session_start`. A single push whose pack exceeds the 1 GiB file limit, or
   cannot transfer within 300 s, keeps the store `behind` until an admin
   rewrite of the remote removes it (off-host, under the deployment
   requirement). Junk pushed on top of a revoke empties the labels and never
@@ -1268,10 +1310,16 @@ one of four statuses, each reported:
   keeps it `oversize` after every reset, until an admin rewrite of the
   remote removes it (off-host, under the deployment requirement) and the
   mirror is reset.
-- `stale-remote`: it could not connect or authenticate (no transfer started:
-  network down, host key or credential refused). The verdicts are recomputed
-  over the observed set and the per-name record against the current trust
-  file, keeping the `fetched` time of the last successful fetch.
+- `stale-remote`: the run failed before the remote accepted authentication —
+  TCP or SSH connect, host-key check, or credential refused — and every
+  commit reachable from every recorded tip has been walked; otherwise the run
+  is `behind` with an empty verdict set. Over HTTPS a TLS verification
+  failure counts with a refused host key, and a 401 on the request that
+  carried the credential, with no earlier request having succeeded, counts
+  as a refused credential; a 403 is `behind`, as is a failure the job cannot
+  place before authentication. The verdicts are recomputed over the observed
+  set and the per-name record against the current trust file, keeping the
+  `fetched` time of the last successful fetch.
 
 **The verdict file**, `/var/lib/priors/<store id>/verdicts`, is the job's
 output: owned by `priors-verify`, mode 0644, its path fixed in the build,
@@ -1291,12 +1339,19 @@ index hash the same bytes with no serialization to agree on. Then comes one
 line, `<sha256 of the entry file's bytes> <state>`, for each name whose tip
 entry is a well-formed v1 entry, `op: attest` or `op: revoke`, with a valid
 SSHSIG by an allowlisted key, sk flags (check 5) and check 6's binding. The
-state is `revoked` for a revoke; `superseded` when check 7 fails (not the
-highest sequence, or tied); `lapsed` when check 8 fails; and `reviewed` when
-checks 4–8 all hold. A `superseded` line also carries the record's highest
+state is decided in this order, for an attest and a revoke alike:
+`superseded` when check 7 fails (not the highest sequence, or tied); else
+`revoked` for a revoke; else `lapsed` when check 8 fails; else `reviewed`
+when checks 4–8 all hold. A `superseded` line also carries the record's highest
 sequence for that name, `<digest> superseded <sequence>`, so `priors attest`
-can number above it; a sequence names nothing. A signed revoke fails
-check 4, which needs `op: attest`, and its line reads `revoked`. Only
+can number above it; a sequence names nothing. Check 7 takes
+precedence for a revoke too, so a revoke below the record's highest reads
+`superseded`, not `revoked`. Besides the tip-entry lines, the file carries a
+`<digest> superseded <sequence>` line, with the record's current highest for
+that name, for every other entry digest the per-name record holds that was
+signed by an allowlisted key, with check 6's binding, and fails check 7, so
+junk pushed on top of a human's superseded entry does not hide its line. A
+non-tip digest gets no other state, never `reviewed`. Only
 `reviewed` makes a fact `reviewed`. The file holds **no names or paths**: the
 entry digest is the key, so it tells a non-work session nothing about the
 work store, and copies of one signed entry under junk names fail check 6 and
@@ -1317,10 +1372,11 @@ activation on nix-darwin, owned by `priors-verify`. Never a plain
 `priors-verify` and fail check 1 for every store. Activation recreates a
 wiped store dir empty, so residual (a) applies.
 
-**The trigger** is a socket any local user can connect to (a systemd socket
-unit with `Accept=no`; launchd `Sockets`). It carries no input: a connection
-only asks for an early run, so a flood hits the one-queued-run rule. The
-module's activation pokes it after any trust-file change, so a rebuild's
+**The trigger** is each store's own socket, one any local user can connect to
+(a systemd socket unit with `Accept=no`; launchd `Sockets`). It carries no
+input: a connection only asks for an early run of that store's unit, so a
+flood hits the one-queued-run rule. The module's activation pokes every
+store's socket after any trust-file change, so a rebuild's
 digest mismatch leaves facts `proposed` for the length of one run, not until
 the next timer.
 
@@ -1346,8 +1402,11 @@ claiming fact:
    `priors-attest@hookyard` by an allowlisted key, an sk type with
    user-presence and user-verified, the `store`/`name` binding — in-process,
    with no git and no subprocess, against the allowlist as the trust file
-   lists it (its evidence checked by `priors trust check` at build time and
-   by the job), so a verdict line alone never labels bytes no human signed.
+   lists it: every listed key passed `priors trust check` at build time, which
+   failed the build otherwise, and the job checks it again. A trust file
+   placed root-owned by other means (the home-manager-only case) must pass
+   `priors trust check` before it is placed, a human rule, stated as one. So
+   a verdict line alone never labels bytes no human signed.
 
 The verdict job runs checks 4–8 over the tip's `.attest/<name>`, the observed
 set and the per-name record:
@@ -1400,9 +1459,11 @@ on each host, by its verdict job.
 **Sequence and revocation.**
 
 - A new entry for a name takes one above the larger of the highest sequence
-  in its local history and the sequence on the verdict file's `superseded`
-  line for its current entry (`priors attest`, above). If junk exhausts the
-  sequence space for a name, or the job still reports the new entry
+  in its local history and the largest sequence on any verdict-file
+  `superseded` line whose digest matches any version of `.attest/<name>` in
+  that history (`priors attest`, above). If the job reports the
+  entry `superseded`, the human retries under the same name first; if junk
+  exhausts the sequence space for a name, or an attest retry is still
   `superseded`, the human re-attests the fact under a new name.
 - A `revoke` as the latest entry makes the fact `proposed`; re-attesting takes
   a higher sequence. A revoke is how a human withdraws review without editing
@@ -1442,7 +1503,8 @@ forgets it, through the observed set and the per-name record, so a remote
 rewrite cannot raise that host's verdict. A default-branch switch is the
 same case.
 
-The **deployment requirement**, stated, not assertable by the module:
+The **deployment requirement**, stated, not assertable by the module
+(tracked in [#192](https://github.com/noamsto/hookyard/issues/192)):
 credentials readable by the owner's user on any agent host — the `gh`
 token, git credential helpers, SSH keys with push access — carry no
 Administration permission on the store repos (for example, a fine-grained
@@ -1461,7 +1523,9 @@ stay open either way:
   it is lost everywhere;
 - **(c)** deleting the store repo or the job's credential leaves each host's
   last verdicts in force for at most 24 h after the last successful fetch
-  (check 1's `fetched` bound); then the store reads `proposed`;
+  (check 1's `fetched` bound); then the store reads `proposed`. A deletion
+  seen after authentication empties the verdicts at once; the 24 h bound
+  stays for a refused credential;
 - **(d)** an agent that pushes junk can keep a store `behind` or `oversize`,
   every fact `proposed`, and one push is enough: a pack past the 1 GiB file
   limit or one that cannot transfer within 300 s, or junk that takes the
@@ -1469,8 +1533,8 @@ stay open either way:
   under the deployment requirement, and for `oversize` a mirror reset. It is
   a denial of the label only, never a false `reviewed`;
 - **(e)** the window: other hosts see a push, attest or revoke, at their
-  next run, within one timer interval plus one run, about 20 min
-  (15 min + 300 s), of it landing while they can fetch. A revoke takes effect
+  next run of that store's unit, within 15 min + 2 × 300 s, about 25 min,
+  per store, of it landing while they can fetch. A revoke takes effect
   on a host only once that host's job has observed it; until then the old
   entry may read `reviewed` there. Check 3 makes a locally revoked entry
   read `proposed` while its bytes stay in the working tree, but an agent can
@@ -1922,7 +1986,7 @@ change.
 | **hookyard** | *only if tier 2 passes its gate (§4.4):* `prompt_submit` added to `HasAdvisorySlot` for Claude and Pi (Codex already has `session_start` and `prompt_submit` since #101, so needs no hookyard change for tiers 1 and 2); Pi bridge's `input` reply delivered (not discarded); `before_agent_start` registration made a real per-prompt handler | the only router changes this design can require; tier 2 is impossible on Claude and Pi without them (R2, §4.7), and v0 needs none of them |
 | **hookyard** | *only if tier 2 passes its gate (§4.4):* captured `prompt_submit` advisory payload fixtures per engine, per its own evidentiary convention | a claimed-advisory engine with no fixture is a claim, not a capability |
 | **`priors`** (separate package and binary, built from the hookyard repo) | `cmd/priors` and its own tree, with its own manifest, reached through hookyard's `exec` handler contract; it speaks the envelope as JSON like any third-party handler and imports no `internal/` package, so moving it to its own repo is moving files. `add` / `list` (`--flagged`) / `show` / `search` / `lint` / `index` / `import` / `touch` / `move` / `publish` / `attest` / `trust check` / `verify`; the verdict job (`priors verify`) reads the root-owned trust file and writes `/var/lib/priors` (§4.4); the host profile, both org lists, each store's id, path and remote URL, the work-name floor and the attestation allowlist from the root-owned trust file (§4.4), and the other keys from `config.toml`, per §4.2's config table; write-time redaction and §4.2's routing; v0 `rg` backend | the owner's decision 4: the router stays small and auditable, and the store keeps a schema cadence of its own; §4.4's fail-open contract lives here, and covers its `pre_tool` guards too, since the router cannot deny on handler error (§4.2) |
-| **nix-config** | install `priors` and its manifest, wiring `session_start` to `priors index` and `post_tool` to the `priors touch` usage logger (`fire_and_forget`, §4.6), and `prompt_submit` only if tier 2 passes its gate; clone the personal store on every host incl. `halo` and `mbp`, and the work store on work-profile hosts only, as full (not shallow, partial or blobless) clones (§4.2, §4.8); the trust file (§4.4) via `environment.etc` on every host, personal ones included: the trust-file keys of §4.2's config table, with the attestation allowlist in its own file, checked by `priors trust check` when the module builds the trust file, with an activation-time diff of the whole trust file plus the `priors` store path and the hookyard revision it was built from, and an activation poke of the verdict job's trigger socket after any trust-file change; the `priors-verify` system account, its systemd service, timer and socket (nix-darwin: a `launchd` daemon), and `/var/lib/priors` (root-owned, mode 0755, each store dir `StateDirectory=priors/<store id>` owned by `priors-verify`, never a plain `StateDirectory=priors`; nix-darwin: by activation); a read-only credential per store, readable by `priors-verify` only, with the verdict job, the trust file's stores and these credentials limited to the stores the host's profile clones, so a personal host has no work mirror, verdict file or credential (§4.4), and §4.4's deployment requirement on owner-readable credentials (credentials without Administration), stated, not asserted; an evaluation-time assertion of §4.4's preconditions (no rootful `docker` group, no Nix trusted user, directly or through a group, no `NOPASSWD` sudo, rebuilds behind a human-typed root credential), which on failure writes an empty allowlist and warns; the secret scanner, `git`, `ssh` and `rg` pinned at build time (§4.2); the host-level include of the personal index in a Cursor-only rule file, never the shared instruction file Claude, Codex and Cursor all read, and no repo-level work include (§4.7); optional Obsidian `programs.obsidian.vaults` entries, one vault per store | one manifest, four engines — the pattern `programs.hookyard.manifests` already exists for; clone placement is the first of §4.2's two layers |
+| **nix-config** | install `priors` and its manifest, wiring `session_start` to `priors index` and `post_tool` to the `priors touch` usage logger (`fire_and_forget`, §4.6), and `prompt_submit` only if tier 2 passes its gate; clone the personal store on every host incl. `halo` and `mbp`, and the work store on work-profile hosts only, as full (not shallow, partial or blobless) clones (§4.2, §4.8); the trust file (§4.4) via `environment.etc` on every host, personal ones included: the trust-file keys of §4.2's config table, with the attestation allowlist in its own file, checked by `priors trust check` when the module builds the trust file, which fails the build on any entry that fails it, with an activation-time diff of the whole trust file plus the `priors` store path and the hookyard revision it was built from, and an activation poke of each store's trigger socket after any trust-file change; the `priors-verify` system account and a systemd template unit per store, `priors-verify@<store id>` (service, timer and socket instance; the timer `OnActiveSec=0` plus `OnUnitActiveSec=15min` with `AccuracySec=1s`, never `OnUnitInactiveSec`; nix-darwin: one `launchd` daemon per store with `StartInterval=900` and `RunAtLoad`; deploying it is [#191](https://github.com/noamsto/hookyard/issues/191)), and `/var/lib/priors` (root-owned, mode 0755, each store dir `StateDirectory=priors/<store id>` owned by `priors-verify`, never a plain `StateDirectory=priors`; nix-darwin: by activation); a read-only credential per store, readable by `priors-verify` only, with the verdict job, the trust file's stores and these credentials limited to the stores the host's profile clones, so a personal host has no work mirror, verdict file or credential (§4.4), and §4.4's deployment requirement on owner-readable credentials (credentials without Administration), stated, not asserted; an evaluation-time assertion of §4.4's preconditions (no rootful `docker` group, no Nix trusted user, directly or through a group, no `NOPASSWD` sudo, rebuilds behind a human-typed root credential), which on failure writes an empty allowlist and warns; the secret scanner, `git`, `ssh` and `rg` pinned at build time (§4.2); the host-level include of the personal index in a Cursor-only rule file, never the shared instruction file Claude, Codex and Cursor all read, and no repo-level work include (§4.7); optional Obsidian `programs.obsidian.vaults` entries, one vault per store | one manifest, four engines — the pattern `programs.hookyard.manifests` already exists for; clone placement is the first of §4.2's two layers |
 | **dispatcher** | `crew reap` runs `priors import` (§4.9), then distillation proposals (§4.3b); the judge consults `priors search` before choosing tier/engine/model | closes failure mode 2 — the judge currently decides from a static table while `ratings.jsonl` holds the evidence |
 | **nix-config** | worker MCP profile unchanged (zero servers) | memory must not be the reason a worker grows an MCP dependency (R1) |
 
@@ -2078,9 +2142,11 @@ flagged facts stops being optional.
   whose `fetched` is 24 h old or more each leave every fact of that store
   `proposed`; a `/var/lib/priors` owned by `priors-verify` fails check 1;
   *key and evidence* (checks 4 and 5): an allowlist entry without
-  valid hardware evidence, or with self-attestation or none, is ignored; an
-  allowlisted key that is not an sk type, a signature missing user-presence,
-  one missing user-verified, and a signature in another namespace (a git or
+  valid hardware evidence, or with self-attestation or none, fails the build,
+  which builds no new trust file and leaves the previous one; the verdict
+  job, given a trust file holding such an entry, ignores it; an allowlisted
+  key that is not an sk type, a signature missing user-presence, one missing
+  user-verified, and a signature in another namespace (a git or
   file signature) leave the fact `proposed`; *binding* (checks 3 and 6): a
   wrong store id or `name` (the job, check 6, and the index, check 3) and a
   wrong `path` or `sha256` (the index, check 3) each leave it `proposed`, so a
@@ -2097,7 +2163,16 @@ flagged facts stops being optional.
   ignored, while a junk entry with a high sequence makes the fact `proposed`;
   a revoke as the latest entry makes the fact `proposed`, and a re-attest at a
   higher sequence makes it `reviewed`; removing a key from the allowlist makes
-  its attestations `proposed` while the facts it revoked stay revoked; *lapse*
+  its attestations `proposed` while the facts it revoked stay revoked; with H
+  attested at 10 and observed, a remote rewritten to a tip with an unsigned
+  entry at 3, and separately to one with no entry, and a human revoke, the
+  line reads `<digest> superseded 10` and `priors attest` reports it not in
+  effect; the same-name retry numbers 11 and reads `revoked`; an agent then
+  restoring H's bytes and entry reads `proposed`; with an agent instead
+  pushing an unsigned junk entry at sequence 5 on top of the superseded
+  revoke before the retry, the retry still numbers 11, from the revoke's own
+  `superseded` line found in local history, and reads `revoked`, and a
+  restore of H reads `proposed`; *lapse*
   (check 8): an archive or delete without a revoke, then a forward-commit
   restore, is `proposed`, as is an edit followed by a revert to the attested
   bytes, over the observed set, commits no longer reachable from the remote
@@ -2107,7 +2182,12 @@ flagged facts stops being optional.
   read-only credential and its own state, so a planted `.git/config`,
   `config.toml` or owner environment is not read, and no git runs in a
   directory the owner's user can write; it runs as `priors-verify`, not root;
-  a personal-profile host has no work mirror, verdict file or credential;
+  the timer counts start to start (`OnUnitActiveSec`, never
+  `OnUnitInactiveSec`) in one instance per store; a socket-started run
+  overlapping a tick, with a push landing just after that run's fetch, is
+  observed within 15 min + 2 × 300 s; a run on one store
+  taking its full 300 s does not delay the other store's observation past the
+  bound; a personal-profile host has no work mirror, verdict file or credential;
   *monotonic*: a force push or a default-branch switch that drops a revoke, a
   higher entry or a lapsing commit the job has already observed leaves the
   fact `proposed`, and a mirror reset (deleting `private/mirror.git`) keeps
@@ -2121,14 +2201,19 @@ flagged facts stops being optional.
   300 s keeps the store `behind` on every run, never `reviewed`, until the
   remote is rewritten; a mirror at its cap fetches nothing and reads
   `oversize`, and junk on the remote that fills it reads `oversize` again
-  after a reset; leftover `tmp_pack*` files are removed; a connect or auth
-  failure recomputes the verdicts over the observed set and the per-name
-  record against the current trust file (`stale-remote`); the verdict file
+  after a reset; leftover `tmp_pack*` files are removed; a cut-short pack
+  with no unwalked commit reads `behind`, never `ok`; an authenticated fetch
+  that stalls or times out before the pack starts reads `behind`, never
+  `stale-remote` or `ok`; a refused host key or credential with no unwalked
+  commit recomputes the verdicts over the observed set and the per-name
+  record against the current trust file (`stale-remote`), and with unwalked
+  commits from an earlier run reads `behind` with an empty set; the verdict file
   holds no names or paths, and an entry copied under junk
   names adds no line; a store with no remote URL has no verdicts; *trigger*: a
-  connection runs the job early and carries no input, and a flood queues at
-  most one run; *remote check*, with no trust file: a non-v1 entry, a deleted
-  entry file and a commit leaving a `confidence: reviewed` fact without an
+  connection to a store's socket runs that store's job early and carries no
+  input, and a flood queues at most one run; *remote check*, with no trust
+  file: a non-v1 entry, a deleted entry file and a commit leaving a
+  `confidence: reviewed` fact without an
   entry each fail, and none of checks 1–8 runs; *cost*: `priors index` starts
   no git process and reads no history for attestation, and its time per
   claiming fact does not grow with history length; *commit gate and
@@ -2141,14 +2226,18 @@ flagged facts stops being optional.
   `confidence: reviewed` set, aborts with nothing written when the fact file
   changed after it was read, and, after fetching the pinned URL, numbers the
   entry one above the larger of the highest well-formed sequence in the
-  name's history and the sequence on the current entry's `superseded` line,
-  `--revoke` included, so a re-attest after a `superseded` verdict does not
-  loop; a planted replace ref is ignored and a checkout with `info/grafts` is
-  refused; it pushes the commit, and a checkout on another branch, or with a
+  name's history and the largest sequence on any `superseded` line whose
+  digest matches a version of the name's entry in that history, `--revoke`
+  included, so a re-attest after a `superseded` verdict does not loop; a
+  planted replace ref and a planted commit-graph that falsifies parents are
+  ignored by both its walks, the `HEAD` check and the sequence walk, and a
+  checkout with `info/grafts`, or a `shallow` file in its git common dir, is
+  refused; a superseded attest or revoke is retried under the
+  same name; it pushes the commit, and a checkout on another branch, or with a
   repo-local push refspec or `push.default`, still pushes to the remote's
   default branch or reports not pushed, while a checkout whose `HEAD` does
-  not descend from that branch's fetched tip is refused; it pokes the
-  trigger and reports the entry as in effect, observed but not in effect
+  not descend from that branch's fetched tip is refused; it pokes its
+  store's socket and reports the entry as in effect, observed but not in effect
   (`superseded` or `lapsed`, with the action), pushed but not yet observed,
   or not pushed; the environment it runs `ssh-keygen` in is exactly the four
   allowlisted variables, so a planted `SSH_SK_HELPER`, `SSH_SK_PROVIDER`,
@@ -2329,7 +2418,7 @@ Decided by the owner on 2026-09-30 unless marked. Decision 5 is settled
 | # | workstream | repo | delivers |
 | --- | --- | --- | --- |
 | 1 | the two store repos, each remote running the lint as a required check (§4.3) and refusing force pushes (§4.4's deployment requirement: owner-readable credentials without Administration); `priors` v0 (`add`/`list`/`show`/`search`/`lint`/`index`), §4.4's gates and the host-local layer, write-time redaction (§4.3), §4.2's routing and read rule, with the trust-file keys of §4.2's config table read from the trust file (§4.4) (`cmd/priors` reads them from `config.toml` today; moving them is #174, #178 and #179), and that table's other follow-ups (#180–#183) | hookyard (`cmd/priors`) | tier 1 + tier 3 on all four engines; the gates and the host-local layer for flagged facts |
-| 2 | nix-config wiring: install, clone per §4.2 (full clones, never shallow or partial), the trust file (§4.4) on every host, checked at build time by `priors trust check` once workstream 5 ships it, the verdict job's wiring (`priors-verify`, its service, timer and trigger socket, and the activation poke) with read-only credentials per store (readable by `priors-verify` only), the pinned binaries of §4.2's config table, the personal index's host-level include in a Cursor-only rule file, never the shared instruction file Claude, Codex and Cursor all read, and dropped wherever Cursor's `session_start` hook runs `priors index` (#140), and no repo-level work include (§4.7) | nix-config | reach with no hookyard change |
+| 2 | nix-config wiring: install, clone per §4.2 (full clones, never shallow or partial), the trust file (§4.4) on every host, checked at build time by `priors trust check` once workstream 5 ships it, which fails the build on any entry that fails it, and until the module runs that check it writes an empty allowlist, the verdict job's wiring (`priors-verify`, its service, timer and trigger socket per store, and the activation poke of each) with read-only credentials per store (readable by `priors-verify` only), the pinned binaries of §4.2's config table, the personal index's host-level include in a Cursor-only rule file, never the shared instruction file Claude, Codex and Cursor all read, and dropped wherever Cursor's `session_start` hook runs `priors index` (#140), and no repo-level work include (§4.7) | nix-config | reach with no hookyard change |
 | 3 | importer v0 (Claude; Codex stage-1 rows behind the schema pin, §4.9) and the per-host migration with dedup proposals (decision 2) | hookyard (`priors`) | content to actually retrieve |
 | 4 | usage log and promotion/demotion: `post_tool → priors touch`, `fire_and_forget` (§4.6) | hookyard (`priors`) | strengthening and forgetting |
 | 5 | `priors attest`, `priors trust check`, `priors verify` and the attestation check (§4.4: the bound entry, its sequence, revocation and lapse, the sk flags, the trust file, the verdict file) in `priors index`, and the `pre_tool` tripwires: the write guard (§4.4), before the stores go to a second host; the read guard (§4.2), before the work store is cloned on a host that also runs non-work sessions | hookyard (`priors`) | the review boundary holds by the key; the guards catch what hookyard sees. The attestation check, used only to promote flagged facts, is designed in [#130](https://github.com/noamsto/hookyard/issues/130), not a v0 blocker; the guards are not blocked |
