@@ -787,3 +787,123 @@ func TestFailedIndexSyncHealsOnTheNextRun(t *testing.T) {
 		t.Errorf("the second run moved HEAD: %s -> %s", committed, got)
 	}
 }
+
+func withRemote(t *testing.T) (fixture, string) {
+	t.Helper()
+	fx := setup(t)
+	bare := filepath.Join(t.TempDir(), "remote.git")
+	git(t, t.TempDir(), "init", "--bare", "-q", bare)
+	git(t, fx.dir(), "remote", "add", "origin", bare)
+	git(t, fx.dir(), "push", "-q", "-u", "origin", "main")
+	fx.cfg.Push = true
+	return fx, bare
+}
+
+func rev(t *testing.T, dir, spec string) string {
+	t.Helper()
+	return strings.TrimSpace(git(t, dir, "rev-parse", spec))
+}
+
+func TestPushSendsOnlyTheGatedCommit(t *testing.T) {
+	fx, bare := withRemote(t)
+	base := head(t, fx.dir())
+	git(t, fx.dir(), "config", "remote.origin.push", "refs/heads/*:refs/heads/*")
+	git(t, fx.dir(), "config", "push.default", "matching")
+	git(t, fx.dir(), "branch", "side")
+	git(t, fx.dir(), "push", "-q", "origin", "side")
+	pushedSide := rev(t, bare, "side")
+	ahead := strings.TrimSpace(git(t, fx.dir(), "commit-tree", "side^{tree}", "-p", "side", "-m", "x"))
+	git(t, fx.dir(), "update-ref", "refs/heads/side", ahead)
+
+	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+	fx.index(t)
+
+	if w := fx.checkout(t); w != "" {
+		t.Fatalf("warning = %q", w)
+	}
+	if got, want := rev(t, bare, "main"), head(t, fx.dir()); got != want {
+		t.Errorf("remote main = %s, want local HEAD %s", got, want)
+	}
+	if got := rev(t, bare, "main^"); got != base {
+		t.Errorf("remote main^ = %s, want %s", got, base)
+	}
+	if got := rev(t, bare, "side"); got != pushedSide {
+		t.Errorf("remote side = %s, want %s", got, pushedSide)
+	}
+}
+
+func TestPushRefusesUngatedCommitsAhead(t *testing.T) {
+	fx, bare := withRemote(t)
+	pushed := rev(t, bare, "main")
+	git(t, fx.dir(), "commit", "-q", "--allow-empty", "-m", "outside")
+	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+	fx.index(t)
+
+	w := fx.checkout(t)
+	for _, want := range []string{"not pushed", "is not exactly one priors commit ahead"} {
+		if !strings.Contains(w, want) {
+			t.Errorf("warning %q lacks %q", w, want)
+		}
+	}
+	if got := rev(t, bare, "main"); got != pushed {
+		t.Errorf("remote main moved: %s -> %s", pushed, got)
+	}
+	if subject := strings.TrimSpace(git(t, fx.dir(), "log", "-1", "--format=%s")); subject != "priors: test" {
+		t.Errorf("subject = %q", subject)
+	}
+}
+
+func TestPushFailureQuotesNoRemoteOutput(t *testing.T) {
+	fx, _ := withRemote(t)
+	const echo = "SECRET-REMOTE-ECHO"
+	script := filepath.Join(t.TempDir(), "receive-pack")
+	writeFile(t, script, []byte("#!/bin/sh\necho "+echo+"\necho "+echo+" >&2\nexit 1\n"))
+	if err := os.Chmod(script, 0o755); err != nil { //nolint:gosec // a test executable
+		t.Fatal(err)
+	}
+	git(t, fx.dir(), "config", "remote.origin.receivepack", script)
+	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+	fx.index(t)
+
+	w := fx.checkout(t)
+	if w == "" || !strings.Contains(w, "git push failed") {
+		t.Errorf("warning = %q, want it to report a failed push", w)
+	}
+	if strings.Contains(w, echo) {
+		t.Errorf("warning quotes remote output: %q", w)
+	}
+}
+
+func TestPushRefusesWithoutUpstream(t *testing.T) {
+	fx := setup(t)
+	fx.cfg.Push = true
+	base := head(t, fx.dir())
+	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+	fx.index(t)
+
+	if w := fx.checkout(t); !strings.Contains(w, "no upstream") {
+		t.Errorf("warning = %q", w)
+	}
+	if head(t, fx.dir()) == base {
+		t.Error("nothing was committed")
+	}
+}
+
+func TestPushRefusesStaleTrackingRef(t *testing.T) {
+	fx, bare := withRemote(t)
+	other := filepath.Join(t.TempDir(), "other")
+	git(t, t.TempDir(), "clone", "-q", bare, other)
+	git(t, other, "-c", "user.name=Other", "-c", "user.email=other@example.invalid", "commit", "-q", "--allow-empty", "-m", "elsewhere")
+	git(t, other, "push", "-q", "origin", "main")
+	elsewhere := rev(t, bare, "main")
+
+	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+	fx.index(t)
+
+	if w := fx.checkout(t); !strings.Contains(w, "git push failed") {
+		t.Errorf("warning = %q", w)
+	}
+	if got := rev(t, bare, "main"); got != elsewhere {
+		t.Errorf("remote main = %s, want %s", got, elsewhere)
+	}
+}
