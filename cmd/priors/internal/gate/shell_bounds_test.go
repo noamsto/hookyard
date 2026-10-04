@@ -19,8 +19,8 @@ const (
 	boundStack = 128 << 20
 	// boundAlloc is the most any one command may allocate.
 	boundAlloc = 96 << 20
-	// hangGuard only stops a judge that never returns; the work bounds are
-	// the allocation and stack ones.
+	// hangGuard only stops a judge that never returns; each test holds
+	// judging to its own, tighter time bound.
 	hangGuard = 10 * time.Second
 )
 

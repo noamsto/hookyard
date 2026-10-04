@@ -868,14 +868,9 @@ func paramOpens(s string) string {
 // gluedIngests judges the command again from every value glued to an option or
 // assignment word (`--split-string=gh`, `-Sgh`, `KEY=gh`), as the command word
 // it may start, followed by the words after it. Only a listed value starts one,
-// as `rg --pre=X` runs X on files, never on the later words. Of a short option's
-// tails only the ones no longer than a listed name are tried: a longer tail
-// with a listed name ends in a shorter one that is that name, and judging the
-// name alone flags whatever the longer tail would. Every such command is judged
-// at once, as one segment from the first listed value on, with each later one
-// placed after its word: a name in it sees the words it would have seen, a
-// listed value among them only makes a later group or verb flag, and no inert
-// command word clears it.
+// as `rg --pre=X` runs X on files, never on the later words. All of them are
+// judged as one segment, from the first listed value on, so the pass stays
+// linear; a listed value inside it can only add a flag.
 func gluedIngests(words []string) string {
 	var seg []string
 	for _, w := range words {
