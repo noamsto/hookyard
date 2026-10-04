@@ -849,8 +849,8 @@ func TestRunRouteClaudeCodeStopObserverPrintsNothing(t *testing.T) {
 	}
 }
 
-// The issue #140 repro: an advising handler on Cursor's session_start used to
-// print nothing; Cursor's standalone additional_context slot now carries it.
+// Cursor's session_start has no decision slot, so its advice prints alone, as
+// the top-level additional_context Cursor reads on that event.
 func TestRunRouteCursorSessionStartDeliversAdvice(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")

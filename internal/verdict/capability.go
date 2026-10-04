@@ -108,9 +108,10 @@ func HasGuardSlot(engine vocab.Engine, canonicalEvent, nativeEvent string) bool 
 // post_tool carry it standalone in a top-level additional_context, per
 // cursor.com/docs/agent/hooks and the cursor-agent 2026.10.01 bundle's hook
 // output validator (docs/design/fixtures/cursor-advisory/, not live-probed).
-// Pi's set is wider than its decision set: on pre_tool, advice rides the block reason on
-// a deny, and a standalone advisory is appended to that call's own tool
-// result, which the model reads in the next request beside the result — the
+// Pi's set is wider than its decision set: on pre_tool, advice rides the
+// block reason on a deny, and a standalone advisory is appended to that
+// call's own tool result, which the model reads in the next request beside
+// the result — the
 // same place Claude Code's pre_tool additionalContext lands (§11.1). The bridge
 // also delivers a standalone advisory on session_start (as an injected message
 // before the agent starts) and on post_tool (appended to the tool result),
