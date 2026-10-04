@@ -1042,7 +1042,9 @@ appears in this design at all. It is not the medium: `obsidian-cli` needs the
 app running (R3), `ob` moves bytes but cannot be queried, and its sync's
 markdown merge is a text merge with no ancestry, which is the wrong tool for a
 corpus two agents write to concurrently. Running git *and* Sync over one
-directory is explicitly rejected.
+directory is explicitly rejected. The vault's own `.obsidian/` state never
+reaches a store commit: priors leaves dirty paths outside the fact layout
+uncommitted and names them in a one-line note.
 
 Prior context worth carrying: Obsidian was installed in `nix-config` on Apr 16
 2026 with two vaults (`personal`, `work`), the `sync`/`bases`/`properties` core

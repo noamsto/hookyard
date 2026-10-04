@@ -270,12 +270,9 @@ func TestRefusesUngatedPaths(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, "_global/passwd.md", false, ""},
-		{"non-fact file", func(t *testing.T, fx fixture) {
-			writeFile(t, filepath.Join(fx.dir(), "notes.txt"), []byte("jotted notes\n"))
-		}, "notes.txt", false, "jotted"},
-		{"gitignore edit", func(t *testing.T, fx fixture) {
-			writeFile(t, filepath.Join(fx.dir(), ".gitignore"), []byte("*.secret\n"))
-		}, ".gitignore", true, "*.secret"},
+		{"non-fact file in the fact layout", func(t *testing.T, fx fixture) {
+			writeFile(t, filepath.Join(fx.dir(), "_global", "notes.txt"), []byte("jotted notes\n"))
+		}, "_global/notes.txt", false, "jotted"},
 		{"work-name fact", func(t *testing.T, fx fixture) {
 			f := cleanFact("leak-fact")
 			f.Body = "deploys to factify-inc infrastructure\n"
@@ -310,11 +307,6 @@ func TestRefusesUngatedPaths(t *testing.T) {
 		{"root-level markdown", func(t *testing.T, fx fixture) {
 			writeFile(t, filepath.Join(fx.dir(), "README.md"), []byte("readme\n"))
 		}, "README.md", false, ""},
-		{"deleted non-fact", func(t *testing.T, fx fixture) {
-			if err := os.Remove(filepath.Join(fx.dir(), ".gitignore")); err != nil {
-				t.Fatal(err)
-			}
-		}, ".gitignore", true, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -360,6 +352,109 @@ func TestRefusesUngatedPaths(t *testing.T) {
 				committest.AssertHeadIndexInTree(t, fx.dir())
 			}
 		})
+	}
+}
+
+func TestLeavesPathsOutsideTheFactLayout(t *testing.T) {
+	tests := []struct {
+		name  string
+		plant func(t *testing.T, fx fixture)
+		path  string
+		leak  string
+	}{
+		{"obsidian", func(t *testing.T, fx fixture) {
+			writeFile(t, filepath.Join(fx.dir(), ".obsidian", "workspace.json"), []byte(`{"secret":"jotted"}`))
+		}, ".obsidian/workspace.json", "jotted"},
+		{"root notes", func(t *testing.T, fx fixture) {
+			writeFile(t, filepath.Join(fx.dir(), "notes.txt"), []byte("jotted notes\n"))
+		}, "notes.txt", "jotted"},
+		{"gitignore edit", func(t *testing.T, fx fixture) {
+			writeFile(t, filepath.Join(fx.dir(), ".gitignore"), []byte("*.secret\n"))
+		}, ".gitignore", "*.secret"},
+		{"gitignore deletion", func(t *testing.T, fx fixture) {
+			if err := os.Remove(filepath.Join(fx.dir(), ".gitignore")); err != nil {
+				t.Fatal(err)
+			}
+		}, ".gitignore", ""},
+		{"symlink", func(t *testing.T, fx fixture) {
+			if err := os.MkdirAll(filepath.Join(fx.dir(), ".obsidian"), 0o755); err != nil { //nolint:gosec // test fixture
+				t.Fatal(err)
+			}
+			if err := os.Symlink("/etc/passwd", filepath.Join(fx.dir(), ".obsidian", "link")); err != nil {
+				t.Fatal(err)
+			}
+		}, ".obsidian/link", "passwd"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := setup(t)
+			before := head(t, fx.dir())
+			tt.plant(t, fx)
+			fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+			fx.index(t)
+
+			w := fx.checkout(t)
+			if head(t, fx.dir()) == before {
+				t.Fatalf("HEAD did not move; warning = %q", w)
+			}
+			got := strings.Fields(git(t, fx.dir(), "log", "-1", "--name-only", "--format="))
+			if want := []string{"MEMORY.md", "_global/good-fact.md"}; !slices.Equal(got, want) {
+				t.Errorf("commit files = %v, want %v", got, want)
+			}
+			if strings.Contains(w, "\n") || !strings.Contains(w, tt.path) || !strings.Contains(w, "left uncommitted") {
+				t.Errorf("warning = %q, want one line naming %s as left uncommitted", w, tt.path)
+			}
+			if tt.leak != "" && strings.Contains(w, tt.leak) {
+				t.Errorf("warning %q repeats the file's content", w)
+			}
+			if git(t, fx.dir(), "status", "--porcelain", "--untracked-files=all", "--", tt.path) == "" {
+				t.Errorf("%s is no longer dirty", tt.path)
+			}
+			if s := staged(t, fx.dir()); s != "" {
+				t.Errorf("staged %q, want nothing", s)
+			}
+			if tt.name == "obsidian" || tt.name == "root notes" || tt.name == "symlink" {
+				if slices.Contains(lsFiles(t, fx.dir()), tt.path) {
+					t.Errorf("%s reached the git index", tt.path)
+				}
+			}
+			committest.AssertHeadIndexInTree(t, fx.dir())
+		})
+	}
+}
+
+func TestRefusalAlsoNamesLeftOutPaths(t *testing.T) {
+	fx := setup(t)
+	before := head(t, fx.dir())
+	writeFile(t, filepath.Join(fx.dir(), ".obsidian", "workspace.json"), []byte("{}"))
+	f := cleanFact("secret-fact")
+	f.Body = "value " + scannerHit + "\n"
+	fx.put(t, "_global/secret-fact.md", f)
+	fx.index(t)
+
+	w := fx.checkout(t)
+	for _, want := range []string{"_global/secret-fact.md", ".obsidian/workspace.json"} {
+		if !strings.Contains(w, want) {
+			t.Errorf("warning = %q, want it to name %s", w, want)
+		}
+	}
+	if head(t, fx.dir()) != before {
+		t.Error("HEAD moved")
+	}
+	if s := staged(t, fx.dir()); s != "" {
+		t.Errorf("staged %q, want nothing", s)
+	}
+}
+
+func TestOnlyPathsOutsideTheFactLayoutIsNothingToDo(t *testing.T) {
+	fx := setup(t)
+	before := head(t, fx.dir())
+	writeFile(t, filepath.Join(fx.dir(), ".obsidian", "workspace.json"), []byte("{}"))
+	if w := fx.checkout(t); w != "" {
+		t.Errorf("warning = %q, want none", w)
+	}
+	if head(t, fx.dir()) != before {
+		t.Error("HEAD moved")
 	}
 }
 
@@ -522,18 +617,18 @@ func TestFailedCommitWarnsAndLaterCommitCatchesUp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	writeFile(t, filepath.Join(fx.dir(), "notes.txt"), []byte("jotted\n"))
+	writeFile(t, filepath.Join(fx.dir(), "_global", "notes.txt"), []byte("jotted\n"))
 	fx.put(t, "_global/second-fact.md", cleanFact("second-fact"))
 	fx.index(t)
-	if w := fx.checkout(t); !strings.Contains(w, "notes.txt") {
-		t.Fatalf("warning = %q, want notes.txt refused", w)
+	if w := fx.checkout(t); !strings.Contains(w, "_global/notes.txt") {
+		t.Fatalf("warning = %q, want _global/notes.txt refused", w)
 	}
 	if head(t, fx.dir()) != before {
-		t.Fatal("HEAD moved with notes.txt in the checkout")
+		t.Fatal("HEAD moved with _global/notes.txt in the checkout")
 	}
 	committest.AssertHeadIndexInTree(t, fx.dir())
 
-	if err := os.Remove(filepath.Join(fx.dir(), "notes.txt")); err != nil {
+	if err := os.Remove(filepath.Join(fx.dir(), "_global", "notes.txt")); err != nil {
 		t.Fatal(err)
 	}
 	if w := fx.checkout(t); w != "" {

@@ -564,16 +564,19 @@ func TestPublishCommitsWholeCheckout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bad := filepath.Join(dir, "notes.txt")
+	bad := filepath.Join(dir, "_global", "notes.txt")
+	if err := os.MkdirAll(filepath.Dir(bad), 0o755); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(bad, []byte("jotted\n"), 0o644); err != nil { //nolint:gosec // test fixture
 		t.Fatal(err)
 	}
 	res, err = Add(context.Background(), fx.cfg, request("second-fact", personalRepo), fx.deps)
-	if err != nil || !strings.Contains(res.Warning, "notes.txt") {
-		t.Fatalf("second add = %+v, %v; want a warning naming notes.txt", res, err)
+	if err != nil || !strings.Contains(res.Warning, "_global/notes.txt") {
+		t.Fatalf("second add = %+v, %v; want a warning naming _global/notes.txt", res, err)
 	}
 	if h := head(t, dir); h != "" {
-		t.Fatalf("HEAD = %s, want it unborn while notes.txt is in the checkout", h)
+		t.Fatalf("HEAD = %s, want it unborn while _global/notes.txt is in the checkout", h)
 	}
 	committest.AssertHeadIndexInTree(t, dir)
 
@@ -595,8 +598,8 @@ func TestPublishCommitsWholeCheckout(t *testing.T) {
 	if len(listed) != 3 {
 		t.Errorf("HEAD's MEMORY.md lists %v, want all three facts", listed)
 	}
-	if slices.Contains(tree, "notes.txt") {
-		t.Error("notes.txt reached HEAD")
+	if slices.Contains(tree, "_global/notes.txt") {
+		t.Error("_global/notes.txt reached HEAD")
 	}
 	committest.AssertHeadIndexInTree(t, dir)
 }
