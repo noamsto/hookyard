@@ -101,6 +101,16 @@ func TestIngestsCall(t *testing.T) {
 		{"line continuation", "Bash", `{"command":"gh \\\nissue view 1"}`, true},
 		{"quoted script after write verb", "Bash", `{"command":"gh pr create --body \"gh issue view 1\""}`, true},
 		{"escaped space in command word", "Bash", `{"command":"grep\\ x gh issue view 1"}`, true},
+		{"env gh attached short value", "Bash", `{"command":"env gh issue -Racme/Sedit view 1"}`, true},
+		{"env gh attached long value", "Bash", `{"command":"env gh --x=auth issue view 1"}`, true},
+		{"env gh attached jq value", "Bash", `{"command":"env gh issue --jq=close view 1"}`, true},
+		{"empty quotes inside word", "Bash", `{"command":"g\"\"h issue view 1"}`, true},
+		{"empty single quotes inside word", "Bash", `{"command":"g''h issue view 1"}`, true},
+		{"quoted piece joined to word", "Bash", `{"command":"\"g\"h issue view 1"}`, true},
+		{"empty quotes in fetcher", "Bash", `{"command":"c''url example.com"}`, true},
+		{"bash -c joined quotes", "Bash", `{"command":"bash -c 'g\"\"h issue view 1'"}`, true},
+		{"backslash newline inside word", "Bash", `{"command":"g\\\nh issue view 1"}`, true},
+		{"rg --pre escaped script", "Bash", `{"command":"rg --pre 'g\\h issue view 1' ."}`, true},
 
 		// not ingestion
 		{"git log", "Bash", `{"command":"git log"}`, false},

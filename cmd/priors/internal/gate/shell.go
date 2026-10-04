@@ -54,14 +54,21 @@ func IngestsCall(toolName string, toolInput json.RawMessage) bool {
 	return true
 }
 
-// segmentBreaks separate commands; pass 1 of ingestsCommand adds quotes.
+// segmentBreaks separate commands; two readings of ingestsCommand add quotes.
 const segmentBreaks = "\n;&|(){}`"
+
+var (
+	unescape   = strings.NewReplacer("\\\n", "", "\\", "")
+	dropQuotes = strings.NewReplacer(`"`, "", "'", "")
+)
 
 // ingestsCommand matches a listed name in any segment whose command word is not
 // inert, so `rg curl src/` stays clean while `echo x | curl …`, `setsid gh pr
-// view 2` and `bash -c "gh pr view 2"` match. A quoted script is judged on its
-// own (quotes break segments); a quoted argument or an escape (`g\h`) stays with
-// the gh that owns it.
+// view 2` and `bash -c "gh pr view 2"` match. Three readings are ORed: the raw
+// text with quotes as segment breaks, so a quoted script is judged on its own;
+// the unescaped text likewise, so a script with escapes is too; and the
+// unescaped text with quotes deleted, as bash joins words (`g""h`, `"g"h`,
+// `g\h`), so a quoted argument stays with the gh that owns it.
 func ingestsCommand(text string) bool {
 	lower := strings.ToLower(text)
 	for _, scheme := range []string{"http://", "https://", "ftp://"} {
@@ -69,26 +76,34 @@ func ingestsCommand(text string) bool {
 			return true
 		}
 	}
-	unescaped := strings.NewReplacer("\\\n", " ", "\\", "").Replace(text)
-	return ingestsSegments(text, segmentBreaks+`"'`) || ingestsSegments(unescaped, segmentBreaks)
+	unescaped := unescape.Replace(text)
+	return ingestsSegments(text, segmentBreaks+`"'`) ||
+		ingestsSegments(unescaped, segmentBreaks+`"'`) ||
+		ingestsSegments(dropQuotes.Replace(unescaped), segmentBreaks)
 }
 
+// ingestsSegments also judges each segment with env's attached values split off,
+// in addition to the unsplit words, so the split can only add flags.
 func ingestsSegments(text, breaks string) bool {
 	segments := strings.FieldsFunc(text, func(r rune) bool {
 		return strings.ContainsRune(breaks, r)
 	})
 	return slices.ContainsFunc(segments, func(seg string) bool {
-		return segmentIngests(splitWords(seg))
+		words := splitWords(seg)
+		return segmentIngests(words) || segmentIngests(splitEnvValues(words))
 	})
 }
 
-// splitWords splits a segment into words. After an env word, a flag's attached
-// value is split off as its own word, since env -S/--split-string runs it as a
-// command; over-splitting only over-flags.
+// splitWords splits a segment into words.
 func splitWords(seg string) []string {
-	fields := strings.FieldsFunc(seg, func(r rune) bool {
-		return unicode.IsSpace(r) || strings.ContainsRune("<>\"'", r)
+	return strings.FieldsFunc(seg, func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune("<>", r)
 	})
+}
+
+// splitEnvValues splits off, after an env word, a flag's attached value as its
+// own word, since env -S/--split-string runs it as a command.
+func splitEnvValues(fields []string) []string {
 	var words []string
 	seenEnv := false
 	for _, w := range fields {
