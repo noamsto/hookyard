@@ -100,7 +100,10 @@ in an already-seen session, and, on Codex, any `post_tool` shape mismatch (only
 `pre_tool` is fixture-backed). It over-flags any URL anywhere, a listed name at
 the start of a quoted string, a listed name as an argument of any non-inert
 command (`git log --grep curl`, `man curl`), `echo gh issue view`,
-`sudo -u bob grep curl` (the option value is taken for the command word),
+`sudo -u bob grep curl` (the option value is taken for the command word), a
+path argument whose last element is a listed name (`go test ./internal/http`),
+`gh` / `glab` with no group anywhere but first in its command (`xargs gh`: its
+arguments may come from stdin or a placeholder),
 `gh -R o/r pr create` and a shell call denied or rejected after `pre_tool` (a
 guard's deny, a declined permission prompt): the marker is written before the
 decision.

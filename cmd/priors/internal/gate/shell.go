@@ -80,17 +80,24 @@ func ingestsCommand(text string) bool {
 
 // segmentIngests judges one segment. Unless its command word is inert, every
 // word from it on is a candidate, since any unlisted wrapper (setsid, ssh host,
-// nix shell -c) may run a later word: the first listed name decides.
+// nix shell -c) may run a later word: the first listed name decides. A command
+// word found after a wrapper's flag may be that flag's value (`sudo -u grep gh
+// ...`), so it is not trusted to be inert. A gh/glab word with no group after
+// it that is not the segment's first word may take its arguments from stdin or
+// a placeholder (`xargs gh`).
 func segmentIngests(words []string) bool {
-	i := commandWord(words)
-	if i < len(words) && slices.Contains(inert, wordName(words[i])) {
+	start, afterFlag := commandWord(words)
+	if start < len(words) && !afterFlag && slices.Contains(inert, wordName(words[start])) {
 		return false
 	}
-	for ; i < len(words); i++ {
+	for i := start; i < len(words); i++ {
 		switch name := wordName(words[i]); {
 		case slices.Contains(fetchers, name), slices.Contains(forgesAny, name):
 			return true
 		case name == "gh" || name == "glab":
+			if group, _ := nextNonFlag(words[i+1:]); group == "" && i > 0 {
+				return true
+			}
 			return forgeIngests(words[i+1:])
 		}
 	}
@@ -99,18 +106,23 @@ func segmentIngests(words []string) bool {
 
 // commandWord returns the index of the segment's command word, skipping
 // assignments, keywords, wrappers and their flags and numeric arguments; the
-// index is len(words) when there is none.
-func commandWord(words []string) int {
+// index is len(words) when there is none. afterFlag reports that a wrapper's
+// flag was skipped, so the word found may be that flag's value.
+func commandWord(words []string) (idx int, afterFlag bool) {
+	wrapped := false
 	for i, w := range words {
-		switch name := wordName(w); {
-		case slices.Contains(wrappers, name),
-			assignmentWord.MatchString(w), strings.HasPrefix(w, "-"),
-			numberWord.MatchString(w), slices.Contains(keywords, name):
+		name := wordName(w)
+		switch {
+		case slices.Contains(wrappers, name):
+			wrapped = true
+		case strings.HasPrefix(w, "-"):
+			afterFlag = afterFlag || wrapped
+		case assignmentWord.MatchString(w), numberWord.MatchString(w), slices.Contains(keywords, name):
 		default:
-			return i
+			return i, afterFlag
 		}
 	}
-	return len(words)
+	return len(words), afterFlag
 }
 
 // wordName is w's last path element, without the backslash that bypasses an
