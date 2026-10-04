@@ -11,12 +11,16 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// Strides keep the generator-driven properties inside the CI budget. Strippable,
-// bracket-like and confusables-table code points are never strided.
+// Strides keep the generator-driven properties inside the CI budget. Without
+// -race, strippable, bracket-like, confusables-table and assigned code points
+// are never strided; that exhaustive run is the pre-push gate. CI runs only
+// -race, where the detector multiplies the cost several times over on a
+// few-core runner and adds nothing for a pure function, so there every class
+// is sampled.
 const (
 	chunkCount      = 32
-	unassignedStep  = 97 // Co and unassigned, non-race
-	raceStep        = 31 // every non-exempt code point, race
+	unassignedStep  = 97  // Co and unassigned, non-race
+	raceStep        = 127 // every code point, race
 	maxChunkFailure = 20
 )
 
@@ -52,6 +56,11 @@ func newProtected(text, token string, fence bool) protected {
 
 func (p protected) replace(i int, s string) string {
 	return p.text[:p.off[i]] + s + p.text[p.off[i+1]:]
+}
+
+// replaceRange replaces runes i through j-1 with s.
+func (p protected) replaceRange(i, j int, s string) string {
+	return p.text[:p.off[i]] + s + p.text[p.off[j]:]
 }
 
 func (p protected) insert(i int, s string) string {
@@ -91,7 +100,9 @@ func bracketLike(c rune) bool {
 	case unicode.In(c, unicode.Ps, unicode.Pe, unicode.Pi, unicode.Pf):
 		return true
 	case 0x239b <= c && c <= 0x23b3, 0x2308 <= c && c <= 0x230b, 0x231c <= c && c <= 0x231f,
-		c == 0x2282, c == 0x2283, 0x228f <= c && c <= 0x2292, c == 0x22d0, c == 0x22d1:
+		c == 0x2282, c == 0x2283, 0x228f <= c && c <= 0x2292, c == 0x22d0, c == 0x22d1,
+		c == 0x23b4, c == 0x23b5, 0x23dc <= c && c <= 0x23e1, c == 0x227a, c == 0x227b,
+		c == 0x22b0, c == 0x22b1, c == 0x2af7, c == 0x2af8:
 		return true
 	}
 	return false
@@ -115,7 +126,7 @@ func imageOf(c rune) image {
 	}
 	n := norm.NFKC.String(string(c))
 	for _, r := range n {
-		if unicode.IsSpace(r) || unicode.Is(unicode.Z, r) {
+		if unicode.IsSpace(r) || unicode.Is(unicode.Z, r) || oracleBlank(r) {
 			im.sep = true
 		}
 	}
@@ -151,6 +162,7 @@ func imageOf(c rune) image {
 
 type counts struct {
 	e3R3, e3R4, e3R7, e3Multi, e3NoLetter atomic.Int64
+	e3Shaped                              atomic.Int64
 	e4R3, e4R7, e4Anchor                  atomic.Int64
 	tested, e2, e3, e4                    atomic.Int64
 	cases                                 atomic.Int64
@@ -162,10 +174,14 @@ type checker struct {
 	cases  int64
 }
 
-func (ck *checker) check(c rune, kind string, p protected, in string) {
+// check runs Text on in and applies the oracle. A non-empty needle is c's
+// image, placed inside the token: outside quoted spans it may occur only as
+// often as in the protected line itself (the store header's own '·').
+func (ck *checker) check(c rune, kind string, p protected, in, needle string) {
 	ck.cases++
 	out := Text(in)
-	if quotesAToken(out) && escaped(out, p.token) && (!p.fence || !ruleRunLeft(out)) {
+	if quotesAToken(out) && escaped(out, p.token) && (!p.fence || !ruleRunLeft(out)) &&
+		(needle == "" || strings.Count(unquoted(out), needle) <= strings.Count(p.text, needle)) {
 		return
 	}
 	ck.t.Errorf("%s U+%04X token %s: Text(%q) = %q", kind, c, p.token, in, out)
@@ -184,6 +200,18 @@ func quotesAToken(out string) bool {
 		}
 	}
 	return false
+}
+
+// needleOf is NFKC(c) when it holds a non-ASCII rune, else empty: an ASCII
+// image is indistinguishable from the line's own letters.
+func needleOf(c rune) string {
+	n := norm.NFKC.String(string(c))
+	for _, r := range n {
+		if r >= 0x80 {
+			return n
+		}
+	}
+	return ""
 }
 
 type codePoint struct {
@@ -205,13 +233,15 @@ func testedCodePoints() (cps []codePoint, desc string) {
 		}
 		_, inTable := confusableSets[c]
 		switch {
-		case strip || bracketLike(c) || inTable || all:
+		case all:
 			exempt++
 		case raceEnabled:
 			if seq++; (seq-1)%raceStep != 0 {
 				continue
 			}
 			strided++
+		case strip || bracketLike(c) || inTable:
+			exempt++
 		case !assigned(c):
 			if seq++; (seq-1)%unassignedStep != 0 {
 				continue
@@ -247,6 +277,7 @@ func TestPropertyEscapes(t *testing.T) {
 		}
 	})
 	t.Logf("tested code points %d (E2 %d, E3 %d, E4 %d); Text calls %d", n.tested.Load(), n.e2.Load(), n.e3.Load(), n.e4.Load(), n.cases.Load())
+	t.Logf("E3 pair, one-sided and blank-companion variants: %d code points", n.e3Shaped.Load())
 	t.Logf("E3 excluded: R3 literal/equals %d, R3 anchor for no token letter %d, R4 empty image %d, R7 separator %d, more than one anchor %d",
 		n.e3R3.Load(), n.e3NoLetter.Load(), n.e3R4.Load(), n.e3R7.Load(), n.e3Multi.Load())
 	t.Logf("E4 excluded: R3 literal/equals %d, R7 separator %d, anchor-bearing (E3 only) %d",
@@ -261,7 +292,7 @@ func propertiesOf(ck *checker, cp codePoint, n *counts) {
 		s := string(c)
 		for _, p := range protectedLines {
 			for i := range len(p.runes) + 1 {
-				ck.check(c, "E2", p, p.insert(i, s))
+				ck.check(c, "E2", p, p.insert(i, s), "")
 			}
 		}
 	}
@@ -271,6 +302,7 @@ func propertiesOf(ck *checker, cp codePoint, n *counts) {
 	im := imageOf(c)
 	s := string(c)
 	isolated := im.runes == 1
+	needle := needleOf(c)
 
 	// E3: single substitution.
 	switch {
@@ -290,9 +322,9 @@ func propertiesOf(ck *checker, cp codePoint, n *counts) {
 					continue
 				}
 				applied = true
-				ck.check(c, "E3 glued", p, p.replace(i, s))
+				ck.check(c, "E3 glued", p, p.replace(i, s), needle)
 				if isolated {
-					ck.check(c, "E3 isolated", p, p.replace(i, isolate(c, i)))
+					ck.check(c, "E3 isolated", p, p.replace(i, isolate(c, i)), needle)
 				}
 			}
 		}
@@ -300,6 +332,10 @@ func propertiesOf(ck *checker, cp codePoint, n *counts) {
 			n.e3.Add(1)
 		} else {
 			n.e3NoLetter.Add(1)
+		}
+		if isolated && len(im.anchors) == 0 {
+			n.e3Shaped.Add(1)
+			shapedSubstitutions(ck, c, needle)
 		}
 	}
 
@@ -316,10 +352,32 @@ func propertiesOf(ck *checker, cp codePoint, n *counts) {
 		for _, p := range protectedLines {
 			first, last := p.letters[0], p.letters[len(p.letters)-1]
 			for i := max(first-1, 0); i <= min(last+2, len(p.runes)); i++ {
-				ck.check(c, "E4 glued", p, p.insert(i, s))
-				if isolated {
-					ck.check(c, "E4 isolated", p, p.insert(i, isolate(c, i)))
+				inner := ""
+				if first < i && i <= last {
+					inner = needle
 				}
+				ck.check(c, "E4 glued", p, p.insert(i, s), inner)
+				if isolated {
+					ck.check(c, "E4 isolated", p, p.insert(i, isolate(c, i)), inner)
+				}
+			}
+		}
+	}
+}
+
+// shapedSubstitutions puts c, whose image is one anchorless rune, in place
+// of token letters: for two letters adjacent in the line, glued; for one,
+// spaced on one side only; and for one, isolated with a blank braille cell.
+func shapedSubstitutions(ck *checker, c rune, needle string) {
+	s := string(c)
+	for _, p := range protectedLines {
+		for k, i := range p.letters {
+			sep := isolators[i%len(isolators)]
+			ck.check(c, "E3 one-sided before", p, p.replace(i, sep+s), needle)
+			ck.check(c, "E3 one-sided after", p, p.replace(i, s+sep), needle)
+			ck.check(c, "E3 blank companion", p, p.replace(i, sep+s+"\u2800"+sep), needle)
+			if k+1 < len(p.letters) && p.letters[k+1] == i+1 {
+				ck.check(c, "E3 pair", p, p.replaceRange(i, i+2, s), needle)
 			}
 		}
 	}
@@ -350,7 +408,7 @@ func TestPropertyBrackets(t *testing.T) {
 	for _, o := range brackets {
 		for _, cl := range brackets {
 			for _, p := range around {
-				ck.check(o, "E5 pair "+string(cl), p, string(o)+p.text+string(cl))
+				ck.check(o, "E5 pair "+string(cl), p, string(o)+p.text+string(cl), "")
 			}
 		}
 	}
@@ -365,7 +423,7 @@ func TestPropertyBrackets(t *testing.T) {
 			continue
 		}
 		for i := range len(inside.runes) + 1 {
-			ck.check(b, "E5 inserted", inside, inside.insert(i, string(b)))
+			ck.check(b, "E5 inserted", inside, inside.insert(i, string(b)), "")
 		}
 	}
 	t.Logf("E5 inserted: %d non-ASCII brackets skipped as ASCII images (R3); Text calls: %d", asciiImage, ck.cases)

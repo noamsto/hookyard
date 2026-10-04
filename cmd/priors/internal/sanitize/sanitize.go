@@ -6,8 +6,8 @@
 //
 // Imitations are found on a per-line skeleton: each rune folds to the ASCII
 // letters it looks like, through UTS #39 confusables, or stays an unknown
-// that may stand for one token letter when it sits in or beside a word with
-// a recognised one. A token matches when at least half of it is spelled by
+// that may stand for up to two token letters when it sits in or beside a word
+// with a recognised one. A token matches when at least half of it is spelled by
 // recognised letters within twice its length.
 package sanitize
 
@@ -184,7 +184,7 @@ type class uint8
 const (
 	anchor   class = iota // looks like an ASCII letter or digit: must match it
 	literal               // breaks a match
-	wild                  // stands for one token rune, or for none
+	wild                  // stands for none, one or two token runes
 	gap                   // may only be skipped inside a match
 	unmapped              // non-ASCII the table does not know; the word pass resolves it
 )
@@ -199,14 +199,21 @@ type skelRune struct {
 	rule       bool // can draw a fence rule: '=' or a non-letter, non-digit
 }
 
+// word counts what the lone-rune rule needs: runes other than punctuation,
+// and non-ASCII runes.
 type word struct {
-	n        int
-	anchored bool
+	size, foreign int
+	anchored      bool
 }
 
-// skeleton folds line to what it looks like. Spaces, separators and marks
-// render as nothing or as space, so they are dropped rather than splitting a
-// token; spaces and separators still end a word. Every other rune is judged
+// blank reports a symbol that renders as an empty cell, so it reads as space.
+func blank(r rune) bool {
+	return r == 0x2800 || r == 0x1d159
+}
+
+// skeleton folds line to what it looks like. Spaces, separators, blanks and
+// marks render as nothing or as space, so they are dropped rather than
+// splitting a token; all but marks still end a word. Every other rune is judged
 // on the lower case of its NFD base, so a precomposed accent folds too.
 func skeleton(line string) []skelRune {
 	sk := make([]skelRune, 0, utf8.RuneCountInString(line))
@@ -216,7 +223,7 @@ func skeleton(line string) []skelRune {
 		r, size := utf8.DecodeRuneInString(line[i:])
 		s := skelRune{start: i, end: i + size}
 		i += size
-		if unicode.IsSpace(r) || unicode.Is(unicode.Z, r) {
+		if unicode.IsSpace(r) || unicode.Is(unicode.Z, r) || blank(r) {
 			newWord = true
 			continue
 		}
@@ -251,13 +258,22 @@ func skeleton(line string) []skelRune {
 			newWord = false
 		}
 		s.word = len(words) - 1
-		words[s.word].n++
-		words[s.word].anchored = words[s.word].anchored || s.c == anchor
+		w := &words[s.word]
+		foreign := lb >= utf8.RuneSelf
+		if foreign {
+			w.foreign++
+		}
+		if (foreign || s.c == anchor) && !unicode.Is(unicode.P, r) {
+			w.size++
+		}
+		w.anchored = w.anchored || s.c == anchor
 		sk = append(sk, s)
 	}
-	// Unmapped runes in a word that has an anchor are lookalikes; so is a
-	// lone one beside such a word, set off by spaces. Elsewhere a letter or
-	// digit is foreign prose and a symbol may only pad a match.
+	// Unmapped runes in a word that has an anchor are lookalikes; so are those
+	// of a lone word beside such a word, set off by spaces: one rune that is
+	// not punctuation, or one non-ASCII rune, glued to any punctuation.
+	// Elsewhere a letter or digit is foreign prose and a symbol may only pad
+	// a match.
 	for i := range sk {
 		s := &sk[i]
 		if s.c != unmapped {
@@ -266,7 +282,7 @@ func skeleton(line string) []skelRune {
 		w := s.word
 		switch {
 		case words[w].anchored,
-			words[w].n == 1 && (w > 0 && words[w-1].anchored || w+1 < len(words) && words[w+1].anchored):
+			(words[w].size == 1 || words[w].foreign == 1) && (w > 0 && words[w-1].anchored || w+1 < len(words) && words[w+1].anchored):
 			s.c = wild
 		case s.rule:
 			s.c = gap
@@ -279,9 +295,10 @@ func skeleton(line string) []skelRune {
 
 // matchAt returns the length of the shortest window of sk from i that spells
 // t: anchors consume the next token rune and must equal it, a wild consumes
-// one or is skipped, a gap is skipped, a literal ends the window, the first
-// rune consumes t[0], and at least half of t is consumed by anchors. It
-// returns 0 when there is none. anchors is sk's prefix count of anchors.
+// one or two (a digraph such as ꝏ) or is skipped, a gap is skipped, a
+// literal ends the window, the first rune consumes t[0], and at least half of
+// t is consumed by anchors. It returns 0 when there is none. anchors is sk's
+// prefix count of anchors.
 func matchAt(sk []skelRune, anchors []int, i int, t string) int {
 	m, k := len(t), (len(t)+1)/2
 	switch sk[i].c {
@@ -328,6 +345,9 @@ func matchAt(sk []skelRune, anchors []int, i int, t string) int {
 				}
 				if j < m {
 					next[j+1], alive = max(next[j+1], a), true
+				}
+				if j+2 <= m {
+					next[j+2] = max(next[j+2], a)
 				}
 			default: // gap
 				next[j], alive = max(next[j], a), true
