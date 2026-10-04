@@ -277,8 +277,8 @@ func configGetRegexp(ctx context.Context, dir, pattern string) ([]configVar, err
 		return nil, err
 	}
 	var vars []configVar
-	// Each record ends in NUL; splitting on it would add an empty record, read as
-	// an empty prefix that matches every URL.
+	// Each record ends in NUL; a trailing empty record would read as an empty
+	// rewrite prefix, which matches every URL.
 	for rec := range strings.SplitSeq(strings.TrimSuffix(out, "\x00"), "\x00") {
 		key, value, _ := strings.Cut(rec, "\n")
 		vars = append(vars, configVar{key, value})
