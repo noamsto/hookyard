@@ -1057,7 +1057,7 @@ func TestSymlinkedFactNeverRead(t *testing.T) {
 	}
 
 	list := sb.run("", "list", "--cwd", repo)
-	wantExit(t, list, 0)
+	wantExit(t, list, 1)
 	if strings.Contains(list.stdout, "work-only-fact") {
 		t.Errorf("list shows a work fact through a personal symlink:\n%s", list.stdout)
 	}
@@ -1134,7 +1134,7 @@ func TestListReportsProblems(t *testing.T) {
 	sb.writeFile(filepath.Join(sb.personal, "demo", "broken.md"), "no frontmatter\n")
 
 	res := sb.run("", "list", "--cwd", repo)
-	wantExit(t, res, 0)
+	wantExit(t, res, 1)
 	wantContains(t, "list stderr", res.stderr, "skipped personal/demo/broken.md: ")
 
 	sb.personal = filepath.Join(sb.dir, "absent")
@@ -1145,6 +1145,96 @@ func TestListReportsProblems(t *testing.T) {
 
 	sb.writeConfig(`rules = "/nonexistent/rules.toml"`)
 	wantExit(t, sb.run("", "list", "--cwd", repo), 1)
+}
+
+// TestReadSkipsExitNonZero pins the read commands' skip→exit-code contract: a
+// skipped fact makes list non-zero (partial or total) while an empty store
+// stays zero, show stays non-zero when the one fact it needs is skipped, a
+// redaction exclusion is report-only, and search stays fail-open.
+func TestReadSkipsExitNonZero(t *testing.T) {
+	broken := func(t *testing.T, sb *sandbox) {
+		t.Helper()
+		sb.writeFile(filepath.Join(sb.personal, "demo", "broken.md"), "no frontmatter\n")
+	}
+	good := func(t *testing.T, sb *sandbox) {
+		t.Helper()
+		sb.putFact(sb.personal, "demo/good-fact.md", newFact("good-fact", "demo", "project"))
+	}
+	leaky := func(t *testing.T, sb *sandbox) {
+		t.Helper()
+		f := newFact("leaky-fact", "demo", "project")
+		f.Metadata.OriginSessionID = "gh" + "p_" + strings.Repeat("a1", 18)
+		sb.putFact(sb.personal, "demo/leaky-fact.md", f)
+	}
+	linked := func(t *testing.T, sb *sandbox) {
+		t.Helper()
+		sb.mkdir(filepath.Join(sb.personal, "_global"))
+		if err := os.Symlink(filepath.Join(sb.dir, "nowhere"), filepath.Join(sb.personal, "_global", "linked.md")); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cases := []struct {
+		name     string
+		setup    func(*testing.T, *sandbox)
+		args     func(repo string) []string
+		want     int
+		stdout   []string
+		emptyOut bool
+		stderr   []string
+	}{
+		{
+			name: "list all skipped", setup: broken,
+			args: func(repo string) []string { return []string{"list", "--cwd", repo} },
+			want: 1, emptyOut: true, stderr: []string{"skipped personal/demo/broken.md: "},
+		},
+		{
+			name: "list partial skip", setup: func(t *testing.T, sb *sandbox) { good(t, sb); broken(t, sb) },
+			args: func(repo string) []string { return []string{"list", "--cwd", repo} },
+			want: 1, stdout: []string{"good-fact"}, stderr: []string{"skipped personal/demo/broken.md: "},
+		},
+		{
+			name: "list empty store", setup: nil,
+			args: func(repo string) []string { return []string{"list", "--cwd", repo} },
+			want: 0, emptyOut: true,
+		},
+		{
+			name: "show all skipped", setup: linked,
+			args: func(repo string) []string { return []string{"show", "linked-fact", "--cwd", repo} },
+			want: 1, emptyOut: true, stderr: []string{"skipped personal/_global/linked.md: ", "no fact named"},
+		},
+		{
+			name: "list all excluded is report-only", setup: leaky,
+			args: func(repo string) []string { return []string{"list", "--cwd", repo} },
+			want: 0, emptyOut: true, stderr: []string{"excluded personal/demo/leaky-fact.md: rule "},
+		},
+		{
+			name: "search stays fail-open", setup: func(t *testing.T, sb *sandbox) {
+				f := newFact("needle-fact", "demo", "project")
+				f.Body = "the zebra crossing rule\n"
+				sb.putFact(sb.personal, "demo/needle-fact.md", f)
+				sb.writeFile(filepath.Join(sb.personal, "demo", "broken.md"), "zebra but no frontmatter\n")
+			},
+			args: func(repo string) []string { return []string{"search", "zebra", "--cwd", repo} },
+			want: 0, stdout: []string{"needle-fact"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := newSandbox(t, "personal")
+			repo := sb.repo(personalRemote)
+			if tc.setup != nil {
+				tc.setup(t, sb)
+			}
+			res := sb.run("", tc.args(repo)...)
+			wantExit(t, res, tc.want)
+			if tc.emptyOut && res.stdout != "" {
+				t.Errorf("stdout = %q, want empty", res.stdout)
+			}
+			wantContains(t, "stdout", res.stdout, tc.stdout...)
+			wantContains(t, "stderr", res.stderr, tc.stderr...)
+		})
+	}
 }
 
 func TestIndexWriteFailsOnBrokenFact(t *testing.T) {
