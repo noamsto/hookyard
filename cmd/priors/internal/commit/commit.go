@@ -2,7 +2,9 @@
 // to a store. It commits a store checkout's dirty files only when every one
 // of them is gated content, staging the very bytes the gates read, so a store
 // commit never carries a file priors' gates have not passed, and HEAD's
-// MEMORY.md never lists a file HEAD lacks.
+// MEMORY.md never lists a file HEAD lacks. Dirty paths outside the fact layout
+// (not .md, and at the root or under a dot directory, such as a vault's
+// .obsidian/) are left out of the commit and named in the returned note.
 package commit
 
 import (
@@ -43,8 +45,9 @@ const (
 // Checkout commits root's dirty files with msg, and pushes when configured,
 // if root is a git work tree's top level and every dirty path passes the
 // gates; otherwise it stages nothing. The caller holds the store's lock. It
-// returns a warning naming what stopped the commit, or "" on success or when
-// there is nothing to do.
+// returns a warning naming what stopped the commit, or a note naming the paths
+// outside the fact layout a commit left out, or "" when there is nothing to
+// say.
 func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gate.Rules, scanner gate.Scanner, msg string) (warning string) {
 	if !cfg.CommitEnabled() {
 		return ""
@@ -88,10 +91,12 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 		findings[f.File] = append(findings[f.File], f.Rule)
 	}
 	c := classifier{root: snap, rules: rules, findings: findings, special: special}
-	var accepted, refused []string
+	var accepted, refused, left []string
 	for _, e := range dirty {
 		switch why := c.refusal(e); {
 		case why == skip:
+		case why == leave:
+			left = append(left, e.path)
 		case why != "":
 			refused = append(refused, e.path+" ("+why+")")
 		default:
@@ -99,7 +104,11 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 		}
 	}
 	if len(refused) > 0 {
-		return fmt.Sprintf("nothing committed in %s: not gated for the store: %s", dir, strings.Join(refused, ", "))
+		w := fmt.Sprintf("nothing committed in %s: not gated for the store: %s", dir, strings.Join(refused, ", "))
+		if len(left) > 0 {
+			w += "; " + leftNote(left)
+		}
+		return w
 	}
 	if len(accepted) == 0 {
 		return ""
@@ -128,10 +137,26 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 	if tree == "" {
 		return ""
 	}
+	var notes []string
 	if cfg.Push {
-		return push(ctx, dir, parent, commit)
+		notes = append(notes, push(ctx, dir, parent, commit))
 	}
-	return ""
+	if len(left) > 0 {
+		notes = append(notes, fmt.Sprintf("%s in %s", leftNote(left), dir))
+	}
+	return strings.Join(slices.DeleteFunc(notes, func(n string) bool { return n == "" }), "; ")
+}
+
+// leftNote names up to three of the paths a commit left out, content-free.
+func leftNote(left []string) string {
+	if len(left) == 0 {
+		return ""
+	}
+	n := "left uncommitted, not fact files: " + strings.Join(left[:min(len(left), 3)], ", ")
+	if len(left) > 3 {
+		n += fmt.Sprintf(" and %d more", len(left)-3)
+	}
+	return n
 }
 
 // beforeStage is a test seam that runs once the gates have passed, just
@@ -512,6 +537,10 @@ func parseStatus(out string) []statusEntry {
 // skip is the refusal of a path that neither blocks the commit nor is staged.
 const skip = "-"
 
+// leave is the refusal of a path outside the fact layout: it does not block
+// the commit, is not staged, and is reported.
+const leave = "+"
+
 type classifier struct {
 	root     store.Root
 	rules    gate.Rules
@@ -520,7 +549,8 @@ type classifier struct {
 }
 
 // refusal says why e must not reach a commit: "" to stage it, skip to leave
-// it out without blocking, or a content-free reason.
+// it out without blocking, leave to leave it out and report it, or a
+// content-free reason.
 func (c classifier) refusal(e statusEntry) string {
 	if strings.HasSuffix(e.path, "/") {
 		if c.holdsIndexable(e.path) {
@@ -533,6 +563,9 @@ func (c classifier) refusal(e statusEntry) string {
 			return "ignored by git but indexed"
 		}
 		return skip
+	}
+	if !factShaped(e.path) {
+		return leave
 	}
 	if slices.Contains(c.special, e.path) {
 		return "not a regular file"
@@ -610,6 +643,15 @@ func indexable(rel string) bool {
 		return false
 	}
 	return !slices.ContainsFunc(segs, func(s string) bool { return strings.HasPrefix(s, ".") })
+}
+
+// factShaped reports whether rel is a .md file or lies in the fact layout,
+// below the root with no dot segment; anything else is no fact to gate.
+func factShaped(rel string) bool {
+	if strings.HasSuffix(rel, ".md") {
+		return true
+	}
+	return strings.Contains(rel, "/") && !slices.ContainsFunc(strings.Split(rel, "/"), func(s string) bool { return strings.HasPrefix(s, ".") })
 }
 
 func (c classifier) holdsIndexable(dirRel string) bool {
