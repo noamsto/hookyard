@@ -43,6 +43,7 @@ var confusables = map[rune]rune{
 	0x043d: 'h', 0x043e: 'o', 0x0440: 'p', 0x0441: 'c', 0x0442: 't',
 	0x0443: 'y', 0x0445: 'x', 0x0456: 'i', 0x0458: 'j', 0x0455: 's',
 	0x04bb: 'h', 0x0501: 'd', 0x051b: 'q', 0x051d: 'w', 0x04af: 'y',
+	0x0433: 'r',
 	// Armenian
 	0x0585: 'o', 0x0570: 'h', 0x057d: 'u', 0x0578: 'n', 0x0566: 'q',
 	// Greek
@@ -59,6 +60,7 @@ var confusables = map[rune]rune{
 	0x1d22: 'z',
 	// lookalikes of the fence rule's '='
 	0x30a0: '=', 0x2e40: '=', 0x1400: '=', 0xa4ff: '=', 0x2550: '=',
+	0xa78a: '=',
 }
 
 // upperConfusables folds upper-case lookalikes whose lower case does not look
@@ -199,15 +201,15 @@ type skeletonRune struct {
 }
 
 // skeleton folds the line to what it looks like: at most one rune per
-// original rune, with whitespace, combining marks (Mn, Me) and format
-// characters dropped because they render as nothing and must not split a
-// token. Each rune is reduced to the base of its NFD form, so a precomposed
+// original rune, with whitespace, blank fillers, combining marks (Mn, Me)
+// and format characters dropped because they render as nothing and must not
+// split a token. Each rune is reduced to the base of its NFD form, so a precomposed
 // accent folds too, then mapped through the upper-case confusables, else
 // lower-cased and mapped through the lower-case ones.
 func skeleton(line string) []skeletonRune {
 	var sk []skeletonRune
 	for i, r := range line {
-		if unicode.IsSpace(r) || unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf) {
+		if unicode.IsSpace(r) || isBlank(r) || unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf) {
 			continue
 		}
 		end := i + utf8.RuneLen(r)
@@ -263,24 +265,38 @@ func escapeLine(line string) string {
 
 // quoteBrackets is the fail-closed backstop for the bracketed attribution
 // headers: a confusable the maps miss still cannot keep its header shape.
-// Any opener ('[' or a non-ASCII Ps rune) pairs with any closer (']' or a
-// non-ASCII Pe rune), innermost first; a pair holding a non-ASCII letter or
-// number, judged on the NFD base so accented Latin passes, is rewritten to
-// "(quoted: …)" with its content verbatim. Unmatched brackets are left alone.
+// Any opener pairs with any closer, innermost first; a pair holding a
+// suspicious rune is rewritten to "(quoted: …)" with its content verbatim,
+// and so is the outermost unmatched opener when anything left open holds
+// one, up to the end of the line. One pass, so hostile nesting stays linear.
 func quoteBrackets(line string) string {
-	rs := []rune(line)
-	var open, quote []int // quote holds the brackets to rewrite
-	for i, r := range rs {
+	type opener struct {
+		idx int
+		hit bool
+	}
+	var open []opener
+	var quote []int // byte offsets of the brackets to rewrite
+	for i, r := range line {
 		switch {
 		case isOpener(r):
-			open = append(open, i)
+			open = append(open, opener{idx: i})
 		case isCloser(r) && len(open) > 0:
 			o := open[len(open)-1]
 			open = open[:len(open)-1]
-			if slices.ContainsFunc(rs[o+1:i], isNonASCIIWord) {
-				quote = append(quote, o, i)
+			if o.hit {
+				quote = append(quote, o.idx, i)
+				if len(open) > 0 {
+					open[len(open)-1].hit = true
+				}
 			}
+		case len(open) > 0 && isSuspicious(r):
+			open[len(open)-1].hit = true
 		}
+	}
+	tail := ""
+	if slices.ContainsFunc(open, func(o opener) bool { return o.hit }) {
+		quote = append(quote, open[0].idx)
+		tail = ")"
 	}
 	if len(quote) == 0 {
 		return line
@@ -289,32 +305,68 @@ func quoteBrackets(line string) string {
 	var b strings.Builder
 	prev := 0
 	for _, i := range quote {
-		b.WriteString(string(rs[prev:i]))
-		if isOpener(rs[i]) {
+		r, size := utf8.DecodeRuneInString(line[i:])
+		b.WriteString(line[prev:i])
+		if isOpener(r) {
 			b.WriteString("(quoted: ")
 		} else {
 			b.WriteString(")")
 		}
-		prev = i + 1
+		prev = i + size
 	}
-	b.WriteString(string(rs[prev:]))
+	b.WriteString(line[prev:])
+	b.WriteString(tail)
 	return b.String()
 }
 
+// isOpener and isCloser count the bracket-piece symbols too, since a stacked
+// pair of them draws a bracket.
 func isOpener(r rune) bool {
-	return r == '[' || r >= utf8.RuneSelf && unicode.Is(unicode.Ps, r)
+	switch r {
+	case '[', 0x23a1, 0x23a3, 0x231c, 0x231e:
+		return true
+	}
+	return r >= utf8.RuneSelf && unicode.Is(unicode.Ps, r)
 }
 
 func isCloser(r rune) bool {
-	return r == ']' || r >= utf8.RuneSelf && unicode.Is(unicode.Pe, r)
+	switch r {
+	case ']', 0x23a4, 0x23a6, 0x231d, 0x231f:
+		return true
+	}
+	return r >= utf8.RuneSelf && unicode.Is(unicode.Pe, r)
 }
 
-func isNonASCIIWord(r rune) bool {
+// everyday is the non-ASCII punctuation genuine headers and prose put in
+// brackets: middle dot, dashes, curly quotes, bullet, times and arrows.
+var everyday = []rune{0x00b7, 0x2013, 0x2014, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x00d7, 0x2192, 0x2190}
+
+// isSuspicious judges r on its NFD base, so accented Latin passes. Every
+// other non-ASCII rune counts, Latin letters without a decomposition
+// included: exempting them would admit unmapped lookalikes such as U+0266.
+func isSuspicious(r rune) bool {
 	if r < utf8.RuneSelf {
 		return false
 	}
 	base, _ := utf8.DecodeRuneInString(norm.NFD.String(string(r)))
-	return base >= utf8.RuneSelf && (unicode.IsLetter(base) || unicode.IsNumber(base))
+	return base >= utf8.RuneSelf && !slices.Contains(everyday, base)
+}
+
+// isBlank reports non-space runes that render as blank space.
+func isBlank(r rune) bool {
+	switch r {
+	case 0x2800, 0x3164, 0x115f, 0x1160:
+		return true
+	}
+	return false
+}
+
+// isRuleRune reports a rune that can draw a fence rule: '=' or any non-ASCII
+// symbol or punctuation, so an unmapped lookalike of '=' still fails closed.
+// Everyday punctuation is exempt: the skeleton drops spaces, so prose such as
+// a dash between quotes would otherwise form a run.
+func isRuleRune(r rune) bool {
+	return r == '=' || r >= utf8.RuneSelf && unicode.In(r, unicode.S, unicode.P) && !slices.Contains(everyday, r)
 }
 
 // matchAt reports how many skeleton runes from i form a token, and the token
@@ -325,7 +377,7 @@ func matchAt(sk []skeletonRune, i int) (n int, tok string) {
 			return len(t), string(t)
 		}
 	}
-	for n < len(sk)-i && sk[i+n].r == '=' {
+	for n < len(sk)-i && isRuleRune(sk[i+n].r) {
 		n++
 	}
 	if n >= 3 {

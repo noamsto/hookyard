@@ -714,21 +714,29 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
   bidi, zero-width and other format, Unicode tag and variation-selector
   characters; NFKC-normalise; then match, per line, two ways. (a) A
   UTS #39-style confusable skeleton of the line — case-folded, accents and
-  marks dropped, whitespace and format characters ignored, cross-script
+  marks dropped, whitespace, blank fillers (braille blank, Hangul fillers)
+  and format characters ignored, Cyrillic, Greek, Armenian and IPA
   lookalikes such as Cyrillic `а` folded to Latin `a` — is matched against
-  the fence and attribution tokens anywhere in the line, and runs of three
-  or more `=` (or lookalikes) are quoted, so no line is fence-shaped.
-  (b) Fail-closed: any
-  bracketed span containing a non-ASCII letter or number has its brackets
-  replaced by a `(quoted: …)` wrapper, because both attribution headers are
-  bracketed and a curated lookalike map is never complete. The cost is
-  intended: bracketed non-Latin text (`[שלום]`, or a non-Latin markdown link
-  `[текст](url)` → `(quoted: текст)(url)`) is quoted, accented Latin is not,
-  and a committed index holding such a line regenerates with a one-time diff.
-  ASCII-only lookalikes (`0` for `o`, `rn` for `m`) are not folded. Each
-  index line is capped; `priors show` and `priors search` fence their own
-  output. A file opened with `cat` or `rg` (tier 3) reaches the model
-  unfenced, so "fenced" below means *through `priors`*.
+  the fence and attribution tokens anywhere in the line. Runs of three or
+  more `=` or non-ASCII symbols and punctuation, the everyday punctuation
+  below aside, are quoted, so no line is fence-shaped; box-drawing rules and
+  emoji runs are quoted too. (b)
+  Fail-closed, because both attribution headers are bracketed and a curated
+  lookalike map is never complete: any bracket pair — bracket-piece
+  lookalikes such as `⎡ ⎤` included, and an unclosed opener running to end
+  of line — holding a non-ASCII rune other than everyday punctuation (`·`,
+  dashes, curly quotes, `•`, `×`, arrows) is rewritten to a `(quoted: …)`
+  wrapper. Letters with a decomposable accent (`é`, `ñ`) pass; letters
+  without one (`ø`, `ł`, `ß`, `æ`), non-Latin text and symbols are quoted —
+  deliberately, since exempting Latin-script letters would admit unmapped
+  Latin lookalikes. The cost is intended: bracketed non-Latin text
+  (`[שלום]`, or a non-Latin markdown link `[текст](url)` →
+  `(quoted: текст)(url)`) is quoted, and a committed index holding such a
+  line regenerates with a one-time diff. ASCII-only lookalikes (`0` for
+  `o`, `rn` for `m`) and ASCII separators (`hookyard-advisory`) are not
+  folded. Each index line is capped; `priors show` and `priors search`
+  fence their own output. A file opened with `cat` or `rg` (tier 3) reaches
+  the model unfenced, so "fenced" below means *through `priors`*.
 - **Provenance on every fact** — §4.1's `provenance:` block (engine, session,
   host) — so the index can be filtered by writer and a compromised writer's
   facts purged.
@@ -1442,14 +1450,17 @@ flagged facts stops being optional.
   store header, the BEGIN and END fence lines — in another case, with other
   whitespace, or spoofed with Cyrillic, Greek (upper case included),
   mixed-script, accented, zero-width-joined, bidi-wrapped and fullwidth
-  lookalikes, and with a lookalike absent from the confusable map (which
+  lookalikes, with blank fillers between words, with symbol lookalikes
+  (`⍺`, `○`, `∨`), between bracket-piece lookalikes, behind an unclosed
+  opener, and with a lookalike absent from the confusable map (which
   exercises the bracket rule), reaches the model escaped; a fence with `=`
-  lookalikes is escaped too; genuine ASCII headers behave as before; benign
-  non-ASCII prose (Hebrew, accented names) is unchanged, except bracketed
-  non-Latin spans, which are quoted; the delimiter differs per injection, while the included index
-  file's delimiter is derived from its body and never occurs in it; no
-  truncation cuts the closing fence, and that file carries its own closing
-  fence (§4.7);
+  lookalikes, mapped or not, is escaped too; genuine ASCII headers behave
+  as before; benign non-ASCII prose (Hebrew, accented names) is unchanged,
+  except bracketed non-Latin or undecomposable-letter spans and symbol
+  runs, which are quoted; the delimiter differs per injection, while the
+  included index file's delimiter is derived from its body and never occurs
+  in it; no truncation cuts the closing fence, and that file carries its own
+  closing fence (§4.7);
 - **double injection** (§4.9): the canonical copy is skipped only when native
   memory is on, the native source exists and the fact is inside the native
   window; it is injected when native memory is off, the source is gone, the
