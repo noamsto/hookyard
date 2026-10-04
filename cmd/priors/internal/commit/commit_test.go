@@ -936,3 +936,16 @@ func TestPushRefusesStaleTrackingRef(t *testing.T) {
 		t.Errorf("remote main = %s, want %s", got, elsewhere)
 	}
 }
+
+func TestPushReportsDetachedHeadAndGitFailuresApart(t *testing.T) {
+	fx, _ := withRemote(t)
+	base := head(t, fx.dir())
+	git(t, fx.dir(), "checkout", "-q", "--detach")
+	if w := push(context.Background(), fx.dir(), base, base); !strings.Contains(w, "HEAD is not on a branch") {
+		t.Errorf("detached warning = %q", w)
+	}
+	w := push(context.Background(), t.TempDir(), base, base)
+	if !strings.Contains(w, "git symbolic-ref failed") || strings.Contains(w, "not on a branch") {
+		t.Errorf("non-repo warning = %q", w)
+	}
+}
