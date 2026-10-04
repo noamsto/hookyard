@@ -1,6 +1,9 @@
 package gate
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestIngestsCall(t *testing.T) {
 	tests := []struct {
@@ -111,6 +114,15 @@ func TestIngestsCall(t *testing.T) {
 		{"bash -c joined quotes", "Bash", `{"command":"bash -c 'g\"\"h issue view 1'"}`, true},
 		{"backslash newline inside word", "Bash", `{"command":"g\\\nh issue view 1"}`, true},
 		{"rg --pre escaped script", "Bash", `{"command":"rg --pre 'g\\h issue view 1' ."}`, true},
+		{"earlier gh hides joined gh", "Bash", `{"command":"printf '%s\\n' 'gh auth status' \"g''h issue view 1\" | sh"}`, true},
+		{"parallel earlier gh hides joined gh", "Bash", `{"command":"parallel ::: 'gh auth status' \"g''h issue view 1\""}`, true},
+		{"xargs sh -c earlier gh hides joined gh", "Bash", `{"command":"printf '%s\\0' 'gh auth status' \"g''h issue view 1\" | xargs -0 -I{} sh -c '{}'"}`, true},
+		// bash binds the second string to $0 and does not run it; it flags by
+		// design, since every quoted string is judged as a script.
+		{"bash -c two quoted scripts", "Bash", `{"command":"bash -c 'gh auth status' \"g''h issue view 1\""}`, true},
+		{"nested quoted joined gh", "Bash", `{"command":"bash -c \"sh -c 'gh auth status' \\\"g''h issue view 1\\\"\""}`, true},
+		{"escaped quote before quoted scripts", "Bash", `{"command":"echo \\\" 'gh auth status' \"g''h issue view 1\""}`, true},
+		{"single-quoted joined gh", "Bash", `{"command":"printf '%s\\n' 'gh auth status' 'g\"\"h issue view 1' | sh"}`, true},
 
 		// not ingestion
 		{"git log", "Bash", `{"command":"git log"}`, false},
@@ -146,6 +158,29 @@ func TestIngestsCall(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IngestsCall(tt.tool, []byte(tt.input)); got != tt.want {
 				t.Errorf("IngestsCall(%q, %s) = %v, want %v", tt.tool, tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestQuotedStrings(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want []string
+	}{
+		{"two strings", `'a' "b"`, []string{"a", "b"}},
+		{"escaped single quote", `\'a`, nil},
+		{"escaped double quote", `"a\"b"`, []string{`a"b`}},
+		{"other backslash kept", `"a\xb"`, []string{`a\xb`}},
+		{"unterminated", `'unterminated`, []string{"unterminated"}},
+		{"single quotes inside double", `"x'y'z"`, []string{"x'y'z"}},
+		{"backslash literal in single", `'a\'`, []string{`a\`}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := quotedStrings(tt.text); !slices.Equal(got, tt.want) {
+				t.Errorf("quotedStrings(%s) = %q, want %q", tt.text, got, tt.want)
 			}
 		})
 	}

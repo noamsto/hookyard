@@ -786,7 +786,7 @@ distillation) and again as each store's required check on its remote:
    ingest write in a session already seen from an earlier call also fails
    open. On Codex the `pre_tool` shape is fixture-backed but the `post_tool`
    one is assumed. It over-flags any URL anywhere in the command (a commit
-   message, a PR body), a listed name at the start of a quoted string (`git
+   message, a PR body), a listed name in a quoted string (`git
    commit -m "curl fails"`), a listed name as an argument of any non-inert
    command (`git log --grep curl`, `man curl`), `echo gh issue view` (echo is
    not inert, since piped into a shell it runs), an inert command after any

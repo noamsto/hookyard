@@ -99,8 +99,8 @@ with no URL literal), an unquoted
 `rg --pre curl …` (inert search commands such as `grep` and `rg` hide a listed
 name in their arguments, and `--pre` runs a preprocessor), a lost ingest write
 in an already-seen session, and, on Codex, any `post_tool` shape mismatch (only
-`pre_tool` is fixture-backed). It over-flags any URL anywhere, a listed name at
-the start of a quoted string, a listed name as an argument of any non-inert
+`pre_tool` is fixture-backed). It over-flags any URL anywhere, a listed name
+in a quoted string, a listed name as an argument of any non-inert
 command (`git log --grep curl`, `man curl`), `echo gh issue view`,
 an inert command after any wrapper flag (`xargs -0 grep curl`,
 `sudo -u bob grep curl`: the flag may take it as its value), a

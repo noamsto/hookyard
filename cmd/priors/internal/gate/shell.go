@@ -63,11 +63,13 @@ var (
 
 // ingestsCommand matches a listed name in any segment whose command word is not
 // inert, so `rg curl src/` stays clean while `echo x | curl …`, `setsid gh pr
-// view 2` and `bash -c "gh pr view 2"` match. Three readings are ORed: the raw
+// view 2` and `bash -c "gh pr view 2"` match. Four readings are ORed: the raw
 // text with quotes as segment breaks, so a quoted script is judged on its own;
-// the unescaped text likewise, so a script with escapes is too; and the
-// unescaped text with quotes deleted, as bash joins words (`g""h`, `"g"h`,
-// `g\h`), so a quoted argument stays with the gh that owns it.
+// the unescaped text likewise, so a script with escapes is too; the unescaped
+// text with quotes deleted, as bash joins words (`g""h`, `"g"h`, `g\h`), so a
+// quoted argument stays with the gh that owns it; and each quoted string's
+// content as a command of its own, so an earlier gh in the segment cannot hide
+// a quote-joined one (`'gh auth status' 'g""h issue view 1'`).
 func ingestsCommand(text string) bool {
 	lower := strings.ToLower(text)
 	for _, scheme := range []string{"http://", "https://", "ftp://"} {
@@ -78,7 +80,41 @@ func ingestsCommand(text string) bool {
 	unescaped := unescape.Replace(text)
 	return ingestsSegments(text, segmentBreaks+`"'`) ||
 		ingestsSegments(unescaped, segmentBreaks+`"'`) ||
-		ingestsSegments(dropQuotes.Replace(unescaped), segmentBreaks)
+		ingestsSegments(dropQuotes.Replace(unescaped), segmentBreaks) ||
+		slices.ContainsFunc(quotedStrings(text), ingestsCommand)
+}
+
+// quotedStrings returns the content of each quoted string in text, as a shell
+// reads it: single quotes are literal; double quotes drop the backslash of a
+// `\$`, `\"`, `\\`, backtick or newline escape. An unterminated string runs to
+// the end of text. Each result is strictly shorter than text, so recursing on
+// it terminates.
+func quotedStrings(text string) []string {
+	var out []string
+	for i := 0; i < len(text); i++ {
+		switch text[i] {
+		case '\\':
+			i++
+		case '\'':
+			end := strings.IndexByte(text[i+1:], '\'')
+			if end < 0 {
+				return append(out, text[i+1:])
+			}
+			out = append(out, text[i+1:i+1+end])
+			i += end + 1
+		case '"':
+			var b strings.Builder
+			i++
+			for ; i < len(text) && text[i] != '"'; i++ {
+				if text[i] == '\\' && i+1 < len(text) && strings.IndexByte("$`\"\\\n", text[i+1]) >= 0 {
+					i++
+				}
+				b.WriteByte(text[i])
+			}
+			out = append(out, b.String())
+		}
+	}
+	return out
 }
 
 // ingestsSegments also judges each segment with env's attached values split off,
