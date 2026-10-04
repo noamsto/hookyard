@@ -13,6 +13,7 @@
 //   counts()          calls/branches as of the latest refresh, held or not
 //   subset(key) / tooltip(key)   hover data for a drawn node key
 //   meta() decisions() idleCount() error() dropped() layoutGen() pendingLayout()
+//   loadedFor()       the filter params the last finished load (resolved or failed) used
 //   isLive() isVisible() showIdle() isSelected(col, name)
 // Inputs:
 //   sync(detail)      hookyard:sync; loads when visible, else marks stale
@@ -92,6 +93,7 @@ export class FlowController {
   private inflight = false;
   private buffered: Entry[] = [];
   private loadGen = 0;
+  private loadedFilters = "";
   private fetchError = "";
   private tableError = "";
   private droppedCount = 0;
@@ -134,6 +136,7 @@ export class FlowController {
   dropped(): number { return this.droppedCount; }
   layoutGen(): number { return this.rendered?.gen ?? 0; }
   pendingLayout(): boolean { return this.pending !== null; }
+  loadedFor(): string { return this.loadedFilters; }
   isLive(): boolean { return this.live; }
   isVisible(): boolean { return this.visible; }
   showIdle(): boolean { return this.model.showIdle; }
@@ -288,6 +291,7 @@ export class FlowController {
     this.buffered = []; // every call buffered before this fetch is already inside its scan
 
     const params = this.deps.filterParams();
+    const loadedFor = params.toString();
     const filters = this.deps.activeFilters();
     params.set("day", this.dayValue ?? "");
     if (this.live) params.set("window", String(WINDOW_MIN));
@@ -303,6 +307,7 @@ export class FlowController {
       if (g !== this.loadGen) return;
       this.fetchError = "flow: " + errText(err);
       this.inflight = false;
+      this.loadedFilters = loadedFor;
       this.model.clear();
       this.buffered = [];
       this.stale = true; // the next show/sync refetches
@@ -317,6 +322,7 @@ export class FlowController {
     this.cursor = resp.next_offset;
     this.droppedCount = 0;
     this.inflight = false;
+    this.loadedFilters = loadedFor;
 
     const buffered = this.buffered;
     this.buffered = [];

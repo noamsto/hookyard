@@ -6,6 +6,8 @@ export const RENDER_MS = 500;
 export const PENDING_CAP = 5000;
 export const RELAYOUT_MS = 5000;
 export const PRESS_HOLD_MAX_MS = 10000;
+export const SETTLE_MS = 350; // node clicks stay inert this long after a filter's reflow is drawn
+export const SETTLE_MAX_MS = 5000; // a filter whose reload never lands must not leave clicks inert
 
 export const HOP_MS = 1280; // per hop: engine -> event -> handler -> outcome
 export const LOUD_HOP_MS = 1550; // a decision takes its time — see the derivation below

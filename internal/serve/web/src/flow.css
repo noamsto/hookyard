@@ -95,6 +95,7 @@
 .port { fill: color-mix(in oklab, var(--fg-dim) 75%, var(--bg-panel)); }
 .flow-node .hit { fill: transparent; cursor: pointer; }
 .k-pseudo .hit { cursor: default; }
+.flow-body.settling .flow-node .hit, .flow-body.settling .flow-group-open .hit { cursor: progress; }
 .flow-node.selected .rule { stroke: var(--accent); stroke-width: 2; }
 /* a pulse's arrival: the event gate and the outcome bar flash, then decay.
    a gate node's rule follows neither of the gate's edges, so only a plate
