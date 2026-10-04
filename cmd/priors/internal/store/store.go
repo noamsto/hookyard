@@ -66,11 +66,11 @@ func CheckoutRoot(cfg config.Config, id route.StoreID) Root {
 }
 
 func LocalRoot(cfg config.Config, id route.StoreID) Root {
-	return Root{Store: id, Kind: KindLocal, Path: filepath.Join(cfg.State(), "local", string(id))}
+	return Root{Store: id, Kind: KindLocal, Path: cfg.LocalDir(string(id))}
 }
 
 func QuarantineRoot(cfg config.Config) Root {
-	return Root{Kind: KindQuarantine, Path: filepath.Join(cfg.State(), "quarantine")}
+	return Root{Kind: KindQuarantine, Path: cfg.QuarantineDir()}
 }
 
 // ReadRoots lists, per store in order, its checkout and then its local layer.
@@ -223,7 +223,7 @@ func (r Root) PathFor(f fact.Fact, learnedRepo string) string {
 // so a duplicate-name check, the write, the index and the commit see one
 // consistent destination.
 func Lock(cfg config.Config, name string) (unlock func(), err error) {
-	path := filepath.Join(cfg.State(), "locks", name+".lock")
+	path := filepath.Join(cfg.LockDir(), name+".lock")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // the state dir is the user's own; 0755 matches the rest of it
 		return nil, err
 	}

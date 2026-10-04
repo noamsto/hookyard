@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -538,6 +539,120 @@ func TestAddQuarantinesWorkRepoOnPersonalHost(t *testing.T) {
 	path := filepath.Join(sb.state, "quarantine", "app", "work-fact.md")
 	if !strings.HasPrefix(res.stdout, "quarantined "+path+": work repo on a personal host") {
 		t.Fatalf("stdout %q", res.stdout)
+	}
+}
+
+// TestSymlinkedStateDirIsOneDir: the marker handler and the write path both
+// land under the symlink's target.
+func TestSymlinkedStateDirIsOneDir(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	real := filepath.Join(sb.dir, "real-state")
+	sb.mkdir(real)
+	sb.state = filepath.Join(sb.dir, "state-link")
+	if err := os.Symlink(real, sb.state); err != nil {
+		t.Fatal(err)
+	}
+	sb.writeConfig()
+	repo := sb.repo(workRemote)
+	sb.record("sess-1")
+
+	res := sb.run("", "add", "--name", "work-fact", "--description", "from work", "--type", "project",
+		"--cwd", repo, "--session", "sess-1")
+	sb.toolCall("pre_tool", "sess-1", "Bash", `{"command":"gh issue view 12"}`)
+
+	wantExit(t, res, 0)
+	path := filepath.Join(real, "quarantine", "app", "work-fact.md")
+	if !strings.HasPrefix(res.stdout, "quarantined "+path+": work repo on a personal host") {
+		t.Fatalf("stdout %q", res.stdout)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Error(err)
+	}
+	wantMarkerExts(t, sb.markerFiles(filepath.Join(real, "provenance")), ".seen", ".ingest")
+}
+
+// TestStateDirInARepoFailsClosed: a state dir that resolves into a git work
+// tree stops every command, and the marker handler writes nothing, neither
+// there nor at the default state path.
+func TestStateDirInARepoFailsClosed(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	inside := filepath.Join(repo, "sub")
+	sb.mkdir(inside)
+	sb.state = filepath.Join(sb.dir, "state-link")
+	if err := os.Symlink(inside, sb.state); err != nil {
+		t.Fatal(err)
+	}
+	sb.writeConfig()
+
+	res := sb.run("", "add", "--name", "a-fact", "--description", "d", "--type", "project",
+		"--cwd", repo, "--session", "sess-1")
+	sb.toolCall("pre_tool", "sess-1", "Bash", `{"command":"gh issue view 12"}`)
+
+	wantExit(t, res, 2)
+	wantContains(t, "stderr", res.stderr, "inside the git work tree")
+	for _, dir := range []string{inside, filepath.Join(sb.dir, "xdg-state")} {
+		entries, err := os.ReadDir(dir)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("%s holds %v, want it untouched", dir, entries)
+		}
+	}
+	top, err := os.ReadDir(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(top) != 2 {
+		t.Errorf("repo holds %v, want only .git and sub", top)
+	}
+}
+
+// TestLayerDirInARepoRefusesTheWrite: a quarantine or local dir that is a
+// symlink into a checkout, or holds its own .git, never receives a fact.
+func TestLayerDirInARepoRefusesTheWrite(t *testing.T) {
+	linkInto := func(t *testing.T, layer, repo string) {
+		if err := os.Symlink(repo, layer); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name   string
+		layer  string
+		remote string
+		args   []string
+		plant  func(t *testing.T, sb *sandbox, layer, repo string)
+	}{
+		{"quarantine symlinked into a repo", "quarantine", workRemote, []string{"--session", "sess-1"},
+			func(t *testing.T, _ *sandbox, layer, repo string) { linkInto(t, layer, repo) }},
+		{"local symlinked into a repo", "local", personalRemote, nil,
+			func(t *testing.T, _ *sandbox, layer, repo string) { linkInto(t, layer, repo) }},
+		{"quarantine holding a .git", "quarantine", workRemote, []string{"--session", "sess-1"},
+			func(_ *testing.T, sb *sandbox, layer, _ string) { sb.mkdir(filepath.Join(layer, ".git")) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := newSandbox(t, "personal")
+			sb.record("sess-1")
+			repo := sb.repo(tc.remote)
+			other := sb.repo(personalRemote)
+			sb.mkdir(sb.state)
+			tc.plant(t, sb, filepath.Join(sb.state, tc.layer), other)
+
+			args := append([]string{"add", "--name", "a-fact", "--description", "d", "--type", "project", "--cwd", repo}, tc.args...)
+			res := sb.run("", args...)
+			if res.code == 0 {
+				t.Fatalf("exit 0, want a refusal; stdout %q", res.stdout)
+			}
+			top, err := os.ReadDir(other)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(top) != 1 {
+				t.Errorf("repo holds %v, want only .git", top)
+			}
+		})
 	}
 }
 

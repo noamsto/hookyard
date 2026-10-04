@@ -217,6 +217,118 @@ func TestLoadRejectsADanglingSymlinkStore(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsAStateDirInAGitWorkTree(t *testing.T) {
+	mkdir := func(t *testing.T, p string) string {
+		t.Helper()
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	repo := func(t *testing.T) string {
+		t.Helper()
+		root := realPath(t, t.TempDir())
+		mkdir(t, filepath.Join(root, ".git"))
+		return root
+	}
+	cases := []struct {
+		name string
+		// setup returns state_dir ("" for the default), the work tree root the
+		// error must name, and the state path it must name.
+		setup func(t *testing.T) (stateDir, root, state string)
+		key   string
+	}{
+		{"repo root", func(t *testing.T) (string, string, string) {
+			r := repo(t)
+			return r, r, r
+		}, "state_dir"},
+		{"repo subdir not yet created", func(t *testing.T) (string, string, string) {
+			r := repo(t)
+			s := filepath.Join(r, "a", "b")
+			return s, r, s
+		}, "state_dir"},
+		{"symlink into a repo", func(t *testing.T) (string, string, string) {
+			r := repo(t)
+			sub := mkdir(t, filepath.Join(r, "sub"))
+			return symlink(t, sub, filepath.Join(t.TempDir(), "link")), r, sub
+		}, "state_dir"},
+		{"linked worktree gitfile", func(t *testing.T) (string, string, string) {
+			r := realPath(t, t.TempDir())
+			if err := os.WriteFile(filepath.Join(r, ".git"), []byte("gitdir: /x\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			s := filepath.Join(r, "state")
+			return s, r, s
+		}, "state_dir"},
+		{"git entry is a symlink", func(t *testing.T) (string, string, string) {
+			r := realPath(t, t.TempDir())
+			symlink(t, t.TempDir(), filepath.Join(r, ".git"))
+			s := filepath.Join(r, "state")
+			return s, r, s
+		}, "state_dir"},
+		{"default state dir", func(t *testing.T) (string, string, string) {
+			r := repo(t)
+			t.Setenv("XDG_STATE_HOME", r)
+			return "", r, filepath.Join(r, "priors")
+		}, "the default state dir"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isolate(t)
+			stateDir, root, state := tc.setup(t)
+			body := fmt.Sprintf("profile = \"personal\"\npersonal_store = %q\nwork_orgs = [\"github.com/w\"]\n", t.TempDir())
+			if stateDir != "" {
+				body += fmt.Sprintf("state_dir = %q\n", stateDir)
+			}
+
+			_, err := Load(writeConfig(t, body))
+
+			if err == nil {
+				t.Fatal("Load accepted a state dir inside a git work tree")
+			}
+			for _, want := range []string{tc.key, state, "inside the git work tree at " + root} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("err = %v, want it to contain %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadRejectsARelativeDefaultStateDir(t *testing.T) {
+	isolate(t)
+	t.Setenv("XDG_STATE_HOME", "rel")
+	body := fmt.Sprintf("profile = \"personal\"\npersonal_store = %q\nwork_orgs = [\"github.com/w\"]\n", t.TempDir())
+
+	_, err := Load(writeConfig(t, body))
+
+	if err == nil || !strings.Contains(err.Error(), "the default state dir must be an absolute path") {
+		t.Errorf("err = %v, want an absolute-path error for the default state dir", err)
+	}
+}
+
+func TestLoadAcceptsAStateDirOutsideAnyRepo(t *testing.T) {
+	isolate(t)
+	parent := realPath(t, t.TempDir())
+	if err := os.Mkdir(filepath.Join(parent, "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(parent, "repo", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(parent, "repo-state")
+	body := fmt.Sprintf("profile = \"personal\"\npersonal_store = %q\nstate_dir = %q\nwork_orgs = [\"github.com/w\"]\n", t.TempDir(), state)
+
+	c, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if c.State() != state {
+		t.Errorf("State() = %q, want %q", c.State(), state)
+	}
+}
+
 func TestResolveDir(t *testing.T) {
 	real := t.TempDir()
 	links := t.TempDir()
@@ -303,6 +415,29 @@ func TestProvenanceDir(t *testing.T) {
 
 	if got, want := (Config{StateDir: "/explicit"}).ProvenanceDir(), "/explicit/provenance"; got != want {
 		t.Errorf("StateDir = %q, want %q", got, want)
+	}
+}
+
+func TestStatePathsDeriveFromTheResolvedState(t *testing.T) {
+	isolate(t)
+	real := realPath(t, t.TempDir())
+	body := fmt.Sprintf("profile = \"personal\"\npersonal_store = %q\nstate_dir = %q\nwork_orgs = [\"github.com/w\"]\n",
+		t.TempDir(), symlink(t, real, filepath.Join(t.TempDir(), "link")))
+
+	c, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := []string{c.QuarantineDir(), c.LocalDir("work"), c.LockDir(), c.ProvenanceDir()}
+	want := []string{
+		filepath.Join(real, "quarantine"),
+		filepath.Join(real, "local", "work"),
+		filepath.Join(real, "locks"),
+		filepath.Join(real, "provenance"),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("state paths = %q, want %q", got, want)
 	}
 }
 

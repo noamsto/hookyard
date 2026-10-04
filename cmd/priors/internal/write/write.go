@@ -131,7 +131,17 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 		res.Path = root.PathFor(f, "")
 		res.Outcome = "published"
 	}
-	if err := confineDir(root.Path, filepath.Dir(res.Path)); err != nil {
+	dir := filepath.Dir(res.Path)
+	if res.Outcome == "published" {
+		err = confineDir(root.Path, dir)
+	} else {
+		// The layer dirs can be swapped for symlinks or gain a .git below
+		// the state dir, so confine from the state dir itself.
+		if err = confineDir(cfg.State(), dir); err == nil {
+			err = config.RefuseWorkTree(dir)
+		}
+	}
+	if err != nil {
 		return Result{}, err
 	}
 	if data, err = f.Marshal(); err != nil {
@@ -208,6 +218,12 @@ func confineDir(root, dir string) error {
 	rel, err := filepath.Rel(root, dir)
 	if err != nil || !filepath.IsLocal(rel) {
 		return fmt.Errorf("%s is not inside the store %s", dir, root)
+	}
+	// The root was resolved at Load; a symlink there now is a later swap.
+	if info, err := os.Lstat(root); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to write through the symlink %s", root)
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
 	existing := root
 	for seg := range strings.SplitSeq(rel, string(filepath.Separator)) {
