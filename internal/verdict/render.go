@@ -3,6 +3,7 @@ package verdict
 import (
 	"encoding/json"
 	"strings"
+	"unicode"
 	"unicode/utf16"
 
 	"github.com/noamsto/hookyard/internal/vocab"
@@ -82,8 +83,7 @@ type cursorAdvisory struct {
 // additional_context (2026.10.01 bundle; docs/design/fixtures/cursor-advisory/).
 // The carrier trims the value, then measures JS string length — UTF-16 code
 // units, not bytes or runes — and drops an over-cap value with a warning.
-// strings.TrimSpace and JS trim differ at the edges (JS trims U+FEFF, Go trims
-// U+0085); the divergence is accepted.
+// cursorDeliverable trims the way JS does, so the measured length matches.
 const cursorAdditionalContextMax = 10000
 
 // piResponse is the bridge's wire shape on both of Pi's reply paths: a block
@@ -296,16 +296,20 @@ func renderCursorAdvisoryOnly(in Input) Rendered {
 // cursorDeliverable reports whether Cursor keeps advice as additional_context:
 // non-empty after trim and within cursorAdditionalContextMax UTF-16 units.
 func cursorDeliverable(advice string) bool {
-	t := strings.TrimSpace(advice)
+	t := strings.TrimFunc(advice, isJSTrimmed)
 	units := 0
 	for _, r := range t {
-		n := utf16.RuneLen(r)
-		if n < 0 {
-			n = 1
-		}
-		units += n
+		// A Go string never yields a surrogate: invalid bytes decode to U+FFFD.
+		units += utf16.RuneLen(r)
 	}
 	return t != "" && units <= cursorAdditionalContextMax
+}
+
+// isJSTrimmed reports whether String.prototype.trim strips r. ECMAScript trims
+// WhiteSpace (U+FEFF and every Zs) and LineTerminators; unicode.IsSpace is the
+// same set plus U+0085, which JS leaves alone.
+func isJSTrimmed(r rune) bool {
+	return r == '\uFEFF' || (r != '\u0085' && unicode.IsSpace(r))
 }
 
 // renderPi renders the deny arm, plus ask degraded to deny per §7's rule for

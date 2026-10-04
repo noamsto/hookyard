@@ -46,9 +46,10 @@ It trims the value (`String.prototype.trim`), drops an empty one, and throws
 length — UTF-16 code units, not bytes or runes. The `postToolUse` caller
 catches that and drops the carrier with a warning. hookyard still prints
 over-cap advice, but records it undelivered (`cursorAdditionalContextMax`
-in `internal/verdict/render.go`). The CLI's own `sessionStart` path was not
-seen going through the capped helper, so for `sessionStart` that record may
-under-claim. It never over-claims.
+in `internal/verdict/render.go`), trimming and measuring as JS does: U+FEFF is
+trimmed and U+0085 is not, unlike Go's `strings.TrimSpace`. The CLI's own
+`sessionStart` path was not seen going through the capped helper, so for
+`sessionStart` that record may under-claim. It never over-claims.
 
 ## Where the code is
 

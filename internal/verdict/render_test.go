@@ -506,6 +506,9 @@ func TestRenderCursorAdvisoryCap(t *testing.T) {
 		{"two-byte runes at the cap, one unit per rune", strings.Repeat("é", 4000) + strings.Repeat("a", 6000), true},
 		{"two-byte runes over the cap", strings.Repeat("é", 4000) + strings.Repeat("a", 6001), false},
 		{"measured after trim", " " + strings.Repeat("a", 10000) + "\n", true},
+		{"BOM alone trims to empty, as JS trim does", "\uFEFF", false},
+		{"NEL is not trimmed by JS, so it counts toward the cap", strings.Repeat("a", 10000) + "\u0085", false},
+		{"BOM is trimmed by JS", "\uFEFF" + strings.Repeat("a", 10000), true},
 	}
 
 	for _, c := range cases {
