@@ -2169,10 +2169,10 @@ flagged facts stops being optional.
   line reads `<digest> superseded 10` and `priors attest` reports it not in
   effect; the same-name retry numbers 11 and reads `revoked`; an agent then
   restoring H's bytes and entry reads `proposed`; with an agent instead
-  pushing an unsigned junk entry on top of the superseded revoke before the
-  retry, the retry still numbers 11, from the revoke's own `superseded` line
-  found in local history, and reads `revoked`, and a restore of H reads
-  `proposed`; *lapse*
+  pushing an unsigned junk entry at sequence 5 on top of the superseded
+  revoke before the retry, the retry still numbers 11, from the revoke's own
+  `superseded` line found in local history, and reads `revoked`, and a
+  restore of H reads `proposed`; *lapse*
   (check 8): an archive or delete without a revoke, then a forward-commit
   restore, is `proposed`, as is an edit followed by a revert to the attested
   bytes, over the observed set, commits no longer reachable from the remote
