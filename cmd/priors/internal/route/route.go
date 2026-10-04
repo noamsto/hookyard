@@ -168,15 +168,20 @@ func Resolve(ctx context.Context, cwd string, cfg config.Config, r Resolver) Ses
 			opaque = true
 		}
 		// The first fetch URL is the one git fetches from; it alone decides the
-		// repo name and whether the remote is unreadable.
+		// repo name and whether the rewritten URL is unreadable.
 		urls := strings.Split(fetch, "\n")
 		urls = append(urls, strings.Split(push, "\n")...)
+		rawStart := len(urls)
 		urls = append(urls, raws[name]...)
 		for i, raw := range urls {
 			rem, err := parse(raw)
 			if err != nil {
-				// An unparsable extra URL names no org it could be matched by.
-				if i == 0 && !isLocalPath(raw) {
+				// A raw value is what the repo's own config names, so one priors
+				// cannot read could hide a work org behind an insteadOf rewrite.
+				// A colon-less value is a local path to git. Other unparsable
+				// rewritten URLs name no org they could be matched by.
+				isRaw := i >= rawStart
+				if (i == 0 || isRaw && strings.Contains(raw, ":")) && !isLocalPath(raw) {
 					opaque = true
 				}
 				continue

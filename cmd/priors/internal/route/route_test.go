@@ -199,6 +199,12 @@ func TestResolveRewrites(t *testing.T) {
 		{"personal raw rewritten to unlisted org on work host", "work", noamsto, []rewrite{{"https://github.com/someone/", insteadOf, "https://github.com/noamsto/"}}, nil, ClassUnresolvable, "x"},
 		{"personal rewritten to personal on work host", "work", noamsto, []rewrite{{"git@github.com:noamsto/", insteadOf, "https://github.com/noamsto/"}}, nil, ClassPersonal, "x"},
 		{"unlisted raw rewritten to personal on work host", "work", someone, []rewrite{{"https://github.com/noamsto/", insteadOf, "https://github.com/someone/"}}, nil, ClassUnresolvable, "x"},
+		{"unsupported raw scheme rewritten to personal", "personal", "persistent-https://github.com/factify-inc/x", []rewrite{{"https://github.com/noamsto/", insteadOf, "persistent-https://github.com/factify-inc/"}}, nil, ClassUnresolvable, "x"},
+		{"unparsable shortcut hidden by longer rewrite", "personal", "fy:x", []rewrite{{"https://github.com/factify-inc/", insteadOf, "fy:"}, {"https://github.com/noamsto/x", insteadOf, "fy:x"}}, nil, ClassUnresolvable, "x"},
+		{"no_push pushurl is a local path", "personal", noamsto, nil, [][]string{{"config", "remote.origin.pushurl", "no_push"}}, ClassPersonal, "x"},
+		{"dotted remote name raw work hidden by insteadOf", "personal", noamsto, []rewrite{{"https://github.com/noamsto/", insteadOf, "https://github.com/factify-inc/"}}, [][]string{{"remote", "add", "up.stream", "https://github.com/factify-inc/y"}}, ClassWork, "x"},
+		// Intended: the raw gh:noamsto/x names host gh, on no list, so origin fails closed.
+		{"personal shorthand prefix is unresolvable on work host", "work", "gh:noamsto/x", []rewrite{{"https://github.com/", insteadOf, "gh:"}}, nil, ClassUnresolvable, "x"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

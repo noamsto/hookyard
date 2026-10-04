@@ -457,7 +457,9 @@ rewritten by `url.<base>.insteadOf` and `pushInsteadOf` from user git config.
 A URL is parsed into host and owner: case-folded, `.git` stripped, SSH host
 aliases resolved, and the host compared as well as the owner. A repo any of
 whose remotes has any such URL naming a work org counts as work, whatever
-`origin` resolves to; this fails closed (#182). Otherwise the repo resolves by
+`origin` resolves to; this fails closed (#182). A raw URL that cannot be
+parsed, and is not a local path, makes the repo unresolvable, since a rewrite
+could hide a work org behind it. Otherwise the repo resolves by
 `origin`, and `origin` counts as a personal org only when every one of its URLs
 does. On a work-profile host an org on neither list is **unresolvable**; on a
 personal host it is personal, being on no work list. The key is the repo's org,
