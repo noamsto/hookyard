@@ -549,7 +549,7 @@ root-owned default; the table decides every key the user config holds today:
 | --- | --- | --- | --- |
 | `profile` | the host kind, so routing and the quarantine | trust file (#174) | flipping it sends work-bound writes to personal on a work-profile host, or quarantines everything |
 | `work_orgs`, `personal_orgs` | org resolution, so both rules above and the personal store's work-org lint | trust file (#174) | an org dropped from the work list, or added to the personal one, routes work facts to personal |
-| `personal_store`, `work_store` | which checkout each store is read from and published to, and the work-store path the read guard denies | trust file: each store's path **and remote URL**, beside its store id (#178) | `work_store` pointed at a second clone of the personal remote publishes work facts to personal, irreversibly; `personal_store` pointed at a work clone feeds work facts to non-work sessions. The path alone is not enough: what a read sees is whatever a sync pulled from `origin`, and `priors`'s push takes the branch's upstream remote, both in the checkout's user-writable `.git/config`. So `priors` refuses a checkout whose `origin` differs from the pinned URL and pushes to the pinned URL, refusing when user git config rewrites it (`pushInsteadOf`). A sync outside `priors` (§4.8) still follows the checkout's own config, the same class as §4.4's host-local rewrite residual |
+| `personal_store`, `work_store` | which checkout each store is read from and published to, and the work-store path the read guard denies | trust file: each store's path **and remote URL**, beside its store id (#178) | `work_store` pointed at a second clone of the personal remote publishes work facts to personal, irreversibly; `personal_store` pointed at a work clone feeds work facts to non-work sessions. The path alone is not enough: what a read sees is whatever a sync pulled from `origin`, and `priors`'s push takes the branch's upstream remote, both in the checkout's user-writable `.git/config`. So `priors` refuses a checkout whose `origin` differs from the pinned URL, and pushes to the pinned URL with the user's and system git config and `GIT_SSH*` cleared, through the pinned `ssh` with a build-time ssh config and `known_hosts`, refusing when the effective push URL after git's rewrites differs from the pinned one. A sync outside `priors` (§4.8) still follows the checkout's own config, the same class as §4.4's host-local rewrite residual |
 | `work_names` | the work-name scan behind `priors move --to personal`, the quarantine drain and the personal store's lint | trust file as a floor; the user key may only add names (#179) | emptying it lets every later move pass the scan; adding a name only makes the scan stricter, as `priors lint --work-name` already does |
 | `rules` | write-time redaction (§4.3) and the index and search exclusion, since a configured file today replaces the built-in set | root-owned default: the built-in set in the system-profile binary is a floor no config removes; the key stays, additive only (#180) | a permissive file would disable redaction on every write path; the built-in floor is §4.3's one shared rule set |
 | `scanner` | gate 1's secret scan (§4.4); unset, it is the first `betterleaks` or `gitleaks` on `PATH` | root-owned default with no override: pinned at build time to a Nix store path; the key and the `PATH` lookup are dropped (#181) | a script printing an empty report passes every fact, and `PATH` is as user-writable as the key |
@@ -566,10 +566,14 @@ decided with it:
   `priors`'s git calls honour. An `insteadOf` rewrite there makes every work
   repo's `origin` read as a personal org, so routing classifies each remote by
   both its raw and its rewritten URL, and a work org in either makes it work
-  (#182); a `pushInsteadOf` rewrite is refused at push (#178).
+  (#182). Plain `insteadOf` rewrites push URLs too, as do `pushInsteadOf`
+  and `core.sshCommand`, so the push runs without that config (#178).
 - **`PATH`**, from which `git`, `ssh` and `rg` are found as the scanner is. A
   shim can lie to routing, push anywhere, or return work-store text to a
-  non-work search, so all four are pinned at build time (#181).
+  non-work search, so all four are pinned at build time (#181). Pinning the
+  binary does not pin what git reads: the push's clean environment above is
+  what keeps a pinned `git` from taking `GIT_SSH_COMMAND`, `core.sshCommand`
+  or `~/.ssh/config` from the user.
 - **`PRIORS_CONFIG`, `XDG_CONFIG_HOME` and `XDG_STATE_HOME`** choose the user
   config file and the default state dir only; no flag, variable or user
   config names the trust file or overrides its keys (§4.4).
