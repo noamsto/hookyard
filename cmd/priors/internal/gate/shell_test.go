@@ -1,8 +1,6 @@
 package gate
 
-import (
-	"testing"
-)
+import "testing"
 
 func TestIngestsCall(t *testing.T) {
 	tests := []struct {
@@ -117,7 +115,7 @@ func TestIngestsCall(t *testing.T) {
 		{"parallel earlier gh hides joined gh", "Bash", `{"command":"parallel ::: 'gh auth status' \"g''h issue view 1\""}`, true},
 		{"xargs sh -c earlier gh hides joined gh", "Bash", `{"command":"printf '%s\\0' 'gh auth status' \"g''h issue view 1\" | xargs -0 -I{} sh -c '{}'"}`, true},
 		// bash binds the second string to $0 and does not run it; it flags by
-		// design, since every quoted string is judged as a script.
+		// design, since every listed name is judged.
 		{"bash -c two quoted scripts", "Bash", `{"command":"bash -c 'gh auth status' \"g''h issue view 1\""}`, true},
 		{"nested quoted joined gh", "Bash", `{"command":"bash -c \"sh -c 'gh auth status' \\\"g''h issue view 1\\\"\""}`, true},
 		{"escaped quote before quoted scripts", "Bash", `{"command":"echo \\\" 'gh auth status' \"g''h issue view 1\""}`, true},
