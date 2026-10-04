@@ -1,8 +1,10 @@
 // Package sanitize makes fact-derived text safe to hand to a model: it strips
 // invisible and control characters, escapes anything imitating priors' own
-// fence or attribution, and wraps output in a fence. Injected output gets an
-// unpredictable delimiter; a committed index gets one derived from its body
-// that never occurs in that body.
+// fence or attribution, and wraps output in a fence. Text strips, then
+// normalises, then matches, so nothing a later step removes can split a
+// token an earlier one saw. Injected output gets an unpredictable delimiter;
+// a committed index gets one derived from its body that never occurs in that
+// body.
 package sanitize
 
 import (
@@ -32,14 +34,17 @@ var fenceTokens = [][]rune{
 	[]rune("endpriors"),
 }
 
-// confusables folds lookalikes of Latin letters, keyed by their lower-case
-// form. Runes are given by code point so the source carries no homoglyphs.
+// confusables folds lookalikes of Latin letters and of '=', keyed by their
+// lower-case form. Runes are given by code point so the source carries no
+// homoglyphs.
 var confusables = map[rune]rune{
 	// Cyrillic
 	0x0430: 'a', 0x0432: 'b', 0x0435: 'e', 0x043a: 'k', 0x043c: 'm',
 	0x043d: 'h', 0x043e: 'o', 0x0440: 'p', 0x0441: 'c', 0x0442: 't',
 	0x0443: 'y', 0x0445: 'x', 0x0456: 'i', 0x0458: 'j', 0x0455: 's',
-	0x04bb: 'h', 0x0501: 'd', 0x051b: 'q', 0x051d: 'w',
+	0x04bb: 'h', 0x0501: 'd', 0x051b: 'q', 0x051d: 'w', 0x04af: 'y',
+	// Armenian
+	0x0585: 'o', 0x0570: 'h', 0x057d: 'u', 0x0578: 'n', 0x0566: 'q',
 	// Greek
 	0x03b1: 'a', 0x03b2: 'b', 0x03b5: 'e', 0x03b9: 'i', 0x03ba: 'k',
 	0x03bd: 'v', 0x03bf: 'o', 0x03c1: 'p', 0x03c4: 't', 0x03c5: 'u',
@@ -52,18 +57,28 @@ var confusables = map[rune]rune{
 	0x0274: 'n', 0x1d0f: 'o', 0x1d18: 'p', 0x0280: 'r', 0xa731: 's',
 	0x1d1b: 't', 0x1d1c: 'u', 0x1d20: 'v', 0x1d21: 'w', 0x028f: 'y',
 	0x1d22: 'z',
+	// lookalikes of the fence rule's '='
+	0x30a0: '=', 0x2e40: '=', 0x1400: '=', 0xa4ff: '=', 0x2550: '=',
+}
+
+// upperConfusables folds upper-case lookalikes whose lower case does not look
+// Latin, so it is checked before lower-casing.
+var upperConfusables = map[rune]rune{
+	0x0396: 'z', 0x0397: 'h', 0x039c: 'm', 0x039d: 'n', 0x03a5: 'y',
 }
 
 var beginLine = regexp.MustCompile(`^===== BEGIN (priors-[0-9a-f]{16}) =====$`)
 
-// Text is safe for multi-line output: NFKC-normalised, stripped of control,
-// format and variation-selector characters, and with fence and attribution
-// imitations escaped line by line. Newlines and tabs are kept.
+// Text is safe for multi-line output: stripped of control, format and
+// variation-selector characters, NFKC-normalised, and with fence and
+// attribution imitations escaped line by line. Stripping comes first so NFKC
+// composes across a removed character and the output is truly normalised.
+// Newlines and tabs are kept.
 func Text(s string) string {
-	s = strings.Map(keepRune, norm.NFKC.String(s))
+	s = norm.NFKC.String(strings.Map(keepRune, s))
 	lines := strings.Split(s, "\n")
 	for i, l := range lines {
-		lines[i] = escapeLine(l)
+		lines[i] = quoteBrackets(escapeLine(l))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -183,19 +198,32 @@ type skeletonRune struct {
 	start, end int
 }
 
-// skeleton lower-cases the line, folds confusables and drops whitespace.
-// Combining marks and format characters are dropped too: they render as
-// nothing, so they must not be able to split a token.
+// skeleton folds the line to what it looks like: at most one rune per
+// original rune, with whitespace, combining marks (Mn, Me) and format
+// characters dropped because they render as nothing and must not split a
+// token. Each rune is reduced to the base of its NFD form, so a precomposed
+// accent folds too, then mapped through the upper-case confusables, else
+// lower-cased and mapped through the lower-case ones.
 func skeleton(line string) []skeletonRune {
 	var sk []skeletonRune
 	for i, r := range line {
-		if unicode.IsSpace(r) || unicode.In(r, unicode.Mn, unicode.Cf) {
+		if unicode.IsSpace(r) || unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf) {
 			continue
 		}
 		end := i + utf8.RuneLen(r)
-		r = unicode.ToLower(r)
-		if f, ok := confusables[r]; ok {
+		if r >= utf8.RuneSelf {
+			r, _ = utf8.DecodeRuneInString(norm.NFD.String(string(r)))
+			if unicode.IsMark(r) {
+				continue
+			}
+		}
+		if f, ok := upperConfusables[r]; ok {
 			r = f
+		} else {
+			r = unicode.ToLower(r)
+			if f, ok := confusables[r]; ok {
+				r = f
+			}
 		}
 		sk = append(sk, skeletonRune{r, i, end})
 	}
@@ -231,6 +259,62 @@ func escapeLine(line string) string {
 	}
 	b.WriteString(line[done:])
 	return b.String()
+}
+
+// quoteBrackets is the fail-closed backstop for the bracketed attribution
+// headers: a confusable the maps miss still cannot keep its header shape.
+// Any opener ('[' or a non-ASCII Ps rune) pairs with any closer (']' or a
+// non-ASCII Pe rune), innermost first; a pair holding a non-ASCII letter or
+// number, judged on the NFD base so accented Latin passes, is rewritten to
+// "(quoted: …)" with its content verbatim. Unmatched brackets are left alone.
+func quoteBrackets(line string) string {
+	rs := []rune(line)
+	var open, quote []int // quote holds the brackets to rewrite
+	for i, r := range rs {
+		switch {
+		case isOpener(r):
+			open = append(open, i)
+		case isCloser(r) && len(open) > 0:
+			o := open[len(open)-1]
+			open = open[:len(open)-1]
+			if slices.ContainsFunc(rs[o+1:i], isNonASCIIWord) {
+				quote = append(quote, o, i)
+			}
+		}
+	}
+	if len(quote) == 0 {
+		return line
+	}
+	slices.Sort(quote)
+	var b strings.Builder
+	prev := 0
+	for _, i := range quote {
+		b.WriteString(string(rs[prev:i]))
+		if isOpener(rs[i]) {
+			b.WriteString("(quoted: ")
+		} else {
+			b.WriteString(")")
+		}
+		prev = i + 1
+	}
+	b.WriteString(string(rs[prev:]))
+	return b.String()
+}
+
+func isOpener(r rune) bool {
+	return r == '[' || r >= utf8.RuneSelf && unicode.Is(unicode.Ps, r)
+}
+
+func isCloser(r rune) bool {
+	return r == ']' || r >= utf8.RuneSelf && unicode.Is(unicode.Pe, r)
+}
+
+func isNonASCIIWord(r rune) bool {
+	if r < utf8.RuneSelf {
+		return false
+	}
+	base, _ := utf8.DecodeRuneInString(norm.NFD.String(string(r)))
+	return base >= utf8.RuneSelf && (unicode.IsLetter(base) || unicode.IsNumber(base))
 }
 
 // matchAt reports how many skeleton runes from i form a token, and the token
