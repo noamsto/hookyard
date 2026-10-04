@@ -6,9 +6,9 @@
 //
 // Imitations are found on a per-line skeleton: each rune folds to the ASCII
 // letters it looks like, through UTS #39 confusables, or stays an unknown
-// that may stand for up to two token letters when it sits in or beside a word
-// with a recognised one. A token matches when at least half of it is spelled by
-// recognised letters within twice its length.
+// that may stand for up to two token letters unless its word reads as foreign
+// prose. A token matches when recognised letters spell at least half of each
+// of its two words within twice its length.
 package sanitize
 
 import (
@@ -171,8 +171,14 @@ func keepRune(r rune) rune {
 	return r
 }
 
-// tokens are the skeletons Text refuses to let through, in match priority.
-var tokens = []string{"hookyardadvisory", "priorsmemory", "beginpriors", "endpriors"}
+// token is a skeleton Text refuses to let through: two words, split at split.
+type token struct {
+	s     string
+	split int
+}
+
+// tokens are in match priority.
+var tokens = []token{{"hookyardadvisory", 8}, {"priorsmemory", 6}, {"beginpriors", 5}, {"endpriors", 3}}
 
 // maxToken bounds the matcher's fixed DP arrays: one state per token rune
 // consumed, plus none.
@@ -197,13 +203,14 @@ type skelRune struct {
 	word       int
 	c          class
 	rule       bool // can draw a fence rule: '=' or a non-letter, non-digit
+	letter     bool // unmapped letter or digit
 }
 
-// word counts what the lone-rune rule needs: runes other than punctuation,
-// and non-ASCII runes.
+// word counts what the word pass needs: whether it has an anchor, and how
+// many unmapped letters or digits it holds.
 type word struct {
-	size, foreign int
-	anchored      bool
+	anchored bool
+	letters  int
 }
 
 // blank reports a symbol that renders as an empty cell, so it reads as space.
@@ -251,7 +258,8 @@ func skeleton(line string) []skelRune {
 		case lb < utf8.RuneSelf:
 			s.c = literal
 		default:
-			s.c, s.rule = unmapped, !unicode.In(b, unicode.L, unicode.N)
+			s.c, s.letter = unmapped, unicode.In(b, unicode.L, unicode.N)
+			s.rule = !s.letter
 		}
 		if newWord {
 			words = append(words, word{})
@@ -259,36 +267,36 @@ func skeleton(line string) []skelRune {
 		}
 		s.word = len(words) - 1
 		w := &words[s.word]
-		foreign := lb >= utf8.RuneSelf
-		if foreign {
-			w.foreign++
-		}
-		if (foreign || s.c == anchor) && !unicode.Is(unicode.P, r) {
-			w.size++
-		}
 		w.anchored = w.anchored || s.c == anchor
+		if s.letter {
+			w.letters++
+		}
 		sk = append(sk, s)
 	}
-	// Unmapped runes in a word that has an anchor are lookalikes; so are those
-	// of a lone word beside such a word, set off by spaces: one rune that is
-	// not punctuation, or one non-ASCII rune, glued to any punctuation.
-	// Elsewhere a letter or digit is foreign prose and a symbol may only pad
-	// a match.
+	// An unmapped rune in a word with an anchor is a lookalike. A word with no
+	// anchor and two or more unmapped letters is foreign prose: its letters
+	// are literal and its symbols may only pad a match. In any other word each
+	// glued run of unmapped runes is one lookalike, whatever surrounds it: its
+	// first rune is wild and the rest pad.
+	glued := false
 	for i := range sk {
 		s := &sk[i]
 		if s.c != unmapped {
+			glued = false
 			continue
 		}
-		w := s.word
+		w := words[s.word]
 		switch {
-		case words[w].anchored,
-			(words[w].size == 1 || words[w].foreign == 1) && (w > 0 && words[w-1].anchored || w+1 < len(words) && words[w+1].anchored):
+		case w.anchored:
 			s.c = wild
-		case s.rule:
+		case w.letters >= 2 && s.letter:
+			s.c = literal
+		case w.letters >= 2 || glued && sk[i-1].word == s.word:
 			s.c = gap
 		default:
-			s.c = literal
+			s.c = wild
 		}
+		glued = true
 	}
 	return sk
 }
@@ -296,26 +304,30 @@ func skeleton(line string) []skelRune {
 // matchAt returns the length of the shortest window of sk from i that spells
 // t: anchors consume the next token rune and must equal it, a wild consumes
 // one or two (a digraph such as ꝏ) or is skipped, a gap is skipped, a
-// literal ends the window, the first rune consumes t[0], and at least half of
-// t is consumed by anchors. It returns 0 when there is none. anchors is sk's
-// prefix count of anchors.
-func matchAt(sk []skelRune, anchors []int, i int, t string) int {
-	m, k := len(t), (len(t)+1)/2
+// literal ends the window, the first rune consumes t's first rune, and
+// anchors consume at least half of each of t's two words (of the whole token
+// when t.split is 0). It returns 0 when there is none. anchors is sk's prefix
+// count of anchors.
+func matchAt(sk []skelRune, anchors []int, i int, t token) int {
+	m, b := len(t.s), t.split
+	need1, need2 := (b+1)/2, (m-b+1)/2
 	switch sk[i].c {
 	case wild:
 	case anchor:
-		if sk[i].set&imageBit(rune(t[0])) == 0 {
+		if sk[i].set&imageBit(rune(t.s[0])) == 0 {
 			return 0
 		}
 	default:
 		return 0
 	}
 	end := min(i+2*m, len(sk))
-	if anchors[end]-anchors[i] < k {
+	if anchors[end]-anchors[i] < need1+need2 {
 		return 0
 	}
 	// best[j] is the most anchors over alignments that consumed j token
-	// runes; -1 is unreachable. Fixed arrays keep the DP allocation-free.
+	// runes, counted within the token word j falls in: crossing into the
+	// second word needs need1 and starts the count again. -1 is unreachable.
+	// Fixed arrays keep the DP allocation-free.
 	var bestArr, nextArr [maxToken + 1]int8
 	best, next := bestArr[:m+1], nextArr[:m+1]
 	for j := 1; j <= m; j++ {
@@ -336,24 +348,24 @@ func matchAt(sk []skelRune, anchors []int, i int, t string) int {
 			}
 			switch s.c {
 			case anchor:
-				if j < m && s.set&imageBit(rune(t[j])) != 0 {
-					next[j+1], alive = max(next[j+1], a+1), true
+				if j < m && s.set&imageBit(rune(t.s[j])) != 0 {
+					alive = advance(next, j, j+1, a+1, b, need1) || alive
 				}
 			case wild:
 				if n > i {
 					next[j], alive = max(next[j], a), true
 				}
 				if j < m {
-					next[j+1], alive = max(next[j+1], a), true
+					alive = advance(next, j, j+1, a, b, need1) || alive
 				}
 				if j+2 <= m {
-					next[j+2] = max(next[j+2], a)
+					advance(next, j, j+2, a, b, need1)
 				}
 			default: // gap
 				next[j], alive = max(next[j], a), true
 			}
 		}
-		if int(next[m]) >= k {
+		if int(next[m]) >= need2 {
 			return n - i + 1
 		}
 		if !alive {
@@ -362,6 +374,19 @@ func matchAt(sk []skelRune, anchors []int, i int, t string) int {
 		best, next = next, best
 	}
 	return 0
+}
+
+// advance records reaching state to from j with a anchors. Leaving the
+// token's first word (split b) needs need1 of them, and the count restarts.
+func advance(next []int8, j, to int, a int8, b, need1 int) bool {
+	if j < b && to >= b {
+		if int(a) < need1 {
+			return false
+		}
+		a = 0
+	}
+	next[to] = max(next[to], a)
+	return true
 }
 
 // span is a byte range of a line to replace with "(quoted: tok)".
@@ -382,13 +407,19 @@ func escapeLine(line string) string {
 			anchors[i+1]++
 		}
 	}
+	ruled := hasRuleRun(line, sk)
 	var spans []span
 	fenced := false
 	for i := 0; i < len(sk); {
 		n, tok := 0, ""
 		for _, t := range tokens {
+			// On a line drawing a rule, the fence words need only half the
+			// whole token, so a mangled BEGIN or END still matches.
+			if ruled && (t.s == "beginpriors" || t.s == "endpriors") {
+				t.split = 0
+			}
 			if n = matchAt(sk, anchors, i, t); n > 0 {
-				tok = t
+				tok = t.s
 				break
 			}
 		}
@@ -481,4 +512,20 @@ func mergeSpans(a, b []span) []span {
 		}
 	}
 	return append(append(out, a...), b...)
+}
+
+// hasRuleRun reports three or more rule runes in a row in sk that are not
+// punctuation, so CJK runs such as 。」「 draw no rule.
+func hasRuleRun(line string, sk []skelRune) bool {
+	n := 0
+	for _, s := range sk {
+		if r, _ := utf8.DecodeRuneInString(line[s.start:]); !s.rule || unicode.Is(unicode.P, r) {
+			n = 0
+			continue
+		}
+		if n++; n >= 3 {
+			return true
+		}
+	}
+	return false
 }

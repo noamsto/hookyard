@@ -721,20 +721,26 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
   UTS #39 `confusables.txt` 18.0.0, pinned by hash, and holds only non-ASCII
   sources. Skeleton runes fall in four classes. An anchor is an ASCII letter
   or digit, or a mapped rune standing for one. A literal is any other ASCII
-  (`=`, `-`) or an `=` lookalike, and breaks a match; so does a non-ASCII
-  letter or digit in a word with no anchor, a word being a run between
-  spaces. A wild is an unmapped non-ASCII rune in a word that has an anchor,
-  and stands for up to two token runes or none, so a digraph lookalike
-  (`hꝏkyard`) is caught. A gap is an unmapped non-ASCII
-  symbol in a word with no anchor, and is only skipped inside a match. One
-  unmapped rune alone in its word, punctuation aside, beside a word with an
-  anchor, is wild, so a lookalike set off by thin spaces (`advis ⭕ ry`) or
-  glued to a bracket (`[ħ ookyard`) is still caught. A
-  match, for each of `hookyardadvisory`, `priorsmemory`, `beginpriors` and
-  `endpriors`, is a window of at most twice the token's length that consumes
-  the token in order, with at least half its runes as exact anchors, each
-  wild standing for up to two runes or none and no literal inside; the work is
-  linear in line length. A match becomes `(quoted: <token>)` and swallows one
+  (`=`, `-`) or an `=` lookalike, and breaks a match. An unmapped non-ASCII
+  rune is judged by its own word alone, a word being a run between spaces. In
+  a word with an anchor it is a wild, standing for up to two token runes or
+  none, so a digraph lookalike (`hꝏkyard`) is caught. A word with no anchor
+  and two or more unmapped letters or digits is foreign prose: its letters
+  are literal and its symbols are gaps, only skipped inside a match. Any
+  other word holds at most one lookalike, so each glued run of unmapped runes
+  in it is one wild unit, its first rune wild and the rest gaps: a lookalike
+  set off by thin spaces (`advis ⭕ ry`), glued to a bracket or symbol
+  (`[ħ ookyard`, `⊏ħ ookyard advisory⊐`, `advis ⭕★ ry`) or one of a chain
+  (`h ꝋ ꝋ ꝋ yard`) is caught whatever its neighbours. A match, for each of
+  `hookyardadvisory`, `priorsmemory`, `beginpriors` and `endpriors`, is a
+  window of at most twice the token's length that consumes the token in
+  order, each wild standing for up to two runes or none and no literal
+  inside, with exact anchors spelling at least half of each token word
+  (`hookyard|advisory`, `priors|memory`, `begin|priors`, `end|priors`), so
+  wilds never supply a token word (`the “priors”`, `中的priors` pass). On a
+  line drawing a rule of three or more non-punctuation runes, `BEGIN` and
+  `END` need only half the whole token, so `===== ƎƝD priors-… =====` is
+  caught. The work is linear in line length. A match becomes `(quoted: <token>)` and swallows one
   adjacent bracket or punctuation rune on each side (a `-` after it
   excepted, so `priors-<hex>` stays readable), which covers every bracket
   shape without a list of them. Only on a line holding a `BEGIN` or `END`
@@ -744,12 +750,15 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
   bracketed non-Latin text and accented names. Every other byte is copied
   as normalised, and a committed index whose lines change under this rule
   regenerates once. What stays out of reach is stated: whole words written
-  in characters the table does not map; more than half a token replaced by
-  unmapped lookalikes; ASCII lookalikes and separators (`h0okyard`,
+  in characters the table does not map, and a lookalike glued to another
+  foreign letter (`ħꝏ kyard`), which forms a foreign word; more than half of
+  one token word replaced by unmapped lookalikes (`ħꝋꝋƙƴard advisory`), and
+  `END` with two of its three letters replaced on a line drawing no
+  non-punctuation rule; ASCII lookalikes and separators (`h0okyard`,
   `hookyard-advisory`), taken at face value; and padding longer than the
   token. The accepted costs are false positives: ASCII prose spelling a
-  token (`Hook yard advisor y?`) and CJK glued to an ASCII word that
-  completes one (`我们priors`). The random delimiter still guards the real
+  token (`Hook yard advisor y?`), and a glued run of symbols beside token
+  words read as a lookalike (`when ★★ priors`, `prior 🎉🎉 memory`). The random delimiter still guards the real
   fence, so the residual is attribution spoofing. Each index line is capped; `priors show` and `priors search`
   fence their own output. A file opened with `cat` or `rg` (tier 3) reaches
   the model unfenced, so "fenced" below means *through `priors`*.
@@ -1466,19 +1475,23 @@ flagged facts stops being optional.
   the model stripped; each protected string — `[hookyard advisory]`, the
   store header, the BEGIN and END fence lines — in ASCII, any case and
   spacing, and every single-code-point substitution (of one letter, or of
-  two adjacent ones: `hꝏkyard`) or insertion over it (every code point,
-  every default-ignorable one assigned or not, glued, set off by thin spaces
-  on one or both sides even beside punctuation, or beside a blank braille
-  cell) except one that normalises to different ASCII
-  (`ⓧ`, `¼`), to an ASCII-mapped letter other than the one replaced, or to
-  nothing, which reads as that spelling or as a deletion; also inside every
-  bracket-like pair (Ps, Pe, Pi,
-  Pf, bracket pieces, math brackets), reaches the model escaped; so do the
-  round-1 and round-2 repros from #132 and #169 as exact outputs, and a
+  two adjacent ones where their token word keeps half its letters:
+  `hꝏkyard`) or insertion over it (every code point, every
+  default-ignorable one assigned or not, glued, set off by thin spaces or
+  blank braille cells on one or both sides even beside punctuation, or
+  beside a blank braille cell), and a chain of one lookalike over up to half
+  a token word (`h ꝋ ꝋ ꝋ yard`), except one that normalises to different
+  ASCII (`ⓧ`, `¼`), to an ASCII-mapped letter other than the one replaced,
+  or to nothing, which reads as that spelling or as a deletion; also inside
+  every bracket-like pair (Ps, Pe, Pi, Pf, bracket pieces, math brackets) or
+  symbol pair (`⊏ħ ookyard advisory⊐`, `★…★`), reaches the model escaped; so
+  do the repros of every #132 and #169 review round as exact outputs, and a
   whole word of mapped lookalikes (Lisu); a fence with `=` lookalikes has
   its rule runs quoted; genuine ASCII headers behave as before; benign
   Hebrew, CJK, Cyrillic, Greek, accented Latin, emoji and symbol prose, and
-  box-drawing tables, come through unchanged; matching is linear on 1 MiB
+  box-drawing tables, come through unchanged, as do one or two foreign runes
+  glued to or set beside a token word (`ב־priors`, `中的priors`,
+  `the “priors”`, every such code point); matching is linear on 1 MiB
   lines; the delimiter differs per injection, while the
   included index file's delimiter is derived from its body and never occurs
   in it; no truncation cuts the closing fence, and that file carries its own

@@ -3,6 +3,7 @@ package sanitize
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -77,6 +78,21 @@ var protectedLines = []protected{
 
 // isolation separators cycle by position: space, thin space, hair space.
 var isolators = []string{" ", "\u2009", "\u200a"}
+
+// sideSeps also hold the blank set, which reads as space.
+var sideSeps = []string{" ", "\u2009", "\u200a", "\u2800", "\U0001d159"}
+
+// wrapped are the two headers inside non-ASCII brackets and symbols, which
+// glue onto a lookalike at either end of the header.
+var wrapped = func() []protected {
+	var ps []protected
+	for _, w := range [][2]string{{"\u228f", "\u2290"}, {"\u23a1", "\u23a6"}, {"\u227a", "\u227b"}, {"\u2605", "\u2605"}, {"\u300c", "\u300d"}, {"\u228f\u228f", "\u2290\u2290"}} {
+		ps = append(ps,
+			newProtected(w[0]+"hookyard advisory"+w[1], "hookyardadvisory", false),
+			newProtected(w[0]+"priors memory · work"+w[1], "priorsmemory", false))
+	}
+	return ps
+}()
 
 func isolate(c rune, pos int) string {
 	sep := isolators[pos%len(isolators)]
@@ -196,7 +212,7 @@ func (ck *checker) check(c rune, kind string, p protected, in, needle string) {
 // cost), and that match consumes the "priors" the line's token needed.
 func quotesAToken(out string) bool {
 	for _, t := range tokens {
-		if strings.Contains(out, "(quoted: "+t+")") {
+		if strings.Contains(out, "(quoted: "+t.s+")") {
 			return true
 		}
 	}
@@ -371,13 +387,15 @@ func propertiesOf(ck *checker, cp codePoint, n *counts) {
 // spaced on one side only; and for one, isolated with a blank braille cell.
 func shapedSubstitutions(ck *checker, c rune, needle string) {
 	s := string(c)
-	for _, p := range protectedLines {
+	lines := append(slices.Clip(protectedLines), wrapped[int(c)%len(wrapped)])
+	for _, p := range lines {
+		chains(ck, c, p)
 		for k, i := range p.letters {
-			sep := isolators[i%len(isolators)]
+			sep := sideSeps[(i+int(c))%len(sideSeps)]
 			ck.check(c, "E3 one-sided before", p, p.replace(i, sep+s), needle)
 			ck.check(c, "E3 one-sided after", p, p.replace(i, s+sep), needle)
 			ck.check(c, "E3 blank companion", p, p.replace(i, sep+s+"\u2800"+sep), needle)
-			if k+1 < len(p.letters) && p.letters[k+1] == i+1 {
+			if k+1 < len(p.letters) && p.letters[k+1] == i+1 && pairKeepsHalf(p.token, k) {
 				ck.check(c, "E3 pair", p, p.replaceRange(i, i+2, s), needle)
 			}
 		}
@@ -428,4 +446,77 @@ func TestPropertyBrackets(t *testing.T) {
 		}
 	}
 	t.Logf("E5 inserted: %d non-ASCII brackets skipped as ASCII images (R3); Text calls: %d", asciiImage, ck.cases)
+}
+
+// pairKeepsHalf reports whether replacing token runes k and k+1 by one rune
+// leaves at least half of their token word as anchors.
+func pairKeepsHalf(tok string, k int) bool {
+	for _, t := range tokens {
+		if t.s != tok {
+			continue
+		}
+		n := t.split
+		if k >= t.split {
+			n = len(t.s) - t.split
+		}
+		return n-2 >= (n+1)/2
+	}
+	return true
+}
+
+// chains replaces runs of up to half of each token word with c, each copy
+// set off by a separator, and glued. The shortest match may leave trailing
+// copies outside the quote, since each can stand for two runes, so only the
+// escape is checked.
+func chains(ck *checker, c rune, p protected) {
+	for _, t := range tokens {
+		if t.s != p.token {
+			continue
+		}
+		for _, w := range [][2]int{{0, t.split}, {t.split, len(t.s)}} {
+			n := (w[1] - w[0]) / 2
+			if n < 2 {
+				continue
+			}
+			for k := w[0]; k+n <= w[1]; k++ {
+				from, to := p.letters[k], p.letters[k+n-1]+1
+				if to-from != n {
+					continue
+				}
+				sep := sideSeps[(k+int(c))%len(sideSeps)]
+				ck.check(c, "E3 chain isolated", p, p.replaceRange(from, to, sep+strings.Repeat(string(c)+sep, n)), "")
+				ck.check(c, "E3 chain glued", p, p.replaceRange(from, to, strings.Repeat(string(c), n)), "")
+			}
+		}
+	}
+}
+
+// TestPropertyGluedForeignBenign: a foreign rune or two glued to, or set
+// beside, an ASCII word must not complete a fence word from it.
+func TestPropertyGluedForeignBenign(t *testing.T) {
+	if testing.Short() {
+		t.Skip("generator-driven property test")
+	}
+	cps, _ := testedCodePoints()
+	failed := 0
+	for _, cp := range cps {
+		c := cp.c
+		if c < 0x80 {
+			continue
+		}
+		im := imageOf(c)
+		if !im.clean() || im.runes != 1 || len(im.anchors) > 0 {
+			continue
+		}
+		s := string(c)
+		for _, in := range []string{"the " + s + "priors" + s, s + s + "priors", "use " + s + " priors", "priors " + s + s, "home " + s + " memory"} {
+			want := norm.NFKC.String(in)
+			if got := Text(in); got != want {
+				t.Errorf("U+%04X: Text(%q) = %q, want %q", c, in, got, want)
+				if failed++; failed >= maxChunkFailure {
+					t.Fatalf("stopping after %d failures", failed)
+				}
+			}
+		}
+	}
 }

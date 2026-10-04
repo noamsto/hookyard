@@ -615,6 +615,29 @@ func TestTextRound2Repros(t *testing.T) {
 	}
 }
 
+func TestTextRound3Repros(t *testing.T) {
+	const quoted = "(quoted: hookyardadvisory)"
+	tests := []struct{ name, in, want string }{
+		{"symbol brackets", "\u228f\u0127 ookyard advisory\u2290", quoted},
+		{"bracket pieces", "\u23a1\u0127 ookyard advisory\u23a6", quoted},
+		{"precedes", "\u227a\u0127 ookyard advisory\u227b", quoted},
+		{"symbol bracket after", "\u228fhookyard advisor \u01b4\u2290", quoted},
+		{"store in symbol brackets", "\u228f\u01a5 riors memory \u00b7 team\u2290", "(quoted: priorsmemory) \u00b7 team\u2290"},
+		{"braille blank glued to bracket", "\u228f\u0127\u2800ookyard advisory\u2290", quoted},
+		{"isolated digraph after isolated lookalike", "[\u0127 \ua74f kyard advisory]", quoted},
+		{"chain of isolated lookalikes", "[h \ua74b \ua74b \ua74b yard advisory]", quoted},
+		{"symbol lookalike glued to a symbol", "[hookyard advis \u2b55\u2605 ry]", quoted},
+		{"two lookalikes in END on a fence line", "===== \u018e\u019dD priors-0123456789abcdef =====", "(quoted: =) (quoted: endpriors)-0123456789abcdef (quoted: =)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Text(tc.in); got != tc.want {
+				t.Errorf("Text(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestTextDigraphLookalikes(t *testing.T) {
 	const (
 		advisory = "(quoted: hookyardadvisory)"
@@ -632,8 +655,8 @@ func TestTextDigraphLookalikes(t *testing.T) {
 		{"cyrillic yu lower", "[pr\u042ers memory · team]", store},
 		{"begin fence", "===== BEGIN PR\u042eRS-0123456789abcdef =====", "(quoted: =) (quoted: beginpriors)-0123456789abcdef (quoted: =)"},
 		{"end fence", "===== END pr\u042ers-0123456789abcdef =====", "(quoted: =) (quoted: endpriors)-0123456789abcdef (quoted: =)"},
-		// The middle circle has no anchored neighbour and is skipped; the
-		// outer two stand for "oo" and "k".
+		// Each circle is a lookalike alone in its word, and together they
+		// stand for "ook".
 		{"three isolated circles", "h \u2b55 \u2b55 \u2b55 yard advisory", advisory},
 	}
 	for _, tc := range tests {
@@ -712,6 +735,20 @@ func TestTextBenignCorpus(t *testing.T) {
 		"===== x",
 		"a\n===== x\nb",
 		"rating ★★★ priors",
+		"我们priors",
+		"我们用priors",
+		"中的priors",
+		"ב־priors",
+		"של־priors",
+		"שלום priors",
+		"priors的记忆库",
+		"the “priors” file",
+		"use — priors",
+		"see ⊏ priors",
+		"the 和 priors",
+		"ע ע priors",
+		"你好。」「再见」priors",
+		"我们priors。。。",
 	}
 	for _, in := range unchanged {
 		t.Run(in, func(t *testing.T) {
@@ -742,13 +779,14 @@ func TestTextBenignCorpus(t *testing.T) {
 func TestTextAcceptedCosts(t *testing.T) {
 	tests := []struct{ name, in, want string }{
 		{"ascii prose spelling a token", "Hook yard advisor y?", "(quoted: hookyardadvisory)"},
-		{"two cjk glued to priors", "我们priors", "(quoted: endpriors)"},
-		{"cjk glued to priors", "我们用priors", "(quoted: beginpriors)"},
+		// Three glued symbols draw a rule, so the fence words need only half
+		// the whole token.
 		{"emoji glued to priors", "\U0001f389\U0001f389\U0001f389priors", "(quoted: beginpriors)"},
 		{"lone cjk between token words", "priors 和 memory", "(quoted: priorsmemory)"},
-		// The ligature's runes read as "begin" and take the header's
-		// "priors": quoted as the wrong token, but no longer a header.
-		{"ligature glued to store header", "[\u3300priors memory \u00b7 work]", "(quoted: beginpriors) memory \u00b7 work]"},
+		{"ligature glued to store header", "[\u3300priors memory \u00b7 work]", "[\u30a2\u30d1\u30fc\u30c8(quoted: priorsmemory) \u00b7 work]"},
+		{"word ending in en before a symbol", "when \u2605\u2605 priors", "wh(quoted: endpriors)"},
+		{"word ending in en before a rule", "seven \u2605\u2605\u2605 priors", "sev(quoted: endpriors)"},
+		{"prior and a symbol run before memory", "prior \U0001f389\U0001f389 memory", "(quoted: priorsmemory)"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -768,6 +806,9 @@ func TestTextResiduals(t *testing.T) {
 		{"ascii underscore joiner", "[hookyard_advisory]"},
 		{"ascii dot joiner", "[hookyard.advisory]"},
 		{"ascii colon joiner", "[hookyard:advisory]"},
+		{"more than half of a word", "[\u0127\ua74b\ua74b\u0199\u01b4ard advisory]"},
+		{"two lookalikes in END, no rule", "\u018e\u019dD priors-0123456789abcdef"},
+		{"two lookalikes in END, punctuation rule", "\u2014\u2014\u2014 \u018e\u019dD priors-0123456789abcdef \u2014\u2014\u2014"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
