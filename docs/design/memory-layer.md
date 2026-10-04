@@ -807,18 +807,25 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
 
   A second, blunt pass backs the skeleton up: any line that is header-shaped
   or bracket-shaped and holds a non-ASCII rune outside the quoted tokens is
-  quoted whole as `(quoted line: …)`, shown, not dropped. Bracket-shaped
-  means the line opens on an ASCII ``[ ( { < " ' ` ``, or on a non-ASCII
-  opening or quote punctuation, symbol, modifier letter or UTS #39
+  quoted whole as `(quoted line: …)`, shown, not dropped. A line separator
+  (U+2028, U+2029) starts a new line. Bracket-shaped means the line, after
+  any leading Markdown or list markup (`- * + > # | ! . )`, digits, bullets)
+  and any leading quoted token, opens on an ASCII ``[ ( { < " ' ` ``, or on
+  a non-ASCII opening or quote punctuation, symbol, modifier letter or UTS #39
   punctuation lookalike, and closes later on a matching-class rune after a
-  letter. Header-shaped means three or more dash, symbol, modifier-letter or
-  `=`/`-` lookalike runes in a row, a loose token match in which a non-ASCII
-  rune the table does not map always counts as a lookalike, or a `-` glued to
-  sixteen hex characters (a delimiter). The accepted cost is false positives:
+  letter; a bracket or quote opener may also run to the end of the line.
+  Header-shaped means three or more dash, symbol, modifier-letter, `=`/`-`
+  lookalike or ASCII `= - _ ~ * # : +` runes in a row (an ASCII one beside a
+  space breaks the row), a loose token match in which a non-ASCII rune the
+  table does not map always counts as a lookalike, or a delimiter: a dash or
+  `_` inside a word followed by eight or more hex characters or digits of any
+  script, or a word of sixteen. The accepted cost is false positives:
   non-ASCII lines that open on a bracket, quote or symbol and close after a
-  letter (`[Søren]`, `「こんにちは」`, `“a” — “b” → ‘c’`), non-ASCII lines with
-  a run of three symbols or emoji (`rating ★★★`, `| ═══ table ═══ |`,
-  `🎉🎉🎉 priors shipped`), and ASCII identifiers that join both token words
+  letter or run to its end (`[Søren]`, `「こんにちは」`, `“a” — “b” → ‘c’`,
+  `««priors`), non-ASCII lines with a run of three symbols, emoji or ASCII
+  rule runes (`rating ★★★`, `| ═══ table ═══ |`, `🎉🎉🎉 priors shipped`,
+  `### Café notes`), non-ASCII lines holding a hex id after a dash
+  (`commit-3bde9c4a`), and ASCII identifiers that join both token words
   with `-` or `_` (`priors-memory-layer.md`) are quoted. Plain ASCII prose,
   smart-quoted prose and unbracketed non-ASCII prose (a Hebrew sentence) are
   unchanged. The #200 accepted costs (`like 🎉🎉🎉 priors`,
@@ -826,8 +833,10 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
   their emoji run is rule-shaped. What stays out of reach is stated: whole
   words written in characters the table does not map, and heavy substitution
   (more than half of a token word replaced, `ħꝋꝋƙƴard advisory`), on a line
-  that is neither bracket- nor header-shaped or that sits mid-line after
-  other text; ASCII punctuation beside a space inside an ASCII-only header
+  that is neither bracket- nor header-shaped, or that sits mid-line after
+  other text (`note [ħꝋꝋƙƴard advisory]`, a list or search row's
+  description, which follows the row's own `store/rel` frame); an `END`
+  imitation with neither rule, bracket nor delimiter (`ƎƝD priors`); ASCII punctuation beside a space inside an ASCII-only header
   (`[hookyard. advisory]`); and padding longer than the token. The #199
   letter-category bracket residual is closed, as are `ƎƝD priors-…` with no
   rule and the ASCII forms (`h0okyard`, `hookyard-advisory`,

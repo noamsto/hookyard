@@ -168,10 +168,14 @@ func nonEmpty(lines []string) []string {
 
 // keepRune drops control, format and default-ignorable characters (bidi,
 // zero-width, soft hyphen, invisible operators, tags, Hangul fillers,
-// unassigned ignorables) and variation selectors.
+// unassigned ignorables) and variation selectors. A line or paragraph
+// separator becomes a newline, so it starts a line of its own.
 func keepRune(r rune) rune {
-	if r == '\n' || r == '\t' {
+	switch r {
+	case '\n', '\t':
 		return r
+	case 0x2028, 0x2029:
+		return '\n'
 	}
 	if unicode.In(r, unicode.Cc, unicode.Cf, unicode.Other_Default_Ignorable_Code_Point, unicode.Variation_Selector) {
 		return -1
@@ -561,14 +565,23 @@ func runeAt(line string, s skelRune) rune {
 	return r
 }
 
-// bracketed reports a line opening on a bracket-like rune that a later one
-// closes around a letter.
+// bracketed reports a line opening, past markup and quoted tokens, on a
+// bracket-like rune that a later one closes around a letter. A bracket or
+// quote needs no closer: the line's end closes it.
 func bracketed(line string, sk []skelRune) bool {
-	if len(sk) == 0 || sk[0].masked || !opener(runeAt(line, sk[0]), sk[0].set) {
+	k := 0
+	for k < len(sk) && (sk[k].masked || markup(runeAt(line, sk[k]))) {
+		k++
+	}
+	if k == len(sk) {
+		return false
+	}
+	o := runeAt(line, sk[k])
+	if !opener(o, sk[k].set) {
 		return false
 	}
 	content := false
-	for _, s := range sk[1:] {
+	for _, s := range sk[k+1:] {
 		if s.masked {
 			continue
 		}
@@ -577,16 +590,30 @@ func bracketed(line string, sk []skelRune) bool {
 		}
 		content = content || s.lc == anchor || s.letter
 	}
-	return false
+	return content && bracket(o)
 }
 
-// ruled reports three or more rule-like runes in a row.
+// markup is Markdown or list syntax that may precede a header: rules,
+// quotes, headings, tables, list numbers and bullets.
+func markup(r rune) bool {
+	if r < utf8.RuneSelf {
+		return '0' <= r && r <= '9' || strings.ContainsRune("-*+>#|!.)", r)
+	}
+	return unicode.Is(unicode.Po, r)
+}
+
+// ruled reports three or more rule-like runes in a row. ASCII ones must be
+// glued: a spaced "* * *" or "a - b - c" is prose.
 func ruled(line string, sk []skelRune) bool {
 	n := 0
-	for _, s := range sk {
-		if s.masked || !ruleRune(runeAt(line, s), s.set) {
+	for i, s := range sk {
+		r := runeAt(line, s)
+		if s.masked || !ruleRune(r, s.set) {
 			n = 0
 			continue
+		}
+		if n > 0 && sk[i-1].end != s.start && (r < utf8.RuneSelf || runeAt(line, sk[i-1]) < utf8.RuneSelf) {
+			n = 0
 		}
 		if n++; n >= 3 {
 			return true
@@ -598,25 +625,42 @@ func ruled(line string, sk []skelRune) bool {
 // hexBits are the imageBit bits of the hex digits.
 const hexBits = 1<<6 - 1 | 0x3ff<<26
 
-// delimited reports a dash glued to sixteen glued anchors that can each be
-// a hex digit: the "priors-<hex>" of a fence.
+// delimited reports the "priors-<hex>" of a fence: a dash or underscore
+// glued inside a word and followed by eight glued digit-like runes, or a
+// word opening on sixteen of them.
 func delimited(line string, sk []skelRune) bool {
 	for i, s := range sk {
-		if s.masked || !dashRune(runeAt(line, s)) {
+		if s.masked {
 			continue
 		}
-		n, end := 0, s.end
-		for _, h := range sk[i+1 : min(i+17, len(sk))] {
-			if h.masked || h.start != end || h.lc != anchor || h.set&hexBits == 0 {
-				break
+		if i == 0 || sk[i-1].word != s.word {
+			if digitRun(line, sk, i, s.start, 16) == 16 {
+				return true
 			}
-			n, end = n+1, h.end
+			continue
 		}
-		if n == 16 {
+		if r := runeAt(line, s); (dashRune(r) || r == '_') && digitRun(line, sk, i+1, s.end, 8) == 8 {
 			return true
 		}
 	}
 	return false
+}
+
+// digitRun counts, up to max, the glued runes of sk from i on, the first at
+// byte at, that can each be a hex digit or are a decimal digit.
+func digitRun(line string, sk []skelRune, i, at, max int) int {
+	n := 0
+	for ; i < len(sk) && n < max; i++ {
+		h := sk[i]
+		if h.masked || h.start != at {
+			break
+		}
+		if (h.lc != anchor || h.set&hexBits == 0) && !unicode.Is(unicode.Digit, runeAt(line, h)) {
+			break
+		}
+		n, at = n+1, h.end
+	}
+	return n
 }
 
 func looseMatch(sk []skelRune) bool {
@@ -651,6 +695,16 @@ func opener(r rune, set uint64) bool {
 	return unicode.In(r, unicode.Ps, unicode.Pi, unicode.Pf) || symbolLike(r, set)
 }
 
+// bracket is an opener that draws a bracket or quote, not a symbol.
+func bracket(r rune) bool {
+	if r < utf8.RuneSelf {
+		return strings.ContainsRune("[({<\"'`", r)
+	}
+	img := punctImage(r)
+	return unicode.In(r, unicode.Ps, unicode.Pi, unicode.Pf) ||
+		img != "" && strings.Trim(img, "[({<\"'`") == "" && !unicode.In(r, unicode.S, unicode.Lm)
+}
+
 func closer(r rune, set uint64) bool {
 	if r < utf8.RuneSelf {
 		return strings.ContainsRune("])}>\"'`", r)
@@ -660,7 +714,7 @@ func closer(r rune, set uint64) bool {
 
 func ruleRune(r rune, set uint64) bool {
 	if r < utf8.RuneSelf {
-		return strings.ContainsRune("=-_~", r)
+		return strings.ContainsRune("=-_~*#:+", r)
 	}
 	// A quote's image draws no rule, so smart-quoted prose ("a” — “b") stays.
 	img := punctImage(r)
