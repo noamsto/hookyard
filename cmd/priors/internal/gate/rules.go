@@ -30,10 +30,9 @@ type Rules struct {
 }
 
 // LoadRules returns the built-in rule set, plus the rules in the file at path
-// when path is not "". The built-in set is always loaded and is a floor config
-// cannot remove: a configured file only adds rules. An id it shares with a
-// built-in or repeats, an unknown key, or a missing, unparsable or empty file
-// is an error, so a bad config fails closed rather than falling back.
+// when path is not "". The built-in set is a floor config cannot remove. An id
+// the file shares with a built-in or repeats, an unknown key, or a missing,
+// unparsable or empty file is an error, so a bad config fails closed.
 func LoadRules(path string) (Rules, error) {
 	r, err := parseRules(Rules{}, builtinRules)
 	if err != nil {
