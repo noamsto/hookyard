@@ -715,6 +715,15 @@ const PLUS = { key: "+", code: "Equal", keyCode: 187, text: "+" };
 const view = (page) => page.evaluate("__e2e.view()");
 const near = (a, b, tol, what) => assert(Math.abs(a - b) <= tol, `${what}: ${a} vs ${b} (tolerance ${tol})`);
 
+// strayDotsInFrame reads dot and band geometry inside one animation frame. The
+// pulse layer's rAF callback is already queued when this one registers, so it
+// re-resolves every live dot against the current geometry first, and no render
+// can interleave inside the frame's callback batch. A plain evaluate can land
+// after a relayout redrew the bands but before the pulse frame moved the dots
+// (the #120 flake: a dot read against the previous frame's bands).
+const strayDotsInFrame = (page) =>
+  page.evaluate("(() => new Promise((res) => requestAnimationFrame(() => res(__e2e.strayDots()))))()");
+
 // Pan, zoom and fit on the Sankey: the wheel zooms about the cursor, a drag
 // pans without clicking, 0 / the fit button re-fit, a relayout keeps the
 // user's transform, tooltips and pulses follow it.
@@ -822,7 +831,7 @@ async function check14(page, env) {
     for (let i = 0; i < 12; i++) {
       if (i % 3 === 0) append(env.stateDir, TODAY_PATHS.slice(0, 5).map((t) => record({ ...t, ts: Date.now() })));
       await sleep(250);
-      const s = await page.evaluate("__e2e.strayDots()");
+      const s = await strayDotsInFrame(page);
       seen += s.dots;
       assert(s.stray === 0, `${s.stray} of ${s.dots} pulse dots off their bands while zoomed`);
     }
