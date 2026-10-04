@@ -996,6 +996,20 @@ one. The owner's hosts fail the first two today (the user is in the rootful
 `mbp-m4-pro`), so attestation is unavailable there until nix-config changes;
 that change is a follow-up.
 
+**Open decision: the trust root on a single-user admin host.** The
+preconditions do not close this, and it blocks implementing attestation. On a
+host whose owner is also its admin, the root credential is typed into the
+owner's own session — a shell and terminal whose config agents can write. An
+agent that shadows `sudo` with a shell function, or types into a pane whose
+sudo timestamp is still live, takes root at the owner's next rebuild, and
+with root it can rewrite the trust file and the `priors` binary. The trust
+root there is only as strong as the path root access takes. The options,
+for the owner to choose between: attestation off on such hosts; an opt-in
+session-trust mode whose residual is stated; or a trust root outside the
+owner's session, such as an allowlist signed by a hardware key, or a root
+credential entered outside the owner's terminal (polkit outside tmux, a
+separate admin account).
+
 **Unwritable means no agent write takes effect without a human's root act.**
 The trust file's source lives in nix-config, and the `priors` binary, with
 its pinned vendor roots, is built from hookyard at the revision nix-config's
@@ -1181,9 +1195,9 @@ fact as `unattested-review` (`cmd/priors/internal/commit/commit.go`), which
 stays correct until the verifier exists, since nothing can be validly
 reviewed yet. v0 does not wait on it: unflagged facts publish through the
 gates, and flagged ones stay `proposed`. The implementation is §10
-workstream 5. The trust file itself, with the profile and org lists that
-§4.2's routing reads, under check 1's ownership test, lands with v0's routing
-(§10 workstreams 1–2); `cmd/priors` reads those lists from `config.toml`
+workstream 5, and it waits on the open decision above. The trust file
+itself, with the profile and org lists that §4.2's routing reads, under
+check 1's ownership test, lands with v0's routing (§10 workstreams 1–2); `cmd/priors` reads those lists from `config.toml`
 today, and moving them is a follow-up.
 
 ### 4.5 Retrieval backend: one interface, three implementations
