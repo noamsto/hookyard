@@ -241,10 +241,11 @@ func Lock(cfg config.Config, name string) (unlock func(), err error) {
 	return func() { _ = f.Close() }, nil
 }
 
-// CheckWrite refuses a write into dir, at or below the root, that a symlink
-// could steer elsewhere. A local or quarantine root is confined from the
-// state dir, since its own dir can be swapped for a symlink or gain a .git
-// after the config loads, and must stay off any git work tree.
+// CheckWrite refuses a write into dir that a symlink could steer elsewhere.
+// A checkout confines dir to its own path. A local or quarantine root
+// confines it from the state dir, since its own dir can be swapped for a
+// symlink or gain a .git after the config loads, and refuses any git work
+// tree at or above it.
 func (r Root) CheckWrite(dir string) error {
 	if r.Kind == KindCheckout {
 		return confineDir(r.Path, dir)

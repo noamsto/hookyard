@@ -660,11 +660,17 @@ func TestLayerDirInARepoRefusesTheWrite(t *testing.T) {
 // TestLayerDirInARepoRefusesLintAndIndex: lint --move-flagged and index --write
 // re-check the local layer dir like add does, and refuse a planted one.
 func TestLayerDirInARepoRefusesLintAndIndex(t *testing.T) {
+	const (
+		lintMove   = "lint --move-flagged"
+		indexWrite = "index --write"
+	)
 	plants := []struct {
-		name  string
-		plant func(t *testing.T, sb *sandbox) (target string, wantTop []string)
+		name     string
+		commands []string
+		wantErr  string
+		plant    func(t *testing.T, sb *sandbox) (target string, wantTop []string)
 	}{
-		{"local symlinked into a checkout", func(t *testing.T, sb *sandbox) (string, []string) {
+		{"local symlinked into a checkout", []string{lintMove, indexWrite}, "refusing to write through the symlink", func(t *testing.T, sb *sandbox) (string, []string) {
 			other := sb.repo(personalRemote)
 			if err := os.Symlink(other, filepath.Join(sb.state, "local")); err != nil {
 				t.Fatal(err)
@@ -673,11 +679,24 @@ func TestLayerDirInARepoRefusesLintAndIndex(t *testing.T) {
 			sb.mkdir(target)
 			return other, []string{".git", "personal"}
 		}},
-		{"local layer holding a .git", func(_ *testing.T, sb *sandbox) (string, []string) {
+		{"local layer holding a .git", []string{lintMove, indexWrite}, "inside the git work tree", func(_ *testing.T, sb *sandbox) (string, []string) {
 			layer := filepath.Join(sb.state, "local", "personal")
 			sb.mkdir(layer)
 			sb.git(layer, "init", "-q")
 			return layer, []string{".git"}
+		}},
+		{"quarantine symlinked into a checkout", []string{indexWrite}, "refusing to write through the symlink", func(t *testing.T, sb *sandbox) (string, []string) {
+			other := sb.repo(personalRemote)
+			if err := os.Symlink(other, filepath.Join(sb.state, "quarantine")); err != nil {
+				t.Fatal(err)
+			}
+			return other, []string{".git"}
+		}},
+		{"quarantine holding a .git", []string{indexWrite}, "inside the git work tree", func(_ *testing.T, sb *sandbox) (string, []string) {
+			quarantine := filepath.Join(sb.state, "quarantine")
+			sb.mkdir(quarantine)
+			sb.git(quarantine, "init", "-q")
+			return quarantine, []string{".git"}
 		}},
 	}
 	commands := []struct {
@@ -686,7 +705,7 @@ func TestLayerDirInARepoRefusesLintAndIndex(t *testing.T) {
 		args []string
 		held func(t *testing.T, sb *sandbox)
 	}{
-		{"lint --move-flagged", func(sb *sandbox) {
+		{lintMove, func(sb *sandbox) {
 			flagged := newFact("linky-fact", "demo", "project")
 			flagged.Body = "see https://example.com/docs for details\n"
 			sb.putFact(sb.personal, "demo/linky-fact.md", flagged)
@@ -698,12 +717,15 @@ func TestLayerDirInARepoRefusesLintAndIndex(t *testing.T) {
 		}},
 		// The checkout's own index is written before the local root is
 		// reached, so only the planted target is asserted untouched.
-		{"index --write", func(sb *sandbox) {
+		{indexWrite, func(sb *sandbox) {
 			sb.putFact(sb.personal, "demo/clean-fact.md", newFact("clean-fact", "demo", "project"))
 		}, []string{"index", "--write"}, func(*testing.T, *sandbox) {}},
 	}
 	for _, p := range plants {
 		for _, c := range commands {
+			if !slices.Contains(p.commands, c.name) {
+				continue
+			}
 			t.Run(p.name+"/"+c.name, func(t *testing.T) {
 				sb := newSandbox(t, "personal")
 				c.seed(sb)
@@ -714,8 +736,8 @@ func TestLayerDirInARepoRefusesLintAndIndex(t *testing.T) {
 				if res.code == 0 {
 					t.Errorf("exit 0, want a refusal; stdout %q", res.stdout)
 				}
-				if !strings.Contains(res.stderr, "symlink") && !strings.Contains(res.stderr, "inside the git work tree") {
-					t.Errorf("stderr lacks a refusal reason:\n%s", res.stderr)
+				if !strings.Contains(res.stderr, p.wantErr) {
+					t.Errorf("stderr lacks %q:\n%s", p.wantErr, res.stderr)
 				}
 				c.held(t, sb)
 				top, err := os.ReadDir(target)
