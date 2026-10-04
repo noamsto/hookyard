@@ -1,13 +1,16 @@
 // Package sanitize makes fact-derived text safe to hand to a model: it strips
 // invisible and control characters, escapes anything imitating priors' own
-// fence or attribution, and wraps output in a fence whose delimiter a fact
-// cannot predict.
+// fence or attribution, and wraps output in a fence. Injected output gets an
+// unpredictable delimiter; a committed index gets one derived from its body
+// that never occurs in that body.
 package sanitize
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -85,6 +88,24 @@ func NewDelimiter() string {
 	var b [8]byte
 	_, _ = rand.Read(b[:]) // never fails since Go 1.24
 	return "priors-" + hex.EncodeToString(b[:])
+}
+
+// BodyDelimiter derives a fence delimiter from body, so a committed file
+// regenerates byte-identically. The collision check keeps it out of the body.
+func BodyDelimiter(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return delimiterFor(body, sum[:])
+}
+
+func delimiterFor(body string, seed []byte) string {
+	for {
+		candidate := "priors-" + hex.EncodeToString(seed)[:16]
+		if !strings.Contains(body, candidate) {
+			return candidate
+		}
+		sum := sha256.Sum256(append(slices.Clip(seed), body...))
+		seed = sum[:]
+	}
 }
 
 // Header is the attribution line above a fenced block. The label is

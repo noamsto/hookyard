@@ -1,6 +1,8 @@
 package sanitize
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"regexp"
 	"slices"
 	"strings"
@@ -143,6 +145,39 @@ func TestNewDelimiter(t *testing.T) {
 		if !delimRE.MatchString(d) {
 			t.Errorf("delimiter %q does not match %s", d, delimRE)
 		}
+	}
+}
+
+func TestBodyDelimiter(t *testing.T) {
+	a, b := BodyDelimiter("one\n"), BodyDelimiter("two\n")
+	if a != BodyDelimiter("one\n") {
+		t.Errorf("same body gave different delimiters")
+	}
+	if a == b {
+		t.Errorf("different bodies share delimiter %q", a)
+	}
+	for _, d := range []string{a, b} {
+		if !delimRE.MatchString(d) {
+			t.Errorf("delimiter %q does not match %s", d, delimRE)
+		}
+	}
+}
+
+func TestBodyDelimiterAvoidsBody(t *testing.T) {
+	seed := sha256.Sum256([]byte("seed"))
+	candidate := "priors-" + hex.EncodeToString(seed[:])[:16]
+	body := "- [x](a/" + candidate + ".md) — y\n"
+
+	got := delimiterFor(body, seed[:])
+
+	if got == candidate {
+		t.Errorf("delimiter %q is the colliding candidate", got)
+	}
+	if !delimRE.MatchString(got) {
+		t.Errorf("delimiter %q does not match %s", got, delimRE)
+	}
+	if strings.Contains(body, got) {
+		t.Errorf("delimiter %q occurs in the body", got)
 	}
 }
 

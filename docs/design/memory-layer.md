@@ -409,6 +409,9 @@ host (§1) a line per fact no longer fits the cap. Which facts are promoted, and
 where the index starts at migration, is §4.6 rule 4 and its seeding rule; every
 other fact stays on disk and reachable by search (tier 3, §4.4). Each store
 generates its own index, never hand-written; the lint regenerates and diffs it.
+Generation is deterministic (the same facts yield the same bytes, fence
+included), so that diff is byte-exact and hosts never conflict on `MEMORY.md`
+(R4).
 
 **Why one fact per file.** It is what makes R4 nearly free: two agents editing
 `MEMORY.md` concurrently would conflict on every write, while two agents writing
@@ -874,7 +877,10 @@ injected with the same confidence as a fresh one. Four mechanical rules:
    target that resolves outside the store's tree, a fact carrying a secret
    pattern (§4.3's shared rule set), in the personal store a fact naming a
    work org (so §6's tripwire is a check), and an index out of sync with the
-   directory. It runs in the store's own pre-commit, as a required check on
+   directory, meaning any byte differing from what `priors index` would write
+   (lines and framing alike). An index written before the delimiter became
+   deterministic (§4.7) fails this once, until `priors index` regenerates it.
+   It runs in the store's own pre-commit, as a required check on
    the store's remote (§4.3), and in the write path, so a malformed fact
    cannot be injected.
 4. **Use strengthens, disuse demotes.** The index is a promoted subset (§4.1);
@@ -981,10 +987,28 @@ Codex, which would get the work index twice and unfenced. Work sessions get
 the work index through the `session_start` hook only, so Cursor reaches work
 facts by tier 3 alone. The included `MEMORY.md` is written only by
 `priors index`; it carries tier 1's stripping and escaping (§4.4) and its own
-opening *and* closing fence inside the file, with a delimiter drawn at each
-generation, and the checkout indexes are in the write guard's protected set
-(§4.4). The included index is the checkout index, which lists published
-facts only; flagged facts stay in the host-local layer and are never in it.
+opening *and* closing fence inside the file. Its delimiter is derived from
+the body it fences: `priors-` plus the first 16 hex of the body's sha256,
+rehashed (sha256 of the previous digest followed by the body) until the token
+does not occur in the body. The same facts therefore regenerate byte-identical files on every host,
+and `priors index` on an unchanged store does not rewrite the file. The random
+per-injection delimiter is for hook injection only (§4.4). The committed
+file's fence is not unpredictable, so its integrity rests on tier 1's
+stripping and escaping of fence imitations plus the collision check. The
+checkout indexes are in the write guard's protected set (§4.4). The included
+index is the checkout index, which lists published facts only; flagged facts
+stay in the host-local layer and are never in it.
+
+**Residual risk: Cursor's read-time gap.** Cursor reads the included personal
+`MEMORY.md` verbatim through its rule-file include line, and no hook verifies
+it at read time. The mitigation is upstream of the read: the file is in the
+write guard's protected set, and the store's pre-commit and the remote's
+required check run the lint, which rejects any byte the generator would not
+write. What remains is a hand-edited index that reaches the remote without
+passing the required check (a push that bypasses it, say): Cursor reads it
+verbatim on every host that pulls. That host's next lint reports it, and
+its next `priors index` rewrites it, since a non-generated file is never left
+in place.
 
 Three gaps must be closed in **hookyard** — needed only if tier 2 passes its
 gate (§4.4) — and they are the only hookyard changes this design needs:
@@ -1264,8 +1288,10 @@ flagged facts stops being optional.
 - frontmatter round-trip: every field survives write → read → write;
 - `priors search` filters: `scope`/`repos`/`type`/`superseded_by`, and that a
   superseded fact is absent from tier 1 and 2 output;
-- index generation is idempotent, and the lint catches each rejected class in
-  §4.6 (one test per rule);
+- index generation is byte-identical (twice, or on two hosts from the same
+  facts, it yields the same bytes) and its delimiter never occurs in the
+  fenced body, and the lint catches each rejected class in §4.6 (one test per
+  rule);
 - **fail-open**: missing binary, missing index, unreadable file, and a
   deliberately hung search each yield empty injection and exit 0;
 - budget: each tier's truncation order, asserted positionally, and the
@@ -1329,7 +1355,8 @@ flagged facts stops being optional.
   another case, with other whitespace, or in homoglyphs — a fake
   `[hookyard advisory]` or store header, or bidi and tag characters reaches
   the model NFKC-normalised, escaped and stripped; the delimiter differs per
-  injection; no truncation cuts the closing fence, and the included index
+  injection, while the included index file's delimiter is derived from its
+  body and never occurs in it; no truncation cuts the closing fence, and that
   file carries its own closing fence (§4.7);
 - **double injection** (§4.9): the canonical copy is skipped only when native
   memory is on, the native source exists and the fact is inside the native
