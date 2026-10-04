@@ -13,7 +13,7 @@
 // two words within twice its length. The blunt backstop then quotes a whole
 // line that holds non-ASCII outside the quoted tokens and is bracket-shaped,
 // draws a rule of three or more dash or symbol runes, loosely matches a token,
-// or holds a priors-<16 hex> delimiter.
+// or holds a priors-<hex> delimiter.
 package sanitize
 
 import (
@@ -62,8 +62,8 @@ var beginLine = regexp.MustCompile(`^===== BEGIN (priors-[0-9a-f]{16}) =====$`)
 // each side with it; on a line imitating a fence, runs of three or more
 // rule-like runes become "(quoted: =)". A line that then holds non-ASCII
 // outside the quoted tokens and is bracket-shaped, draws a rule of three or
-// more dash or symbol runes, loosely matches a token, or holds a priors-<16
-// hex> delimiter is wrapped whole as "(quoted line: …)". Everything else is
+// more dash or symbol runes, loosely matches a token, or holds a priors-<hex>
+// delimiter is wrapped whole as "(quoted line: …)". Everything else is
 // kept as normalised. Stripping comes first so NFKC composes across a removed
 // character and the output is truly normalised. Newlines and tabs are kept.
 func Text(s string) string {
