@@ -36,9 +36,9 @@ var (
 
 	// echo -e reads an octal escape as \0NNN where printf reads \NNN.
 	echoOctal = regexp.MustCompile(`\\0([0-7]{1,3})`)
-	// paramOpen is a parameter expansion's opening up to its operand, which
-	// rule (b) reads as a word break, so `${X:-gh}` yields gh.
-	paramOpen = regexp.MustCompile(`\$\{[!#]?[A-Za-z_0-9@*#?$!-]*(\[[^]]*\])?(:?[-+=?]|##?|%%?|//?|\^\^?|,,?|@)?`)
+	// paramOps are the operators that may end a parameter expansion's
+	// opening, longest first.
+	paramOps = []string{":-", ":+", ":=", ":?", "-", "+", "=", "?", "##", "#", "%%", "%", "//", "/", "^^", "^", ",,", ",", "@"}
 	// overflagQuotes are deleted by rule (b), as bash joins the words around them.
 	overflagQuotes = strings.NewReplacer(`"`, "", "'", "", `\`, "")
 )
@@ -98,9 +98,9 @@ func IngestsCall(toolName string, toolInput json.RawMessage) bool {
 		parts[i] = p
 	}
 	// Codex puts the script in one element (["bash", "-lc", "<script>"]),
-	// whose joined form starts with "bash" and would hide it.
-	return ingestReason(strings.Join(parts, " ")) != "" ||
-		slices.ContainsFunc(parts, func(p string) bool { return ingestReason(p) != "" })
+	// whose joined form starts with "bash" and would hide it. The joined form
+	// and every element share one budget.
+	return ingestReason(append([]string{strings.Join(parts, " ")}, parts...)...) != ""
 }
 
 // ingestReason names why text ingests, or returns "" when it does not. The
@@ -119,8 +119,9 @@ func IngestsCall(toolName string, toolInput json.RawMessage) bool {
 // over-flagging overflagReason: the whole text on a parse error, after the
 // statements before it are judged, and the source of every arithmetic
 // expression, which is never walked. A text past the depth, byte or nesting
-// budget flags, so the gate fails closed.
-func ingestReason(text string) (reason string) {
+// budget flags, so the gate fails closed. Several texts are judged as one
+// command, sharing one budget.
+func ingestReason(texts ...string) (reason string) {
 	// render panics on a word part it does not know; a panic must flag, not
 	// fail open.
 	defer func() {
@@ -129,7 +130,12 @@ func ingestReason(text string) (reason string) {
 		}
 	}()
 	j := &judge{seen: map[string]bool{}, vars: map[string]string{}}
-	return j.script(text, 0)
+	for _, text := range texts {
+		if reason = j.script(text, 0); reason != "" {
+			return reason
+		}
+	}
+	return ""
 }
 
 // judge holds the budget shared by every script judged for one command, and
@@ -216,7 +222,11 @@ func (j *judge) stmt(s *syntax.Stmt, text string, depth int) string {
 	walkBounded(s, func(n syntax.Node) bool {
 		switch n := n.(type) {
 		case *syntax.Assign:
-			if n.Name != nil {
+			switch {
+			case n.Name == nil:
+			case n.Array != nil:
+				j.assign(n.Name.Value, elemValues(n.Array)...)
+			default:
 				j.assign(n.Name.Value, n.Value)
 			}
 		case *syntax.ParamExp:
@@ -237,7 +247,15 @@ func (j *judge) stmt(s *syntax.Stmt, text string, depth int) string {
 		}
 		switch n := n.(type) {
 		case *syntax.CallExpr:
-			reason = j.call(n, text, depth)
+			reason = j.call(n.Args, n.Assigns, text, depth)
+		case *syntax.ArrayExpr:
+			reason = j.call(elemValues(n), nil, text, depth)
+		case *syntax.WordIter:
+			reason = j.names(text, n.Items...)
+		case *syntax.Redirect:
+			if n.Op == syntax.WordHdoc {
+				reason = j.names(text, n.Word)
+			}
 		case *syntax.Word:
 			reason = j.word(n, text, depth)
 		}
@@ -289,22 +307,39 @@ func walkBounded(root syntax.Node, f func(syntax.Node) bool) {
 	}
 }
 
-// assign records value as name's, unless name already has one. The value is
-// rendered in the unset environment, so one assignment never feeds another.
-func (j *judge) assign(name string, value *syntax.Word) {
-	if _, ok := j.vars[name]; ok || value == nil {
+// assign records values, joined by spaces, as name's, unless name already has
+// one. The values are rendered in the unset environment, so one assignment
+// never feeds another.
+func (j *judge) assign(name string, values ...*syntax.Word) {
+	if _, ok := j.vars[name]; ok || len(values) == 0 || values[0] == nil {
 		return
 	}
 	r := &render{spent: &j.parsed}
-	j.vars[name] = r.operand(value, false)
+	rendered := make([]string, len(values))
+	for i, v := range values {
+		rendered[i] = r.operand(v, false)
+	}
+	j.vars[name] = strings.Join(rendered, " ")
 }
 
-// call judges a simple command's fields. Its prefix assignments lead the glued
-// judgement, as `GIT_PAGER=curl git log` runs the value.
-func (j *judge) call(n *syntax.CallExpr, text string, depth int) string {
-	reads := slices.ContainsFunc(n.Args, readsVar) || slices.ContainsFunc(n.Assigns, func(a *syntax.Assign) bool { return readsVar(a.Value) })
+// elemValues returns an array's element words.
+func elemValues(a *syntax.ArrayExpr) []*syntax.Word {
+	var words []*syntax.Word
+	for _, e := range a.Elems {
+		if e.Value != nil {
+			words = append(words, e.Value)
+		}
+	}
+	return words
+}
+
+// call judges a simple command's fields, or an array's, which `"${a[@]}"`
+// runs as one. Its prefix assignments lead the glued judgement, as
+// `GIT_PAGER=curl git log` runs the value.
+func (j *judge) call(args []*syntax.Word, assigns []*syntax.Assign, text string, depth int) string {
+	reads := slices.ContainsFunc(args, readsVar) || slices.ContainsFunc(assigns, func(a *syntax.Assign) bool { return readsVar(a.Value) })
 	for _, e := range envsFor(reads) {
-		fields, r := j.fields(e, text, n.Args...)
+		fields, r := j.fields(e, text, args...)
 		if r != "" {
 			return r
 		}
@@ -315,9 +350,9 @@ func (j *judge) call(n *syntax.CallExpr, text string, depth int) string {
 			return r
 		}
 		glued := fields
-		if len(n.Assigns) > 0 {
-			var assigns []string
-			for _, a := range n.Assigns {
+		if len(assigns) > 0 {
+			var prefix []string
+			for _, a := range assigns {
 				if a.Value == nil {
 					continue
 				}
@@ -325,9 +360,9 @@ func (j *judge) call(n *syntax.CallExpr, text string, depth int) string {
 				if r != "" {
 					return r
 				}
-				assigns = append(assigns, a.Name.Value+"="+strings.Join(fs, " "))
+				prefix = append(prefix, a.Name.Value+"="+strings.Join(fs, " "))
 			}
-			glued = append(assigns, fields...)
+			glued = append(prefix, fields...)
 		}
 		if r := gluedIngests(glued); r != "" {
 			return r
@@ -336,6 +371,22 @@ func (j *judge) call(n *syntax.CallExpr, text string, depth int) string {
 			if r := j.script(strings.Join(fields, " "), depth+1); r != "" {
 				return r
 			}
+		}
+	}
+	return ""
+}
+
+// names judges every listed name among the fields of a loop's list or a
+// here-string, as any of them may become a command word later
+// (`for c in gh; do $c …`, `read c <<< gh; $c …`).
+func (j *judge) names(text string, words ...*syntax.Word) string {
+	for _, e := range envsFor(slices.ContainsFunc(words, readsVar)) {
+		fields, r := j.fields(e, text, words...)
+		if r != "" {
+			return r
+		}
+		if r := namesIngest(fields, true); r != "" {
+			return r
 		}
 	}
 	return ""
@@ -734,31 +785,75 @@ func fallback(text string) string {
 }
 
 // overflagReason is rule (b), for text the parser cannot see: with every quote
-// and backslash deleted, and every parameter expansion opening read as a word
-// break, every listed name among its tokens is judged, with no inert command
-// word to clear it, and so is every listed value glued to one. A `$` is read
+// and backslash deleted, every listed name among its tokens is judged, with no
+// inert command word to clear it, and so is every listed value glued to one.
+// A parameter expansion opening is read both as it is and as a word break, so
+// `${X:-gh}` yields gh and `gh ${X:-issue}` keeps its group. A `$` is read
 // both as a word break (`curl$IFS`) and as nothing (`g$""h`). The text is read
 // as it is and with printf escapes decoded.
 func overflagReason(text string) string {
 	for _, d := range decodings(text) {
-		d = paramOpen.ReplaceAllString(d, " ")
-		d = overflagQuotes.Replace(d)
-		if hasURL(d) {
-			return "url"
-		}
-		for _, reading := range []string{d, strings.ReplaceAll(d, "$", "")} {
-			tokens := strings.FieldsFunc(reading, func(r rune) bool {
-				return unicode.IsSpace(r) || strings.ContainsRune(";&|(){}<>=`$", r)
-			})
-			if r := namesIngest(tokens, false); r != "" {
-				return r
+		for _, p := range []string{d, paramOpens(d)} {
+			p = overflagQuotes.Replace(p)
+			if hasURL(p) {
+				return "url"
 			}
-			if r := gluedIngests(tokens); r != "" {
-				return r
+			for _, reading := range []string{p, strings.ReplaceAll(p, "$", "")} {
+				tokens := strings.FieldsFunc(reading, func(r rune) bool {
+					return unicode.IsSpace(r) || strings.ContainsRune(";&|(){}<>=`$", r)
+				})
+				if r := namesIngest(tokens, false); r != "" {
+					return r
+				}
+				if r := gluedIngests(tokens); r != "" {
+					return r
+				}
 			}
 		}
 	}
 	return ""
+}
+
+// paramOpens replaces every parameter expansion's opening, up to its operand,
+// with a space. A subscript runs to the next `]`, which is looked up again
+// only once the scan has passed it, so the scan stays linear.
+func paramOpens(s string) string {
+	if !strings.Contains(s, "${") {
+		return s
+	}
+	var b strings.Builder
+	closing := -1
+	for i := 0; i < len(s); {
+		if !strings.HasPrefix(s[i:], "${") {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		k := i + 2
+		for k < len(s) && (nameByte(s[k]) || strings.IndexByte("@*#?$!-", s[k]) >= 0) {
+			k++
+		}
+		if k < len(s) && s[k] == '[' {
+			if closing <= k {
+				closing = len(s)
+				if c := strings.IndexByte(s[k+1:], ']'); c >= 0 {
+					closing = k + 1 + c
+				}
+			}
+			if closing < len(s) {
+				k = closing + 1
+			}
+		}
+		for _, op := range paramOps {
+			if strings.HasPrefix(s[k:], op) {
+				k += len(op)
+				break
+			}
+		}
+		b.WriteByte(' ')
+		i = k
+	}
+	return b.String()
 }
 
 // gluedIngests judges the command again from every value glued to an option or

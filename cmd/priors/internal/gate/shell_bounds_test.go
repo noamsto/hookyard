@@ -44,32 +44,59 @@ func limitStack(t *testing.T) {
 // boundAlloc, or takes longer than hangGuard.
 func judgeBounded(t *testing.T, cmd string) judged {
 	t.Helper()
+	return runBounded(t, len(cmd), func() string { return ingestReason(cmd) })
+}
+
+// runBounded runs judge on size bytes of input under judgeBounded's bounds.
+func runBounded(t *testing.T, size int, judge func() string) judged {
+	t.Helper()
 	done := make(chan string, 1)
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 	start := time.Now()
-	go func() { done <- ingestReason(cmd) }()
+	go func() { done <- judge() }()
 	select {
 	case reason := <-done:
 		j := judged{reason: reason, elapsed: time.Since(start)}
 		runtime.ReadMemStats(&after)
 		j.alloc = after.TotalAlloc - before.TotalAlloc
 		if j.alloc > boundAlloc {
-			t.Errorf("judging %d bytes allocated %d MiB", len(cmd), j.alloc>>20)
+			t.Errorf("judging %d bytes allocated %d MiB", size, j.alloc>>20)
 		}
 		return j
 	case <-time.After(hangGuard):
-		t.Fatalf("judging %d bytes took over %v", len(cmd), hangGuard)
+		t.Fatalf("judging %d bytes took over %v", size, hangGuard)
 		return judged{}
 	}
 }
 
+// codexArgv returns a Codex command array of "#", n brace sequences and then
+// tail. distinct makes every sequence differ, so none is judged only once.
+func codexArgv(n int, distinct bool, tail ...string) []string {
+	argv := []string{"#"}
+	for i := range n {
+		end := 9999
+		if distinct {
+			end -= i
+		}
+		argv = append(argv, "{1.."+strconv.Itoa(end)+"}")
+	}
+	return append(argv, tail...)
+}
+
 // TestIngestReasonBounded feeds commands built to exhaust the parser's or
 // the walk's stack, the judge's memory, or a quadratic scan. Each must come
-// back flagged, or clean, within the stack and allocation bounds: a stack
-// overflow or an out-of-memory error is fatal, and no marker is written.
+// back flagged, or clean, within the stack, allocation and time bounds: a
+// stack overflow or an out-of-memory error is fatal, and no marker is
+// written. A Codex command array is judged by IngestsCall. The race detector
+// slows judging about tenfold, so the time bound, the pre_tool hook's
+// deadline, grows with it.
 func TestIngestReasonBounded(t *testing.T) {
 	limitStack(t)
+	timeLimit := time.Second
+	if raceEnabled {
+		timeLimit *= 10
+	}
 	tests := []struct {
 		name, cmd string
 		flag      bool
@@ -90,14 +117,46 @@ func TestIngestReasonBounded(t *testing.T) {
 		{"pipe chain", strings.Repeat("a|", maxText/2-1) + "a", false},
 		{"test negation chain", "[[ " + strings.Repeat("! ", (maxText-8)/2) + "a ]]", false},
 		{"if chain", strings.Repeat("if ", maxText/3-1) + "a", false},
+		{"unclosed subscripts after syntax error", ": ${x~~}; gh issue view 1 #" + strings.Repeat("${a[)}", 5000), true},
+		{"many unclosed subscripts after syntax error", ": ${x~~}; gh issue view 1 #" + strings.Repeat("${a[)}", 20000), true},
+	}
+	check := func(t *testing.T, j judged, size int, flag bool) {
+		t.Helper()
+		t.Logf("%d bytes judged in %v, %d KiB allocated", size, j.elapsed, j.alloc>>10)
+		if (j.reason != "") != flag {
+			t.Errorf("reason %q, want flagged %v", j.reason, flag)
+		}
+		if j.elapsed > timeLimit {
+			t.Errorf("judging %d bytes took %v, over %v", size, j.elapsed, timeLimit)
+		}
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			j := judgeBounded(t, tt.cmd)
-			t.Logf("%d bytes judged in %v, %d KiB allocated", len(tt.cmd), j.elapsed, j.alloc>>10)
-			if (j.reason != "") != tt.flag {
-				t.Errorf("reason %q, want flagged %v", j.reason, tt.flag)
+			check(t, judgeBounded(t, tt.cmd), len(tt.cmd), tt.flag)
+		})
+	}
+
+	argvTests := []struct {
+		name string
+		argv []string
+		flag bool
+	}{
+		{"Codex brace sequence elements", codexArgv(400, false, "gh issue view 1"), true},
+		{"Codex distinct brace sequence elements", codexArgv(400, true), true},
+	}
+	for _, tt := range argvTests {
+		t.Run(tt.name, func(t *testing.T) {
+			in, err := json.Marshal(map[string][]string{"command": tt.argv})
+			if err != nil {
+				t.Fatal(err)
 			}
+			j := runBounded(t, len(in), func() string {
+				if IngestsCall("Bash", in) {
+					return "ingests"
+				}
+				return ""
+			})
+			check(t, j, len(in), tt.flag)
 		})
 	}
 }

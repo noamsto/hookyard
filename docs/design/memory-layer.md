@@ -797,8 +797,10 @@ distillation) and again as each store's required check on its remote:
    `$'…'`, `$""` and brace expansion are applied; a parameter expansion's
    operand (`${X:-…}`, `${X:+…}`, a `//` replacement) is read as text, never
    run or repeated; and a variable is read three ways: unset, as a
-   placeholder, and as the first literal value the command assigns it (the
-   shell's own `IFS`, `PATH`, … always set). So `$'\x67h'`, `g$""h`,
+   placeholder, and as the first literal value the command assigns it,
+   before its use in statement order (the shell's own `IFS`, `PATH`, …
+   always set). Array elements, `for` / `select` items and `<<<` words are
+   judged as words a shell may run. So `$'\x67h'`, `g$""h`,
    `{gh,issue,view,1}`, `gh${IFS}issue` and `X=gh; $X` all read as `gh`.
    Arithmetic is not evaluated; its text goes to the token scan below. The
    command word is found by skipping assignments, flags, numeric
@@ -825,18 +827,22 @@ distillation) and again as each store's required check on its remote:
    construction: every rendered byte is charged to a 1 MiB budget before it
    is written, and a parse is charged four times its length; a brace
    expansion pays for its whole output up front; re-reading stops at depth
-   8, a text at 128 KiB, bracket nesting at 256 and the syntax-tree walk at
-   512 levels. Past a bound the command flags.
+   8, a text at 128 KiB and bracket nesting at 256, and one budget covers a
+   command and every element of a Codex argv. Past a bound the command
+   flags. The syntax-tree walk holds at most 512 levels on the stack and
+   resumes deeper subtrees from their own root.
 
    It misses what the command text does not show: content arriving through
    `git fetch` or `git pull` without a URL; aliases, shell functions and
    scripts on disk; and an unlisted fetcher with no URL literal (a language
    client reading the URL from a variable). It misses a command word the
    parser cannot resolve: a variable set outside the command (`$CMD`), a
-   value other than a variable's first literal assignment (a reassignment,
-   `+=`, `a=gh; b=$a`, arrays, `read`, `printf -v`, a loop item after the
-   first), a pattern removal or replacement on an
-   assigned value (`X=xgh; ${X#x}`), a spelling built by command
+   value other than a variable's first literal assignment before its use (a
+   reassignment, `+=`, `a=gh; b=$a`, `f(){ $X issue view 1; }; X=gh; f`, a
+   value read from a file), a pattern removal or replacement on an assigned
+   value (`X=xgh; ${X#x}`), escapes decoded by `${X@E}`, a quoted heredoc
+   body's backslash escapes (`bash <<'EOF'` with `$'\x67h' issue view 1`),
+   a spelling built by command
    substitution (`$(printf g)h`), a spelling that depends on a variable's
    real value (`${0/bas/g}`), a command inside arithmetic beyond what the
    token scan sees, and globs (`/usr/bin/g[h]`), since globbing is off. It
@@ -869,7 +875,8 @@ distillation) and again as each store's required check on its remote:
    name glued to `--opt=`, `KEY=` or a fused short option (`--title=curl`,
    `GIT_PAGER=curl`, `rsync -avxh`, whose `xh` is a fetcher), a command the
    parser cannot read, whose token scan flags a listed name even as an inert
-   command's argument, a listed name inside arithmetic, a command past a
+   command's argument, a listed name inside arithmetic or as an array
+   element, loop item or `<<<` word (`for f in curl.c`), a command past a
    bound (any command over 128 KiB, and one of roughly 60–100 KiB holding
    nested scripts, such as a large heredoc), a word starting `!` or `=`
    (`!gh`), and a shell call

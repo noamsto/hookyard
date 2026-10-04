@@ -103,11 +103,12 @@ before it is written, re-read depth 8, 128 KiB per text, bracket nesting 256)
 flags. It misses what the command text does not show (`git fetch` or `git
 pull` content without a URL; aliases, shell functions, scripts on disk; an
 unlisted fetcher with no URL literal), a command word built at run time or
-from a variable's value beyond its first literal assignment (`$CMD`,
-`$(printf g)h`, `eval "$X"`, `${0/bas/g}`, `X=xgh; ${X#x}`, `/usr/bin/g[h]`),
-a script another program decodes before a shell runs it
-(`base64 -d | sh`, `rev`, `xxd -r`), statements after syntax the parser
-rejects beyond what the token scan sees, an
+from a variable's value beyond its first literal assignment before use
+(`$CMD`, `$(printf g)h`, `eval "$X"`, `${0/bas/g}`, `X=xgh; ${X#x}`,
+`${X@E}`, `/usr/bin/g[h]`), a quoted heredoc body's backslash escapes, a
+script another program decodes before a shell runs it (`base64 -d | sh`,
+`rev`, `xxd -r`), statements after syntax the parser rejects beyond what the
+token scan sees, an
 unquoted `rg --pre curl …` (inert search commands such as `grep` and `rg`
 hide a listed name in their arguments, and `--pre` runs a preprocessor), a
 lost ingest write in an already-seen session, and, on Codex, any `post_tool`
@@ -123,7 +124,8 @@ later in a `gh` / `glab` write or local segment (`gh pr comment 1 --body
 curl`), a listed name glued to `--opt=`, `KEY=` or a fused short option
 (`--title=curl`, `GIT_PAGER=curl`, `rsync -avxh`, whose `xh` is a fetcher),
 a command the parser cannot read, a command past a bound (any over 128
-KiB), a word starting `!` or `=`, a printf / echo escape inside a quoted message (`git
+KiB), a word starting `!` or `=`, a listed name as an array element, loop
+item or `<<<` word, a printf / echo escape inside a quoted message (`git
 commit -m 'gh auth status\nand gh issue view'`), `gh -R o/r pr create` and a
 shell call denied or rejected after `pre_tool` (a guard's deny, a declined
 permission prompt): the marker is written before the decision.
