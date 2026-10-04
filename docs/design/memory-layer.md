@@ -559,8 +559,8 @@ root-owned default; the table decides every key the user config holds today:
 | `commit` | whether `priors` commits what passed its gates | user-owned | off leaves facts uncommitted, which weakens nothing an agent's own `git commit` could not; the store remote's required check and force-push refusal (§4.3, §4.4) gate publishing whoever commits |
 | `push` | whether `priors` pushes after committing | user-owned | it pushes only commits that passed the gates, to the remote that the `*_store` row above pins |
 
-Three inputs outside `config.toml` steer the same boundaries, so they are
-decided with it:
+Three inputs outside `config.toml` steer the same boundaries and are decided
+here too:
 
 - **User git config** (`~/.gitconfig`, `$XDG_CONFIG_HOME/git/config`), which
   `priors`'s git calls honour. An `insteadOf` rewrite there makes every work
