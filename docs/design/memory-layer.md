@@ -539,6 +539,51 @@ hard wall, and it covers neither a personal repo on a work-profile host nor
 the quarantine, which sits on personal hosts by design.
 Write-time redaction (§4.3) applies to both stores on top of these.
 
+**Config keys and the trust boundary.** Agents run as the owner's user, so
+any key in `priors`'s user config (`config.toml`, `cmd/priors/internal/config`)
+is one an agent can rewrite for every later session. The keys that steer a
+boundary move into the root-owned trust file (§4.4, *Attestation*) or get a
+root-owned default; the table decides every key the user config holds today:
+
+| key | what an agent can weaken by rewriting it | decision | reason |
+| --- | --- | --- | --- |
+| `profile` | the host kind, so routing and the quarantine | trust file (#174) | flipping it sends work-bound writes to personal on a work-profile host, or quarantines everything |
+| `work_orgs`, `personal_orgs` | org resolution, so both rules above and the personal store's work-org lint | trust file (#174) | an org dropped from the work list, or added to the personal one, routes work facts to personal |
+| `personal_store`, `work_store` | which checkout each store is read from and published to, and the work-store path the read guard denies | trust file: each store's path **and remote URL**, beside its store id (#178) | `work_store` pointed at a second clone of the personal remote publishes work facts to personal, irreversibly; `personal_store` pointed at a work clone feeds work facts to non-work sessions. The path alone is not enough: what a read sees is whatever a sync pulled from `origin`, and `priors`'s push takes the branch's upstream remote, both in the checkout's user-writable `.git/config`. So `priors` refuses a checkout whose `origin` differs from the pinned URL, and pushes to the pinned URL with the user's and system git config and `GIT_SSH*` cleared, through the pinned `ssh` with a build-time ssh config and `known_hosts`, refusing when the effective push URL after git's rewrites differs from the pinned one. A sync outside `priors` (§4.8) still follows the checkout's own config, the same class as §4.4's host-local rewrite residual |
+| `work_names` | the work-name scan behind `priors move --to personal`, the quarantine drain and the personal store's lint | trust file as a floor; the user key may only add names (#179) | emptying it lets every later move pass the scan; adding a name only makes the scan stricter, as `priors lint --work-name` already does |
+| `rules` | write-time redaction (§4.3) and the index and search exclusion, since a configured file today replaces the built-in set | root-owned default: the built-in set in the system-profile binary is a floor no config removes; the key stays, additive only (#180) | a permissive file would disable redaction on every write path; the built-in floor is §4.3's one shared rule set |
+| `scanner` | gate 1's secret scan (§4.4); unset, it is the first `betterleaks` or `gitleaks` on `PATH` | root-owned default with no override: pinned at build time to a Nix store path; the key and the `PATH` lookup are dropped (#181) | a script printing an empty report passes every fact, and `PATH` is as user-writable as the key |
+| `ssh_config` | `origin` host-alias resolution | user-owned | it only adds a resolved host to the candidates matched; a work owner on an unrecognised host is unresolvable, which fails closed; and the default `~/.ssh/config` and the repo's own `origin` are as writable as the key |
+| `state_dir` | the local layers, the quarantine (and with it its "never synced" rule), the locks, gate 2's shell markers (§4.4), and the paths the read guard denies | user-owned, but `priors` refuses a state dir, configured or default, that resolves inside a git work tree, and the guards derive their paths the same way (#183) | what it names is written by the owner's user, so an agent can read, copy or forge it in place whatever the path; a fresh dir has no markers and flags (fail closed). Where it points is the boundary: inside a checkout, every later quarantined fact could be committed off the host. A non-git sync tool on the chosen dir cannot be detected, a stated residual |
+| `event_record` | the hookyard record gate 2 reads | user-owned | hookyard writes the record as the owner's user (and `HOOKYARD_STATE_DIR` already moves it), so a forged record is the same act at either path; a missing one flags (fail closed). Gate 2 catches an agent's mistakes, not a forger |
+| `commit` | whether `priors` commits what passed its gates | user-owned | off leaves facts uncommitted, which weakens nothing an agent's own `git commit` could not; the store remote's required check and force-push refusal (§4.3, §4.4) gate publishing whoever commits |
+| `push` | whether `priors` pushes after committing | user-owned | it pushes only commits that passed the gates, to the remote that the `*_store` row above pins |
+
+Three inputs outside `config.toml` steer the same boundaries and are decided
+here too:
+
+- **User git config** (`~/.gitconfig`, `$XDG_CONFIG_HOME/git/config`), which
+  `priors`'s git calls honour. An `insteadOf` rewrite there makes every work
+  repo's `origin` read as a personal org, so routing classifies each remote by
+  both its raw and its rewritten URL, and a work org in either makes it work
+  (#182). Plain `insteadOf` rewrites push URLs too, as do `pushInsteadOf`
+  and `core.sshCommand`, so the push runs without that config (#178).
+- **`PATH`**, from which `git`, `ssh` and `rg` are found as the scanner is. A
+  shim can lie to routing, push anywhere, or return work-store text to a
+  non-work search, so all four are pinned at build time (#181). Pinning the
+  binary does not pin what git reads: the push's clean environment above is
+  what keeps a pinned `git` from taking `GIT_SSH_COMMAND`, `core.sshCommand`
+  or `~/.ssh/config` from the user.
+- **`PRIORS_CONFIG`, `XDG_CONFIG_HOME` and `XDG_STATE_HOME`** choose the user
+  config file and the default state dir only; no flag, variable or user
+  config names the trust file or overrides its keys (§4.4).
+
+Every root-owned decision above — the trust file, the built-in rule floor,
+the pinned binaries — holds only while the owner's user is not
+root-equivalent (§4.4's preconditions): on a single-user admin host it stops
+a plain file write, not an agent that takes root through the owner's own
+session, and what that host gets beyond this is #171's to decide.
+
 Inside a store, facts are scoped by repo:
 
 - **repo scope** — a fact that is only true in one repository (`repos: [x]`).
@@ -959,8 +1004,9 @@ absolute path; that is a human rule, stated as one.
 **The trust file**, `/etc/priors/trust.toml`, is written by the NixOS and
 nix-darwin modules through `environment.etc` (a root-owned link into the Nix
 store). It holds the host **profile** and the **work and personal org lists**
-(§4.2), each store's **store id**, and the **attestation allowlist**: each
-public key with its hardware evidence. Its path is fixed in the build: no
+(§4.2), each store's **store id**, **path** and **remote URL**, the floor of
+the **work names** (§4.2's config table), and the **attestation allowlist**:
+each public key with its hardware evidence. Its path is fixed in the build: no
 flag, environment variable (`PRIORS_CONFIG` included) or user config names it
 or overrides its keys. Before any use, `priors` checks ownership: every
 component of the path as traversed, symlinks and their targets included, is
@@ -972,9 +1018,8 @@ since no non-root user can replace an entry in it; a home-manager
 is a missing config: `priors` writes nothing, injects nothing (R8) and reports
 it. An empty allowlist means no fact reads `reviewed`. A home-manager-only
 host has no trust file, so `priors` is inert there until one is placed
-root-owned by other means. `config.toml` keeps everything else (state dir,
-rules, scanner, store paths, …); those keys also steer routing and the gates,
-and auditing them is a follow-up.
+root-owned by other means. `config.toml` keeps the rest; §4.2's config table
+decides each of its keys.
 
 **Preconditions.** Agents run as the owner's user, so the trust file and the
 `priors` binary are unwritable only if that user is not root-equivalent:
@@ -1018,7 +1063,8 @@ flake input pins; agents edit both repos and can repoint or overlay that
 input. The rebuild that deploys them is the human act, so it must be
 informed. The allowlist sits in its own small file in nix-config, and on
 every rebuild the module's activation prints a diff of the **whole trust
-file** (profile, org lists, store ids, keys added or removed), plus the
+file** (profile, org lists, store ids, paths and URLs, work names, keys
+added or removed), plus the
 `priors` store path and the hookyard revision it was built from. A rebuild
 that changes any of them must be **started by the human** at an interactive
 root prompt (the preconditions above), and its diff is for that human: agents
@@ -1199,7 +1245,7 @@ gates, and flagged ones stay `proposed`. The implementation is §10
 workstream 5, and it waits on the open decision above. The trust file
 itself, with the profile and org lists that §4.2's routing reads, under
 check 1's ownership test, lands with v0's routing (§10 workstreams 1–2); `cmd/priors` reads those lists from `config.toml`
-today, and moving them is a follow-up.
+today, and moving them is [#174](https://github.com/noamsto/hookyard/issues/174).
 
 ### 4.5 Retrieval backend: one interface, three implementations
 
@@ -1599,8 +1645,8 @@ change.
 | --- | --- | --- |
 | **hookyard** | *only if tier 2 passes its gate (§4.4):* `prompt_submit` added to `HasAdvisorySlot` for Claude and Pi (Codex already has `session_start` and `prompt_submit` since #101, so needs no hookyard change for tiers 1 and 2); Pi bridge's `input` reply delivered (not discarded); `before_agent_start` registration made a real per-prompt handler | the only router changes this design can require; tier 2 is impossible on Claude and Pi without them (R2, §4.7), and v0 needs none of them |
 | **hookyard** | *only if tier 2 passes its gate (§4.4):* captured `prompt_submit` advisory payload fixtures per engine, per its own evidentiary convention | a claimed-advisory engine with no fixture is a claim, not a capability |
-| **`priors`** (separate package and binary, built from the hookyard repo) | `cmd/priors` and its own tree, with its own manifest, reached through hookyard's `exec` handler contract; it speaks the envelope as JSON like any third-party handler and imports no `internal/` package, so moving it to its own repo is moving files. `add` / `list` (`--flagged`) / `show` / `search` / `lint` / `index` / `import` / `touch` / `move` / `publish` / `attest` / `trust check`; both store paths from config; the host profile, both org lists, the store ids and the attestation allowlist from the root-owned trust file (§4.4); write-time redaction and §4.2's routing; v0 `rg` backend | the owner's decision 4: the router stays small and auditable, and the store keeps a schema cadence of its own; §4.4's fail-open contract lives here, and covers its `pre_tool` guards too, since the router cannot deny on handler error (§4.2) |
-| **nix-config** | install `priors` and its manifest, wiring `session_start` to `priors index` and `post_tool` to the `priors touch` usage logger (`fire_and_forget`, §4.6), and `prompt_submit` only if tier 2 passes its gate; clone the personal store on every host incl. `halo` and `mbp`, and the work store on work-profile hosts only, as full (not shallow, partial or blobless) clones (§4.2, §4.4, §4.8); the trust file (§4.4) via `environment.etc` on every host, personal ones included: the host profile, both org lists, the store ids and the attestation allowlist in its own file, checked by `priors trust check` when the module builds the trust file, with an activation-time diff of the whole trust file plus the `priors` store path and the hookyard revision it was built from; an evaluation-time assertion of §4.4's preconditions (no rootful `docker` group, no Nix trusted user, directly or through a group, no `NOPASSWD` sudo, rebuilds behind a human-typed root credential), which on failure writes an empty allowlist and warns; the host-level include of the personal index in a Cursor-only rule file, never the shared instruction file Claude, Codex and Cursor all read, and no repo-level work include (§4.7); optional Obsidian `programs.obsidian.vaults` entries, one vault per store | one manifest, four engines — the pattern `programs.hookyard.manifests` already exists for; clone placement is the first of §4.2's two layers |
+| **`priors`** (separate package and binary, built from the hookyard repo) | `cmd/priors` and its own tree, with its own manifest, reached through hookyard's `exec` handler contract; it speaks the envelope as JSON like any third-party handler and imports no `internal/` package, so moving it to its own repo is moving files. `add` / `list` (`--flagged`) / `show` / `search` / `lint` / `index` / `import` / `touch` / `move` / `publish` / `attest` / `trust check`; the host profile, both org lists, each store's id, path and remote URL, the work-name floor and the attestation allowlist from the root-owned trust file (§4.4), and the other keys from `config.toml`, per §4.2's config table; write-time redaction and §4.2's routing; v0 `rg` backend | the owner's decision 4: the router stays small and auditable, and the store keeps a schema cadence of its own; §4.4's fail-open contract lives here, and covers its `pre_tool` guards too, since the router cannot deny on handler error (§4.2) |
+| **nix-config** | install `priors` and its manifest, wiring `session_start` to `priors index` and `post_tool` to the `priors touch` usage logger (`fire_and_forget`, §4.6), and `prompt_submit` only if tier 2 passes its gate; clone the personal store on every host incl. `halo` and `mbp`, and the work store on work-profile hosts only, as full (not shallow, partial or blobless) clones (§4.2, §4.4, §4.8); the trust file (§4.4) via `environment.etc` on every host, personal ones included: the trust-file keys of §4.2's config table, with the attestation allowlist in its own file, checked by `priors trust check` when the module builds the trust file, with an activation-time diff of the whole trust file plus the `priors` store path and the hookyard revision it was built from; an evaluation-time assertion of §4.4's preconditions (no rootful `docker` group, no Nix trusted user, directly or through a group, no `NOPASSWD` sudo, rebuilds behind a human-typed root credential), which on failure writes an empty allowlist and warns; the secret scanner, `git`, `ssh` and `rg` pinned at build time (§4.2); the host-level include of the personal index in a Cursor-only rule file, never the shared instruction file Claude, Codex and Cursor all read, and no repo-level work include (§4.7); optional Obsidian `programs.obsidian.vaults` entries, one vault per store | one manifest, four engines — the pattern `programs.hookyard.manifests` already exists for; clone placement is the first of §4.2's two layers |
 | **dispatcher** | `crew reap` runs `priors import` (§4.9), then distillation proposals (§4.3b); the judge consults `priors search` before choosing tier/engine/model | closes failure mode 2 — the judge currently decides from a static table while `ratings.jsonl` holds the evidence |
 | **nix-config** | worker MCP profile unchanged (zero servers) | memory must not be the reason a worker grows an MCP dependency (R1) |
 
@@ -1956,8 +2002,8 @@ Decided by the owner on 2026-09-30 unless marked. Decision 5 is settled
 
 | # | workstream | repo | delivers |
 | --- | --- | --- | --- |
-| 1 | the two store repos, each remote running the lint as a required check (§4.3) and refusing force pushes (§4.4); `priors` v0 (`add`/`list`/`show`/`search`/`lint`/`index`), §4.4's gates and the host-local layer, write-time redaction (§4.3), §4.2's routing and read rule, with the profile and org lists from the trust file (§4.4) (`cmd/priors` reads them from `config.toml` today; moving them is a follow-up) | hookyard (`cmd/priors`) | tier 1 + tier 3 on all four engines; the gates and the host-local layer for flagged facts |
-| 2 | nix-config wiring: install, clone per §4.2 (full clones, never shallow or partial), the trust file (§4.4) on every host, checked at build time by `priors trust check` once workstream 5 ships it, the personal index's host-level include in a Cursor-only rule file, never the shared instruction file Claude, Codex and Cursor all read, and dropped wherever Cursor's `session_start` hook runs `priors index` (#140), and no repo-level work include (§4.7) | nix-config | reach with no hookyard change |
+| 1 | the two store repos, each remote running the lint as a required check (§4.3) and refusing force pushes (§4.4); `priors` v0 (`add`/`list`/`show`/`search`/`lint`/`index`), §4.4's gates and the host-local layer, write-time redaction (§4.3), §4.2's routing and read rule, with the trust-file keys of §4.2's config table read from the trust file (§4.4) (`cmd/priors` reads them from `config.toml` today; moving them is #174, #178 and #179), and that table's other follow-ups (#180–#183) | hookyard (`cmd/priors`) | tier 1 + tier 3 on all four engines; the gates and the host-local layer for flagged facts |
+| 2 | nix-config wiring: install, clone per §4.2 (full clones, never shallow or partial), the trust file (§4.4) on every host, checked at build time by `priors trust check` once workstream 5 ships it, the pinned binaries of §4.2's config table, the personal index's host-level include in a Cursor-only rule file, never the shared instruction file Claude, Codex and Cursor all read, and dropped wherever Cursor's `session_start` hook runs `priors index` (#140), and no repo-level work include (§4.7) | nix-config | reach with no hookyard change |
 | 3 | importer v0 (Claude; Codex stage-1 rows behind the schema pin, §4.9) and the per-host migration with dedup proposals (decision 2) | hookyard (`priors`) | content to actually retrieve |
 | 4 | usage log and promotion/demotion: `post_tool → priors touch`, `fire_and_forget` (§4.6) | hookyard (`priors`) | strengthening and forgetting |
 | 5 | `priors attest`, `priors trust check` and the attestation check (§4.4: the bound entry, its sequence, revocation and lapse, the sk flags, the trust file) in `priors index`, and the `pre_tool` tripwires: the write guard (§4.4), before the stores go to a second host; the read guard (§4.2), before the work store is cloned on a host that also runs non-work sessions | hookyard (`priors`) | the review boundary holds by the key; the guards catch what hookyard sees. The attestation check, used only to promote flagged facts, is designed in [#130](https://github.com/noamsto/hookyard/issues/130), not a v0 blocker; the guards are not blocked |
