@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
+  flake-check:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -23,11 +23,29 @@ jobs:
       # build this small does not need.
       - name: flake check
         run: nix flake check
-      # nix flake check does not run this repo's `gotest`/`golangci-lint`
-      # pre-commit hooks -- both are staged "pre-push" only, and the
-      # `pre-commit` flake check runs `pre-commit run --all-files` with the
-      # default stage "pre-commit", which skips them. Run them explicitly so
-      # Go tests and lint actually gate CI.
+
+  # nix flake check does not run this repo's `gotest`/`golangci-lint`
+  # pre-commit hooks -- both are staged "pre-push" only, and the
+  # `pre-commit` flake check runs `pre-commit run --all-files` with the
+  # default stage "pre-commit", which skips them. Run them explicitly so
+  # Go tests and lint actually gate CI. Outside the sandbox, so the Go build
+  # and lint caches can carry over between runs.
+  go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            ~/.cache/golangci-lint
+          key: go-${{ runner.os }}-${{ hashFiles('go.sum', 'flake.lock') }}-${{ github.sha }}
+          restore-keys: |
+            go-${{ runner.os }}-${{ hashFiles('go.sum', 'flake.lock') }}-
+            go-${{ runner.os }}-
       - name: go test
         run: nix develop -c go test -race ./...
       - name: golangci-lint
