@@ -568,8 +568,8 @@ root-owned default; the table decides every key the user config holds today:
 
 | key | what an agent can weaken by rewriting it | decision | reason |
 | --- | --- | --- | --- |
-| `profile` | the host kind, so routing and the quarantine | trust file (#174) | flipping it sends work-bound writes to personal on a work-profile host, or quarantines everything |
-| `work_orgs`, `personal_orgs` | org resolution, so both rules above and the personal store's work-org lint | trust file (#174) | an org dropped from the work list, or added to the personal one, routes work facts to personal |
+| `profile` | the host kind, so routing and the quarantine | trust file (#174). Implemented: `priors` reads `profile` only from `/etc/priors/trust.toml`, after the ownership walk, along with `trust_root` and each store's id. The key in `config.toml` is an error naming the trust file | flipping it sends work-bound writes to personal on a work-profile host, or quarantines everything |
+| `work_orgs`, `personal_orgs` | org resolution, so both rules above and the personal store's work-org lint | trust file (#174). Implemented: `priors` reads `work_orgs` and `personal_orgs` only from `/etc/priors/trust.toml`, after the ownership walk, along with `trust_root` and each store's id. The keys in `config.toml` are an error naming the trust file | an org dropped from the work list, or added to the personal one, routes work facts to personal |
 | `personal_store`, `work_store` | which checkout each store is read from and published to, and the work-store path the read guard denies | trust file: each store's path **and remote URL**, beside its store id (#178) | `work_store` pointed at a second clone of the personal remote publishes work facts to personal, irreversibly; `personal_store` pointed at a work clone feeds work facts to non-work sessions. The path alone is not enough: what a read sees is whatever a sync pulled from `origin`, and `priors`'s push takes the branch's upstream remote, both in the checkout's user-writable `.git/config`. So `priors` refuses a checkout whose `origin` differs from the pinned URL, and pushes to the pinned URL with the user's and system git config and `GIT_SSH*` cleared, through the pinned `ssh` with a build-time ssh config and `known_hosts`, refusing when the effective push URL after git's rewrites differs from the pinned one. A sync outside `priors` (§4.8) still follows the checkout's own config: a stated residual for content, which §4.4's verdicts do not share, since its job fetches the pinned URL itself |
 | `work_names` | the work-name scan behind `priors move --to personal`, the quarantine drain and the personal store's lint | trust file as a floor; the user key may only add names (#179) | emptying it lets every later move pass the scan; adding a name only makes the scan stricter, as `priors lint --work-name` already does |
 | `rules` | write-time redaction (§4.3) and the index and search exclusion; rewriting the key can now only add rules | root-owned default: the built-in set in the system-profile binary is a floor no config removes; the key stays, additive only (#180). Implemented: `gate.LoadRules` always loads the built-in set compiled into the binary and appends a configured file's rules. A configured id that repeats or matches a built-in id, an unknown key in the file, and a missing, unparsable or empty file are errors, so priors fails closed. A rule has only `id` and `regex`, and a match on any rule refuses (no allow list, exception or priority), so a configured rule adds matches and cannot weaken a built-in. `add`, `index`, `search`, `read` and `lint` all get their rules through `LoadRules`, so none sees a set without the floor | a permissive file would disable redaction on every write path; the built-in floor is §4.3's one shared rule set |
@@ -2426,9 +2426,10 @@ flagged facts stops being optional.
   file or directory that is group- or world-writable each fail, a missing or
   unparsable file is a missing config that writes and injects nothing and is
   reported, and a root-owned file under root-owned or sticky directories
-  passes; `PRIORS_CONFIG` or a user config naming a trust file or its keys is
-  ignored; an empty allowlist leaves no fact `reviewed`; a verdict file owned
-  by a user other than `priors-verify`, one that is group- or world-writable,
+  passes; a `PRIORS_CONFIG` or user config cannot name a trust file, and a
+  trust key in it is an error naming the trust file; an empty allowlist
+  leaves no fact `reviewed`; a verdict file owned by a user other than
+  `priors-verify`, one that is group- or world-writable,
   one under a user-owned directory, one over 1 MiB, one naming another store
   id, one whose `trust` digest does not match the trust file (so a key removed
   from the allowlist leaves its facts `proposed` before any job run) and one

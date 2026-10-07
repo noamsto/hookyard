@@ -108,3 +108,22 @@ Ledger opened before the independent review batch; base `origin/main` `7325ff2`.
 | trail rendering during a bridge uses a different distance basis than a normal leg (cosmetic: trail briefly shrinks then "pops" back to length) | typescript-reviewer MEDIUM (round 1) | e816cde | n/a | reviewer's own verdict did not mark this blocking; the ~140ms window makes it imperceptible in practice | deferred (documented in PR body, not filed as an issue — cosmetic only) | 1 |
 
 recurrence_escalation: unused
+
+---
+
+# Review notes — hookyard #174 (read profile, org lists, store ids and trust_root from the root-owned trust file)
+
+Review base `6b93791` (merge-base with `origin/main`); harness reviewer roster, no repo-local reviewers.
+Batch (round 1): go-reviewer, security-reviewer, nix-reviewer + yaml-reviewer, targeted test-runner (all opus).
+The diverse-engine one-shot (cursor, grok-4.7-high; codex was not in budget) returned no output and was
+dropped; its first attempt was stopped by the secret-read guard on the prompt's wording.
+
+| invariant/family | finding or thread IDs | observed head | fix commit | proof | disposition | rounds used |
+| --- | --- | --- | --- | --- | --- | --- |
+| a non-string `trust_root` is off, not a missing config (§4.4) | go-reviewer + security-reviewer MEDIUM (round 1); targeted re-review MEDIUM (round 2: table-shaped values still fail via undecoded keys) | 3246e1c | 3246e1c (scalars, arrays) | `TestLoadTrustRoot`, `TestReadTrust` trust_root cases; round 2 reproduced the table case with BurntSushi v1.6.0 | partly fixed; table-shaped values deferred to a follow-up issue (fails closed, root-only file, no round left) | 2 |
+| the trust walk resolves `..` after symlinks, as the kernel does | go-reviewer LOW, security-reviewer LOW (round 1) | 3246e1c | 3246e1c | `TestCheckTrustPathFollowsSymlinkBeforeDotDot` red with `filepath.Clean` restored, green with the fix; round 2 edge-case table | fixed | 2 |
+| the "unparsable" trust test asserts the parse error, not any error | go-reviewer LOW (round 1) | 3246e1c | 3246e1c | asserts `toml: line 1 (last key "profile"): expected value` | fixed | 2 |
+| the check-only seamed derivation is named apart from production | nix-reviewer LOW (round 1) | 3246e1c | 3246e1c | check inputs `priors-0.1.0.drv`, `priors-priorstest-0.1.0.drv` | fixed | 2 |
+| `priors search` reports a config (trust) failure | security-reviewer LOW, go-reviewer note (round 1) | d9aa3ee | — | `cmd_search.go:36-39` returns 0 silently; predates this branch, by design "prints no hits" | deferred to a follow-up issue | 1 |
+
+recurrence_escalation: unused

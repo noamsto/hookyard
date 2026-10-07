@@ -38,7 +38,9 @@ const toolsPkg = "github.com/noamsto/hookyard/cmd/priors/internal/tools"
 func pinnedTool(name string) string { return filepath.Join(toolsDir, name) }
 
 func goBuild(out string, ldflags ...string) ([]byte, error) {
-	args := []string{"build"}
+	// priorstest makes the binary read its trust file from $PRIORS_TEST_TRUST
+	// and treat every owner as root; production builds never set the tag.
+	args := []string{"build", "-tags", "priorstest"}
 	if len(ldflags) > 0 {
 		args = append(args, "-ldflags", strings.Join(ldflags, " "))
 	}
@@ -108,7 +110,7 @@ type sandbox struct {
 	personal, work, state          string
 	hookyard, gitConfig, sshConfig string
 	configPath, scanner, path      string
-	profile                        string
+	trustPath, profile             string
 }
 
 func newSandbox(t *testing.T, profile string) *sandbox {
@@ -129,9 +131,15 @@ func newSandbox(t *testing.T, profile string) *sandbox {
 		gitConfig:  filepath.Join(dir, "gitconfig"),
 		sshConfig:  filepath.Join(dir, "ssh_config"),
 		configPath: filepath.Join(dir, "config.toml"),
+		trustPath:  filepath.Join(dir, "trust.toml"),
 		scanner:    pinnedTool("scanner"),
 		path:       os.Getenv("PATH"),
 		profile:    profile,
+	}
+	// The trust walk rejects group-writable directories, and a 002 umask makes
+	// t.TempDir() 0775.
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
 	}
 	sb.writeFile(sb.gitConfig, "[user]\n\tname = Test\n\temail = test@example.com\n[commit]\n\tgpgsign = false\n")
 	sb.writeFile(sb.sshConfig, "")
@@ -140,6 +148,7 @@ func newSandbox(t *testing.T, profile string) *sandbox {
 		sb.mkdir(d)
 		sb.git(d, "init", "-q")
 	}
+	sb.writeTrust()
 	sb.writeConfig()
 	return sb
 }
@@ -167,16 +176,30 @@ func (sb *sandbox) setScanner(script string) {
 	}
 }
 
+// writeTrust writes the host trust file the binary reads through
+// $PRIORS_TEST_TRUST.
+func (sb *sandbox) writeTrust() {
+	sb.t.Helper()
+	lines := []string{
+		fmt.Sprintf("profile = %q", sb.profile),
+		`work_orgs = ["github.com/factify-inc"]`,
+		`personal_orgs = ["github.com/noamsto"]`,
+		"[stores.personal]",
+		`id = "personal-test"`,
+	}
+	if sb.profile == "work" {
+		lines = append(lines, "[stores.work]", `id = "work-test"`)
+	}
+	sb.writeFile(sb.trustPath, strings.Join(lines, "\n")+"\n")
+}
+
 // writeConfig rewrites the config; extra lines are appended to it.
 func (sb *sandbox) writeConfig(extra ...string) {
 	sb.t.Helper()
 	lines := []string{
-		fmt.Sprintf("profile = %q", sb.profile),
 		fmt.Sprintf("personal_store = %q", sb.personal),
 		fmt.Sprintf("work_store = %q", sb.work),
 		fmt.Sprintf("state_dir = %q", sb.state),
-		`work_orgs = ["github.com/factify-inc"]`,
-		`personal_orgs = ["github.com/noamsto"]`,
 		fmt.Sprintf("ssh_config = %q", sb.sshConfig),
 	}
 	sb.writeFile(sb.configPath, strings.Join(append(lines, extra...), "\n")+"\n")
@@ -192,6 +215,7 @@ func (sb *sandbox) childEnv() []string {
 		"GIT_CONFIG_NOSYSTEM=1",
 		"PATH=" + sb.path,
 		"PRIORS_CONFIG=" + sb.configPath,
+		"PRIORS_TEST_TRUST=" + sb.trustPath,
 	}
 }
 
@@ -870,10 +894,78 @@ func TestAddRefusals(t *testing.T) {
 		defer sb.writeConfig()
 		res := sb.run("", append(base, "--type", "project")...)
 		wantExit(t, res, 2)
+		wantContains(t, "stderr", res.stderr, "is read from the trust file")
 	})
 	t.Run("unknown flag", func(t *testing.T) {
 		wantExit(t, sb.run("", "add", "--nope"), 1)
 	})
+}
+
+// filesUnder lists the files below dir, leaving out .git; a missing dir has none.
+func filesUnder(t *testing.T, dir string) []string {
+	t.Helper()
+	var files []string
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && d.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		if !d.IsDir() {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+	return files
+}
+
+func TestMissingTrustFileIsAMissingConfig(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.trustPath = filepath.Join(sb.dir, "absent", "trust.toml")
+
+	res := sb.run(sessionStartEnvelope(repo))
+	wantExit(t, res, 0)
+	if res.stdout != "" {
+		t.Errorf("session_start stdout %q, want none", res.stdout)
+	}
+	wantContains(t, "session_start stderr", res.stderr, sb.trustPath)
+
+	res = sb.run("", "add", "--name", "a-fact", "--description", "d", "--type", "project",
+		"--cwd", repo, "--session", "sess-1")
+	wantExit(t, res, 2)
+	wantContains(t, "add stderr", res.stderr, sb.trustPath)
+	for _, dir := range []string{sb.personal, sb.work, sb.state} {
+		if files := filesUnder(t, dir); len(files) != 0 {
+			t.Errorf("files under %s: %v, want none", dir, files)
+		}
+	}
+}
+
+func TestTrustFileWritableByGroupIsRefused(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	if err := os.Chmod(sb.trustPath, 0o664); err != nil {
+		t.Fatal(err)
+	}
+	res := sb.run("", "add", "--name", "a-fact", "--description", "d", "--type", "project",
+		"--cwd", repo, "--session", "sess-1")
+	wantExit(t, res, 2)
+	wantContains(t, "stderr", res.stderr, "writable by group or others")
+}
+
+func TestUserConfigCannotSetTrustKeys(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.writeConfig(`work_orgs = ["github.com/noamsto"]`)
+	res := sb.run("", "add", "--name", "a-fact", "--description", "d", "--type", "project",
+		"--cwd", repo, "--session", "sess-1")
+	wantExit(t, res, 2)
+	wantContains(t, "stderr", res.stderr, "is read from the trust file")
 }
 
 func TestUnknownSubcommandPrintsUsage(t *testing.T) {
@@ -1127,7 +1219,7 @@ func TestLintDirWithKind(t *testing.T) {
 func writeStoreIndex(t *testing.T, sb *sandbox, dir string) {
 	t.Helper()
 	cfg := filepath.Join(t.TempDir(), "config.toml")
-	sb.writeFile(cfg, fmt.Sprintf("profile = \"personal\"\npersonal_store = %q\nstate_dir = %q\nwork_orgs = [\"github.com/factify-inc\"]\n", dir, filepath.Join(t.TempDir(), "state")))
+	sb.writeFile(cfg, fmt.Sprintf("personal_store = %q\nstate_dir = %q\n", dir, filepath.Join(t.TempDir(), "state")))
 	if res := sb.run("", "index", "--write", "--config", cfg); res.code != 0 {
 		t.Fatalf("index --write: %s", res.stderr)
 	}
@@ -1264,8 +1356,16 @@ func TestFailOpenMatrix(t *testing.T) {
 			}
 			return fx.envelope
 		},
+		// A trust key in the user config is rejected, so this is the same silence
+		// as a malformed config.
 		"invalid config": func(t *testing.T, fx *failOpenFixture) string {
 			fx.sb.writeFile(fx.sb.configPath, "profile = \"bogus\"\n")
+			return fx.envelope
+		},
+		"missing trust file": func(t *testing.T, fx *failOpenFixture) string {
+			if err := os.Remove(fx.sb.trustPath); err != nil {
+				t.Fatal(err)
+			}
 			return fx.envelope
 		},
 		"missing store dir": func(t *testing.T, fx *failOpenFixture) string {
@@ -1779,11 +1879,8 @@ func TestPostToolMarkerHonoursXDGStateHome(t *testing.T) {
 	sb := newSandbox(t, "personal")
 	sb.configPath = filepath.Join(sb.dir, "config-no-state.toml")
 	sb.writeFile(sb.configPath, strings.Join([]string{
-		fmt.Sprintf("profile = %q", sb.profile),
 		fmt.Sprintf("personal_store = %q", sb.personal),
 		fmt.Sprintf("work_store = %q", sb.work),
-		`work_orgs = ["github.com/factify-inc"]`,
-		`personal_orgs = ["github.com/noamsto"]`,
 		fmt.Sprintf("ssh_config = %q", sb.sshConfig),
 	}, "\n")+"\n")
 	sb.toolCall("post_tool", "sess-1", "Bash", `{"command":"go test ./..."}`)
