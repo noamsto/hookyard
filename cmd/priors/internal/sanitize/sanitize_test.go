@@ -885,6 +885,7 @@ func TestTextAcceptedCosts(t *testing.T) {
 		{"roman numeral item before a name", "iv. [S\u00f8ren]", "(quoted line: iv. [S\u00f8ren])"},
 		{"hebrew vav before a bracketed word", "\u05d5 [café]", "(quoted line: \u05d5 [café])"},
 		{"spacing accents", "x \u00b4\u00b4\u00b4 café", "(quoted line: x  \u0301 \u0301 \u0301 café)"},
+		{"spacing accents beside a dash", "x \u00b4\u00b4 \u2014 café", "(quoted line: x  \u0301 \u0301 \u2014 café)"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
