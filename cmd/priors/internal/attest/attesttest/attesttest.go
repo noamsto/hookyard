@@ -59,6 +59,7 @@ func NewSKECDSA(t testing.TB) Key {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
+		return Key{}
 	}
 	point, err := priv.PublicKey.Bytes()
 	if err != nil {
@@ -83,6 +84,7 @@ func NewEd25519(t testing.TB) Key {
 	signer, err := ssh.NewSignerFromKey(priv)
 	if err != nil {
 		t.Fatal(err)
+		return Key{}
 	}
 	return Key{t: t, pub: signer.PublicKey(), signer: signer}
 }

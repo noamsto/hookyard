@@ -122,10 +122,11 @@ func ParseEntry(raw []byte) (Entry, error) {
 	if slices.Contains(body, "") {
 		return Entry{}, errors.New("armour has an empty line")
 	}
-	e.Signature, err = base64.StdEncoding.Strict().DecodeString(strings.Join(body, ""))
+	sig, err := base64.StdEncoding.Strict().DecodeString(strings.Join(body, ""))
 	if err != nil {
 		return Entry{}, fmt.Errorf("armour: %w", err)
 	}
+	e.Signature = sig
 
 	e.Signed = raw[:len(strings.Join(lines[:headerLines], "\n"))+1]
 	return e, nil

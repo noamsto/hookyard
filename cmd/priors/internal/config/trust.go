@@ -90,7 +90,10 @@ func CheckOwnedPath(fsys StatFS, path string, leafUID *uint32) (string, error) {
 		// last is the component the walk ends on, so cur holds the final file.
 		// A failed Lstat counts, so a missing file in a sound leaf directory
 		// reads as missing.
-		last := len(queue) == 0 && (err != nil || fi.Mode()&fs.ModeSymlink == 0)
+		last := len(queue) == 0
+		if err == nil {
+			last = last && fi.Mode()&fs.ModeSymlink == 0
+		}
 		owner := uint32(0)
 		if last && leafUID != nil {
 			owner = *leafUID

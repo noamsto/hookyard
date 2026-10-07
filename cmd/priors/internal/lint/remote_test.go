@@ -185,6 +185,9 @@ func TestRemoteSinceMiddleCommitUnattested(t *testing.T) {
 
 	got := Remote(context.Background(), root, base)
 	assertFindings(t, got, "repo-a/r.md:unattested-review")
+	if len(got) == 0 {
+		return
+	}
 	if !strings.Contains(got[0].Msg, middle[:12]) {
 		t.Errorf("msg %q does not name commit %s", got[0].Msg, middle[:12])
 	}
@@ -212,6 +215,9 @@ func TestRemoteSinceEntryAddedThenDeleted(t *testing.T) {
 
 	got := Remote(context.Background(), root, base)
 	assertFindings(t, got, ".attest/x:attest-deleted")
+	if len(got) == 0 {
+		return
+	}
 	if !strings.Contains(got[0].Msg, gone[:12]) {
 		t.Errorf("msg %q does not name commit %s", got[0].Msg, gone[:12])
 	}
