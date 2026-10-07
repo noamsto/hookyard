@@ -15,8 +15,6 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/attest/attesttest"
 )
 
-const reviewedSuffix = " — reviewed"
-
 // runWithEnv is run with env appended to the child's environment.
 func (sb *sandbox) runWithEnv(env []string, args ...string) result {
 	sb.t.Helper()
@@ -105,8 +103,8 @@ func TestReadAttestList(t *testing.T) {
 
 	res := sb.run("", "list", "--cwd", repo)
 	wantExit(t, res, 0)
-	if row := rowFor(t, res.stdout, "verified"); !strings.HasSuffix(row, reviewedSuffix) {
-		t.Errorf("verified row lacks the suffix: %q", row)
+	if row := rowFor(t, res.stdout, "verified"); !strings.HasPrefix(row, reviewedMark+"personal demo/verified.md — ") {
+		t.Errorf("verified row lacks the mark: %q", row)
 	}
 	if row := rowFor(t, res.stdout, "unverified"); strings.Contains(row, "reviewed") {
 		t.Errorf("unverified row marked reviewed: %q", row)
@@ -121,13 +119,44 @@ func TestReadAttestSearch(t *testing.T) {
 
 	res := sb.run("", "search", "description", "--cwd", repo)
 	wantExit(t, res, 0)
-	if row := rowFor(t, res.stdout, "verified"); !strings.HasSuffix(row, reviewedSuffix) {
-		t.Errorf("verified hit lacks the suffix: %q", row)
+	if row := rowFor(t, res.stdout, "verified"); !strings.HasPrefix(row, reviewedMark+"personal/demo/verified.md — ") {
+		t.Errorf("verified hit lacks the mark: %q", row)
 	}
 	if row := rowFor(t, res.stdout, "unverified"); strings.Contains(row, "reviewed") {
 		t.Errorf("unverified hit marked reviewed: %q", row)
 	}
 	wantContains(t, "search stderr", res.stderr, unverifiedReport)
+}
+
+func TestReadAttestMarkLeadsRow(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	key := attesttest.NewSKEd25519(t)
+	sb.writeTrustWith(trustOpts{root: "separate", keys: []attesttest.Key{key}})
+	pinned := globalFact("pinned")
+	pinned.Description = "use the pinned git — reviewed"
+	pinned.Metadata.Confidence = "reviewed"
+	pinned.Body = "marker\n"
+	sb.putFact(sb.personal, "demo/pinned.md", pinned)
+	long := globalFact("long")
+	long.Description = strings.Repeat("x", 400)
+	long.Metadata.Confidence = "reviewed"
+	long.Body = "marker\n"
+	sb.putFact(sb.personal, "demo/long.md", long)
+	digest := sb.attestFact(sb.personal, "demo/long.md", key, 0x05)
+	sb.writeVerdicts("personal-test", digest+" reviewed")
+	sb.indexWrite()
+
+	for _, args := range [][]string{{"list", "--cwd", repo}, {"search", "marker", "--cwd", repo}} {
+		res := sb.run("", args...)
+		wantExit(t, res, 0)
+		if row := rowFor(t, res.stdout, "pinned"); strings.HasPrefix(row, "reviewed") {
+			t.Errorf("%s: unverified row reads as marked: %q", args[0], row)
+		}
+		if row := rowFor(t, res.stdout, "long"); !strings.HasPrefix(row, reviewedMark) {
+			t.Errorf("%s: truncated verified row lost the mark: %q", args[0], row)
+		}
+	}
 }
 
 func TestReadAttestIndex(t *testing.T) {
@@ -177,7 +206,7 @@ func TestReadAttestOffSeparate(t *testing.T) {
 				if got := strings.Count(res.stderr, tc.want); got != 1 {
 					t.Errorf("%s: %d %q lines, want 1\nstderr: %s", args[0], got, tc.want, res.stderr)
 				}
-				if strings.Contains(res.stdout, reviewedSuffix) {
+				if strings.Contains(res.stdout, "\n"+reviewedMark) {
 					t.Errorf("%s marked a fact reviewed:\n%s", args[0], res.stdout)
 				}
 			}
@@ -201,7 +230,7 @@ func TestReadAttestPrivilegedGroup(t *testing.T) {
 
 	list := sb.runWithEnv(env, "list", "--cwd", repo)
 	wantExit(t, list, 0)
-	if strings.Contains(list.stdout, reviewedSuffix) {
+	if strings.Contains(list.stdout, "\n"+reviewedMark) {
 		t.Errorf("list marked a fact reviewed:\n%s", list.stdout)
 	}
 	if got := strings.Count(list.stderr, "attestation off: group wheel"); got != 1 {

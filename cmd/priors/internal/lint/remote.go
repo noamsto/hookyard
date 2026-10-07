@@ -130,12 +130,13 @@ func remoteRange(ctx context.Context, dir, since string) []Finding {
 	return out
 }
 
-// deletedEntries finds an entry deleted by any commit in base..HEAD, so one
-// added and dropped inside the range still counts. -m diffs a merge against
-// each parent, so a merge that takes the side without an entry counts too;
-// --no-renames makes a rename a delete.
+// deletedEntries finds an entry deleted or replaced by a symlink in any
+// commit in base..HEAD, so one added and dropped inside the range still
+// counts. -m diffs a merge against each parent, so a merge that takes the
+// side without an entry counts too; --no-renames makes a rename a delete;
+// T counts an entry turned into a symlink, which no reader honours.
 func deletedEntries(ctx context.Context, dir, base string) ([]Finding, error) {
-	log, err := remoteGit(ctx, dir, nil, "log", "--reverse", "--format=%x01%H", "-z", "--name-only", "-m", "--no-renames", "--relative", "--diff-filter=D", base+"..HEAD", "--", attestDir+"/")
+	log, err := remoteGit(ctx, dir, nil, "log", "--reverse", "--format=%x01%H", "-z", "--name-only", "-m", "--no-renames", "--relative", "--diff-filter=DT", base+"..HEAD", "--", attestDir+"/")
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +153,7 @@ func deletedEntries(ctx context.Context, dir, base string) ([]Finding, error) {
 			continue
 		}
 		seen[tok] = true
-		out = append(out, Finding{File: tok, Rule: "attest-deleted", Msg: "entry was deleted by commit " + short(commit)})
+		out = append(out, Finding{File: tok, Rule: "attest-deleted", Msg: "entry was deleted or replaced by commit " + short(commit)})
 	}
 	return out, nil
 }

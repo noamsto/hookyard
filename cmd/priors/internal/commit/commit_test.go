@@ -1231,6 +1231,10 @@ func TestSeparateHostRefusesUnattestedReview(t *testing.T) {
 		{"entry for another path", func(t *testing.T, key attesttest.Key, raw []byte) []byte {
 			return entry(key, "rev-fact", "_global/other.md", raw, "attest", upUV)
 		}},
+		{"entry for another store", func(t *testing.T, key attesttest.Key, raw []byte) []byte {
+			sum := sha256.Sum256(raw)
+			return attesttest.Signed(key, attesttest.Entry("work-test", "rev-fact", revRel, hex.EncodeToString(sum[:]), 1, "attest"), upUV, attest.Namespace)
+		}},
 		{"revoke entry", func(t *testing.T, key attesttest.Key, raw []byte) []byte {
 			return entry(key, "rev-fact", revRel, raw, "revoke", upUV)
 		}},

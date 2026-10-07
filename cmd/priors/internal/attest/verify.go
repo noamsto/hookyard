@@ -67,12 +67,12 @@ func (v *Verifier) Reviewed(e store.Entry) bool {
 	if !Claims(e.Fact) {
 		return false
 	}
-	if e.Root.Kind != store.KindCheckout {
-		v.reject(e, &CheckError{Check: 2, Reason: "not in a checkout"})
-		return false
-	}
 	s := v.check1(e.Root.Store)
 	if !s.ok {
+		return false
+	}
+	if e.Root.Kind != store.KindCheckout {
+		v.reject(e, &CheckError{Check: 2, Reason: "not in a checkout"})
 		return false
 	}
 	err := v.check3(e, s)
@@ -130,6 +130,12 @@ func (v *Verifier) check1(id route.StoreID) *storeCheck {
 	uid, err := strconv.ParseUint(VerifyUID, 10, 32)
 	if err != nil {
 		v.report(fmt.Sprintf("%s store: check 1: verdict owner not pinned", id))
+		return s
+	}
+	// A verdict file this user owns is one an agent running as this user
+	// could forge.
+	if strconv.FormatUint(uid, 10) == strconv.Itoa(os.Getuid()) {
+		v.report(fmt.Sprintf("%s store: check 1: verdict owner is this user", id))
 		return s
 	}
 	s.verdicts, err = ReadVerdicts(v.o.FS, VerdictPath(s.id), s.id, v.cfg.TrustDigest, uint32(uid), v.o.Now())

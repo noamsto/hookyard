@@ -151,6 +151,11 @@ func printReports(s streams, v *attest.Verifier) {
 	}
 }
 
+// reviewedMark leads the row of a fact that verified as reviewed. It goes
+// before the store name, which no fact controls, so a description can neither
+// forge it nor push it past the truncation point.
+const reviewedMark = "reviewed · "
+
 // listRow is e's row; reviewed marks a fact that verified as reviewed.
 func listRow(e store.Entry, reviewed bool) string {
 	f := e.Fact
@@ -158,13 +163,13 @@ func listRow(e store.Entry, reviewed bool) string {
 	if e.Root.Kind == store.KindLocal {
 		where += " local"
 	}
+	if reviewed {
+		where = reviewedMark + where
+	}
 	verified := cmp.Or(f.Metadata.Verified, "never")
 	row := fmt.Sprintf("%s %s — %s — verified %s — %s", where, e.Rel, f.Metadata.Type, verified, f.Description)
 	if e.Root.Kind == store.KindLocal {
 		row += " — flags: " + strings.Join(f.Metadata.Flags, ", ")
-	}
-	if reviewed {
-		row += " — reviewed"
 	}
 	return sanitize.Line(row, sanitize.IndexLineMax)
 }

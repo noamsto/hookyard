@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -382,6 +383,20 @@ func TestReviewedLocalLayer(t *testing.T) {
 	e.Root.Kind = store.KindLocal
 
 	wantProposed(t, f.verifier(), []string{factReport + ": proposed: check 2: not in a checkout"}, e)
+	// Check 1 runs first, so the store's verdict file is read, once.
+	if n := f.fs.reads(VerdictPath(personalID)); n != 1 {
+		t.Errorf("verdict file read %d times, want 1", n)
+	}
+}
+
+func TestReviewedLocalLayerAttestationOff(t *testing.T) {
+	f := newFixture(t)
+	f.cfg.TrustRoot, f.cfg.TrustRootLabel = "owner-admin", "owner-admin"
+	a := f.claim(route.StorePersonal, factRel, factName)
+	b := f.claim(route.StorePersonal, "repo-a/other-fact.md", "other-fact")
+	a.Root.Kind, b.Root.Kind = store.KindLocal, store.KindLocal
+
+	wantProposed(t, f.verifier(), []string{"personal store: attestation off: trust_root owner-admin"}, a, b)
 	if len(f.fs.accessed) != 0 {
 		t.Errorf("verdict fs accessed: %q", f.fs.accessed)
 	}
@@ -516,6 +531,7 @@ func TestReviewedCheck1Fails(t *testing.T) {
 		{"trust digest mismatch", func(f *fixture) { f.cfg.TrustDigest = digestA }, "verdict file is for another trust file"},
 		{"owner not pinned", func(*fixture) { VerifyUID = "" }, "verdict owner not pinned"},
 		{"owner not a uid", func(*fixture) { VerifyUID = "priors-verify" }, "verdict owner not pinned"},
+		{"owner is this user", func(*fixture) { VerifyUID = strconv.Itoa(os.Getuid()) }, "verdict owner is this user"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -3,6 +3,8 @@ package attest
 import (
 	"bytes"
 	"errors"
+	"os"
+	"slices"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -121,5 +123,15 @@ func TestClassifyOffWithoutEnrolledKey(t *testing.T) {
 	h := Classify(separateCfg(), g)
 	if want := "no attestation key enrolled"; h.Off != want {
 		t.Errorf("Off = %q, want %q", h.Off, want)
+	}
+}
+
+func TestOSGroupsIncludePrimaryGid(t *testing.T) {
+	gids, err := OSGroups.Gids()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(gids, os.Getgid()) {
+		t.Errorf("Gids() = %v, want it to hold the primary gid %d", gids, os.Getgid())
 	}
 }

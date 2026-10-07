@@ -68,7 +68,7 @@ func cmdSearch(args []string, s streams) int {
 		e := h.Entry
 		row := fmt.Sprintf("%s/%s — %s — %s", e.Root.Store, e.Rel, e.Fact.Name, e.Fact.Description)
 		if v.Reviewed(e) {
-			row += " — reviewed"
+			row = reviewedMark + row
 		}
 		lines[i] = sanitize.Line(row, sanitize.IndexLineMax)
 	}

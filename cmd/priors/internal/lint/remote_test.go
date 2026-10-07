@@ -205,6 +205,30 @@ func TestRemoteSinceFactAndEntryTogether(t *testing.T) {
 	assertFindings(t, Remote(context.Background(), root, base))
 }
 
+func TestRemoteSinceEntryReplacedBySymlinkThenRestored(t *testing.T) {
+	root := gitRepo(t)
+	putRaw(t, root, ".attest/a", entryFor("a"))
+	putRaw(t, root, ".attest/b", entryFor("b"))
+	base := commitAll(t, root, "base")
+	remove(t, root, ".attest/a")
+	if err := os.Symlink("b", filepath.Join(root.Path, ".attest", "a")); err != nil {
+		t.Fatal(err)
+	}
+	swapped := commitAll(t, root, "entry to symlink")
+	remove(t, root, ".attest/a")
+	putRaw(t, root, ".attest/a", entryFor("a"))
+	commitAll(t, root, "restore")
+
+	got := Remote(context.Background(), root, base)
+	assertFindings(t, got, ".attest/a:attest-deleted")
+	if len(got) == 0 {
+		return
+	}
+	if !strings.Contains(got[0].Msg, swapped[:12]) {
+		t.Errorf("msg %q does not name commit %s", got[0].Msg, swapped[:12])
+	}
+}
+
 func TestRemoteSinceEntryAddedThenDeleted(t *testing.T) {
 	root := gitRepo(t)
 	base := commitAll(t, root, "base")
