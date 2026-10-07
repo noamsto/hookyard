@@ -786,8 +786,7 @@ func opener(r rune, set uint64) bool {
 
 // bracket is an opener that draws a bracket or quote, not a symbol. A letter
 // or digit counts only when it looks like an opening bracket (ᐸ): one that
-// looks like a quote (Hebrew yod, the ʻokina) opens prose. No modifier letter
-// has an opening-bracket image, so the letter branch needs no Lm exclusion.
+// looks like a quote (Hebrew yod, the ʻokina) opens prose.
 func bracket(r rune) bool {
 	if r < utf8.RuneSelf {
 		return strings.ContainsRune("[({<\"'`", r)
