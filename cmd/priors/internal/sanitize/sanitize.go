@@ -569,8 +569,9 @@ func runeAt(line string, s skelRune) rune {
 // bracketed reports a line whose first bracket or quote, past list
 // markup, punctuation, symbols, letters that look like punctuation (ǃ) and
 // quoted tokens but before any word, opens it: a later closer after a letter
-// or the line's end closes it. A line starting with a word may still open on a
-// symbol that a later one closes around a letter (★…★).
+// or the line's end closes it. A line starting with a word, or whose first
+// bracket does not close, may still open on a symbol that a later one closes
+// around a letter (★…★).
 func bracketed(line string, sk []skelRune) bool {
 	for k := 0; k < len(sk); k++ {
 		s := sk[k]
@@ -579,7 +580,10 @@ func bracketed(line string, sk []skelRune) bool {
 		}
 		r := runeAt(line, s)
 		if bracket(r) {
-			return closes(line, sk[k+1:], true)
+			if closes(line, sk[k+1:], true) {
+				return true
+			}
+			break
 		}
 		if !unicode.Is(unicode.L, r) || unicode.Is(unicode.Lm, r) || markupLetter(r) {
 			continue
@@ -688,7 +692,8 @@ func ruled(line string, sk []skelRune) bool {
 // markRuled reports three or more combining marks in a row outside the
 // spans, each on a space or at the line's start: with no base, each draws its
 // own glyph, so " ̲ ̲ ̲" draws a rule. The skeleton drops them, so the token
-// match never counts them. Marks stacked on one space draw one glyph.
+// match never counts them. Marks stacked on one space draw one glyph. A
+// non-ASCII rule rune counts like a mark, so "— ̲ ̲" draws a rule too.
 func markRuled(line string, spans []span) bool {
 	n, p, free := 0, 0, true
 	for i, r := range line {
@@ -707,6 +712,11 @@ func markRuled(line string, spans []span) bool {
 				}
 				free = false
 			}
+		case r >= utf8.RuneSelf && ruleRune(r, confusableSets[r]):
+			if n++; n >= 3 {
+				return true
+			}
+			free = false
 		default:
 			n, free = 0, false
 		}
