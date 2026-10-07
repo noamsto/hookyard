@@ -12,14 +12,38 @@ It lives in this repo as `cmd/priors`, but it is not router code: it is an
 
 ## Configure
 
+### Trust file
+
+`/etc/priors/trust.toml` holds the host's profile, org lists, `trust_root` and
+each store's id. The path is fixed in the build: no flag, env var or user
+config overrides it. The nix-config module writes it via `environment.etc`.
+
+```toml
+profile       = "work"                        # the host kind: "work" or "personal"
+work_orgs     = ["github.com/your-work-org"]  # host/owner; required on every host
+personal_orgs = ["github.com/you"]
+trust_root    = "owner-admin"                 # only "separate" turns attestation on
+[stores.personal]
+id = "you-priors"                             # [a-z0-9-]{1,64}
+[stores.work]
+id = "work-priors"                            # only on a work profile
+```
+
+Before reading, `priors` walks the path as traversed, symlinks and their
+targets included. Every component must be owned by root, each directory
+writable by root only or sticky, and the file a regular file writable by root
+only. A trust file that is missing, fails the walk or does not parse (unknown
+keys included) is a missing config: `priors` writes nothing, injects nothing
+and reports it. The trust file and `priors` must come from the same hookyard
+revision, since an unknown trust key fails closed.
+
+### User config
+
 `$PRIORS_CONFIG`, else `$XDG_CONFIG_HOME/priors/config.toml`:
 
 ```toml
-profile        = "work"            # the host kind: "work" or "personal"
 personal_store = "~/memory/personal"
 work_store     = "~/memory/work"   # read only on a work-profile host
-work_orgs      = ["github.com/your-work-org"]   # host/owner
-personal_orgs  = ["github.com/you"]
 # optional:
 # work_names   = ["build.corp.internal"]  # also rejected in the personal store
 # state_dir    = ""     # default $XDG_STATE_HOME/priors
@@ -30,12 +54,14 @@ personal_orgs  = ["github.com/you"]
 # push         = false  # needs an upstream set once (git push -u); after a failed push, git push by hand to resume
 ```
 
+`profile`, `work_orgs`, `personal_orgs`, `trust_root` or `stores` in
+`config.toml` is an error naming the trust file.
+
 `git`, `ssh`, `rg` and the secret scanner (betterleaks) are pinned at build time
 (`nix build .#priors`) and never looked up on `PATH`, so the `scanner` key is gone;
 a plain `go build` binary refuses every subcommand.
 
-`work_orgs` is required on every host. `personal_store`, `work_store` and
-`state_dir` must be absolute once `~/` is expanded, and none may be the same
+`personal_store`, `work_store` and `state_dir` must be absolute once `~/` is expanded, and none may be the same
 as, or nested inside, another (the default state dir included). Symlinks in
 them are resolved first, so a store behind a symlink behaves as the directory
 it names, and the nesting check sees the real paths.

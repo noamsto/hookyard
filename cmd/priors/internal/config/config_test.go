@@ -1,11 +1,14 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -16,6 +19,60 @@ func writeConfig(t *testing.T, body string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// fakeRoot is the real file system with every owner reported as uid 0, so
+// load runs the trust walk over temp files without root.
+type fakeRoot struct{ osFS }
+
+func (r fakeRoot) Lstat(name string) (fs.FileInfo, error) {
+	fi, err := r.osFS.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	owned := *fi.Sys().(*syscall.Stat_t)
+	owned.Uid = 0
+	return fakeRootInfo{fi, &owned}, nil
+}
+
+type fakeRootInfo struct {
+	fs.FileInfo
+	sys *syscall.Stat_t
+}
+
+func (i fakeRootInfo) Sys() any { return i.sys }
+
+const sampleTrust = `
+profile       = "work"
+work_orgs     = ["github.com/Factify-Inc"]
+personal_orgs = ["GitHub.com/noamsto"]
+trust_root    = "separate"
+
+[stores.personal]
+id = "personal-test"
+
+[stores.work]
+id = "work-test"
+`
+
+func writeTrust(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	// Under umask 002 a temp dir is group-writable, which the trust walk refuses.
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "trust.toml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// loadUser loads the user config at path against a valid trust file.
+func loadUser(t *testing.T, path string) (Config, error) {
+	t.Helper()
+	return load(path, writeTrust(t, sampleTrust), fakeRoot{})
 }
 
 func isolate(t *testing.T) string {
@@ -29,11 +86,8 @@ func isolate(t *testing.T) string {
 }
 
 const sample = `
-profile        = "work"
 personal_store = "~/memory/personal"
 work_store     = "~/memory/work"
-work_orgs      = ["github.com/Factify-Inc"]
-personal_orgs  = ["GitHub.com/noamsto"]
 work_names     = ["corp-host.internal"]
 state_dir      = "~/state"
 event_record   = "/abs/record"
@@ -46,25 +100,28 @@ push           = true
 func TestLoadFullSample(t *testing.T) {
 	home := isolate(t)
 
-	got, err := Load(writeConfig(t, sample))
+	got, err := loadUser(t, writeConfig(t, sample))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	no := false
 	want := Config{
-		Profile:       "work",
-		PersonalStore: filepath.Join(home, "memory/personal"),
-		WorkStore:     filepath.Join(home, "memory/work"),
-		WorkOrgs:      []string{"github.com/factify-inc"},
-		PersonalOrgs:  []string{"github.com/noamsto"},
-		WorkNames:     []string{"corp-host.internal"},
-		StateDir:      filepath.Join(home, "state"),
-		EventRecord:   "/abs/record",
-		Rules:         filepath.Join(home, "rules.toml"),
-		SSHConfig:     filepath.Join(home, "ssh_config"),
-		Commit:        &no,
-		Push:          true,
+		Profile:         "work",
+		WorkOrgs:        []string{"github.com/factify-inc"},
+		PersonalOrgs:    []string{"github.com/noamsto"},
+		PersonalStoreID: "personal-test",
+		WorkStoreID:     "work-test",
+		TrustRoot:       "separate",
+		PersonalStore:   filepath.Join(home, "memory/personal"),
+		WorkStore:       filepath.Join(home, "memory/work"),
+		WorkNames:       []string{"corp-host.internal"},
+		StateDir:        filepath.Join(home, "state"),
+		EventRecord:     "/abs/record",
+		Rules:           filepath.Join(home, "rules.toml"),
+		SSHConfig:       filepath.Join(home, "ssh_config"),
+		Commit:          &no,
+		Push:            true,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Load = %+v\nwant   %+v", got, want)
@@ -74,57 +131,48 @@ func TestLoadFullSample(t *testing.T) {
 func TestLoadRejects(t *testing.T) {
 	isolate(t)
 	cases := map[string]string{
-		"unknown key":          "profile = \"work\"\nbogus = 1\n",
-		"no profile":           "push = true\n",
-		"bad profile":          "profile = \"office\"\n",
-		"org without slash":    "profile = \"work\"\nwork_orgs = [\"factify-inc\"]\n",
-		"org empty owner":      "profile = \"work\"\nwork_orgs = [\"github.com/\"]\n",
-		"org empty host":       "profile = \"work\"\npersonal_orgs = [\"/noamsto\"]\n",
-		"org with two slashes": "profile = \"work\"\nwork_orgs = [\"github.com/a/b\"]\n",
-		"invalid toml":         "profile = \n",
+		"unknown key":  "push = true\nbogus = 1\n",
+		"invalid toml": "push = \n",
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := Load(writeConfig(t, body)); err == nil {
+			if _, err := loadUser(t, writeConfig(t, body)); err == nil {
 				t.Errorf("Load accepted %q", body)
 			}
 		})
 	}
 }
 
-func TestLoadValidatesStoresAndOrgs(t *testing.T) {
+func TestLoadValidatesStores(t *testing.T) {
 	home := isolate(t)
-	const orgs = "work_orgs = [\"github.com/w\"]\n"
 	accepted := map[string]string{
-		"minimal":                 "profile = \"personal\"\npersonal_store = \"/m/personal\"\n" + orgs,
-		"tilde paths":             "profile = \"work\"\npersonal_store = \"~/p\"\nwork_store = \"~/w\"\nstate_dir = \"~/s\"\n" + orgs,
-		"siblings share a prefix": "profile = \"work\"\npersonal_store = \"/m/store\"\nwork_store = \"/m/store-work\"\nstate_dir = \"/m/store-state\"\n" + orgs,
+		"minimal":                 "personal_store = \"/m/personal\"\n",
+		"tilde paths":             "personal_store = \"~/p\"\nwork_store = \"~/w\"\nstate_dir = \"~/s\"\n",
+		"siblings share a prefix": "personal_store = \"/m/store\"\nwork_store = \"/m/store-work\"\nstate_dir = \"/m/store-state\"\n",
 	}
 	for name, body := range accepted {
 		t.Run(name, func(t *testing.T) {
-			if _, err := Load(writeConfig(t, body)); err != nil {
+			if _, err := loadUser(t, writeConfig(t, body)); err != nil {
 				t.Errorf("Load(%q): %v", body, err)
 			}
 		})
 	}
 	rejected := map[string]struct{ body, want string }{
-		"no personal store":               {"profile = \"work\"\n" + orgs, `personal_store must be an absolute path, got ""`},
-		"relative personal store":         {"profile = \"work\"\npersonal_store = \"memory/p\"\n" + orgs, `personal_store must be an absolute path, got "memory/p"`},
-		"relative work store":             {"profile = \"work\"\npersonal_store = \"/m/p\"\nwork_store = \"memory/w\"\n" + orgs, `work_store must be an absolute path, got "memory/w"`},
-		"relative state dir":              {"profile = \"work\"\npersonal_store = \"/m/p\"\nstate_dir = \"state\"\n" + orgs, `state_dir must be an absolute path, got "state"`},
-		"no work orgs":                    {"profile = \"personal\"\npersonal_store = \"/m/p\"\n", "work_orgs is required"},
-		"empty work orgs":                 {"profile = \"personal\"\npersonal_store = \"/m/p\"\nwork_orgs = []\n", "work_orgs is required"},
-		"stores equal":                    {"profile = \"work\"\npersonal_store = \"/m/s\"\nwork_store = \"/m/s/\"\n" + orgs, "personal_store (/m/s) and work_store (/m/s) must not be the same or nested"},
-		"work inside personal":            {"profile = \"work\"\npersonal_store = \"/m/p\"\nwork_store = \"/m/p/w\"\n" + orgs, "personal_store (/m/p) and work_store (/m/p/w) must not"},
-		"personal inside work":            {"profile = \"work\"\npersonal_store = \"/m/w/p\"\nwork_store = \"/m/w\"\n" + orgs, "personal_store (/m/w/p) and work_store (/m/w) must not"},
-		"state inside personal":           {"profile = \"work\"\npersonal_store = \"/m/p\"\nstate_dir = \"/m/p/.state\"\n" + orgs, "personal_store (/m/p) and state_dir (/m/p/.state) must not"},
-		"personal inside state":           {"profile = \"work\"\npersonal_store = \"/m/s/p\"\nstate_dir = \"/m/s\"\n" + orgs, "personal_store (/m/s/p) and state_dir (/m/s) must not"},
-		"work inside state":               {"profile = \"work\"\npersonal_store = \"/m/p\"\nwork_store = \"/m/s/w\"\nstate_dir = \"/m/s\"\n" + orgs, "work_store (/m/s/w) and state_dir (/m/s) must not"},
-		"default state inside home store": {"profile = \"work\"\npersonal_store = \"" + home + "\"\n" + orgs, "personal_store (" + home + ") and the default state dir"},
+		"no personal store":               {"", `personal_store must be an absolute path, got ""`},
+		"relative personal store":         {"personal_store = \"memory/p\"\n", `personal_store must be an absolute path, got "memory/p"`},
+		"relative work store":             {"personal_store = \"/m/p\"\nwork_store = \"memory/w\"\n", `work_store must be an absolute path, got "memory/w"`},
+		"relative state dir":              {"personal_store = \"/m/p\"\nstate_dir = \"state\"\n", `state_dir must be an absolute path, got "state"`},
+		"stores equal":                    {"personal_store = \"/m/s\"\nwork_store = \"/m/s/\"\n", "personal_store (/m/s) and work_store (/m/s) must not be the same or nested"},
+		"work inside personal":            {"personal_store = \"/m/p\"\nwork_store = \"/m/p/w\"\n", "personal_store (/m/p) and work_store (/m/p/w) must not"},
+		"personal inside work":            {"personal_store = \"/m/w/p\"\nwork_store = \"/m/w\"\n", "personal_store (/m/w/p) and work_store (/m/w) must not"},
+		"state inside personal":           {"personal_store = \"/m/p\"\nstate_dir = \"/m/p/.state\"\n", "personal_store (/m/p) and state_dir (/m/p/.state) must not"},
+		"personal inside state":           {"personal_store = \"/m/s/p\"\nstate_dir = \"/m/s\"\n", "personal_store (/m/s/p) and state_dir (/m/s) must not"},
+		"work inside state":               {"personal_store = \"/m/p\"\nwork_store = \"/m/s/w\"\nstate_dir = \"/m/s\"\n", "work_store (/m/s/w) and state_dir (/m/s) must not"},
+		"default state inside home store": {"personal_store = \"" + home + "\"\n", "personal_store (" + home + ") and the default state dir"},
 	}
 	for name, c := range rejected {
 		t.Run(name, func(t *testing.T) {
-			_, err := Load(writeConfig(t, c.body))
+			_, err := loadUser(t, writeConfig(t, c.body))
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Errorf("Load(%q) = %v, want an error containing %q", c.body, err, c.want)
 			}
@@ -153,12 +201,12 @@ func TestLoadResolvesSymlinkedStores(t *testing.T) {
 	isolate(t)
 	personal, work, state := t.TempDir(), t.TempDir(), t.TempDir()
 	links := t.TempDir()
-	body := fmt.Sprintf("profile = \"work\"\npersonal_store = %q\nwork_store = %q\nstate_dir = %q\nwork_orgs = [\"github.com/w\"]\n",
+	body := fmt.Sprintf("personal_store = %q\nwork_store = %q\nstate_dir = %q\n",
 		symlink(t, personal, filepath.Join(links, "p")),
 		filepath.Join(symlink(t, work, filepath.Join(links, "w")), "not-yet"),
 		symlink(t, state, filepath.Join(links, "s")))
 
-	c, err := Load(writeConfig(t, body))
+	c, err := loadUser(t, writeConfig(t, body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,9 +222,9 @@ func TestLoadResolvesTheDefaultStateDir(t *testing.T) {
 	isolate(t)
 	xdg := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", symlink(t, xdg, filepath.Join(t.TempDir(), "xdg")))
-	body := fmt.Sprintf("profile = \"personal\"\npersonal_store = %q\nwork_orgs = [\"github.com/w\"]\n", t.TempDir())
+	body := fmt.Sprintf("personal_store = %q\n", t.TempDir())
 
-	c, err := Load(writeConfig(t, body))
+	c, err := loadUser(t, writeConfig(t, body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,10 +241,10 @@ func TestLoadRejectsNestingThroughASymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	work := symlink(t, filepath.Join(personal, "w"), filepath.Join(t.TempDir(), "work"))
-	body := fmt.Sprintf("profile = \"work\"\npersonal_store = %q\nwork_store = %q\nstate_dir = %q\nwork_orgs = [\"github.com/w\"]\n",
+	body := fmt.Sprintf("personal_store = %q\nwork_store = %q\nstate_dir = %q\n",
 		personal, work, t.TempDir())
 
-	_, err := Load(writeConfig(t, body))
+	_, err := loadUser(t, writeConfig(t, body))
 
 	if err == nil || !strings.Contains(err.Error(), "must not be the same or nested") {
 		t.Errorf("err = %v, want a nesting error", err)
@@ -206,9 +254,9 @@ func TestLoadRejectsNestingThroughASymlink(t *testing.T) {
 func TestLoadRejectsADanglingSymlinkStore(t *testing.T) {
 	isolate(t)
 	dangling := symlink(t, filepath.Join(t.TempDir(), "absent"), filepath.Join(t.TempDir(), "p"))
-	body := fmt.Sprintf("profile = \"personal\"\npersonal_store = %q\nstate_dir = %q\nwork_orgs = [\"github.com/w\"]\n", dangling, t.TempDir())
+	body := fmt.Sprintf("personal_store = %q\nstate_dir = %q\n", dangling, t.TempDir())
 
-	_, err := Load(writeConfig(t, body))
+	_, err := loadUser(t, writeConfig(t, body))
 
 	if err == nil || !strings.Contains(err.Error(), "personal_store") {
 		t.Errorf("err = %v, want an error naming personal_store", err)
@@ -274,12 +322,12 @@ func TestLoadRejectsAStateDirInAGitWorkTree(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			isolate(t)
 			stateDir, root, state := tc.setup(t)
-			body := fmt.Sprintf("profile = \"personal\"\npersonal_store = %q\nwork_orgs = [\"github.com/w\"]\n", t.TempDir())
+			body := fmt.Sprintf("personal_store = %q\n", t.TempDir())
 			if stateDir != "" {
 				body += fmt.Sprintf("state_dir = %q\n", stateDir)
 			}
 
-			_, err := Load(writeConfig(t, body))
+			_, err := loadUser(t, writeConfig(t, body))
 
 			if err == nil {
 				t.Fatal("Load accepted a state dir inside a git work tree")
@@ -296,9 +344,9 @@ func TestLoadRejectsAStateDirInAGitWorkTree(t *testing.T) {
 func TestLoadRejectsARelativeDefaultStateDir(t *testing.T) {
 	isolate(t)
 	t.Setenv("XDG_STATE_HOME", "rel")
-	body := fmt.Sprintf("profile = \"personal\"\npersonal_store = %q\nwork_orgs = [\"github.com/w\"]\n", t.TempDir())
+	body := fmt.Sprintf("personal_store = %q\n", t.TempDir())
 
-	_, err := Load(writeConfig(t, body))
+	_, err := loadUser(t, writeConfig(t, body))
 
 	if err == nil || !strings.Contains(err.Error(), "the default state dir must be an absolute path") {
 		t.Errorf("err = %v, want an absolute-path error for the default state dir", err)
@@ -315,9 +363,9 @@ func TestLoadAcceptsAStateDirOutsideAnyRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := filepath.Join(parent, "repo-state")
-	body := fmt.Sprintf("profile = \"personal\"\npersonal_store = %q\nstate_dir = %q\nwork_orgs = [\"github.com/w\"]\n", t.TempDir(), state)
+	body := fmt.Sprintf("personal_store = %q\nstate_dir = %q\n", t.TempDir(), state)
 
-	c, err := Load(writeConfig(t, body))
+	c, err := loadUser(t, writeConfig(t, body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +403,7 @@ func TestResolveDir(t *testing.T) {
 
 func TestLoadNamesTheUnknownKey(t *testing.T) {
 	isolate(t)
-	_, err := Load(writeConfig(t, "profile = \"work\"\nwork_path = \"x\"\n"))
+	_, err := loadUser(t, writeConfig(t, "work_path = \"x\"\n"))
 	if err == nil || !strings.Contains(err.Error(), "work_path") {
 		t.Errorf("err = %v, want it to name work_path", err)
 	}
@@ -363,7 +411,7 @@ func TestLoadNamesTheUnknownKey(t *testing.T) {
 
 func TestLoadRejectsTheScannerKey(t *testing.T) {
 	isolate(t)
-	_, err := Load(writeConfig(t, "profile = \"work\"\nscanner = \"x\"\n"))
+	_, err := loadUser(t, writeConfig(t, "scanner = \"x\"\n"))
 	if err == nil || !strings.Contains(err.Error(), "pinned at build time") {
 		t.Errorf("err = %v, want it to say the scanner is pinned at build time", err)
 	}
@@ -371,8 +419,57 @@ func TestLoadRejectsTheScannerKey(t *testing.T) {
 
 func TestLoadMissingFile(t *testing.T) {
 	isolate(t)
-	if _, err := Load(filepath.Join(t.TempDir(), "absent.toml")); err == nil {
+	if _, err := loadUser(t, filepath.Join(t.TempDir(), "absent.toml")); err == nil {
 		t.Error("Load of a missing file succeeded")
+	}
+}
+
+func TestLoadRefusesTrustKeysInTheUserConfig(t *testing.T) {
+	isolate(t)
+	for key, body := range map[string]string{
+		"profile":       "profile = \"personal\"\n",
+		"work_orgs":     "work_orgs = [\"github.com/noamsto\"]\n",
+		"personal_orgs": "personal_orgs = [\"github.com/factify-inc\"]\n",
+		"trust_root":    "trust_root = \"separate\"\n",
+		"stores":        "[stores.personal]\nid = \"mine\"\n",
+	} {
+		t.Run(key, func(t *testing.T) {
+			trust := writeTrust(t, sampleTrust)
+			_, err := load(writeConfig(t, "personal_store = \"/m/p\"\n"+body), trust, fakeRoot{})
+			want := key + " is read from the trust file " + trust + ", not the user config"
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("err = %v, want it to contain %q", err, want)
+			}
+		})
+	}
+}
+
+func TestPriorsConfigCannotOverrideTheTrustFile(t *testing.T) {
+	isolate(t)
+	t.Setenv("PRIORS_CONFIG", writeConfig(t, "personal_store = \"/m/p\"\nprofile = \"personal\"\nwork_orgs = [\"github.com/noamsto\"]\n"))
+
+	c, err := loadUser(t, DefaultPath())
+
+	if err == nil || !strings.Contains(err.Error(), "is read from the trust file") {
+		t.Errorf("Load = %+v, %v; want a trust-key error", c, err)
+	}
+}
+
+func TestLoadNamesTheTrustFile(t *testing.T) {
+	isolate(t)
+	user := writeConfig(t, "personal_store = \"/m/p\"\n")
+	missing := filepath.Join(t.TempDir(), "trust.toml")
+
+	_, err := load(user, missing, fakeRoot{})
+
+	if err == nil || !strings.HasPrefix(err.Error(), "trust file "+missing+": ") || !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("err = %v, want a not-exist error naming %s", err, missing)
+	}
+
+	bad := writeTrust(t, "seam_probe = 1\n"+sampleTrust)
+	_, err = load(user, bad, fakeRoot{})
+	if err == nil || !strings.Contains(err.Error(), "trust file "+bad+": unknown keys: seam_probe") {
+		t.Errorf("err = %v, want an unknown-key error naming %s", err, bad)
 	}
 }
 
@@ -427,10 +524,10 @@ func TestProvenanceDir(t *testing.T) {
 func TestStatePathsDeriveFromTheResolvedState(t *testing.T) {
 	isolate(t)
 	real := realPath(t, t.TempDir())
-	body := fmt.Sprintf("profile = \"personal\"\npersonal_store = %q\nstate_dir = %q\nwork_orgs = [\"github.com/w\"]\n",
+	body := fmt.Sprintf("personal_store = %q\nstate_dir = %q\n",
 		t.TempDir(), symlink(t, real, filepath.Join(t.TempDir(), "link")))
 
-	c, err := Load(writeConfig(t, body))
+	c, err := loadUser(t, writeConfig(t, body))
 	if err != nil {
 		t.Fatal(err)
 	}

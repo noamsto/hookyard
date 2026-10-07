@@ -15,11 +15,20 @@ import (
 )
 
 type Config struct {
-	Profile       string   `toml:"profile"`
+	// Read from the trust file only; a user config naming any of them is an
+	// error.
+	Profile      string   `toml:"-"`
+	WorkOrgs     []string `toml:"-"`
+	PersonalOrgs []string `toml:"-"`
+	// PersonalStoreID and WorkStoreID are the trust file's store ids, which
+	// name a store in attestation; they are not route.StoreID kinds.
+	PersonalStoreID string `toml:"-"`
+	WorkStoreID     string `toml:"-"`
+	// TrustRoot is kept verbatim; only "separate" turns attestation on.
+	TrustRoot string `toml:"-"`
+
 	PersonalStore string   `toml:"personal_store"`
 	WorkStore     string   `toml:"work_store"`
-	WorkOrgs      []string `toml:"work_orgs"`
-	PersonalOrgs  []string `toml:"personal_orgs"`
 	WorkNames     []string `toml:"work_names"`
 	StateDir      string   `toml:"state_dir"`
 	EventRecord   string   `toml:"event_record"`
@@ -45,9 +54,18 @@ func DefaultPath() string {
 	return filepath.Join(homeDir(), ".config", "priors", "config.toml")
 }
 
-// Load reads and validates the config at path. A typo'd key is an error, not
-// a silently ignored setting.
+// Load reads the trust file, then validates the user config at path. A typo'd
+// key is an error, not a silently ignored setting.
 func Load(path string) (Config, error) {
+	trustPath, fsys := trustSource()
+	return load(path, trustPath, fsys)
+}
+
+func load(path, trustPath string, fsys statFS) (Config, error) {
+	t, err := readTrust(fsys, trustPath)
+	if err != nil {
+		return Config{}, fmt.Errorf("trust file %s: %w", trustPath, err)
+	}
 	var c Config
 	md, err := toml.DecodeFile(path, &c)
 	if err != nil {
@@ -56,6 +74,11 @@ func Load(path string) (Config, error) {
 	if md.IsDefined("scanner") {
 		return Config{}, fmt.Errorf("%s: scanner is no longer a config key: the secret scanner is pinned at build time", path)
 	}
+	for _, k := range []string{"profile", "work_orgs", "personal_orgs", "trust_root", "stores"} {
+		if md.IsDefined(k) {
+			return Config{}, fmt.Errorf("%s: %s is read from the trust file %s, not the user config", path, k, trustPath)
+		}
+	}
 	if undecoded := md.Undecoded(); len(undecoded) > 0 {
 		keys := make([]string, len(undecoded))
 		for i, k := range undecoded {
@@ -63,17 +86,10 @@ func Load(path string) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("%s: unknown keys: %s", path, strings.Join(keys, ", "))
 	}
-	if c.Profile != "work" && c.Profile != "personal" {
-		return Config{}, fmt.Errorf(`%s: profile must be "work" or "personal", got %q`, path, c.Profile)
-	}
-	if c.WorkOrgs, err = normalizeOrgs("work_orgs", c.WorkOrgs); err != nil {
-		return Config{}, err
-	}
-	if len(c.WorkOrgs) == 0 {
-		return Config{}, fmt.Errorf("%s: work_orgs is required on every host", path)
-	}
-	if c.PersonalOrgs, err = normalizeOrgs("personal_orgs", c.PersonalOrgs); err != nil {
-		return Config{}, err
+	c.Profile, c.WorkOrgs, c.PersonalOrgs, c.TrustRoot = t.Profile, t.WorkOrgs, t.PersonalOrgs, t.TrustRoot
+	c.PersonalStoreID = t.Stores.Personal.ID
+	if t.Stores.Work != nil {
+		c.WorkStoreID = t.Stores.Work.ID
 	}
 	for _, p := range []*string{&c.PersonalStore, &c.WorkStore, &c.StateDir, &c.EventRecord, &c.Rules, &c.SSHConfig} {
 		if *p, err = expandHome(*p); err != nil {
