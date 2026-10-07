@@ -115,7 +115,7 @@ func TestLoadFullSample(t *testing.T) {
 		TrustRoot:       "separate",
 		PersonalStore:   filepath.Join(home, "memory/personal"),
 		WorkStore:       filepath.Join(home, "memory/work"),
-		WorkNames:       []string{"corp-host.internal"},
+		workNames:       []string{"corp-host.internal"},
 		StateDir:        filepath.Join(home, "state"),
 		EventRecord:     "/abs/record",
 		Rules:           filepath.Join(home, "rules.toml"),
@@ -126,6 +126,49 @@ func TestLoadFullSample(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Load = %+v\nwant   %+v", got, want)
 	}
+}
+
+func TestLoadWorkNamesFloor(t *testing.T) {
+	isolate(t)
+	const (
+		floor = "work_names    = [\"acme\"]\n\n[stores.personal]"
+		base  = "personal_store = \"/m/personal\"\n"
+	)
+	withFloor := strings.Replace(sampleTrust, "[stores.personal]", floor, 1)
+	cases := []struct {
+		name        string
+		trust, user string
+		want        []string
+	}{
+		{"floor, user omitted", withFloor, base, []string{"acme"}},
+		{"floor, user empty", withFloor, base + "work_names = []\n", []string{"acme"}},
+		{"floor plus user addition", withFloor, base + "work_names = [\"globex\"]\n", []string{"acme", "globex"}},
+		{"floor, user repeats and duplicates", withFloor, base + "work_names = [\"acme\", \"globex\", \"globex\"]\n", []string{"acme", "globex"}},
+		{"no floor, user addition", sampleTrust, base + "work_names = [\"globex\"]\n", []string{"globex"}},
+		{"neither", sampleTrust, base, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := load(writeConfig(t, c.user), writeTrust(t, c.trust), fakeRoot{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if names := got.WorkNames(); len(names) != len(c.want) || (len(c.want) > 0 && !reflect.DeepEqual(names, c.want)) {
+				t.Errorf("WorkNames() = %v, want %v", names, c.want)
+			}
+		})
+	}
+
+	t.Run("returns a copy", func(t *testing.T) {
+		got, err := load(writeConfig(t, base), writeTrust(t, withFloor), fakeRoot{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got.WorkNames()[0] = "mutated"
+		if names := got.WorkNames(); !reflect.DeepEqual(names, []string{"acme"}) {
+			t.Errorf("WorkNames() = %v after the caller mutated a previous result, want [acme]", names)
+		}
+	})
 }
 
 func TestLoadTrustRoot(t *testing.T) {

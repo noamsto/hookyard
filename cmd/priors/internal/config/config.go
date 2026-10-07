@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -28,16 +29,19 @@ type Config struct {
 	// non-string scalar or array in the trust file reads as empty, which is off.
 	TrustRoot string `toml:"-"`
 
-	PersonalStore string   `toml:"personal_store"`
-	WorkStore     string   `toml:"work_store"`
-	WorkNames     []string `toml:"work_names"`
-	StateDir      string   `toml:"state_dir"`
-	EventRecord   string   `toml:"event_record"`
-	Rules         string   `toml:"rules"`
-	SSHConfig     string   `toml:"ssh_config"`
+	PersonalStore string `toml:"personal_store"`
+	WorkStore     string `toml:"work_store"`
+	StateDir      string `toml:"state_dir"`
+	EventRecord   string `toml:"event_record"`
+	Rules         string `toml:"rules"`
+	SSHConfig     string `toml:"ssh_config"`
 	// Commit is a pointer so that unset means true.
 	Commit *bool `toml:"commit"`
 	Push   bool  `toml:"push"`
+
+	// workNames is the trust file's floor plus the user config's additions; read
+	// through WorkNames.
+	workNames []string
 
 	// defaultState is the resolved default state dir, set by Load when
 	// state_dir is unset.
@@ -67,8 +71,11 @@ func load(path, trustPath string, fsys statFS) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("trust file %s: %w", trustPath, err)
 	}
-	var c Config
-	md, err := toml.DecodeFile(path, &c)
+	var u struct {
+		Config
+		WorkNames []string `toml:"work_names"`
+	}
+	md, err := toml.DecodeFile(path, &u)
 	if err != nil {
 		return Config{}, err
 	}
@@ -87,8 +94,10 @@ func load(path, trustPath string, fsys statFS) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("%s: unknown keys: %s", path, strings.Join(keys, ", "))
 	}
+	c := u.Config
 	c.Profile, c.WorkOrgs, c.PersonalOrgs = t.Profile, t.WorkOrgs, t.PersonalOrgs
 	c.TrustRoot, _ = t.TrustRoot.(string)
+	c.workNames = unionNames(t.WorkNames, u.WorkNames)
 	c.PersonalStoreID = t.Stores.Personal.ID
 	if t.Stores.Work != nil {
 		c.WorkStoreID = t.Stores.Work.ID
@@ -105,6 +114,20 @@ func load(path, trustPath string, fsys statFS) (Config, error) {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
 	return c, nil
+}
+
+// WorkNames is the work-name list every scan uses: the trust file's floor plus
+// the user config's additions, which cannot remove a floor name.
+func (c Config) WorkNames() []string { return slices.Clone(c.workNames) }
+
+func unionNames(floor, extra []string) []string {
+	out := slices.Clone(floor)
+	for _, n := range extra {
+		if !slices.Contains(out, n) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // resolveDirs replaces each absolute store and state path with its real one,

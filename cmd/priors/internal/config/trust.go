@@ -130,6 +130,8 @@ type trust struct {
 	Profile      string   `toml:"profile"`
 	WorkOrgs     []string `toml:"work_orgs"`
 	PersonalOrgs []string `toml:"personal_orgs"`
+	// WorkNames is the floor the user config's work_names can only add to.
+	WorkNames []string `toml:"work_names"`
 	// TrustRoot is any so that a non-string scalar or array is off, not a parse error.
 	TrustRoot any `toml:"trust_root"`
 	Stores    struct {

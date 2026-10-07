@@ -61,7 +61,7 @@ func cmdLint(args []string, s streams) int {
 			return 1
 		}
 		workOrgs = append(slices.Clone(cfg.WorkOrgs), workOrgs...)
-		workNames = append(slices.Clone(cfg.WorkNames), workNames...)
+		workNames = append(cfg.WorkNames(), workNames...)
 	}
 
 	rules, err := gate.LoadRules(cfg.Rules)

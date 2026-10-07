@@ -177,16 +177,16 @@ func (sb *sandbox) setScanner(script string) {
 }
 
 // writeTrust writes the host trust file the binary reads through
-// $PRIORS_TEST_TRUST.
-func (sb *sandbox) writeTrust() {
+// $PRIORS_TEST_TRUST; extra top-level lines go before the store tables.
+func (sb *sandbox) writeTrust(extra ...string) {
 	sb.t.Helper()
 	lines := []string{
 		fmt.Sprintf("profile = %q", sb.profile),
 		`work_orgs = ["github.com/factify-inc"]`,
 		`personal_orgs = ["github.com/noamsto"]`,
-		"[stores.personal]",
-		`id = "personal-test"`,
 	}
+	lines = append(lines, extra...)
+	lines = append(lines, "[stores.personal]", `id = "personal-test"`)
 	if sb.profile == "work" {
 		lines = append(lines, "[stores.work]", `id = "work-test"`)
 	}
@@ -1223,6 +1223,66 @@ func writeStoreIndex(t *testing.T, sb *sandbox, dir string) {
 	if res := sb.run("", "index", "--write", "--config", cfg); res.code != 0 {
 		t.Fatalf("index --write: %s", res.stderr)
 	}
+}
+
+// TestWorkNamesFloor: a work name from the trust file flags and refuses a
+// fact whatever the user config sets.
+func TestWorkNamesFloor(t *testing.T) {
+	const leakBody = "acme-corp deploys on fridays\n"
+	for name, row := range map[string]string{
+		"config omits work_names":   "",
+		"config empties work_names": "work_names = []",
+	} {
+		newFloorSandbox := func(t *testing.T) *sandbox {
+			sb := newSandbox(t, "personal")
+			sb.writeTrust(`work_names = ["acme-corp"]`)
+			sb.writeConfig(row)
+			return sb
+		}
+		t.Run(name+"/lint", func(t *testing.T) {
+			sb := newFloorSandbox(t)
+			leak := newFact("leak-fact", "demo", "project")
+			leak.Body = leakBody
+			sb.putFact(sb.personal, "demo/leak-fact.md", leak)
+			sb.indexWrite()
+
+			res := sb.run("", "lint")
+			wantExit(t, res, 1)
+			wantContains(t, "lint", res.stdout, "demo/leak-fact.md: work-name:")
+		})
+		t.Run(name+"/add", func(t *testing.T) {
+			sb := newFloorSandbox(t)
+			repo := sb.repo(personalRemote)
+			sb.record("sess-1")
+
+			res := sb.run(leakBody, "add", "--name", "leak-fact", "--description", "a fact", "--type", "project",
+				"--stdin", "--cwd", repo, "--session", "sess-1")
+			wantExit(t, res, 1)
+			wantContains(t, "add stderr", res.stderr, "refused:", "work-name")
+			for _, root := range []string{sb.personal, filepath.Join(sb.state, "local", "personal")} {
+				if _, err := os.Stat(filepath.Join(root, "demo", "leak-fact.md")); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("leak-fact.md exists under %s (stat err %v)", root, err)
+				}
+			}
+		})
+	}
+}
+
+// TestUserWorkNamesExtendTheFloor: config work_names add to the trust floor.
+func TestUserWorkNamesExtendTheFloor(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	sb.writeTrust(`work_names = ["acme-corp"]`)
+	sb.writeConfig(`work_names = ["globex"]`)
+	for name, body := range map[string]string{"floor-fact": "acme-corp deploys on fridays\n", "user-fact": "globex deploys on fridays\n"} {
+		f := newFact(name, "demo", "project")
+		f.Body = body
+		sb.putFact(sb.personal, "demo/"+name+".md", f)
+	}
+	sb.indexWrite()
+
+	res := sb.run("", "lint")
+	wantExit(t, res, 1)
+	wantContains(t, "lint", res.stdout, "demo/floor-fact.md: work-name:", "demo/user-fact.md: work-name:")
 }
 
 func TestLintMoveFlagged(t *testing.T) {
