@@ -29,14 +29,28 @@ jobs:
       # flake ref would let any change on hookyard's main turn every store's
       # required check red at once.
       PRIORS_REF: github:noamsto/hookyard/<rev>#priors
+      PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      PUSH_BEFORE: ${{ github.event.before }}
     steps:
+      # Full history: the entry-deletion and per-commit checks read the pushed
+      # range, which a shallow clone does not hold.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@main
       # priors comes wrapped with git, ripgrep and betterleaks on its PATH,
       # so the gate:secret scan runs with nothing else to install.
       - name: priors lint
         run: |
           args=(lint --dir . --kind "$STORE_KIND")
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            SINCE="$PR_BASE_SHA"
+          elif [ "$PUSH_BEFORE" != 0000000000000000000000000000000000000000 ]; then
+            SINCE="$PUSH_BEFORE"
+          fi
+          if [ -n "${SINCE:-}" ]; then
+            args+=(--since "$SINCE")
+          fi
           if [ "$STORE_KIND" = personal ]; then
             test -n "$WORK_ORG" || { echo "set the PRIORS_WORK_ORG repository variable"; exit 1; }
             args+=(--work-org "$WORK_ORG")
