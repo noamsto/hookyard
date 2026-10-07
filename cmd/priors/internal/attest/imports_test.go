@@ -47,6 +47,8 @@ func TestReviewedRunsNoGit(t *testing.T) {
 		t.Helper()
 		cmd := tools.Command(context.Background(), tools.Git, append([]string{
 			"-C", root, "-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+			// A detached auto gc would still be writing objects when TempDir is removed.
+			"-c", "gc.auto=0", "-c", "maintenance.auto=false",
 		}, args...)...)
 		cmd.Env = route.RepoEnv("LC_ALL=C")
 		if out, err := cmd.CombinedOutput(); err != nil {
