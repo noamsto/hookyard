@@ -25,7 +25,7 @@ type Config struct {
 	PersonalStoreID string `toml:"-"`
 	WorkStoreID     string `toml:"-"`
 	// TrustRoot is kept verbatim; only "separate" turns attestation on. A
-	// non-string value in the trust file reads as empty, which is off.
+	// non-string scalar or array in the trust file reads as empty, which is off.
 	TrustRoot string `toml:"-"`
 
 	PersonalStore string   `toml:"personal_store"`

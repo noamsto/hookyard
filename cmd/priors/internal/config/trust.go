@@ -130,7 +130,7 @@ type trust struct {
 	Profile      string   `toml:"profile"`
 	WorkOrgs     []string `toml:"work_orgs"`
 	PersonalOrgs []string `toml:"personal_orgs"`
-	// TrustRoot is any so that a non-string value is off, not a parse error.
+	// TrustRoot is any so that a non-string scalar or array is off, not a parse error.
 	TrustRoot any `toml:"trust_root"`
 	Stores    struct {
 		Personal *trustStore `toml:"personal"`
