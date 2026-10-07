@@ -1199,6 +1199,19 @@ func TestHookReportsConfigError(t *testing.T) {
 	}
 }
 
+func TestHookReportsRulesFileError(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.writeConfig(`rules = "/nonexistent/rules.toml"`)
+
+	res := sb.run(sessionStartEnvelope(repo))
+	wantExit(t, res, 0)
+	wantContains(t, "stderr", res.stderr, "priors: rules:", "/nonexistent/rules.toml")
+	if res.stdout != "" {
+		t.Errorf("stdout %q", res.stdout)
+	}
+}
+
 func TestIndexTextPrintsFencedBlock(t *testing.T) {
 	sb := newSandbox(t, "personal")
 	repo := sb.repo(personalRemote)
