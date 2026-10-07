@@ -285,6 +285,7 @@ func TestReadTrust(t *testing.T) {
 		"duplicate store ids":       {"profile = \"work\"\n" + orgs + personal + "\n[stores.work]\nid = \"p\"\n", `must differ, both are "p"`},
 		"work profile no work":      {"profile = \"work\"\n" + orgs + personal, "stores.work is required on a work profile"},
 		"personal profile has work": {"profile = \"personal\"\n" + orgs + personal + work, "stores.work is listed on a personal profile"},
+		"scalar work names":         {"profile = \"personal\"\n" + orgs + "work_names = \"acme\"\n" + personal, "work_names"},
 	}
 	for name, c := range rejected {
 		t.Run(name, func(t *testing.T) {
@@ -312,6 +313,18 @@ func TestReadTrust(t *testing.T) {
 		want.Stores.Work = &trustStore{ID: "factify-priors"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("readTrust = %+v\nwant       %+v", got, want)
+		}
+	})
+
+	t.Run("work_names", func(t *testing.T) {
+		f := etcFS()
+		f[etcTrust] = file("profile = \"personal\"\n" + orgs + "work_names = [\"acme\", \"globex\"]\n" + personal)
+		got, err := readTrust(f, etcTrust)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"acme", "globex"}; !reflect.DeepEqual(got.WorkNames, want) {
+			t.Errorf("WorkNames = %v, want %v", got.WorkNames, want)
 		}
 	})
 

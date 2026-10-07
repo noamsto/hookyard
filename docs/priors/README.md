@@ -14,14 +14,16 @@ It lives in this repo as `cmd/priors`, but it is not router code: it is an
 
 ### Trust file
 
-`/etc/priors/trust.toml` holds the host's profile, org lists, `trust_root` and
-each store's id. The path is fixed in the build: no flag, env var or user
-config overrides it. The nix-config module writes it via `environment.etc`.
+`/etc/priors/trust.toml` holds the host's profile, org lists, work-name floor,
+`trust_root` and each store's id. The path is fixed in the build: no flag, env
+var or user config overrides it. The nix-config module writes it via
+`environment.etc`.
 
 ```toml
 profile       = "work"                        # the host kind: "work" or "personal"
 work_orgs     = ["github.com/your-work-org"]  # host/owner; required on every host
 personal_orgs = ["github.com/you"]
+work_names    = ["build.corp.internal"]       # floor for the work-name scan; config.toml can only add
 trust_root    = "owner-admin"                 # only "separate" turns attestation on
 [stores.personal]
 id = "you-priors"                             # [a-z0-9-]{1,64}
@@ -45,7 +47,7 @@ revision, since an unknown trust key fails closed.
 personal_store = "~/memory/personal"
 work_store     = "~/memory/work"   # read only on a work-profile host
 # optional:
-# work_names   = ["build.corp.internal"]  # also rejected in the personal store
+# work_names   = ["build.corp.internal"]  # added to the trust file's work_names; also rejected in the personal store
 # state_dir    = ""     # default $XDG_STATE_HOME/priors
 # event_record = ""     # hookyard's state dir; default follows hookyard's own
 # rules        = ""     # extra redaction rules, added to the built-in set; a bad file fails closed

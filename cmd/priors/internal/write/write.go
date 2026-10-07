@@ -97,7 +97,7 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 			return Result{}, err
 		}
 		candidate := store.Entry{Root: checkout, Rel: filepath.ToSlash(rel), Fact: f, Raw: data}
-		opts := lint.Options{Store: dest.Store, WorkOrgs: cfg.WorkOrgs, WorkNames: cfg.WorkNames, Rules: d.Rules}
+		opts := lint.Options{Store: dest.Store, WorkOrgs: cfg.WorkOrgs, WorkNames: cfg.WorkNames(), Rules: d.Rules}
 		if findings := lint.Candidate(ctx, checkout, candidate, opts); len(findings) > 0 {
 			return Result{}, refusal(findings)
 		}

@@ -83,7 +83,7 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 	}
 	snap := store.Root{Store: root.Store, Kind: root.Kind, Path: snapDir}
 
-	opts := lint.Options{Store: root.Store, WorkOrgs: cfg.WorkOrgs, WorkNames: cfg.WorkNames, Rules: rules, Scanner: &scanner, Gates: true}
+	opts := lint.Options{Store: root.Store, WorkOrgs: cfg.WorkOrgs, WorkNames: cfg.WorkNames(), Rules: rules, Scanner: &scanner, Gates: true}
 	findings := map[string][]string{}
 	for _, f := range lint.Store(ctx, snap, opts) {
 		if f.File == "." {

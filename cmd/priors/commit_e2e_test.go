@@ -134,3 +134,27 @@ func TestLintWorkFlagsCannotNarrowTheCommitGate(t *testing.T) {
 		t.Errorf("HEAD moved to %s, committing %q", got, sb.gitOut(sb.personal, "log", "-1", "--name-status", "--format="))
 	}
 }
+
+func TestCommitGateKeepsTheWorkNamesFloor(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	sb.writeTrust(`work_names = ["acme-corp"]`)
+	sb.writeConfig(`work_names = []`)
+	flagged := newFact("linky-fact", "demo", "project")
+	flagged.Body = "see https://example.com/docs for details\n"
+	sb.putFact(sb.personal, "demo/linky-fact.md", flagged)
+	sb.indexWrite()
+	sb.git(sb.personal, "add", "-A")
+	sb.git(sb.personal, "commit", "-q", "-m", "seed")
+	before := sb.head(sb.personal)
+	leak := newFact("leak-fact", "demo", "project")
+	leak.Body = "acme-corp deploys on fridays\n"
+	sb.putFact(sb.personal, "demo/leak-fact.md", leak)
+
+	res := sb.run("", "lint", "--move-flagged")
+
+	wantContains(t, "lint", res.stdout, "demo/leak-fact.md: work-name:")
+	wantContains(t, "lint stderr", res.stderr, "nothing committed", "demo/leak-fact.md")
+	if got := sb.head(sb.personal); got != before {
+		t.Errorf("HEAD moved to %s, committing %q", got, sb.gitOut(sb.personal, "log", "-1", "--name-status", "--format="))
+	}
+}
