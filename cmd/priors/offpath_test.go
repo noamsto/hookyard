@@ -38,9 +38,9 @@ func (sb *sandbox) writeOffPathTrust(trustRoot string) {
 	if trustRoot != "" {
 		lines = append(lines, fmt.Sprintf("trust_root = %q", trustRoot))
 	}
-	lines = append(lines, "[stores.personal]", `id = "personal-test"`)
+	lines = append(lines, "[stores.personal]", `id = "personal-test"`, fmt.Sprintf("path = %q", sb.personal))
 	if sb.profile == "work" {
-		lines = append(lines, "[stores.work]", `id = "work-test"`)
+		lines = append(lines, "[stores.work]", `id = "work-test"`, fmt.Sprintf("path = %q", sb.work))
 	}
 	sb.writeFile(sb.trustPath, strings.Join(lines, "\n")+"\n")
 }
