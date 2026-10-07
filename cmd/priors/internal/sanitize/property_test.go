@@ -504,6 +504,12 @@ func quoteLike(c rune) bool {
 	return img != "" && strings.Trim(img, "[({<\"'`") == "" && unicode.Is(unicode.P, c)
 }
 
+// bracketLetter is a letter or digit whose UTS #39 image is an opening bracket.
+func bracketLetter(c rune) bool {
+	img := punctImages[c]
+	return img != "" && unicode.In(c, unicode.L, unicode.N) && strings.Trim(img, "[({<") == ""
+}
+
 // TestPropertyGluedForeignBenign: a foreign rune or two glued to, or set
 // beside, an ASCII word must not complete a fence word from it.
 func TestPropertyGluedForeignBenign(t *testing.T) {
@@ -527,7 +533,7 @@ func TestPropertyGluedForeignBenign(t *testing.T) {
 			got := Text(in)
 			// A line opening on a bracket or quote is bracket-shaped and
 			// quoted whole: the blunt rule's accepted cost, not a fence word.
-			if (bracketLike(c) || quoteLike(c)) && strings.HasPrefix(in, s+s) && got == "(quoted line: "+want+")" {
+			if (bracketLike(c) || quoteLike(c) || bracketLetter(c)) && strings.HasPrefix(in, s+s) && got == "(quoted line: "+want+")" {
 				continue
 			}
 			if got != want {

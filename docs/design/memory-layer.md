@@ -827,28 +827,40 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
   A second, blunt pass backs the skeleton up: any line that is header-shaped
   or bracket-shaped and holds a non-ASCII rune outside the quoted tokens is
   quoted whole as `(quoted line: …)`, shown, not dropped. A line separator
-  (U+2028, U+2029) starts a new line, and a combining mark stays glued to
-  its base. Bracket-shaped means a bracket or quote opener (ASCII
-  ``[ ( { < " ' ` ``, non-ASCII opening or quote punctuation, or a UTS #39
-  bracket or quote lookalike) comes before the line's first letter — past
-  any leading quoted token, punctuation, symbol, digit or one-letter list
-  marker (`a.`, `b)`) — and closes after a letter or runs to the end of the
-  line; or that the line opens on a symbol or modifier letter that closes
-  later on one after a letter (`★…★`).
+  (U+2028, U+2029) starts a new line. A combining mark stays glued to its
+  base, but one on a space or at a line's start draws its own glyph and
+  counts as a rule rune (` ̲ ̲ ̲`), and it may stand as the punctuation
+  before a delimiter. Bracket-shaped means a bracket or quote opener (ASCII
+  ``[ ( { < " ' ` ``, non-ASCII opening or quote punctuation, a UTS #39
+  bracket or quote lookalike, or a letter or digit only when it looks like
+  an opening bracket, `ᐸ`, since a quote-shaped letter, Hebrew yod or the
+  ʻokina, opens prose) comes before the line's first letter — past any
+  leading quoted token, punctuation, symbol, digit, letter that looks like
+  list or Markdown punctuation (`ǃ`, `ǀ`, Hebrew vav) or list marker (`a.`,
+  `b)`, `iv.`, `1a.`: one letter, or up to four roman-numeral letters, after
+  any digits) — and closes after a letter or runs to the end of the line; or
+  that the line opens on a symbol or modifier letter that closes later on one
+  after a letter (`★…★`).
   Header-shaped means three or more dash, symbol, modifier-letter, `=`/`-`
   lookalike or ASCII `= - _ ~ * # : +` runes in a row (a space breaks the
   row only between two different runes when one is ASCII, so `= = = = =`
   is a rule and `— --flag` is not), a loose token match in which a
   non-ASCII rune the table does not map always counts as a lookalike, or a
   delimiter: any punctuation or symbol followed by eight or more glued hex
-  characters or digits of any script, or a word of sixteen. The accepted cost is false positives:
+  characters or digits of any script, or sixteen glued anywhere in a word.
+  The accepted cost is false positives:
   non-ASCII lines that open on a bracket, quote or symbol and close after a
   letter or run to its end (`[Søren]`, `「こんにちは」`, `“a” — “b” → ‘c’`,
   `««priors`), non-ASCII lines with a run of three symbols, emoji or ASCII
   rule runes (`rating ★★★`, `| ═══ table ═══ |`, `🎉🎉🎉 priors shipped`,
   `### Café notes`, Arabic justified with tatweel `مـــحمد`), non-ASCII lines
   holding eight or more digits or hex characters after punctuation
-  (`commit-3bde9c4a`, a Hebrew phone number `ל-0541234567`), and ASCII
+  (`commit-3bde9c4a`, a Hebrew phone number `ל-0541234567`), a syllabics line
+  opening on `ᐸ` (Inuktitut "pa"; likewise lines opening on runic `ᚲ` or
+  Tifinagh `ⵦ`), a Hebrew vav or Arabic alef standing before a bracket
+  (`ו [café]`), a roman item before a bracketed name (`iv. [Søren]`),
+  sixteen hex-like runes glued inside a word (`id0123456789abcdef café`),
+  spacing accents (`´´´`, which NFKC turns into marks on spaces), and ASCII
   identifiers that join both token words
   with `-` or `_` (`priors-memory-layer.md`) are quoted. Plain ASCII prose,
   smart-quoted prose and unbracketed non-ASCII prose (a Hebrew sentence) are
@@ -860,8 +872,14 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
   that is neither bracket- nor header-shaped, or that sits mid-line after
   other text (`note [ħꝋꝋƙƴard advisory]`, a list or search row's
   description, which follows the row's own `store/rel` frame); an `END`
-  imitation with neither rule, bracket nor delimiter (`ƎƝD priors`); ASCII punctuation beside a space inside an ASCII-only header
-  (`[hookyard. advisory]`); and padding longer than the token. The #199
+  imitation with neither rule, bracket nor delimiter (`ƎƝD priors`); ASCII
+  punctuation beside a space inside an ASCII-only header
+  (`[hookyard. advisory]`); a symbol opener with no closer
+  (`⊏ħꝋꝋƙƴard advisory run`), or an unclosed modifier-letter quote
+  (`ʹħꝋꝋƙƴard advisory`, since closing it would quote Hawaiian lines opening
+  on the ʻokina); a Markdown heading of one or two `#`; a fence rule of
+  bullets or of spaced mixed ASCII and non-ASCII runes (`••••• ƎƝD priors`,
+  `= — = — = ƎƝD priors`); and padding longer than the token. The #199
   letter-category bracket residual is closed, as are `ƎƝD priors-…` with no
   rule and the ASCII forms (`h0okyard`, `hookyard-advisory`,
   `[hookyard_advisory]`). Another false positive is ASCII prose spelling a
