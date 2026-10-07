@@ -6,6 +6,7 @@ import (
 	"os"
 	"slices"
 
+	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/commit"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
@@ -31,9 +32,15 @@ func cmdLint(args []string, s streams) int {
 	var workOrgs, workNames stringList
 	fs.Var(&workOrgs, "work-org", "work org (host/owner) the personal store must not name, added to the configured work_orgs (repeatable)")
 	fs.Var(&workNames, "work-name", "work name the personal store must not use, added to the configured work_names (repeatable)")
+	since := fs.String("since", "", "with --dir: also check the commits since this revision for deleted or unattested attest entries")
 	moveFlagged := fs.Bool("move-flagged", false, "move checkout facts that trip a content or size gate into the local layer")
 	if _, code, ok := parseFlags(fs, args); !ok {
 		return code
+	}
+
+	if *since != "" && *dir == "" {
+		s.errln("--since needs --dir")
+		return 1
 	}
 
 	var cfg config.Config
@@ -78,6 +85,8 @@ func cmdLint(args []string, s streams) int {
 
 	ctx := context.Background()
 	failed := false
+	configured := *dir == ""
+	verifier := attest.ForHost(cfg)
 	for _, t := range targets {
 		opts := lint.Options{Store: t.id, WorkOrgs: workOrgs, WorkNames: workNames, Rules: rules, Scanner: scanner, Gates: true}
 		if *moveFlagged && t.hasLocal {
@@ -107,14 +116,33 @@ func cmdLint(args []string, s streams) int {
 			}
 		}
 		findings := lint.Store(ctx, t.checkout, opts)
-		if t.hasLocal && dirExists(t.local.Path) {
+		hasLocal := t.hasLocal && dirExists(t.local.Path)
+		if hasLocal {
 			opts.Gates = false
 			findings = append(findings, lint.Store(ctx, t.local, opts)...)
+		}
+		if !configured {
+			findings = append(findings, lint.Remote(ctx, t.checkout, *since)...)
 		}
 		for _, f := range findings {
 			s.outln(f)
 			failed = true
 		}
+		if configured {
+			roots := []store.Root{t.checkout}
+			if hasLocal {
+				roots = append(roots, t.local)
+			}
+			for _, root := range roots {
+				entries, _ := root.Walk()
+				for _, e := range entries {
+					verifier.Reviewed(e)
+				}
+			}
+		}
+	}
+	for _, r := range verifier.Reports() {
+		s.errln(r)
 	}
 	if failed {
 		return 1
