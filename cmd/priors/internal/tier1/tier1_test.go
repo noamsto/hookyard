@@ -19,7 +19,16 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 	"github.com/noamsto/hookyard/cmd/priors/internal/sanitize"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
+	"github.com/noamsto/hookyard/cmd/priors/internal/tools/toolstest"
 )
+
+func TestMain(m *testing.M) {
+	toolstest.Pin()
+	for _, k := range route.RepoLocatingEnv {
+		_ = os.Unsetenv(k)
+	}
+	os.Exit(m.Run())
+}
 
 type env struct {
 	cfg                      config.Config
@@ -40,10 +49,18 @@ func newEnv(t *testing.T) env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	personal, err := store.CheckoutRoot(context.Background(), cfg, route.StorePersonal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	work, err := store.CheckoutRoot(context.Background(), cfg, route.StoreWork)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return env{
 		cfg:           cfg,
-		personal:      store.CheckoutRoot(cfg, route.StorePersonal),
-		work:          store.CheckoutRoot(cfg, route.StoreWork),
+		personal:      personal,
+		work:          work,
 		localPersonal: store.LocalRoot(cfg, route.StorePersonal),
 		localWork:     store.LocalRoot(cfg, route.StoreWork),
 		rules:         rules,
@@ -321,6 +338,26 @@ func TestLocalLayer(t *testing.T) {
 	out, _ = e.assemble(route.Session{Class: route.ClassNoRepo})
 	if !strings.Contains(out, flagged+"[loose](_norepo/loose.md)") || strings.Contains(out, "[learned]") || strings.Contains(out, "[elsewhere]") {
 		t.Errorf("no-repo session sees the wrong local facts:\n%s", out)
+	}
+}
+
+func TestRefusedCheckoutIsReportedAndLocalLayerKept(t *testing.T) {
+	e := newEnv(t)
+	put(t, e.personal, "_global/p-global.md", mk("p-global", "checkout fact", "global"))
+	index(t, e.personal)
+	put(t, e.localPersonal, "repo-a/learned.md", mk("learned", "learned in repo-a", "repo", "repo-a"))
+	index(t, e.localPersonal)
+	e.cfg.PersonalRemote = "git@github.com:o/r.git"
+
+	out, reports := e.assemble(personalSession)
+	if !strings.Contains(out, "[learned](repo-a/learned.md)") {
+		t.Errorf("local layer dropped with the refused checkout:\n%s", out)
+	}
+	if strings.Contains(out, "p-global") {
+		t.Errorf("refused checkout still injected:\n%s", out)
+	}
+	if len(reports) != 1 || !strings.Contains(reports[0], "personal store: ") {
+		t.Errorf("reports = %q, want one personal store refusal", reports)
 	}
 }
 

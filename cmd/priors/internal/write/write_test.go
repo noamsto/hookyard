@@ -210,6 +210,15 @@ func files(t *testing.T, dir string) []string {
 	return out
 }
 
+func checkoutRoot(t *testing.T, cfg config.Config, id route.StoreID) store.Root {
+	t.Helper()
+	root, err := store.CheckoutRoot(context.Background(), cfg, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 func assertNothingWritten(t *testing.T, fx fixture) {
 	t.Helper()
 	for _, dir := range []string{
@@ -234,7 +243,7 @@ func TestPublished(t *testing.T) {
 	if res.Outcome != "published" || res.Store != route.StorePersonal || res.Path != want || res.Warning != "" || len(res.Reasons) != 0 {
 		t.Fatalf("result = %+v, want published personal at %s", res, want)
 	}
-	if !indexLists(t, store.CheckoutRoot(fx.cfg, route.StorePersonal), "markdown-store") {
+	if !indexLists(t, checkoutRoot(t, fx.cfg, route.StorePersonal), "markdown-store") {
 		t.Error("checkout MEMORY.md does not list the fact")
 	}
 
@@ -341,7 +350,7 @@ func TestRouting(t *testing.T) {
 					t.Errorf("personal checkout holds %v", got)
 				}
 			} else {
-				root = store.CheckoutRoot(fx.cfg, tt.store)
+				root = checkoutRoot(t, fx.cfg, tt.store)
 				want = filepath.Join(root.Path, tt.session.Repo, "routed-fact.md")
 			}
 			if res.Path != want || !exists(want) {
@@ -424,7 +433,7 @@ func TestFlagged(t *testing.T) {
 			if got := files(t, fx.cfg.PersonalStore); len(got) != 0 {
 				t.Errorf("checkout holds %v, want nothing", got)
 			}
-			if indexLists(t, store.CheckoutRoot(fx.cfg, route.StorePersonal), "flagged-fact") {
+			if indexLists(t, checkoutRoot(t, fx.cfg, route.StorePersonal), "flagged-fact") {
 				t.Error("checkout MEMORY.md lists the flagged fact")
 			}
 			if !indexLists(t, local, "flagged-fact") {
@@ -688,7 +697,7 @@ func TestAddReturnsIndexReports(t *testing.T) {
 	committest.AssertHeadIndexInTree(t, fx.cfg.PersonalStore)
 }
 
-func TestPublishWarnsWhenCheckoutUnreadable(t *testing.T) {
+func TestPublishRefusesUnreadableCheckout(t *testing.T) {
 	fx := setup(t, "work")
 	f, err := os.OpenFile(filepath.Join(fx.cfg.PersonalStore, ".git", "config"), os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
@@ -700,14 +709,11 @@ func TestPublishWarnsWhenCheckoutUnreadable(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	res, err := Add(context.Background(), fx.cfg, request("unreadable-repo", personalRepo), fx.deps)
-	if err != nil {
-		t.Fatal(err)
+	_, err = Add(context.Background(), fx.cfg, request("unreadable-repo", personalRepo), fx.deps)
+	if err == nil || !strings.Contains(err.Error(), "personal store") {
+		t.Fatalf("err = %v, want a refusal naming the personal store", err)
 	}
-	if res.Outcome != "published" || res.Warning == "" {
-		t.Errorf("result = %+v, want published with a warning", res)
-	}
-	committest.AssertHeadIndexInTree(t, fx.cfg.PersonalStore)
+	assertNothingWritten(t, fx)
 }
 
 func TestRedactionRuleRefusalNamesRuleOnly(t *testing.T) {
@@ -825,6 +831,7 @@ func TestPush(t *testing.T) {
 	git(t, fx.cfg.PersonalStore, "commit", "-q", "--allow-empty", "-m", "base")
 	git(t, fx.cfg.PersonalStore, "push", "-q", "-u", "origin", "main")
 	fx.cfg.Push = true
+	fx.cfg.PersonalRemote = remote
 	res, err := Add(context.Background(), fx.cfg, request("pushed-fact", personalRepo), fx.deps)
 	if err != nil || res.Warning != "" {
 		t.Fatalf("result = %+v, %v", res, err)
@@ -854,7 +861,7 @@ func TestConcurrentAdds(t *testing.T) {
 	if got := files(t, filepath.Join(fx.cfg.PersonalStore, "hookyard")); len(got) != n {
 		t.Errorf("facts on disk = %v, want %d", got, n)
 	}
-	lines, err := store.CheckoutRoot(fx.cfg, route.StorePersonal).ReadIndex()
+	lines, err := checkoutRoot(t, fx.cfg, route.StorePersonal).ReadIndex()
 	if err != nil || len(lines) != n {
 		t.Errorf("index lines = %d (%v), want %d", len(lines), err, n)
 	}

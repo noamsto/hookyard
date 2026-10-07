@@ -256,9 +256,16 @@ func writeIndexes(cfgPath string, s streams) int {
 	if cfg.WorkPresent() {
 		ids = append(ids, route.StoreWork)
 	}
+	code := 0
 	var groups []indexGroup
 	for _, id := range ids {
-		g := indexGroup{lock: string(id), roots: []store.Root{store.CheckoutRoot(cfg, id)}}
+		g := indexGroup{lock: string(id)}
+		if checkout, err := store.CheckoutRoot(context.Background(), cfg, id); err != nil {
+			s.errln("refused:", err)
+			code = 1
+		} else {
+			g.roots = append(g.roots, checkout)
+		}
 		if local := store.LocalRoot(cfg, id); dirExists(local.Path) {
 			g.roots = append(g.roots, local)
 		}
@@ -267,7 +274,6 @@ func writeIndexes(cfgPath string, s streams) int {
 	if q := store.QuarantineRoot(cfg); dirExists(q.Path) {
 		groups = append(groups, indexGroup{lock: "quarantine", roots: []store.Root{q}})
 	}
-	code := 0
 	for _, g := range groups {
 		skipped, err := writeGroup(context.Background(), cfg, rules, scanner, g, s)
 		if err != nil {

@@ -1,17 +1,30 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
+	"github.com/noamsto/hookyard/cmd/priors/internal/tools"
+	"github.com/noamsto/hookyard/cmd/priors/internal/tools/toolstest"
 )
+
+func TestMain(m *testing.M) {
+	toolstest.Pin()
+	for _, k := range route.RepoLocatingEnv {
+		_ = os.Unsetenv(k)
+	}
+	os.Exit(m.Run())
+}
 
 func newFact(name, desc, modified string) fact.Fact {
 	return fact.Fact{
@@ -254,27 +267,55 @@ func TestConfine(t *testing.T) {
 
 func TestRoots(t *testing.T) {
 	cfg := config.Config{PersonalStore: "/p", WorkStore: "/w", StateDir: "/state"}
+	ctx := context.Background()
 
-	if got, want := CheckoutRoot(cfg, route.StorePersonal), (Root{route.StorePersonal, KindCheckout, "/p", ""}); got != want {
-		t.Errorf("personal checkout = %+v, want %+v", got, want)
+	if got, err := CheckoutRoot(ctx, cfg, route.StorePersonal); err != nil || got != (Root{route.StorePersonal, KindCheckout, "/p", "", ""}) {
+		t.Errorf("personal checkout = %+v, %v", got, err)
 	}
-	if got, want := CheckoutRoot(cfg, route.StoreWork), (Root{route.StoreWork, KindCheckout, "/w", ""}); got != want {
-		t.Errorf("work checkout = %+v, want %+v", got, want)
+	if got, err := CheckoutRoot(ctx, cfg, route.StoreWork); err != nil || got != (Root{route.StoreWork, KindCheckout, "/w", "", ""}) {
+		t.Errorf("work checkout = %+v, %v", got, err)
 	}
-	if got, want := LocalRoot(cfg, route.StoreWork), (Root{route.StoreWork, KindLocal, filepath.Join("/state", "local", "work"), "/state"}); got != want {
+	if got, want := LocalRoot(cfg, route.StoreWork), (Root{route.StoreWork, KindLocal, filepath.Join("/state", "local", "work"), "", "/state"}); got != want {
 		t.Errorf("work local = %+v, want %+v", got, want)
 	}
-	if got, want := QuarantineRoot(cfg), (Root{"", KindQuarantine, filepath.Join("/state", "quarantine"), "/state"}); got != want {
+	if got, want := QuarantineRoot(cfg), (Root{"", KindQuarantine, filepath.Join("/state", "quarantine"), "", "/state"}); got != want {
 		t.Errorf("quarantine = %+v, want %+v", got, want)
 	}
 
-	got := ReadRoots(cfg, []route.StoreID{route.StoreWork, route.StorePersonal})
+	got, errs := ReadRoots(ctx, cfg, []route.StoreID{route.StoreWork, route.StorePersonal})
 	want := []Root{
-		CheckoutRoot(cfg, route.StoreWork), LocalRoot(cfg, route.StoreWork),
-		CheckoutRoot(cfg, route.StorePersonal), LocalRoot(cfg, route.StorePersonal),
+		{route.StoreWork, KindCheckout, "/w", "", ""}, LocalRoot(cfg, route.StoreWork),
+		{route.StorePersonal, KindCheckout, "/p", "", ""}, LocalRoot(cfg, route.StorePersonal),
 	}
-	if !slices.Equal(got, want) {
-		t.Errorf("ReadRoots = %+v, want %+v", got, want)
+	if !slices.Equal(got, want) || len(errs) != 0 {
+		t.Errorf("ReadRoots = %+v, %v, want %+v", got, errs, want)
+	}
+}
+
+func TestCheckoutRootRefusesRepointedOrigin(t *testing.T) {
+	const pinned, other = "git@github.com:o/r.git", "git@github.com:evil/r.git"
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	dir := t.TempDir()
+	for _, args := range [][]string{{"init", "-q"}, {"remote", "add", "origin", other}} {
+		if out, err := exec.Command(tools.Git, append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	cfg := config.Config{PersonalStore: dir, PersonalRemote: pinned, StateDir: t.TempDir()}
+	ctx := context.Background()
+
+	_, err := CheckoutRoot(ctx, cfg, route.StorePersonal)
+	if err == nil || !strings.Contains(err.Error(), "personal store: ") || !strings.Contains(err.Error(), other) {
+		t.Fatalf("CheckoutRoot err = %v, want a personal store refusal naming %s", err, other)
+	}
+
+	roots, errs := ReadRoots(ctx, cfg, []route.StoreID{route.StorePersonal})
+	if want := []Root{LocalRoot(cfg, route.StorePersonal)}; !slices.Equal(roots, want) {
+		t.Errorf("roots = %+v, want %+v", roots, want)
+	}
+	if len(errs) != 1 || errs[0].Error() != err.Error() {
+		t.Errorf("errs = %v, want [%v]", errs, err)
 	}
 }
 

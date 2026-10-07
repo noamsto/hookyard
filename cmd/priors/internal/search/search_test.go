@@ -21,6 +21,9 @@ import (
 
 func TestMain(m *testing.M) {
 	toolstest.Pin()
+	for _, k := range route.RepoLocatingEnv {
+		_ = os.Unsetenv(k)
+	}
 	os.Exit(m.Run())
 }
 
@@ -106,14 +109,33 @@ func names(hits []Hit) []string {
 	return out
 }
 
-func checkAndLocal(cfg config.Config, id route.StoreID) []store.Root {
-	return []store.Root{store.CheckoutRoot(cfg, id), store.LocalRoot(cfg, id)}
+func checkoutRoot(t *testing.T, cfg config.Config, id route.StoreID) store.Root {
+	t.Helper()
+	root, err := store.CheckoutRoot(context.Background(), cfg, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func checkAndLocal(t *testing.T, cfg config.Config, id route.StoreID) []store.Root {
+	t.Helper()
+	return []store.Root{checkoutRoot(t, cfg, id), store.LocalRoot(cfg, id)}
+}
+
+func readRoots(t *testing.T, cfg config.Config, sess route.Session) []store.Root {
+	t.Helper()
+	roots, errs := store.ReadRoots(context.Background(), cfg, route.ReadStores(sess, cfg))
+	if len(errs) > 0 {
+		t.Fatal(errs)
+	}
+	return roots
 }
 
 func TestAllTermsMustMatchCaseInsensitively(t *testing.T) {
 	needRg(t)
 	cfg := newConfig(t)
-	co := store.CheckoutRoot(cfg, route.StorePersonal)
+	co := checkoutRoot(t, cfg, route.StorePersonal)
 	both := newFact("both-terms", "Uses Postgres", "hookyard")
 	both.Body = "The CACHE is warmed on boot.\n"
 	onlyOne := newFact("only-one", "Uses postgres", "hookyard")
@@ -130,7 +152,7 @@ func TestAllTermsMustMatchCaseInsensitively(t *testing.T) {
 func TestTermMatchedOnlyInFrontmatterKeysIsNotAHit(t *testing.T) {
 	needRg(t)
 	cfg := newConfig(t)
-	co := store.CheckoutRoot(cfg, route.StorePersonal)
+	co := checkoutRoot(t, cfg, route.StorePersonal)
 	put(t, co, "hookyard/a-fact.md", newFact("a-fact", "about caching", "hookyard"))
 
 	got := run(t, []store.Root{co}, personalSession("hookyard"), Query{Terms: []string{"confidence"}})
@@ -143,7 +165,7 @@ func TestTermMatchedOnlyInFrontmatterKeysIsNotAHit(t *testing.T) {
 func TestTypeScopeAndRepoFilters(t *testing.T) {
 	needRg(t)
 	cfg := newConfig(t)
-	co := store.CheckoutRoot(cfg, route.StorePersonal)
+	co := checkoutRoot(t, cfg, route.StorePersonal)
 	ref := newFact("ref-fact", "shared topic", "hookyard")
 	ref.Metadata.Type = "reference"
 	proj := newFact("proj-fact", "shared topic", "hookyard")
@@ -184,7 +206,7 @@ func TestTypeScopeAndRepoFilters(t *testing.T) {
 func TestInsideStoreFilterVersusAnyRepo(t *testing.T) {
 	needRg(t)
 	cfg := newConfig(t)
-	co := store.CheckoutRoot(cfg, route.StorePersonal)
+	co := checkoutRoot(t, cfg, route.StorePersonal)
 	put(t, co, "hookyard/mine.md", newFact("mine", "shared topic", "hookyard"))
 	put(t, co, "other/theirs.md", newFact("theirs", "shared topic", "other"))
 	roots := []store.Root{co}
@@ -208,7 +230,7 @@ func TestInsideStoreFilterVersusAnyRepo(t *testing.T) {
 func TestArchivedAndSupersededAreHiddenUnlessAll(t *testing.T) {
 	needRg(t)
 	cfg := newConfig(t)
-	co := store.CheckoutRoot(cfg, route.StorePersonal)
+	co := checkoutRoot(t, cfg, route.StorePersonal)
 	put(t, co, "hookyard/live.md", newFact("live", "shared topic", "hookyard"))
 	old := newFact("old-one", "shared topic", "hookyard")
 	put(t, co, "_archive/hookyard/old-one.md", old)
@@ -234,7 +256,7 @@ func TestArchivedAndSupersededAreHiddenUnlessAll(t *testing.T) {
 func TestRootLevelAndDotPathsAreNotFacts(t *testing.T) {
 	needRg(t)
 	cfg := newConfig(t)
-	co := store.CheckoutRoot(cfg, route.StorePersonal)
+	co := checkoutRoot(t, cfg, route.StorePersonal)
 	put(t, co, "hookyard/real.md", newFact("real", "shared topic", "hookyard"))
 	put(t, co, "top-level.md", newFact("top-level", "shared topic", "hookyard"))
 	put(t, co, ".github/ci.md", newFact("ci", "shared topic", "hookyard"))
@@ -251,7 +273,7 @@ func TestRootLevelAndDotPathsAreNotFacts(t *testing.T) {
 func TestUnparsableFileIsSkippedAndReported(t *testing.T) {
 	needRg(t)
 	cfg := newConfig(t)
-	co := store.CheckoutRoot(cfg, route.StorePersonal)
+	co := checkoutRoot(t, cfg, route.StorePersonal)
 	put(t, co, "hookyard/ok.md", newFact("ok", "shared topic", "hookyard"))
 	putRaw(t, co, "hookyard/broken.md", []byte("shared topic but no frontmatter\n"))
 
@@ -272,7 +294,7 @@ func TestUnparsableFileIsSkippedAndReported(t *testing.T) {
 func TestSymlinkOutOfRootIsSkipped(t *testing.T) {
 	needRg(t)
 	cfg := newConfig(t)
-	co := store.CheckoutRoot(cfg, route.StorePersonal)
+	co := checkoutRoot(t, cfg, route.StorePersonal)
 	outside := store.Root{Path: t.TempDir()}
 	put(t, outside, "escape.md", newFact("escape", "shared topic", "hookyard"))
 	if err := os.MkdirAll(filepath.Join(co.Path, "hookyard"), 0o755); err != nil {
@@ -322,16 +344,16 @@ func TestLocalFactIsVisibleOnlyToItsLearnedRepo(t *testing.T) {
 func TestReadRuleKeepsWorkOutOfPersonalSessions(t *testing.T) {
 	needRg(t)
 	cfg := newConfig(t)
-	put(t, store.CheckoutRoot(cfg, route.StorePersonal), "hookyard/p-fact.md", newFact("p-fact", "shared topic", "hookyard"))
+	put(t, checkoutRoot(t, cfg, route.StorePersonal), "hookyard/p-fact.md", newFact("p-fact", "shared topic", "hookyard"))
 	put(t, store.LocalRoot(cfg, route.StorePersonal), "hookyard/p-local.md", newFact("p-local", "shared topic", "hookyard"))
-	put(t, store.CheckoutRoot(cfg, route.StoreWork), "hookyard/w-fact.md", newFact("w-fact", "shared topic", "hookyard"))
+	put(t, checkoutRoot(t, cfg, route.StoreWork), "hookyard/w-fact.md", newFact("w-fact", "shared topic", "hookyard"))
 	put(t, store.LocalRoot(cfg, route.StoreWork), "hookyard/w-local.md", newFact("w-local", "shared topic", "hookyard"))
 	q := Query{Terms: []string{"shared topic"}, AnyRepo: true}
 
 	personal := personalSession("hookyard")
-	pRoots := store.ReadRoots(cfg, route.ReadStores(personal, cfg))
+	pRoots := readRoots(t, cfg, personal)
 	work := route.Session{Class: route.ClassWork, Repo: "hookyard"}
-	wRoots := store.ReadRoots(cfg, route.ReadStores(work, cfg))
+	wRoots := readRoots(t, cfg, work)
 
 	gotPersonal := names(run(t, pRoots, personal, q))
 	gotWork := names(run(t, wRoots, work, q))
@@ -349,9 +371,9 @@ func TestReadRuleKeepsWorkOutOfPersonalSessions(t *testing.T) {
 func TestCheckoutWinsOverLocalByName(t *testing.T) {
 	needRg(t)
 	cfg := newConfig(t)
-	put(t, store.CheckoutRoot(cfg, route.StorePersonal), "hookyard/dup.md", newFact("dup", "shared topic reviewed", "hookyard"))
+	put(t, checkoutRoot(t, cfg, route.StorePersonal), "hookyard/dup.md", newFact("dup", "shared topic reviewed", "hookyard"))
 	put(t, store.LocalRoot(cfg, route.StorePersonal), "hookyard/dup.md", newFact("dup", "shared topic flagged", "hookyard"))
-	roots := checkAndLocal(cfg, route.StorePersonal)
+	roots := checkAndLocal(t, cfg, route.StorePersonal)
 
 	got := run(t, roots, personalSession("hookyard"), Query{Terms: []string{"shared topic"}})
 
@@ -366,7 +388,7 @@ func TestCheckoutWinsOverLocalByName(t *testing.T) {
 func TestNameMatchRanksBeforeNewerBodyMatch(t *testing.T) {
 	needRg(t)
 	cfg := newConfig(t)
-	co := store.CheckoutRoot(cfg, route.StorePersonal)
+	co := checkoutRoot(t, cfg, route.StorePersonal)
 	named := newFact("deploy-runbook", "older but named", "hookyard")
 	named.Metadata.Modified = "2026-01-01T00:00:00.000Z"
 	bodyOnly := newFact("unrelated", "newer", "hookyard")
@@ -389,7 +411,7 @@ func TestNameMatchRanksBeforeNewerBodyMatch(t *testing.T) {
 func TestLimit(t *testing.T) {
 	needRg(t)
 	cfg := newConfig(t)
-	co := store.CheckoutRoot(cfg, route.StorePersonal)
+	co := checkoutRoot(t, cfg, route.StorePersonal)
 	for _, n := range []string{"aa", "bb", "cc", "dd", "ee"} {
 		put(t, co, "hookyard/"+n+".md", newFact(n, "shared topic", "hookyard"))
 	}
@@ -409,7 +431,7 @@ func TestLimit(t *testing.T) {
 func TestRedactionMatchIsExcludedAndReportedWithoutTheToken(t *testing.T) {
 	needRg(t)
 	cfg := newConfig(t)
-	co := store.CheckoutRoot(cfg, route.StorePersonal)
+	co := checkoutRoot(t, cfg, route.StorePersonal)
 	token := "gh" + "p_" + strings.Repeat("a1", 18)
 	leaky := newFact("leaky", "shared topic", "hookyard")
 	leaky.Body = "token " + token + "\n"
@@ -466,8 +488,8 @@ func TestBackendErrorOnEveryRootIsReturned(t *testing.T) {
 
 func TestBackendErrorOnOneRootKeepsTheOthers(t *testing.T) {
 	cfg := newConfig(t)
-	broken := store.CheckoutRoot(cfg, route.StorePersonal)
-	good := store.CheckoutRoot(cfg, route.StoreWork)
+	broken := checkoutRoot(t, cfg, route.StorePersonal)
+	good := checkoutRoot(t, cfg, route.StoreWork)
 	put(t, good, "hookyard/b.md", newFact("b", "shared topic", "hookyard"))
 	b := stubBackend(func(_ context.Context, roots []string, _ string) ([]string, error) {
 		if roots[0] == broken.Path {
@@ -492,7 +514,7 @@ func TestBackendErrorOnOneRootKeepsTheOthers(t *testing.T) {
 
 func TestRgMissingBinaryFailsTheSearch(t *testing.T) {
 	cfg := newConfig(t)
-	roots := checkAndLocal(cfg, route.StorePersonal)
+	roots := checkAndLocal(t, cfg, route.StorePersonal)
 	put(t, roots[0], "hookyard/a.md", newFact("a", "shared topic", "hookyard"))
 
 	_, _, err := Run(context.Background(), Rg{Bin: filepath.Join(t.TempDir(), "no-such-rg")}, roots,
@@ -521,7 +543,7 @@ func TestBackendBlockingPastTheDeadlineReturnsDeadlineExceeded(t *testing.T) {
 
 func TestCanceledContextStopsBetweenCandidates(t *testing.T) {
 	cfg := newConfig(t)
-	co := store.CheckoutRoot(cfg, route.StorePersonal)
+	co := checkoutRoot(t, cfg, route.StorePersonal)
 	put(t, co, "hookyard/a.md", newFact("a", "shared topic", "hookyard"))
 	ctx, cancel := context.WithCancel(context.Background())
 	b := stubBackend(func(_ context.Context, roots []string, _ string) ([]string, error) {
@@ -611,7 +633,7 @@ func TestRgCanceledContextIsAnError(t *testing.T) {
 func TestRedactionMatchesRawFileBytes(t *testing.T) {
 	needRg(t)
 	cfg := newConfig(t)
-	co := store.CheckoutRoot(cfg, route.StorePersonal)
+	co := checkoutRoot(t, cfg, route.StorePersonal)
 	leaky := newFact("leaky", "shared topic", "hookyard")
 	leaky.Metadata.OriginSessionID = "gh" + "p_" + strings.Repeat("a1", 18)
 	put(t, co, "hookyard/leaky.md", leaky)
@@ -676,8 +698,8 @@ func TestRgUnreadableFileAndNoMatchIsPartial(t *testing.T) {
 func TestUnreadableFileInOneRootKeepsOtherRootsHits(t *testing.T) {
 	needRg(t)
 	cfg := newConfig(t)
-	a := store.CheckoutRoot(cfg, route.StorePersonal)
-	b := store.CheckoutRoot(cfg, route.StoreWork)
+	a := checkoutRoot(t, cfg, route.StorePersonal)
+	b := checkoutRoot(t, cfg, route.StoreWork)
 	lockedFile(t, filepath.Join(a.Path, "hookyard", "locked.md"))
 	put(t, b, "hookyard/b.md", newFact("b", "shared topic", "hookyard"))
 
@@ -696,7 +718,7 @@ func TestUnreadableFileInOneRootKeepsOtherRootsHits(t *testing.T) {
 func TestUnreadableFileInARootKeepsItsOtherHits(t *testing.T) {
 	needRg(t)
 	cfg := newConfig(t)
-	co := store.CheckoutRoot(cfg, route.StorePersonal)
+	co := checkoutRoot(t, cfg, route.StorePersonal)
 	lockedFile(t, filepath.Join(co.Path, "hookyard", "locked.md"))
 	put(t, co, "hookyard/ok.md", newFact("ok", "shared topic", "hookyard"))
 
@@ -723,7 +745,7 @@ func wantSkipped(t *testing.T, reports []string, prefix string) {
 func TestRgIgnoresRipgrepConfig(t *testing.T) {
 	needRg(t)
 	cfg := newConfig(t)
-	co := store.CheckoutRoot(cfg, route.StorePersonal)
+	co := checkoutRoot(t, cfg, route.StorePersonal)
 	put(t, co, "hookyard/a.md", newFact("a", "shared topic", "hookyard"))
 	for name, body := range map[string]string{
 		"broken":   "--no-such-ripgrep-flag\n",
@@ -751,8 +773,8 @@ func TestRgIgnoresRipgrepConfig(t *testing.T) {
 
 func TestPartialRootWithNothingReadIsAFailedRoot(t *testing.T) {
 	cfg := newConfig(t)
-	broken := store.CheckoutRoot(cfg, route.StorePersonal)
-	good := store.CheckoutRoot(cfg, route.StoreWork)
+	broken := checkoutRoot(t, cfg, route.StorePersonal)
+	good := checkoutRoot(t, cfg, route.StoreWork)
 	put(t, broken, "hookyard/a.md", newFact("a", "shared topic", "hookyard"))
 	put(t, good, "hookyard/b.md", newFact("b", "shared topic", "hookyard"))
 	b := stubBackend(func(_ context.Context, roots []string, _ string) ([]string, error) {

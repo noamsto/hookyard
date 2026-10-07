@@ -4,6 +4,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
+	"github.com/noamsto/hookyard/cmd/priors/internal/pin"
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 )
 
@@ -35,12 +37,14 @@ const (
 
 // Root is one directory tree of facts. Store is empty for the quarantine.
 // State is the state dir a local or quarantine root lives under, empty for a
-// checkout.
+// checkout. Remote is the remote URL the trust file pins for a checkout, empty
+// for none and for the other layers.
 type Root struct {
-	Store route.StoreID
-	Kind  Kind
-	Path  string
-	State string
+	Store  route.StoreID
+	Kind   Kind
+	Path   string
+	Remote string
+	State  string
 }
 
 // Entry is one parsed fact file. Rel uses '/' separators; Raw is the file's
@@ -60,12 +64,17 @@ type WalkErr struct {
 	Err error
 }
 
-func CheckoutRoot(cfg config.Config, id route.StoreID) Root {
-	path := cfg.PersonalStore
+// CheckoutRoot is the store's checkout at its pinned path, or the pin check's
+// refusal.
+func CheckoutRoot(ctx context.Context, cfg config.Config, id route.StoreID) (Root, error) {
+	path, remote := cfg.PersonalStore, cfg.PersonalRemote
 	if id == route.StoreWork {
-		path = cfg.WorkStore
+		path, remote = cfg.WorkStore, cfg.WorkRemote
 	}
-	return Root{Store: id, Kind: KindCheckout, Path: path}
+	if err := pin.Check(ctx, path, remote); err != nil {
+		return Root{}, fmt.Errorf("%s store: %w", id, err)
+	}
+	return Root{Store: id, Kind: KindCheckout, Path: path, Remote: remote}, nil
 }
 
 func LocalRoot(cfg config.Config, id route.StoreID) Root {
@@ -77,12 +86,21 @@ func QuarantineRoot(cfg config.Config) Root {
 }
 
 // ReadRoots lists, per store in order, its checkout and then its local layer.
-func ReadRoots(cfg config.Config, stores []route.StoreID) []Root {
+// A checkout that fails its pin is left out and its error returned; the local
+// layer lives in the state dir and is always listed.
+func ReadRoots(ctx context.Context, cfg config.Config, stores []route.StoreID) ([]Root, []error) {
 	roots := make([]Root, 0, 2*len(stores))
+	var errs []error
 	for _, id := range stores {
-		roots = append(roots, CheckoutRoot(cfg, id), LocalRoot(cfg, id))
+		checkout, err := CheckoutRoot(ctx, cfg, id)
+		if err != nil {
+			errs = append(errs, err)
+		} else {
+			roots = append(roots, checkout)
+		}
+		roots = append(roots, LocalRoot(cfg, id))
 	}
-	return roots
+	return roots, errs
 }
 
 // Walk parses every fact under the root, sorted by Rel. Root-level files and

@@ -72,14 +72,16 @@ func cmdList(args []string, s streams) int {
 		s.errln(err)
 		return 1
 	}
-	sess := sessionAt(context.Background(), id.cwd, cfg)
+	ctx := context.Background()
+	sess := sessionAt(ctx, id.cwd, cfg)
 	wantRepo := cmp.Or(*repo, sess.Repo)
 	now := time.Now()
 
 	v := attest.ForHost(cfg)
 	var rows []string
 	skipped := 0
-	for _, root := range readRoots(cfg, sess) {
+	roots, refused := readRoots(ctx, cfg, sess, s)
+	for _, root := range roots {
 		if *storeID != "" && string(root.Store) != *storeID || *flagged && root.Kind != store.KindLocal {
 			continue
 		}
@@ -103,16 +105,23 @@ func cmdList(args []string, s streams) int {
 		s.outText(sanitize.Fence(sanitize.Header("list"), strings.Join(rows, "\n"), sanitize.NewDelimiter()))
 	}
 	printReports(s, v)
-	// A skipped file makes the listing incomplete, so exit non-zero even when
-	// some rows printed; a redaction exclusion is reported and does not.
-	if skipped > 0 {
+	// A skipped file or refused checkout makes the listing incomplete, so exit
+	// non-zero even when some rows printed; a redaction exclusion is reported
+	// and does not.
+	if skipped > 0 || refused {
 		return 1
 	}
 	return 0
 }
 
-func readRoots(cfg config.Config, sess route.Session) []store.Root {
-	return store.ReadRoots(cfg, route.ReadStores(sess, cfg))
+// readRoots is the session's read roots, with each refused checkout reported
+// on stderr and flagged in refused.
+func readRoots(ctx context.Context, cfg config.Config, sess route.Session, s streams) (roots []store.Root, refused bool) {
+	roots, errs := store.ReadRoots(ctx, cfg, route.ReadStores(sess, cfg))
+	for _, err := range errs {
+		s.errln("refused:", err)
+	}
+	return roots, len(errs) > 0
 }
 
 // walk is root.Walk with a missing checkout and every skipped file reported
@@ -199,9 +208,11 @@ func cmdShow(args []string, s streams) int {
 		s.errln(err)
 		return 1
 	}
-	sess := sessionAt(context.Background(), id.cwd, cfg)
+	ctx := context.Background()
+	sess := sessionAt(ctx, id.cwd, cfg)
 
-	e, found := findFact(readRoots(cfg, sess), sess, names[0], s)
+	roots, _ := readRoots(ctx, cfg, sess, s)
+	e, found := findFact(roots, sess, names[0], s)
 	if !found {
 		s.errf("no fact named %q\n", names[0])
 		return 1

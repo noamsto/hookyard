@@ -55,7 +55,8 @@ func cmdSearch(args []string, s streams) int {
 	defer cancel()
 	sess := sessionAt(ctx, id.cwd, cfg)
 	q := search.Query{Terms: terms, Repo: *repo, AnyRepo: *anyRepo, Type: *typ, Scope: *scope, All: *all, Limit: *limit}
-	hits, reports, err := search.Run(ctx, search.Rg{}, readRoots(cfg, sess), sess, q, rules)
+	roots, _ := readRoots(ctx, cfg, sess, s)
+	hits, reports, err := search.Run(ctx, search.Rg{}, roots, sess, q, rules)
 	if err != nil {
 		s.errln("search unavailable:", err)
 		return 0
