@@ -4,7 +4,8 @@
 // commit never carries a file priors' gates have not passed, and HEAD's
 // MEMORY.md never lists a file HEAD lacks. Dirty paths outside the fact layout
 // (not .md, and at the root or under a dot directory, such as a vault's
-// .obsidian/) are left out of the commit and named in the returned note.
+// .obsidian/) are left out of the commit and named in the returned note,
+// except .attest/ entries on a host where attestation is on, which are gated.
 package commit
 
 import (
@@ -24,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
@@ -91,7 +93,15 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 		}
 		findings[f.File] = append(findings[f.File], f.Rule)
 	}
-	c := classifier{root: snap, rules: rules, findings: findings, special: special}
+	pending := map[string]bool{}
+	for _, e := range dirty {
+		pending[e.path] = !e.ignored
+	}
+	c := classifier{
+		root: snap, rules: rules, findings: findings, special: special,
+		host: attest.Classify(cfg, groups), storeID: storeID(cfg, root.Store), pending: pending,
+		inHead: func(rel string, raw []byte) bool { return inHead(ctx, dir, rel, raw) },
+	}
 	var accepted, refused, left []string
 	for _, e := range dirty {
 		switch why := c.refusal(e); {
@@ -163,6 +173,9 @@ func leftNote(left []string) string {
 // beforeStage is a test seam that runs once the gates have passed, just
 // before the accepted paths are staged.
 var beforeStage = func() {}
+
+// groups is the process's group membership, a test seam.
+var groups = attest.OSGroups
 
 // signTimeout bounds a signing commit-tree, so a pinentry or hardware-key
 // prompt cannot hang priors.
@@ -547,12 +560,32 @@ type classifier struct {
 	rules    gate.Rules
 	findings map[string][]string
 	special  []string
+	host     attest.Host
+	storeID  string
+	// pending holds the dirty paths git does not ignore.
+	pending map[string]bool
+	inHead  func(rel string, raw []byte) bool
+}
+
+// attestDir holds the attest entries, gated content only when attestation is
+// on; off, they stay outside the fact layout as any dot directory does.
+const attestDir = ".attest/"
+
+// storeID is the trust file's id for s.
+func storeID(cfg config.Config, s route.StoreID) string {
+	if s == route.StoreWork {
+		return cfg.WorkStoreID
+	}
+	return cfg.PersonalStoreID
 }
 
 // refusal says why e must not reach a commit: "" to stage it, skip to leave
 // it out without blocking, leave to leave it out and report it, or a
 // content-free reason.
 func (c classifier) refusal(e statusEntry) string {
+	if c.host.On() && strings.HasPrefix(e.path, attestDir) {
+		return c.attestRefusal(e)
+	}
 	if strings.HasSuffix(e.path, "/") {
 		if c.holdsIndexable(e.path) {
 			return "holds facts git would not commit"
@@ -629,11 +662,114 @@ func (c classifier) factRefusal(rel string) string {
 	if len(f.Metadata.Flags) > 0 {
 		rules = append(rules, "flagged")
 	}
-	if f.Metadata.Confidence == "reviewed" {
+	switch {
+	case f.Metadata.Confidence != "reviewed":
+	case !c.host.On():
 		rules = append(rules, "unattested-review")
+	default:
+		if err := c.attested(rel, f, raw); err != nil {
+			rules = append(rules, "unattested-review ("+err.Error()+")")
+		}
 	}
 	slices.Sort(rules)
 	return strings.Join(slices.Compact(rules), ", ")
+}
+
+// attestRefusal gates an entry by itself: a well-formed entry signed for this
+// store and file name, attesting or revoking. Deleting one is refused, as the
+// remote refuses it.
+func (c classifier) attestRefusal(e statusEntry) string {
+	if e.ignored {
+		return "attest entry ignored by git"
+	}
+	name := strings.TrimPrefix(e.path, attestDir)
+	if name == "" || strings.Contains(name, "/") {
+		return "attest entry not directly in .attest"
+	}
+	if slices.Contains(c.special, e.path) {
+		return "not a regular file"
+	}
+	ent, _, err := c.readEntry(e.path)
+	if errors.Is(err, errNoEntry) {
+		return "attest entry deleted"
+	}
+	if err != nil {
+		return err.Error()
+	}
+	if err := attest.VerifyEntry(ent, c.host.Keys, c.storeID, name, attest.OpAttest, attest.OpRevoke); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+var errNoEntry = errors.New("no attest entry")
+
+// attested checks the reviewed fact at rel, whose bytes are raw, against its
+// entry in the snapshot. The entry must reach the commit with it: dirty, and
+// so gated by attestRefusal, or unchanged from HEAD.
+func (c classifier) attested(rel string, f fact.Fact, raw []byte) error {
+	if !fact.NameRE.MatchString(f.Name) {
+		return &attest.CheckError{Check: 3, Reason: "bad name"}
+	}
+	entryRel := attestDir + f.Name
+	ent, entryRaw, err := c.readEntry(entryRel)
+	if err != nil {
+		return err
+	}
+	if err := attest.VerifyEntry(ent, c.host.Keys, c.storeID, f.Name, attest.OpAttest); err != nil {
+		return err
+	}
+	if err := attest.Bind(ent, rel, raw); err != nil {
+		return err
+	}
+	if !c.pending[entryRel] && !c.inHead(entryRel, entryRaw) {
+		return errors.New("attest entry not in this commit or HEAD")
+	}
+	return nil
+}
+
+// readEntry parses the snapshot's entry at rel, reading at most
+// attest.MaxEntryBytes. Its errors are content-free.
+func (c classifier) readEntry(rel string) (attest.Entry, []byte, error) {
+	path := filepath.Join(c.root.Path, filepath.FromSlash(rel))
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return attest.Entry{}, nil, errNoEntry
+	case err != nil:
+		return attest.Entry{}, nil, errors.New("unreadable")
+	case !info.Mode().IsRegular():
+		return attest.Entry{}, nil, errors.New("not a regular file")
+	case info.Size() > attest.MaxEntryBytes:
+		return attest.Entry{}, nil, errors.New("attest entry oversize")
+	}
+	raw, err := os.ReadFile(path) //nolint:gosec // path is under priors' private snapshot, lstat-checked as a regular file
+	if err != nil {
+		return attest.Entry{}, nil, errors.New("unreadable")
+	}
+	ent, err := attest.ParseEntry(raw)
+	if err != nil {
+		return attest.Entry{}, nil, errors.New("attest entry malformed")
+	}
+	return ent, raw, nil
+}
+
+// inHead reports whether HEAD holds rel with exactly raw, so a commit on HEAD
+// that leaves rel alone carries those bytes. An unborn HEAD holds nothing.
+func inHead(ctx context.Context, dir, rel string, raw []byte) bool {
+	out, err := runGit(ctx, dir, gitTimeout, nil, "ls-tree", "-z", "HEAD", "--", rel)
+	if err != nil {
+		return false
+	}
+	meta, path, ok := strings.Cut(strings.TrimSuffix(out, "\x00"), "\t")
+	f := strings.Fields(meta)
+	if !ok || path != rel || len(f) != 3 || f[1] != "blob" {
+		return false
+	}
+	// Hashed from stdin without -w or --path: no object is written and no
+	// filter rewrites the bytes.
+	oid, err := runGit(ctx, dir, gitTimeout, bytes.NewReader(raw), "hash-object", "--stdin")
+	return err == nil && strings.TrimSpace(oid) == f[2]
 }
 
 // indexable reports whether store.Root.Walk would read rel as a fact: a .md
