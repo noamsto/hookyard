@@ -538,7 +538,7 @@ func suspect(line string, sk []skelRune, spans []span) bool {
 			s.masked, s.lc = true, literal
 		}
 	}
-	return bracketed(line, sk) || ruled(line, sk) || delimited(line, sk) || looseMatch(sk)
+	return bracketed(line, sk) || ruled(line, sk) || markRuled(line, spans) || delimited(line, sk) || looseMatch(sk)
 }
 
 func nonASCIIOutside(line string, spans []span) bool {
@@ -567,10 +567,10 @@ func runeAt(line string, s skelRune) rune {
 }
 
 // bracketed reports a line whose first bracket or quote, past list
-// markup, punctuation, symbols and quoted tokens but before any word, opens
-// it: a later closer after a letter or the line's end closes it. A line
-// starting with a word may still open on a symbol that a later one closes
-// around a letter (★…★).
+// markup, punctuation, symbols, letters that look like punctuation (ǃ) and
+// quoted tokens but before any word, opens it: a later closer after a letter
+// or the line's end closes it. A line starting with a word may still open on a
+// symbol that a later one closes around a letter (★…★).
 func bracketed(line string, sk []skelRune) bool {
 	for k := 0; k < len(sk); k++ {
 		s := sk[k]
@@ -581,11 +581,11 @@ func bracketed(line string, sk []skelRune) bool {
 		if bracket(r) {
 			return closes(line, sk[k+1:], true)
 		}
-		if !unicode.Is(unicode.L, r) || unicode.Is(unicode.Lm, r) {
+		if !unicode.Is(unicode.L, r) || unicode.Is(unicode.Lm, r) || markupLetter(r) {
 			continue
 		}
-		if listMarker(line, sk, k) {
-			k++
+		if n := listMarker(line, sk, k); n > 0 {
+			k += n
 			continue
 		}
 		break
@@ -616,15 +616,30 @@ func closes(line string, sk []skelRune, open bool) bool {
 	return content && open
 }
 
-// listMarker reports a one-letter word at k ending in '.' or ')': "a." or
-// "b)".
-func listMarker(line string, sk []skelRune, k int) bool {
-	if k > 0 && sk[k-1].word == sk[k].word || k+1 == len(sk) || sk[k+1].word != sk[k].word {
-		return false
+// listMarker returns the length of a list marker's letters at k, 0 if none:
+// one letter, or up to four roman-numeral letters i v x, followed by '.' or
+// ')' ("a.", "b)", "iv.", "1a."). Only digits may precede it in its word.
+func listMarker(line string, sk []skelRune, k int) int {
+	if k > 0 && sk[k-1].word == sk[k].word {
+		if p := runeAt(line, sk[k-1]); p < '0' || p > '9' {
+			return 0
+		}
 	}
-	r := runeAt(line, sk[k+1])
-	return r == '.' || r == ')'
+	n := 1
+	for n < 4 && k+n < len(sk) && sk[k+n].word == sk[k].word &&
+		roman(runeAt(line, sk[k+n-1])) && roman(runeAt(line, sk[k+n])) {
+		n++
+	}
+	if k+n == len(sk) || sk[k+n].word != sk[k].word {
+		return 0
+	}
+	if r := runeAt(line, sk[k+n]); r != '.' && r != ')' {
+		return 0
+	}
+	return n
 }
+
+func roman(r rune) bool { return strings.ContainsRune("ivxIVX", r) }
 
 // markup is Markdown or list syntax that may precede a header: rules,
 // quotes, headings, tables, list numbers and bullets.
@@ -632,7 +647,17 @@ func markup(r rune) bool {
 	if r < utf8.RuneSelf {
 		return '0' <= r && r <= '9' || strings.ContainsRune("-*+>#|!.)", r)
 	}
-	return unicode.Is(unicode.Po, r) && !bracket(r)
+	return unicode.Is(unicode.Po, r) && !bracket(r) || markupLetter(r)
+}
+
+// markupLetter reports a letter or digit whose UTS #39 image is list or
+// Markdown punctuation (ǃ, ǀ, Hebrew vav): before a header it reads as that
+// punctuation. A modifier letter is not one: bracketed's first loop already
+// skips it, and its second loop reads it as an opener.
+func markupLetter(r rune) bool {
+	img := punctImages[r]
+	return img != "" && unicode.In(r, unicode.L, unicode.N) && !unicode.Is(unicode.Lm, r) &&
+		strings.Trim(img, "-*+>#|!.)") == ""
 }
 
 // ruled reports three or more rule-like runes in a row. Space between two
@@ -660,18 +685,47 @@ func ruled(line string, sk []skelRune) bool {
 	return false
 }
 
+// markRuled reports three or more combining marks in a row outside the
+// spans, each on a space or at the line's start: with no base, each draws its
+// own glyph, so " ̲ ̲ ̲" draws a rule. The skeleton drops them, so the token
+// match never counts them. Marks stacked on one space draw one glyph.
+func markRuled(line string, spans []span) bool {
+	n, p, free := 0, 0, true
+	for i, r := range line {
+		for p < len(spans) && spans[p].end <= i {
+			p++
+		}
+		switch {
+		case p < len(spans) && spans[p].start <= i:
+			n, free = 0, false
+		case spaceLike(r):
+			free = true
+		case unicode.Is(unicode.M, r):
+			if free {
+				if n++; n >= 3 {
+					return true
+				}
+				free = false
+			}
+		default:
+			n, free = 0, false
+		}
+	}
+	return false
+}
+
 // hexBits are the imageBit bits of the hex digits.
 const hexBits = 1<<6 - 1 | 0x3ff<<26
 
 // delimited reports the "priors-<hex>" of a fence: a separator, any rune
-// but a letter or digit, followed by eight glued digit-like runes, or a word
-// opening on sixteen of them.
+// but a letter or digit, followed by eight glued digit-like runes, or sixteen
+// glued anywhere.
 func delimited(line string, sk []skelRune) bool {
 	for i, s := range sk {
 		if s.masked {
 			continue
 		}
-		if (i == 0 || sk[i-1].word != s.word) && digitRun(line, sk, i, s.start, 16) == 16 {
+		if digitRun(line, sk, i, s.start, 16) == 16 {
 			return true
 		}
 		if !unicode.In(runeAt(line, s), unicode.L, unicode.N) && digitRun(line, sk, i+1, s.end, 8) == 8 {
@@ -709,8 +763,8 @@ func looseMatch(sk []skelRune) bool {
 }
 
 // punctImage is the ASCII punctuation r looks like, or "". A letter or digit
-// with such an image (Hebrew vav, Arabic alef) is prose; the loose token
-// match still catches one used as a bracket.
+// with such an image (Hebrew vav, Arabic alef) is prose; bracketed still reads
+// one that looks like an opening bracket as a bracket.
 func punctImage(r rune) string {
 	if unicode.In(r, unicode.L, unicode.N) {
 		return ""
@@ -730,14 +784,24 @@ func opener(r rune, set uint64) bool {
 	return unicode.In(r, unicode.Ps, unicode.Pi, unicode.Pf) || symbolLike(r, set)
 }
 
-// bracket is an opener that draws a bracket or quote, not a symbol.
+// bracket is an opener that draws a bracket or quote, not a symbol. A letter
+// or digit counts only when it looks like an opening bracket (ᐸ): one that
+// looks like a quote (Hebrew yod, the ʻokina) opens prose.
 func bracket(r rune) bool {
 	if r < utf8.RuneSelf {
 		return strings.ContainsRune("[({<\"'`", r)
 	}
-	img := punctImage(r)
-	return unicode.In(r, unicode.Ps, unicode.Pi, unicode.Pf) ||
-		img != "" && strings.Trim(img, "[({<\"'`") == "" && !unicode.In(r, unicode.S, unicode.Lm)
+	if unicode.In(r, unicode.Ps, unicode.Pi, unicode.Pf) {
+		return true
+	}
+	img := punctImages[r]
+	if img == "" {
+		return false
+	}
+	if unicode.In(r, unicode.L, unicode.N) {
+		return strings.Trim(img, "[({<") == ""
+	}
+	return strings.Trim(img, "[({<\"'`") == "" && !unicode.Is(unicode.S, r)
 }
 
 func closer(r rune, set uint64) bool {
