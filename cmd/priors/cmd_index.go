@@ -146,7 +146,7 @@ func assembleIndex(ctx context.Context, cfgPath, cwd string) hookResult {
 	}
 	rules, err := gate.LoadRules(cfg.Rules)
 	if err != nil {
-		return hookResult{}
+		return hookResult{reports: []string{"priors: " + err.Error()}}
 	}
 	id, err := resolveIdentity(cwd, "", "")
 	if err != nil {
