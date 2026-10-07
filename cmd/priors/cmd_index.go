@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/commit"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
@@ -152,7 +153,7 @@ func assembleIndex(ctx context.Context, cfgPath, cwd string) hookResult {
 	if err != nil {
 		return hookResult{}
 	}
-	text, reports := tier1.Assemble(ctx, sessionAt(ctx, id.cwd, cfg), cfg, rules)
+	text, reports := tier1.Assemble(ctx, sessionAt(ctx, id.cwd, cfg), cfg, rules, attest.ForHost(cfg))
 	return hookResult{text: text, reports: reports}
 }
 
