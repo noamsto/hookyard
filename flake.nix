@@ -97,33 +97,40 @@
           # (docs/design/memory-layer.md §5).
           priors = let
             tools = "github.com/noamsto/hookyard/cmd/priors/internal/tools";
+            attest = "github.com/noamsto/hookyard/cmd/priors/internal/attest";
             # The tests exec these; the binary gets them as pinned paths.
             runtimeDeps = [pkgs.git pkgs.ripgrep pkgs.betterleaks pkgs.openssh];
           in
-            pkgs.buildGoModule {
-              pname = "priors";
-              version = "0.1.0";
-              src = ./.;
-              inherit vendorHash;
-              subPackages = ["cmd/priors"];
-              # Pinned so that neither the config nor PATH can swap them.
-              ldflags = [
-                "-X ${tools}.Git=${pkgs.git}/bin/git"
-                "-X ${tools}.SSH=${pkgs.openssh}/bin/ssh"
-                "-X ${tools}.Rg=${pkgs.ripgrep}/bin/rg"
-                "-X ${tools}.Scanner=${pkgs.betterleaks}/bin/betterleaks"
-              ];
-              nativeCheckInputs = runtimeDeps;
-              # subPackages alone would test only cmd/priors; the gates,
-              # routing and store live in its internal packages.
-              preCheck = ''
-                subPackages=cmd/priors/...
-              '';
-              meta = {
-                description = "Cross-harness agent memory: markdown fact stores, write gates, tier-1 index and search";
-                mainProgram = "priors";
-              };
-            };
+            pkgs.lib.makeOverridable ({
+              # nix-config sets the priors-verify account's uid (memory-layer §4.4).
+              priorsVerifyUid ? null,
+            }:
+              pkgs.buildGoModule {
+                pname = "priors";
+                version = "0.1.0";
+                src = ./.;
+                inherit vendorHash;
+                subPackages = ["cmd/priors"];
+                # Pinned so that neither the config nor PATH can swap them.
+                ldflags =
+                  [
+                    "-X ${tools}.Git=${pkgs.git}/bin/git"
+                    "-X ${tools}.SSH=${pkgs.openssh}/bin/ssh"
+                    "-X ${tools}.Rg=${pkgs.ripgrep}/bin/rg"
+                    "-X ${tools}.Scanner=${pkgs.betterleaks}/bin/betterleaks"
+                  ]
+                  ++ pkgs.lib.optional (priorsVerifyUid != null) "-X ${attest}.VerifyUID=${toString priorsVerifyUid}";
+                nativeCheckInputs = runtimeDeps;
+                # subPackages alone would test only cmd/priors; the gates,
+                # routing and store live in its internal packages.
+                preCheck = ''
+                  subPackages=cmd/priors/...
+                '';
+                meta = {
+                  description = "Cross-harness agent memory: markdown fact stores, write gates, tier-1 index and search";
+                  mainProgram = "priors";
+                };
+              }) {};
         in {
           default = hookyard;
           inherit priors;
