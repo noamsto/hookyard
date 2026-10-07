@@ -12,8 +12,8 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 )
 
-// privilegedGroups are the groups whose members can act as the store owner
-// or read its keys, so a signer in one is not separate from the agent.
+// privilegedGroups give a route to root; docker counts because a rootful and
+// a rootless install cannot be told apart from here.
 var privilegedGroups = []string{"wheel", "admin", "docker", "libvirtd", "input", "disk", "lxd", "incus-admin"}
 
 // GroupSource reads the running process's group membership.
