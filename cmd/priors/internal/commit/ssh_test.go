@@ -5,16 +5,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/tools"
 )
 
+// recordingSSH writes an ssh stand-in to dir that records its argv, one
+// argument per line, in marker and fails.
 func recordingSSH(t *testing.T, dir, marker string) string {
 	t.Helper()
 	path := filepath.Join(dir, "ssh")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\necho ran > "+marker+"\nexit 1\n"), 0o755); err != nil {
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > '"+marker+"'\nexit 1\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -69,5 +73,48 @@ func TestRunGitEnvDropsExecPath(t *testing.T) {
 
 	if _, err := os.Stat(marker); err == nil {
 		t.Error("a helper from the inherited GIT_EXEC_PATH ran")
+	}
+}
+
+func TestPushUsesPinnedSSHConfigAndKnownHosts(t *testing.T) {
+	fx, _ := withRemote(t)
+	const url = "ssh://example.invalid/x.git"
+	git(t, fx.dir(), "remote", "set-url", "origin", url)
+	fx.root.Remote = url
+
+	pinnedMarker := filepath.Join(t.TempDir(), "pinned")
+	savedSSH := tools.SSH
+	t.Cleanup(func() { tools.SSH = savedSSH })
+	tools.SSH = recordingSSH(t, t.TempDir(), pinnedMarker)
+
+	others := map[string]string{
+		"GIT_SSH_COMMAND": filepath.Join(t.TempDir(), "ssh-command"),
+		"GIT_SSH":         filepath.Join(t.TempDir(), "ssh"),
+		"core.sshCommand": filepath.Join(t.TempDir(), "core-ssh-command"),
+	}
+	t.Setenv("GIT_SSH_COMMAND", recordingSSH(t, t.TempDir(), others["GIT_SSH_COMMAND"]))
+	t.Setenv("GIT_SSH", recordingSSH(t, t.TempDir(), others["GIT_SSH"]))
+	git(t, fx.dir(), "config", "--global", "core.sshCommand", recordingSSH(t, t.TempDir(), others["core.sshCommand"]))
+
+	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+	fx.index(t)
+	if w := fx.checkout(t); !strings.Contains(w, "git push failed") {
+		t.Errorf("warning = %q, want a failed push", w)
+	}
+
+	raw, err := os.ReadFile(pinnedMarker)
+	if err != nil {
+		t.Fatalf("pinned ssh was not run: %v", err)
+	}
+	argv := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	for _, pair := range [][2]string{{"-F", tools.SSHConfig}, {"-o", "UserKnownHostsFile=" + tools.KnownHosts}} {
+		if i := slices.Index(argv, pair[1]); i < 1 || argv[i-1] != pair[0] {
+			t.Errorf("ssh argv %q lacks %s %s", argv, pair[0], pair[1])
+		}
+	}
+	for name, marker := range others {
+		if _, err := os.Stat(marker); err == nil {
+			t.Errorf("%s ran", name)
+		}
 	}
 }

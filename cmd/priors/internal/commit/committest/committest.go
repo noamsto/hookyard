@@ -5,6 +5,7 @@ package committest
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -21,6 +22,21 @@ import (
 func UnsetRepoEnv() {
 	for _, k := range route.RepoLocatingEnv {
 		_ = os.Unsetenv(k)
+	}
+}
+
+// PinSSH points tools.SSHConfig and tools.KnownHosts at empty files for the
+// length of t, as a push refuses to run without them.
+func PinSSH(t testing.TB) {
+	t.Helper()
+	savedConfig, savedKnownHosts := tools.SSHConfig, tools.KnownHosts
+	t.Cleanup(func() { tools.SSHConfig, tools.KnownHosts = savedConfig, savedKnownHosts })
+	dir := t.TempDir()
+	tools.SSHConfig, tools.KnownHosts = filepath.Join(dir, "ssh_config"), filepath.Join(dir, "known_hosts")
+	for _, path := range []string{tools.SSHConfig, tools.KnownHosts} {
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
