@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func writeConfig(t *testing.T, body string) string {
@@ -122,6 +124,9 @@ func TestLoadFullSample(t *testing.T) {
 		SSHConfig:       filepath.Join(home, "ssh_config"),
 		Commit:          &no,
 		Push:            true,
+		TrustDigest:     sha256Hex(sampleTrust),
+		TrustRootLabel:  "separate",
+		fsys:            fakeRoot{},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Load = %+v\nwant   %+v", got, want)
@@ -171,13 +176,47 @@ func TestLoadWorkNamesFloor(t *testing.T) {
 	})
 }
 
+func TestFSIsTheTrustFileSource(t *testing.T) {
+	isolate(t)
+	c, err := loadUser(t, writeConfig(t, sample))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.FS().(fakeRoot); !ok {
+		t.Errorf("FS() = %T, want the fakeRoot load read through", c.FS())
+	}
+	if _, ok := (Config{}).FS().(osFS); !ok {
+		t.Errorf("zero Config FS() = %T, want osFS", (Config{}).FS())
+	}
+}
+
+func TestLoadCopiesAttestKeys(t *testing.T) {
+	isolate(t)
+	sk, key := skKeyLine(t)
+
+	got, err := load(writeConfig(t, sample), writeTrust(t, sampleTrust+attestEntry(sk, "YQ==", "Yg==")), fakeRoot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(got.AttestKeys) != 1 {
+		t.Fatalf("AttestKeys = %+v, want one", got.AttestKeys)
+	}
+	k := got.AttestKeys[0]
+	if !reflect.DeepEqual(k.Key.Marshal(), key.Marshal()) || string(k.Attestation) != "a" || string(k.Challenge) != "b" {
+		t.Errorf("AttestKeys[0] = %s %q %q, want %s \"a\" \"b\"", ssh.MarshalAuthorizedKey(k.Key), k.Attestation, k.Challenge, sk)
+	}
+}
+
 func TestLoadTrustRoot(t *testing.T) {
 	isolate(t)
-	for name, c := range map[string]struct{ line, want string }{
-		"separate":   {`trust_root = "separate"`, "separate"},
-		"bool":       {"trust_root = true", ""},
-		"int":        {"trust_root = 1", ""},
-		"other text": {`trust_root = "owner-admin"`, "owner-admin"},
+	for name, c := range map[string]struct{ line, want, label string }{
+		"separate":   {`trust_root = "separate"`, "separate", "separate"},
+		"absent":     {"", "", "absent"},
+		"bool":       {"trust_root = true", "", "true"},
+		"int":        {"trust_root = 1", "", "1"},
+		"array":      {`trust_root = ["a"]`, "", `["a"]`},
+		"other text": {`trust_root = "owner-admin"`, "owner-admin", "owner-admin"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			body := strings.Replace(sampleTrust, `trust_root    = "separate"`, c.line, 1)
@@ -185,8 +224,8 @@ func TestLoadTrustRoot(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.TrustRoot != c.want {
-				t.Errorf("TrustRoot = %q, want %q", got.TrustRoot, c.want)
+			if got.TrustRoot != c.want || got.TrustRootLabel != c.label {
+				t.Errorf("TrustRoot, TrustRootLabel = %q, %q; want %q, %q", got.TrustRoot, got.TrustRootLabel, c.want, c.label)
 			}
 		})
 	}
@@ -496,6 +535,7 @@ func TestLoadRefusesTrustKeysInTheUserConfig(t *testing.T) {
 		"personal_orgs": "personal_orgs = [\"github.com/factify-inc\"]\n",
 		"trust_root":    "trust_root = \"separate\"\n",
 		"stores":        "[stores.personal]\nid = \"mine\"\n",
+		"attest_keys":   "[[attest_keys]]\nkey = \"x\"\n",
 	} {
 		t.Run(key, func(t *testing.T) {
 			trust := writeTrust(t, sampleTrust)

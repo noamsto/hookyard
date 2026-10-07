@@ -13,7 +13,7 @@ import (
 // files without root. Only a build with -tags priorstest compiles this file;
 // the nix build of priors sets no tags, so no flag, env var or file can reach
 // it in a production binary.
-func trustSource() (string, statFS) { return os.Getenv("PRIORS_TEST_TRUST"), rootOwnedFS{} }
+func trustSource() (string, StatFS) { return os.Getenv("PRIORS_TEST_TRUST"), rootOwnedFS{} }
 
 // rootOwnedFS is the real file system with every owner reported as uid 0;
 // types, modes and symlinks stay real.

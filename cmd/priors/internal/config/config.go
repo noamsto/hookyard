@@ -28,6 +28,15 @@ type Config struct {
 	// TrustRoot is kept verbatim; only "separate" turns attestation on. A
 	// non-string scalar or array in the trust file reads as empty, which is off.
 	TrustRoot string `toml:"-"`
+	// TrustRootLabel names trust_root for the attestation-off message:
+	// "absent", a string verbatim, or any other value as TOML writes it.
+	TrustRootLabel string `toml:"-"`
+	// AttestKeys is the attestation allowlist; empty means no fact reads
+	// reviewed.
+	AttestKeys []AttestKey `toml:"-"`
+	// TrustDigest is the lowercase hex sha256 of the trust file's bytes as
+	// this run read them, which a verdict file must name.
+	TrustDigest string `toml:"-"`
 
 	PersonalStore string `toml:"personal_store"`
 	WorkStore     string `toml:"work_store"`
@@ -46,6 +55,17 @@ type Config struct {
 	// defaultState is the resolved default state dir, set by Load when
 	// state_dir is unset.
 	defaultState string
+	// fsys is the file system the trust file was read through.
+	fsys StatFS
+}
+
+// FS is the file system the trust file was read through, for walking other
+// root-owned paths the same way; the real one on a zero Config.
+func (c Config) FS() StatFS {
+	if c.fsys == nil {
+		return osFS{}
+	}
+	return c.fsys
 }
 
 // DefaultPath is where the config lives when --config is not given.
@@ -66,7 +86,7 @@ func Load(path string) (Config, error) {
 	return load(path, trustPath, fsys)
 }
 
-func load(path, trustPath string, fsys statFS) (Config, error) {
+func load(path, trustPath string, fsys StatFS) (Config, error) {
 	t, err := readTrust(fsys, trustPath)
 	if err != nil {
 		return Config{}, fmt.Errorf("trust file %s: %w", trustPath, err)
@@ -82,7 +102,7 @@ func load(path, trustPath string, fsys statFS) (Config, error) {
 	if md.IsDefined("scanner") {
 		return Config{}, fmt.Errorf("%s: scanner is no longer a config key: the secret scanner is pinned at build time", path)
 	}
-	for _, k := range []string{"profile", "work_orgs", "personal_orgs", "trust_root", "stores"} {
+	for _, k := range []string{"profile", "work_orgs", "personal_orgs", "trust_root", "stores", "attest_keys"} {
 		if md.IsDefined(k) {
 			return Config{}, fmt.Errorf("%s: %s is read from the trust file %s, not the user config", path, k, trustPath)
 		}
@@ -98,6 +118,8 @@ func load(path, trustPath string, fsys statFS) (Config, error) {
 	c.Profile, c.WorkOrgs, c.PersonalOrgs = t.Profile, t.WorkOrgs, t.PersonalOrgs
 	c.TrustRoot, _ = t.TrustRoot.(string)
 	c.workNames = unionNames(t.WorkNames, u.WorkNames)
+	c.TrustRootLabel, c.AttestKeys, c.TrustDigest = t.rootLabel, t.keys, t.digest
+	c.fsys = fsys
 	c.PersonalStoreID = t.Stores.Personal.ID
 	if t.Stores.Work != nil {
 		c.WorkStoreID = t.Stores.Work.ID
