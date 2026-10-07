@@ -47,8 +47,9 @@ jobs:
             SINCE="$PR_BASE_SHA"
           elif [ "$PUSH_BEFORE" != 0000000000000000000000000000000000000000 ]; then
             # After a force-push the old tip is in no clone, so --since fails
-            # the check by design: a rewrite can hide an entry deletion. An
-            # admin re-runs the check after reviewing the rewrite.
+            # this run by design, and a re-run fails the same way: a rewrite
+            # can hide an entry deletion. An admin compares .attest/ across the
+            # old and new tips; the next push's range checks normally.
             SINCE="$PUSH_BEFORE"
           fi
           if [ -n "${SINCE:-}" ]; then
