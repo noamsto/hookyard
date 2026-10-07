@@ -120,7 +120,6 @@ func load(path, trustPath string, fsys statFS) (Config, error) {
 // the user config's additions, which cannot remove a floor name.
 func (c Config) WorkNames() []string { return slices.Clone(c.workNames) }
 
-// unionNames returns floor in order, then each name of extra not already in it.
 func unionNames(floor, extra []string) []string {
 	out := slices.Clone(floor)
 	for _, n := range extra {

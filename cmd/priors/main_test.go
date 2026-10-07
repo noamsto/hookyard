@@ -1236,11 +1236,7 @@ func TestWorkNamesFloor(t *testing.T) {
 		newFloorSandbox := func(t *testing.T) *sandbox {
 			sb := newSandbox(t, "personal")
 			sb.writeTrust(`work_names = ["acme-corp"]`)
-			if row == "" {
-				sb.writeConfig()
-			} else {
-				sb.writeConfig(row)
-			}
+			sb.writeConfig(row)
 			return sb
 		}
 		t.Run(name+"/lint", func(t *testing.T) {
