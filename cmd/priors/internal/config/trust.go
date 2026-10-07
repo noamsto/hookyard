@@ -46,7 +46,7 @@ func checkTrustPath(fsys statFS, path string) (string, error) {
 	if err := checkDir("/", root); err != nil {
 		return "", err
 	}
-	queue := strings.Split(filepath.Clean(path), "/")
+	queue := strings.Split(path, "/")
 	cur := "/"
 	hops := 0
 	for len(queue) > 0 {
@@ -130,8 +130,9 @@ type trust struct {
 	Profile      string   `toml:"profile"`
 	WorkOrgs     []string `toml:"work_orgs"`
 	PersonalOrgs []string `toml:"personal_orgs"`
-	TrustRoot    string   `toml:"trust_root"`
-	Stores       struct {
+	// TrustRoot is any so that a non-string value is off, not a parse error.
+	TrustRoot any `toml:"trust_root"`
+	Stores    struct {
 		Personal *trustStore `toml:"personal"`
 		Work     *trustStore `toml:"work"`
 	} `toml:"stores"`

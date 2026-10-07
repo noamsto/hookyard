@@ -24,7 +24,8 @@ type Config struct {
 	// name a store in attestation; they are not route.StoreID kinds.
 	PersonalStoreID string `toml:"-"`
 	WorkStoreID     string `toml:"-"`
-	// TrustRoot is kept verbatim; only "separate" turns attestation on.
+	// TrustRoot is kept verbatim; only "separate" turns attestation on. A
+	// non-string value in the trust file reads as empty, which is off.
 	TrustRoot string `toml:"-"`
 
 	PersonalStore string   `toml:"personal_store"`
@@ -86,7 +87,8 @@ func load(path, trustPath string, fsys statFS) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("%s: unknown keys: %s", path, strings.Join(keys, ", "))
 	}
-	c.Profile, c.WorkOrgs, c.PersonalOrgs, c.TrustRoot = t.Profile, t.WorkOrgs, t.PersonalOrgs, t.TrustRoot
+	c.Profile, c.WorkOrgs, c.PersonalOrgs = t.Profile, t.WorkOrgs, t.PersonalOrgs
+	c.TrustRoot, _ = t.TrustRoot.(string)
 	c.PersonalStoreID = t.Stores.Personal.ID
 	if t.Stores.Work != nil {
 		c.WorkStoreID = t.Stores.Work.ID

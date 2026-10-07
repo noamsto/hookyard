@@ -12,6 +12,7 @@
   priors,
 }: let
   seamed = priors.overrideAttrs (_: {
+    pname = "priors-priorstest";
     tags = ["priorstest"];
     doCheck = false;
   });

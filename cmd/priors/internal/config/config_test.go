@@ -128,6 +128,27 @@ func TestLoadFullSample(t *testing.T) {
 	}
 }
 
+func TestLoadTrustRoot(t *testing.T) {
+	isolate(t)
+	for name, c := range map[string]struct{ line, want string }{
+		"separate":   {`trust_root = "separate"`, "separate"},
+		"bool":       {"trust_root = true", ""},
+		"int":        {"trust_root = 1", ""},
+		"other text": {`trust_root = "owner-admin"`, "owner-admin"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := strings.Replace(sampleTrust, `trust_root    = "separate"`, c.line, 1)
+			got, err := load(writeConfig(t, sample), writeTrust(t, body), fakeRoot{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.TrustRoot != c.want {
+				t.Errorf("TrustRoot = %q, want %q", got.TrustRoot, c.want)
+			}
+		})
+	}
+}
+
 func TestLoadRejects(t *testing.T) {
 	isolate(t)
 	cases := map[string]string{

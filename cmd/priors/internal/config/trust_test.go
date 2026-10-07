@@ -198,6 +198,25 @@ func TestCheckTrustPath(t *testing.T) {
 	}
 }
 
+// The kernel resolves ".." after following the symlink before it, so a
+// lexical clean of the input would look for /etc/trust.toml instead.
+func TestCheckTrustPathFollowsSymlinkBeforeDotDot(t *testing.T) {
+	f := fakeFS{
+		"/":               dir(0o755),
+		"/etc":            dir(0o755),
+		"/etc/link":       link("/opt/real"),
+		"/opt":            dir(0o755),
+		"/opt/real":       dir(0o755),
+		"/opt/trust.toml": file(validTrust),
+	}
+
+	got, err := checkTrustPath(f, "/etc/link/../trust.toml")
+
+	if err != nil || got != "/opt/trust.toml" {
+		t.Errorf("checkTrustPath = %q, %v; want /opt/trust.toml", got, err)
+	}
+}
+
 func TestCheckTrustPathNeedsAnAbsolutePath(t *testing.T) {
 	for _, p := range []string{"", "etc/priors/trust.toml"} {
 		if _, err := checkTrustPath(etcFS(), p); err == nil || !strings.Contains(err.Error(), "is not absolute") {
@@ -246,7 +265,7 @@ func TestReadTrust(t *testing.T) {
 		work     = "\n[stores.work]\nid = \"w\"\n"
 	)
 	rejected := map[string]struct{ body, want string }{
-		"unparsable":                {"profile = \n", "toml"},
+		"unparsable":                {"profile = \n", "toml: line 1 (last key \"profile\"): expected value"},
 		"unknown key":               {"profile = \"personal\"\n" + orgs + "seam_probe = 1\n" + personal, "unknown keys: seam_probe"},
 		"unknown store key":         {"profile = \"personal\"\n" + orgs + personal + "path = \"/x\"\n", "unknown keys: stores.personal.path"},
 		"unknown store kind":        {"profile = \"personal\"\n" + orgs + personal + "\n[stores.other]\nid = \"o\"\n", "unknown keys: stores.other"},
@@ -304,10 +323,27 @@ func TestReadTrust(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Stores.Work != nil || got.PersonalOrgs != nil || got.TrustRoot != "" {
+		if got.Stores.Work != nil || got.PersonalOrgs != nil || got.TrustRoot != nil {
 			t.Errorf("readTrust = %+v, want no work store, personal orgs or trust_root", got)
 		}
 	})
+
+	for name, body := range map[string]string{
+		"trust_root = true": "trust_root = true\n",
+		"trust_root = 1":    "trust_root = 1\n",
+	} {
+		t.Run(name+" is off, not an error", func(t *testing.T) {
+			f := etcFS()
+			f[etcTrust] = file("profile = \"personal\"\n" + orgs + body + personal)
+			got, err := readTrust(f, etcTrust)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s, _ := got.TrustRoot.(string); s != "" {
+				t.Errorf("TrustRoot = %v, want a non-string", got.TrustRoot)
+			}
+		})
+	}
 
 	t.Run("checks ownership before reading", func(t *testing.T) {
 		f := etcFS()
