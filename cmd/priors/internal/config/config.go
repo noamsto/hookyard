@@ -37,13 +37,17 @@ type Config struct {
 	// TrustDigest is the lowercase hex sha256 of the trust file's bytes as
 	// this run read them, which a verdict file must name.
 	TrustDigest string `toml:"-"`
+	// The stores' checkout paths and pinned remotes, also from the trust file;
+	// an empty remote pins none.
+	PersonalStore  string `toml:"-"`
+	WorkStore      string `toml:"-"`
+	PersonalRemote string `toml:"-"`
+	WorkRemote     string `toml:"-"`
 
-	PersonalStore string `toml:"personal_store"`
-	WorkStore     string `toml:"work_store"`
-	StateDir      string `toml:"state_dir"`
-	EventRecord   string `toml:"event_record"`
-	Rules         string `toml:"rules"`
-	SSHConfig     string `toml:"ssh_config"`
+	StateDir    string `toml:"state_dir"`
+	EventRecord string `toml:"event_record"`
+	Rules       string `toml:"rules"`
+	SSHConfig   string `toml:"ssh_config"`
 	// Commit is a pointer so that unset means true.
 	Commit *bool `toml:"commit"`
 	Push   bool  `toml:"push"`
@@ -102,7 +106,7 @@ func load(path, trustPath string, fsys StatFS) (Config, error) {
 	if md.IsDefined("scanner") {
 		return Config{}, fmt.Errorf("%s: scanner is no longer a config key: the secret scanner is pinned at build time", path)
 	}
-	for _, k := range []string{"profile", "work_orgs", "personal_orgs", "trust_root", "stores", "attest_keys"} {
+	for _, k := range []string{"profile", "work_orgs", "personal_orgs", "trust_root", "stores", "attest_keys", "personal_store", "work_store"} {
 		if md.IsDefined(k) {
 			return Config{}, fmt.Errorf("%s: %s is read from the trust file %s, not the user config", path, k, trustPath)
 		}
@@ -120,20 +124,20 @@ func load(path, trustPath string, fsys StatFS) (Config, error) {
 	c.workNames = unionNames(t.WorkNames, u.WorkNames)
 	c.TrustRootLabel, c.AttestKeys, c.TrustDigest = t.rootLabel, t.keys, t.digest
 	c.fsys = fsys
-	c.PersonalStoreID = t.Stores.Personal.ID
-	if t.Stores.Work != nil {
-		c.WorkStoreID = t.Stores.Work.ID
+	c.PersonalStoreID, c.PersonalStore, c.PersonalRemote = t.Stores.Personal.ID, t.Stores.Personal.Path, t.Stores.Personal.Remote
+	if w := t.Stores.Work; w != nil {
+		c.WorkStoreID, c.WorkStore, c.WorkRemote = w.ID, w.Path, w.Remote
 	}
-	for _, p := range []*string{&c.PersonalStore, &c.WorkStore, &c.StateDir, &c.EventRecord, &c.Rules, &c.SSHConfig} {
+	for _, p := range []*string{&c.StateDir, &c.EventRecord, &c.Rules, &c.SSHConfig} {
 		if *p, err = expandHome(*p); err != nil {
 			return Config{}, err
 		}
 	}
-	if err := c.resolveDirs(); err != nil {
-		return Config{}, fmt.Errorf("%s: %w", path, err)
+	if err := c.resolveDirs(trustPath, path); err != nil {
+		return Config{}, err
 	}
-	if err := c.checkDirs(); err != nil {
-		return Config{}, fmt.Errorf("%s: %w", path, err)
+	if err := c.checkDirs(trustPath, path); err != nil {
+		return Config{}, err
 	}
 	return c, nil
 }
@@ -155,26 +159,27 @@ func unionNames(floor, extra []string) []string {
 // resolveDirs replaces each absolute store and state path with its real one,
 // so that a symlinked store reads like the directory it points at and the
 // nesting check sees through symlinks. A relative path is left for checkDirs
-// to reject.
-func (c *Config) resolveDirs() error {
+// to reject. An error is prefixed with the file its path came from: the trust
+// file for a store, the user config for a state dir.
+func (c *Config) resolveDirs(trustPath, path string) error {
 	if c.StateDir == "" {
 		c.defaultState = stateHome("priors")
 	}
 	for _, d := range []struct {
-		key string
-		p   *string
+		src, key string
+		p        *string
 	}{
-		{"personal_store", &c.PersonalStore},
-		{"work_store", &c.WorkStore},
-		{"state_dir", &c.StateDir},
-		{"the default state dir", &c.defaultState},
+		{trustPath, "stores.personal.path", &c.PersonalStore},
+		{trustPath, "stores.work.path", &c.WorkStore},
+		{path, "state_dir", &c.StateDir},
+		{path, "the default state dir", &c.defaultState},
 	} {
 		if !filepath.IsAbs(*d.p) {
 			continue
 		}
 		resolved, err := ResolveDir(*d.p)
 		if err != nil {
-			return fmt.Errorf("%s: %w", d.key, err)
+			return fmt.Errorf("%s: %s: %w", d.src, d.key, err)
 		}
 		*d.p = resolved
 	}
@@ -204,40 +209,37 @@ func ResolveDir(p string) (string, error) {
 	}
 }
 
-// checkDirs requires absolute store and state paths and keeps them apart: a
-// store nested in another, or in the state dir, would publish one layer's
-// files through another's checkout.
-func (c Config) checkDirs() error {
-	type dir struct{ key, path string }
-	dirs := []dir{{"personal_store", c.PersonalStore}}
+// checkDirs requires an absolute state path and keeps the stores and state dir
+// apart: a store nested in another, or in the state dir, would publish one
+// layer's files through another's checkout. An error is prefixed with the trust
+// file when it names only stores, else with the user config.
+func (c Config) checkDirs(trustPath, path string) error {
+	type dir struct{ src, key, path string }
+	dirs := []dir{{trustPath, "stores.personal.path", c.PersonalStore}}
 	if c.WorkStore != "" {
-		dirs = append(dirs, dir{"work_store", c.WorkStore})
-	}
-	if c.StateDir != "" {
-		dirs = append(dirs, dir{"state_dir", c.StateDir})
-	}
-	for _, d := range dirs {
-		if !filepath.IsAbs(d.path) {
-			return fmt.Errorf("%s must be an absolute path, got %q", d.key, d.path)
-		}
+		dirs = append(dirs, dir{trustPath, "stores.work.path", c.WorkStore})
 	}
 	stateKey := "state_dir"
 	if c.StateDir == "" {
 		stateKey = "the default state dir"
-		if !filepath.IsAbs(c.State()) {
-			return fmt.Errorf("%s must be an absolute path, got %q", stateKey, c.State())
-		}
-		dirs = append(dirs, dir{stateKey, c.State()})
 	}
+	if !filepath.IsAbs(c.State()) {
+		return fmt.Errorf("%s: %s must be an absolute path, got %q", path, stateKey, c.State())
+	}
+	dirs = append(dirs, dir{path, stateKey, c.State()})
 	for i, a := range dirs {
 		for _, b := range dirs[i+1:] {
 			if within(a.path, b.path) || within(b.path, a.path) {
-				return fmt.Errorf("%s (%s) and %s (%s) must not be the same or nested", a.key, a.path, b.key, b.path)
+				src := path
+				if a.src == b.src {
+					src = a.src
+				}
+				return fmt.Errorf("%s: %s (%s) and %s (%s) must not be the same or nested", src, a.key, a.path, b.key, b.path)
 			}
 		}
 	}
 	if err := RefuseWorkTree(c.State()); err != nil {
-		return fmt.Errorf("%s: %w", stateKey, err)
+		return fmt.Errorf("%s: %s: %w", path, stateKey, err)
 	}
 	return nil
 }

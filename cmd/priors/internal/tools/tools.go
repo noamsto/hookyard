@@ -19,6 +19,13 @@ var (
 	Scanner string
 )
 
+// The ssh config and known_hosts a push uses, set by -ldflags -X; empty in an
+// unpinned build. Not tools, so Unpinned leaves them out: only a push needs them.
+var (
+	SSHConfig  string
+	KnownHosts string
+)
+
 // ErrUnpinned reports a tool whose path was not fixed at build time.
 var ErrUnpinned = errors.New("not pinned at build time")
 
