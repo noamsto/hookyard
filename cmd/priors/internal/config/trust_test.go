@@ -198,8 +198,7 @@ func TestCheckTrustPath(t *testing.T) {
 	}
 }
 
-// The kernel resolves ".." after following the symlink before it, so a
-// lexical clean of the input would look for /etc/trust.toml instead.
+// The kernel resolves ".." after following the symlink before it.
 func TestCheckTrustPathFollowsSymlinkBeforeDotDot(t *testing.T) {
 	f := fakeFS{
 		"/":               dir(0o755),
