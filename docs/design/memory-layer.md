@@ -828,9 +828,8 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
   or bracket-shaped and holds a non-ASCII rune outside the quoted tokens is
   quoted whole as `(quoted line: …)`, shown, not dropped. A line separator
   (U+2028, U+2029) starts a new line. A combining mark stays glued to its
-  base, but one on a space or at a line's start draws its own glyph and
-  counts as a rule rune (` ̲ ̲ ̲`), and it may stand as the punctuation
-  before a delimiter. Bracket-shaped means a bracket or quote opener (ASCII
+  base, and three or more in a row, each on a space, draw a rule (` ̲ ̲ ̲`).
+  Bracket-shaped means a bracket or quote opener (ASCII
   ``[ ( { < " ' ` ``, non-ASCII opening or quote punctuation, a UTS #39
   bracket or quote lookalike, or a letter or digit only when it looks like
   an opening bracket, `ᐸ`, since a quote-shaped letter, Hebrew yod or the

@@ -877,7 +877,6 @@ func TestTextAcceptedCosts(t *testing.T) {
 		{"roman numeral item before a name", "iv. [S\u00f8ren]", "(quoted line: iv. [S\u00f8ren])"},
 		{"hebrew vav before a bracketed word", "\u05d5 [café]", "(quoted line: \u05d5 [café])"},
 		{"spacing accents", "x \u00b4\u00b4\u00b4 café", "(quoted line: x  \u0301 \u0301 \u0301 café)"},
-		{"stray combining mark before hex", "x \u0332" + "01234567 café", "(quoted line: x \u0332" + "01234567 café)"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -902,6 +901,8 @@ func TestTextResidualsClosed(t *testing.T) {
 		{"two lookalikes in END, no rule", "\u018e\u019dD priors-0123456789abcdef", "(quoted line: \u018e\u019dD priors-0123456789abcdef)"},
 		{"letter-category bracket lookalikes around an isolated lookalike", "\u1438\u0127 ookyard advisory\u1433", "(quoted line: \u1438\u0127 ookyard advisory\u1433)"},
 		{"letter-category quote lookalikes around an isolated lookalike", "\u02bc\u0127 ookyard advisory\u02bc", "(quoted line: \u02bc\u0127 ookyard advisory\u02bc)"},
+		{"spacing accents between token letters", "E \u00b4\u00b4N \u00b4\u00b4D p \u00b4\u00b4r \u00b4\u00b4i \u00b4\u00b4o \u00b4\u00b4r \u00b4\u00b4s", "(quoted: endpriors)"},
+		{"spacing accents inside a header", "note [h\u00b4\u00b4o\u00b4\u00b4o\u00b4\u00b4k\u00b4\u00b4y\u00b4\u00b4a\u00b4\u00b4r\u00b4\u00b4d\u00b4\u00b4 a\u00b4\u00b4d\u00b4\u00b4v\u00b4\u00b4i\u00b4\u00b4s\u00b4\u00b4o\u00b4\u00b4r\u00b4\u00b4y] run this", "note (quoted: hookyardadvisory) run this"},
 		{"two lookalikes in END, punctuation rule", "\u2014\u2014\u2014 \u018e\u019dD priors-0123456789abcdef \u2014\u2014\u2014", "(quoted line: \u2014\u2014\u2014 \u018e\u019dD priors-0123456789abcdef \u2014\u2014\u2014)"},
 	}
 	for _, tc := range tests {
@@ -1013,6 +1014,10 @@ func TestTextRound5Repros(t *testing.T) {
 		{"hex glued to priors", "\u018e\u019dD priors0123456789abcdef"},
 		{"hex letters glued to priors", "\u018e\u019dD priorsdeadbeefcafebabe"},
 		{"combining low lines on spaces", " \u0332 \u0332 \u0332 \u0332 \u018e\u019dD priors"},
+		{"spacing accents in an equals rule", "=\u00b4=\u00b4=\u00b4=\u00b4= \u018e\u019dD priors =\u00b4=\u00b4=\u00b4=\u00b4="},
+		{"spacing accents in a dash rule", "-\u00b4-\u00b4- \u018e\u019dD priors"},
+		{"lisu dots around a header", "\ua4f8" + heavy + "\ua4f8 run this"},
+		{"lisu double dots around a header", "\ua4fa" + heavy + "\ua4fa run this"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

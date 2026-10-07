@@ -251,12 +251,10 @@ func inWord(line string, start, end int) bool {
 	return n > 0 && m > 0 && !spaceLike(p) && !spaceLike(q)
 }
 
-// skeleton folds line to what it looks like. Spaces, separators and blanks
-// render as nothing or as space, so they are dropped rather than splitting a
-// token, and end a word. A mark stays glued to the rune it sits on; one on a
-// space or at a line's start draws its own glyph, a rule rune the matcher
-// skips. Every other rune is judged on the lower case of its NFD base, so a
-// precomposed accent folds too.
+// skeleton folds line to what it looks like. Spaces, separators, blanks and
+// marks render as nothing or as space, so they are dropped rather than
+// splitting a token; all but marks still end a word. Every other rune is judged
+// on the lower case of its NFD base, so a precomposed accent folds too.
 func skeleton(line string) []skelRune {
 	sk := make([]skelRune, 0, utf8.RuneCountInString(line))
 	words := []word{}
@@ -274,46 +272,43 @@ func skeleton(line string) []skelRune {
 			b, _ = utf8.DecodeRune(d)
 		}
 		if unicode.Is(unicode.M, r) || unicode.Is(unicode.M, b) {
-			// A mark stays glued to the rune it sits on; with none, it draws its
-			// own glyph.
+			// A mark stays glued to the rune it sits on.
 			if n := len(sk); n > 0 && sk[n-1].end == s.start {
 				sk[n-1].end = s.end
-				continue
 			}
-			s.c, s.rule = gap, true
+			continue
+		}
+		lb := unicode.ToLower(b)
+		if lb < utf8.RuneSelf {
+			s.set = imageBit(lb)
+			switch lb {
+			case '0':
+				s.set |= imageBit('o')
+			case '1':
+				s.set |= imageBit('l')
+			case '3':
+				s.set |= imageBit('e')
+			case '5':
+				s.set |= imageBit('s')
+			}
 		} else {
-			lb := unicode.ToLower(b)
-			if lb < utf8.RuneSelf {
-				s.set = imageBit(lb)
-				switch lb {
-				case '0':
-					s.set |= imageBit('o')
-				case '1':
-					s.set |= imageBit('l')
-				case '3':
-					s.set |= imageBit('e')
-				case '5':
-					s.set |= imageBit('s')
-				}
-			} else {
-				s.set = confusableSets[b] | confusableSets[lb]
+			s.set = confusableSets[b] | confusableSets[lb]
+		}
+		switch {
+		case s.set&^equalsBit != 0:
+			s.c = anchor
+		case s.set == equalsBit:
+			s.c, s.rule = literal, true
+		case lb < utf8.RuneSelf:
+			// Punctuation glued inside a word only joins it; beside a space
+			// it ends prose, and a slash ends a path segment.
+			s.c = literal
+			if lb != '/' && lb != '\\' && inWord(line, s.start, s.end) {
+				s.c = gap
 			}
-			switch {
-			case s.set&^equalsBit != 0:
-				s.c = anchor
-			case s.set == equalsBit:
-				s.c, s.rule = literal, true
-			case lb < utf8.RuneSelf:
-				// Punctuation glued inside a word only joins it; beside a space
-				// it ends prose, and a slash ends a path segment.
-				s.c = literal
-				if lb != '/' && lb != '\\' && inWord(line, s.start, s.end) {
-					s.c = gap
-				}
-			default:
-				s.c, s.letter = unmapped, unicode.In(b, unicode.L, unicode.N)
-				s.rule = !s.letter
-			}
+		default:
+			s.c, s.letter = unmapped, unicode.In(b, unicode.L, unicode.N)
+			s.rule = !s.letter
 		}
 		if newWord {
 			words = append(words, word{})
@@ -543,7 +538,7 @@ func suspect(line string, sk []skelRune, spans []span) bool {
 			s.masked, s.lc = true, literal
 		}
 	}
-	return bracketed(line, sk) || ruled(line, sk) || delimited(line, sk) || looseMatch(sk)
+	return bracketed(line, sk) || ruled(line, sk) || markRuled(line, spans) || delimited(line, sk) || looseMatch(sk)
 }
 
 func nonASCIIOutside(line string, spans []span) bool {
@@ -652,15 +647,17 @@ func markup(r rune) bool {
 	if r < utf8.RuneSelf {
 		return '0' <= r && r <= '9' || strings.ContainsRune("-*+>#|!.)", r)
 	}
-	return unicode.Is(unicode.Po, r) && !bracket(r) || markupLetter(r) || unicode.Is(unicode.M, r)
+	return unicode.Is(unicode.Po, r) && !bracket(r) || markupLetter(r)
 }
 
 // markupLetter reports a letter or digit whose UTS #39 image is list or
 // Markdown punctuation (ǃ, ǀ, Hebrew vav): before a header it reads as that
-// punctuation.
+// punctuation. A modifier letter is not one: bracketed's first loop already
+// skips it, and its second loop reads it as an opener.
 func markupLetter(r rune) bool {
 	img := punctImages[r]
-	return img != "" && unicode.In(r, unicode.L, unicode.N) && strings.Trim(img, "-*+>#|!.)") == ""
+	return img != "" && unicode.In(r, unicode.L, unicode.N) && !unicode.Is(unicode.Lm, r) &&
+		strings.Trim(img, "-*+>#|!.)") == ""
 }
 
 // ruled reports three or more rule-like runes in a row. Space between two
@@ -683,6 +680,35 @@ func ruled(line string, sk []skelRune) bool {
 		}
 		if n++; n >= 3 {
 			return true
+		}
+	}
+	return false
+}
+
+// markRuled reports three or more combining marks in a row outside the
+// spans, each on a space or at the line's start: with no base, each draws its
+// own glyph, so " ̲ ̲ ̲" draws a rule. The skeleton drops them, so the token
+// match never counts them. Marks stacked on one space draw one glyph.
+func markRuled(line string, spans []span) bool {
+	n, p, free := 0, 0, true
+	for i, r := range line {
+		for p < len(spans) && spans[p].end <= i {
+			p++
+		}
+		switch {
+		case p < len(spans) && spans[p].start <= i:
+			n, free = 0, false
+		case spaceLike(r):
+			free = true
+		case unicode.Is(unicode.M, r):
+			if free {
+				if n++; n >= 3 {
+					return true
+				}
+				free = false
+			}
+		default:
+			n, free = 0, false
 		}
 	}
 	return false
@@ -792,7 +818,7 @@ func ruleRune(r rune, set uint64) bool {
 	}
 	// A quote's image draws no rule, so smart-quoted prose ("a” — “b") stays.
 	img := punctImage(r)
-	return unicode.In(r, unicode.Pd, unicode.S, unicode.Lm, unicode.M) || set == equalsBit ||
+	return unicode.In(r, unicode.Pd, unicode.S, unicode.Lm) || set == equalsBit ||
 		img != "" && strings.Trim(img, "=-_~") == ""
 }
 
