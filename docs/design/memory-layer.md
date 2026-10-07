@@ -1186,17 +1186,18 @@ one. The owner's hosts fail the first two today (the user is in the rootful
 there (*Host classification*, below); fixing `docker` and `trusted-users`
 alone does not turn it on.
 
-**Host classification: attestation is off on a single-user admin host.** On
-a host whose owner is also its admin, the root credential is typed into the
-owner's own session, a shell and terminal whose config agents can write. An
-agent that shadows `sudo` with a shell function, or types into a pane whose
-sudo timestamp is still live, takes root at the next rebuild, and with root it
-can rewrite the trust file, the `priors` binary and the verdicts. A `reviewed`
-label an agent can mint that way is a tripwire, not a wall, so attestation is
-off there. The trust file's `trust_root` key (`"owner-admin"` or
-`"separate"`; the module option that writes it defaults to `owner-admin`)
-turns it on only when it is exactly the string `"separate"`; an absent key,
-`"owner-admin"`, any other string or a non-string value is off.
+**Host classification: attestation is off on a single-user admin host.** On a
+host whose owner administers it from their own user, the one agents run as,
+the root credential is typed into the owner's own session, a shell and
+terminal whose config agents can write. An agent that shadows `sudo` with a
+shell function, or types into a pane whose sudo timestamp is still live, takes
+root at the next rebuild, and with root it can rewrite the trust file, the
+`priors` binary and the verdicts. A `reviewed` label an agent can mint that
+way is a tripwire, not a wall, so attestation is off there. The trust file's
+`trust_root` key (`"owner-admin"` or `"separate"`; the module option that
+writes it defaults to `owner-admin`) turns it on only when it is exactly the
+string `"separate"`; an absent key, `"owner-admin"`, any other string or a
+non-string value is off.
 
 **When `separate` is honest.** All three hold. First, the user agents run as
 has no route to root by any mechanism, for example: no membership of
@@ -1208,26 +1209,35 @@ root; not a Nix trusted user, directly or through a group. Second, no
 credential of root, or of any account that can become root, is ever entered
 in a session agents run in (a separate admin account on another VT, another
 macOS user or another device; never `sudo` or `su admin` in the owner's
-terminal or tmux), and the trust file and allowlist come from the Nix store
-through that admin's rebuild, or are root-owned with no agent route to root.
-Third, a host becomes `separate` only after a reinstall, or after a wipe of
-all root-writable state outside module-managed config, a list that is open:
-for example root's dotfiles and `authorized_keys`; root's Nix profiles and
-channels (`/nix/var/nix/profiles/per-user/root`, `/root/.nix-defexpr`);
-system cron and launchd jobs; setuid files; `/var/lib/priors`; a `nix.conf`
-include the module does not manage, such as darwin's
-`/etc/nix/nix.custom.conf`, where a planted substituter and trusted key make
-the admin's own rebuild install an attacker-built `priors`; the ESP and
-bootloader; and on darwin, `/etc` outside nix-darwin (`sudoers.d`, `pam.d`,
-LaunchDaemons). The Nix store is checked too, with
-`nix-store --verify --check-contents --repair` over the whole store, since a
-root agent can patch a valid store path in place (the `priors` binary,
-`ssh-keygen`, `git`) and a rebuild reuses those bytes. Anything planted while
-it was owner-admin survives a rebuild; when in doubt, reinstall. The second
-and third are human rules, stated as such. The module asserts the first at
-evaluation, as far as declarative NixOS config shows it (groups, sudo and
-doas rules, polkit admin identities, root's authorized keys,
-`trusted-users`); with
+terminal or tmux); that admin account runs nothing the agents' user can write:
+no user-owned prefix such as Homebrew's on its `PATH`, and no git command, a
+rebuild's included, in a checkout the agents' user can write (its config and
+hooks run code), so the admin rebuilds from its own clone; and the trust file
+and allowlist come from the Nix store through that admin's rebuild, or are
+root-owned with no agent route to root. Third, a host becomes `separate` only
+after a reinstall, or after a wipe of all root-writable state outside
+module-managed config, a list that is open: for example root's dotfiles and
+`authorized_keys`; root's Nix profiles and channels
+(`/nix/var/nix/profiles/per-user/root`, `/root/.nix-defexpr`); system cron and
+launchd jobs; setuid files; `/var/lib/priors`; a `nix.conf` include the module
+does not manage, such as darwin's `/etc/nix/nix.custom.conf`, where a planted
+substituter and trusted key make the admin's own rebuild install an
+attacker-built `priors`; the ESP and bootloader; and on darwin, `/etc`
+(`sudoers.d`, `pam.d`) and LaunchDaemons outside nix-darwin. The Nix store is
+checked too, since a root agent can patch a valid store path in place (the
+`priors` binary, `ssh-keygen`, `git`) and a rebuild reuses those bytes:
+`nix-store --verify --check-contents --repair` over the whole store, run from
+trusted boot media and only after that `nix.conf` include is gone, since
+`--repair` fetches from the configured substituters. On its own it trusts the
+Nix database, which root can rewrite along with `nix-store` itself, so every
+path is also verified by signature with only the keys the module configures
+trusted (`nix store verify --all --sigs-needed 1`), and every path that fails
+or carries no trusted signature, locally built ones such as `priors` included,
+is deleted so the rebuild rebuilds it. Anything planted while it was
+owner-admin survives a rebuild; when in doubt, reinstall. The second and third
+are human rules, stated as such. The module asserts the first at evaluation,
+as far as declarative NixOS config shows it (groups, sudo and doas rules,
+polkit admin identities, root's authorized keys, `trusted-users`); with
 `users.mutableUsers = true` imperative changes are invisible to it, and on
 nix-darwin `admin` membership is not declared, so there the first is a human
 rule too. When `separate` is declared and the assertion fails, the module
@@ -1281,10 +1291,11 @@ route to root, so the first condition of *When `separate` is honest* fails
 however the credential is entered, and the owner holds no FIDO2 key; revisit
 if the owner adopts one. A host where the agents' user has no route to root
 and never sees the admin credential (another VT's admin account, another
-macOS user or another device) is not (c): it is what `separate` declares,
-simply not deployed on the owner's hosts today. Attesting also needs the
-FIDO2 attestation key, so promotion waits on both that key and a `separate`
-host.
+macOS user or another device) is not (c): it is what `separate` declares once
+all three conditions of *When `separate` is honest* hold, so a converted
+owner-admin host only after the third's reinstall or wipe; it is simply not
+deployed on the owner's hosts today. Attesting also needs the FIDO2
+attestation key, so promotion waits on both that key and a `separate` host.
 
 **Unwritable means no agent write takes effect without a human's root act.**
 The trust file's source lives in nix-config, and the `priors` binary, with
@@ -1358,7 +1369,7 @@ store's trigger socket, waits up to 60 s for the verdict file to show the
 entry's new state, or an `ok` verdict whose `tip` descends from the entry's
 commit (below), prints `<name> <entry sha256> <commit>` — the name, the
 sha256 of the entry file's bytes (the verdict file's key) and the entry's
-commit id — and tells the human one of:
+commit id, the arguments `--check` takes — and tells the human one of:
 
 - in effect: the verdict file lists the entry `reviewed` for an attest; for a
   revoke, only a `revoked` line counts, at the tip or not (below).
@@ -1384,22 +1395,25 @@ commit id — and tells the human one of:
   the same clean fetch and walk settings; a `tip` it still does not find is
   not this case.
 - pushed but not yet observed, with the reason the job reported. That is not
-  final: the human checks again with `priors attest --check <name> <commit>`,
-  naming the name and commit it printed, which signs and pushes nothing. It
-  applies the same `info/grafts` and `shallow` refusal as `priors attest`,
-  and reads that commit's `.attest/<name>` with replace objects off
-  (`GIT_NO_REPLACE_OBJECTS=1`) and `-c core.commitGraph=false`, as its walks
-  do, since a blob read through `<commit>:<path>` honours a planted
-  `refs/replace/` ref. It requires the entry to pass checks 4–6 for `<name>`,
-  with `op: revoke` accepted as for a verdict line: an allowlisted sk
-  signature with both flags, `store` this store's id and `name` equal to
-  `<name>`; an entry that fails them is refused, naming the failing check. It
-  prints the name and the entry digest it checked, and reports by the same
-  rules against the current verdict file, so an entry the job walks after the
-  wait, under junk or a restore pushed on top, still reads observed but not
-  in effect. Other hosts
-  see the entry at their next run of that store's unit, within 15 min + 2 ×
-  300 s, about 25 min, of the push landing while they can fetch.
+  final: the human checks again with
+  `priors attest --check <name> <entry sha256> <commit>`, copying the line it
+  printed, which signs and pushes nothing. It applies the same `info/grafts`
+  and `shallow` refusal as `priors attest`, and reads that commit's
+  `.attest/<name>` with replace objects off (`GIT_NO_REPLACE_OBJECTS=1`) and
+  `-c core.commitGraph=false`, as its walks do, since a blob read through
+  `<commit>:<path>` honours a planted `refs/replace/` ref. Neither stops an
+  agent that rewrites the commit or tree object itself in the checkout's
+  object store, which git does not re-hash on a read, so it refuses unless the
+  sha256 of the bytes it read equals the `<entry sha256>` given. It requires
+  the entry to pass checks 4–6 for `<name>`, with `op: revoke` accepted as for
+  a verdict line: an allowlisted sk signature with both flags, `store` this
+  store's id and `name` equal to `<name>`; an entry that fails them is
+  refused, naming the failing check. It prints the name and the entry digest
+  it checked, and reports by the same rules against the current verdict file,
+  so an entry the job walks after the wait, under junk or a restore pushed on
+  top, still reads observed but not in effect. Other hosts see the entry at
+  their next run of that store's unit, within 15 min + 2 × 300 s, about 25
+  min, of the push landing while they can fetch.
 - not pushed: the commit exists only in this working tree. An attest reads
   `proposed` everywhere, and a revoke is in effect nowhere (residual (e)).
 
@@ -2481,20 +2495,22 @@ flagged facts stops being optional.
   found after the re-fetch, reports pushed but not yet observed; with the
   job's run still going past the 60 s wait, so the revoke reports pushed but
   not yet observed, and junk then a restore of H pushed on top before the next
-  run, `priors attest --check <name> <commit>` on the revoke's commit reports
-  it observed but not in effect, printing the name and digest it checked,
-  and a replace ref planted for the revoke's commit, pointing at a commit
-  whose entry bytes have a `revoked` line (another fact's tip revoke), does
-  not change what it reports; the retry numbers 11 and reads `revoked`; with
-  the remote rewritten after the job's last fetch to drop a name's winning
-  entry, a retry reads `superseded` once and the next retry wins; *lapse*
-  (check 8): an archive or delete without a revoke, then a forward-commit
-  restore, is `proposed`, as is an edit followed by a revert to the attested
-  bytes, over the observed set, commits no longer reachable from the remote
-  tip included, and a re-attest after either makes it `reviewed`; lint reports
-  a lapsed entry as a stale attestation from the verdict file, walking no
-  history; *verdict job*: its only inputs are the trust file, the store's
-  read-only credential and its own state, so a planted `.git/config`,
+  run, `priors attest --check <name> <entry sha256> <commit>` on the revoke's
+  commit reports it observed but not in effect, printing the name and digest
+  it checked, and a replace ref planted for the revoke's commit, pointing at a
+  commit whose entry bytes have a `revoked` line (another fact's tip revoke),
+  does not change what it reports, and a loose tree object for that commit
+  rewritten to point at an earlier same-name attest still listed `reviewed` is
+  refused on the digest mismatch; the retry numbers 11 and reads `revoked`;
+  with the remote rewritten after the job's last fetch to drop a name's
+  winning entry, a retry reads `superseded` once and the next retry wins;
+  *lapse* (check 8): an archive or delete without a revoke, then a
+  forward-commit restore, is `proposed`, as is an edit followed by a revert to
+  the attested bytes, over the observed set, commits no longer reachable from
+  the remote tip included, and a re-attest after either makes it `reviewed`;
+  lint reports a lapsed entry as a stale attestation from the verdict file,
+  walking no history; *verdict job*: its only inputs are the trust file, the
+  store's read-only credential and its own state, so a planted `.git/config`,
   `config.toml` or owner environment is not read, and no git runs in a
   directory the owner's user can write; it runs as `priors-verify`, not root;
   the timer counts start to start (`OnUnitActiveSec`, never
@@ -2568,23 +2584,23 @@ flagged facts stops being optional.
   entry as in effect, observed but not in effect (`superseded` or `lapsed`,
   with the action, or an `ok` verdict with no line whose `tip` descends from
   the entry's commit), pushed but not yet observed (re-checked by
-  `priors attest --check <name> <commit>`, which signs and pushes nothing and
-  refuses an entry that fails checks 4–6 for that name, another name's entry
-  at that commit included), or not pushed; the environment it runs
-  `ssh-keygen` in is exactly the four allowlisted variables, so a planted
-  `SSH_SK_HELPER`, `SSH_SK_PROVIDER`, `OPENSSL_CONF`, `LD_LIBRARY_PATH`,
-  `LD_AUDIT`, `LIBPCSCLITE_DELEGATE` or `SSH_AUTH_SOCK` in the caller's
-  environment has no effect; a preloaded library's constructor does not run
-  in `priors attest` on either platform (a static Linux build; a restricted
-  or hardened-runtime darwin binary); it
-  refuses to run with any `LD_*` or `DYLD_*` in its own environment, refuses
-  a key handle whose public key is not allowlisted, and reads the PIN from
-  the terminal only; *display*: `show` and `search` print an unverified
-  `reviewed` as `proposed`; *the guard*: an agent's write to an attest entry
-  (`.attest/` included), to `confidence: reviewed`, to a checkout index, or
-  under `priors`'s config or state dirs is denied. Fixtures sign with a
-  software stand-in authenticator that sets the flags byte per case, and the
-  hardware evidence check is faked the same way;
+  `priors attest --check <name> <entry sha256> <commit>`, which signs and
+  pushes nothing and refuses an entry whose bytes do not hash to the given
+  digest or that fails checks 4–6 for that name, another name's entry at that
+  commit included), or not pushed; the environment it runs `ssh-keygen` in is
+  exactly the four allowlisted variables, so a planted `SSH_SK_HELPER`,
+  `SSH_SK_PROVIDER`, `OPENSSL_CONF`, `LD_LIBRARY_PATH`, `LD_AUDIT`,
+  `LIBPCSCLITE_DELEGATE` or `SSH_AUTH_SOCK` in the caller's environment has no
+  effect; a preloaded library's constructor does not run in `priors attest` on
+  either platform (a static Linux build; a restricted or hardened-runtime
+  darwin binary); it refuses to run with any `LD_*` or `DYLD_*` in its own
+  environment, refuses a key handle whose public key is not allowlisted, and
+  reads the PIN from the terminal only; *display*: `show` and `search` print
+  an unverified `reviewed` as `proposed`; *the guard*: an agent's write to an
+  attest entry (`.attest/` included), to `confidence: reviewed`, to a checkout
+  index, or under `priors`'s config or state dirs is denied. Fixtures sign
+  with a software stand-in authenticator that sets the flags byte per case,
+  and the hardware evidence check is faked the same way;
 - **injection hygiene** (§4.4): bidi, zero-width and tag characters reach
   the model stripped; each protected string — `[hookyard advisory]`, the
   store header, the BEGIN and END fence lines — in ASCII, any case and
@@ -2758,20 +2774,22 @@ declares `trust_root = "separate"` (decision 8). It is not a v0 blocker
    gaps behind it (§4.7, §5, workstream 8 below) — is built only if §7's
    recall A/B shows a delta.
 8. **Attestation off on single-user admin hosts — decided 2026-10-04**
-   (§4.4, *Host classification*; #171). Where the owner is also the admin,
-   the root credential is typed into a session agents can write, so an agent
-   can take root and mint a `reviewed` label; attestation is off there, and
-   on only where the trust file declares `trust_root = "separate"`. Rejected:
-   (b) opt-in session trust with a stated residual, a tripwire dressed as a
-   wall; (c) an out-of-band root while the owner's own user stays
-   root-capable (a hardware-key-signed allowlist replacing the root-owned
-   trust file, or polkit or an admin credential outside tmux), since the
-   user agents run as keeps a route to root however the credential is
-   entered, and the owner holds no FIDO2 key. A host where the agents' user
-   has no route to root and never sees the admin credential (another VT's
-   admin account, another macOS user or another device) is not (c); it is
-   what `separate` declares, not deployed on the owner's hosts today.
-   Revisit (c) if the owner adopts a FIDO2 key (§6).
+   (§4.4, *Host classification*; #171). Where the owner administers the host
+   from their own user, the one agents run as, the root credential is typed
+   into a session agents can write, so an agent can take root and mint a
+   `reviewed` label; attestation is off there, and on only where the trust
+   file declares `trust_root = "separate"`. Rejected: (b) opt-in session trust
+   with a stated residual, a tripwire dressed as a wall; (c) an out-of-band
+   root while the owner's own user stays root-capable (a hardware-key-signed
+   allowlist replacing the root-owned trust file, or polkit or an admin
+   credential outside tmux), since the user agents run as keeps a route to
+   root however the credential is entered, and the owner holds no FIDO2 key. A
+   host where the agents' user has no route to root and never sees the admin
+   credential (another VT's admin account, another macOS user or another
+   device) is not (c); it is what `separate` declares once all three
+   conditions of §4.4's *When `separate` is honest* hold (a converted
+   owner-admin host only after a reinstall or wipe), not deployed on the
+   owner's hosts today. Revisit (c) if the owner adopts a FIDO2 key (§6).
 
 ---
 
