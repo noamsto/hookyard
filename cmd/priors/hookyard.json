@@ -19,7 +19,7 @@
       "exec": "/run/current-system/sw/bin/priors",
       "events": ["pre_tool"],
       "engines": ["claude-code", "codex", "cursor", "pi"],
-      "match": ["Bash", "Edit", "Write", "MultiEdit"],
+      "match": ["Bash", "Edit", "Write", "MultiEdit", "edit"],
       "timeout_ms": 1000
     }
   ]

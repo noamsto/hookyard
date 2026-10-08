@@ -48,6 +48,10 @@ func TestHookWriteGuardDenies(t *testing.T) {
 			"edits": []map[string]string{{"old_string": "a", "new_string": "b"}}})},
 		{"fact reviewed Write", "Write", guardInput(t, map[string]any{"file_path": fact, "content": claim})},
 		{"fact reviewed Edit", "Edit", guardInput(t, map[string]any{"file_path": fact, "old_string": "proposed", "new_string": "  confidence: reviewed"})},
+		{"fact Edit proposed to reviewed", "Edit", guardInput(t, map[string]any{"file_path": fact, "old_string": "proposed", "new_string": "reviewed"})},
+		{"Pi write path", "Write", guardInput(t, map[string]any{"path": attest, "content": "x\n"})},
+		{"patch body", "Write", guardInput(t, map[string]any{"input": "*** Add File: " + attest})},
+		{"sed flags apart", "Bash", guardInput(t, map[string]any{"command": "sed -E -i s/a/b/ " + fact})},
 		{"fact Bash", "Bash", guardInput(t, map[string]any{"command": "sed -i s/a/b/ " + fact})},
 	}
 	for _, tt := range tests {
@@ -65,6 +69,7 @@ func TestHookWriteGuardAllows(t *testing.T) {
 		{"unrelated Bash write", "Bash", guardInput(t, map[string]any{"command": "echo x > " + filepath.Join(sb.dir, "out.txt")})},
 		{"cat index", "Bash", guardInput(t, map[string]any{"command": "cat " + filepath.Join(sb.personal, "MEMORY.md")})},
 		{"rg state", "Bash", guardInput(t, map[string]any{"command": "rg needle " + sb.state})},
+		{"cat index with stderr redirect", "Bash", guardInput(t, map[string]any{"command": "cat " + filepath.Join(sb.personal, "MEMORY.md") + " 2>/dev/null"})},
 		{"cat attest", "Bash", guardInput(t, map[string]any{"command": "cat " + filepath.Join(sb.personal, ".attest", "entry")})},
 		{"fact proposed Write", "Write", guardInput(t, map[string]any{"file_path": fact, "content": "---\nmetadata:\n  confidence: proposed\n---\nb\n"})},
 	}

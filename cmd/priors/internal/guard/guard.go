@@ -5,6 +5,7 @@ package guard
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -47,6 +48,11 @@ func both(dir string) []string {
 		return nil
 	}
 	out := []string{filepath.Clean(dir)}
+	if h, err := os.UserHomeDir(); err == nil && within(out[0], h) {
+		if rel, err := filepath.Rel(h, out[0]); err == nil {
+			out = append(out, "~/"+rel)
+		}
+	}
 	if r, err := config.ResolveDir(dir); err == nil && r != out[0] {
 		out = append(out, r)
 	}
@@ -54,15 +60,20 @@ func both(dir string) []string {
 }
 
 // reviewedLine matches a claim line; a plain line match is the whole rule.
-var reviewedLine = regexp.MustCompile(`(?m)^[ \t]*confidence:[ \t]*reviewed[ \t]*\r?$`)
+// A bare `reviewed` word also counts: an Edit that turns proposed into
+// reviewed carries no confidence: key in its new text.
+var reviewedLine = regexp.MustCompile(`\breviewed\b`)
+
+// stderrRedirect is a redirect that cannot write a protected file.
+var stderrRedirect = regexp.MustCompile(`[0-9]*>&[0-9-]|[0-9]*>>?[ \t]*/dev/null`)
 
 // writeToken matches a shell token that can write. Plain text matching: a
 // word-boundary scan, not a parse.
 var writeToken = regexp.MustCompile(
 	`>|(^|[^\w.-])(tee|mv|cp|rm|install|dd|truncate|eval)($|[^\w.-])` +
-		`|(^|[^\w.-])sed[ \t]+(-[A-Za-z]*i|--in-place)` +
-		`|(^|[^\w.-])perl[ \t]+-[A-Za-z]*i` +
-		`|(^|[^\w.-])(bash|sh)[ \t]+-[A-Za-z]*c`)
+		`|(^|[^\w.-])sed\b[^|;&\n]*[ \t](-[A-Za-z]*i|--in-place)` +
+		`|(^|[^\w.-])perl\b[^|;&\n]*[ \t]-[A-Za-z]*i` +
+		`|(^|[^\w.-])(bash|sh)\b[^|;&\n]*[ \t]-[A-Za-z]*c`)
 
 // Check returns why the call must be denied, or "".
 func Check(s Set, cwd, tool string, input json.RawMessage) string {
@@ -78,14 +89,22 @@ func Check(s Set, cwd, tool string, input json.RawMessage) string {
 	case "write", "edit", "multiedit":
 		var in struct {
 			FilePath  string `json:"file_path"`
+			Path      string `json:"path"`
 			Content   string `json:"content"`
 			NewString string `json:"new_string"`
 			Edits     []struct {
 				NewString string `json:"new_string"`
 			} `json:"edits"`
 		}
-		if json.Unmarshal(input, &in) != nil || in.FilePath == "" {
-			return ""
+		if len(input) == 0 || json.Unmarshal(input, &in) != nil {
+			return "priors: an unreadable write call is denied"
+		}
+		if in.FilePath == "" {
+			in.FilePath = in.Path
+		}
+		if in.FilePath == "" {
+			// A patch body names its paths inline (Codex apply_patch).
+			return s.checkText(string(input))
 		}
 		texts := []string{in.Content, in.NewString}
 		for _, e := range in.Edits {
@@ -127,9 +146,14 @@ func (s Set) checkWrite(cwd, path, text string) string {
 }
 
 func (s Set) checkCommand(cmd string) string {
-	if !writeToken.MatchString(cmd) {
+	if !writeToken.MatchString(stderrRedirect.ReplaceAllString(cmd, "")) {
 		return ""
 	}
+	return s.checkText(cmd)
+}
+
+// checkText denies text that names a protected path.
+func (s Set) checkText(cmd string) string {
 	protected := append(slices.Clone(s.state), s.stores...)
 	protected = append(protected, attestDir)
 	if slices.ContainsFunc(protected, func(p string) bool { return strings.Contains(cmd, p) }) {

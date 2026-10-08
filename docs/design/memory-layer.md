@@ -1893,7 +1893,7 @@ and contains a write-shaped token (`>`, `tee`, `sed -i`, `perl -i`, `mv`, `cp`,
 `rm`, `install`, `dd`, `truncate`, `eval`, `bash -c`, `sh -c`); over-denying is
 accepted. **Residuals:** a path built through a variable, glob or command
 substitution, a script or other interpreter (`python`, `awk`, `git`) that does
-the write, and any write-shaped token the list omits are not seen; none changes
+the write, a relative path written from a store or state dir as the working directory, a store path reached only through a symlink the config does not resolve, and any write-shaped token the list omits are not seen; none changes
 what attestation rests on, the key and the unwritable allowlist.
 
 **v0 builds no attestation**: no entry, no verdict job, no `priors verify`,
