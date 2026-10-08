@@ -83,6 +83,9 @@ func DefaultPath() string {
 	return filepath.Join(homeDir(), ".config", "priors", "config.toml")
 }
 
+// DefaultState is priors' state directory when no state_dir is configured.
+func DefaultState() string { return stateHome("priors") }
+
 // Load reads the trust file, then validates the user config at path. A typo'd
 // key is an error, not a silently ignored setting.
 func Load(path string) (Config, error) {

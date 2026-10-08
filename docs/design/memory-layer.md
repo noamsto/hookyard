@@ -1884,6 +1884,18 @@ the tool calls hookyard sees, and fails open (R8). The key's non-usability
 plus an unwritable allowlist, and an entry bound to the fact's identity — not
 the guard — is what makes attestation hold.
 
+Implemented as plain text and path matching, with no shell parsing or edit
+simulation. `Edit`, `Write` and `MultiEdit` are denied for any path under a
+`.attest/` element, a generated `MEMORY.md` or a priors state dir, and for a
+fact file in a store only when the new text has a `confidence: reviewed` line.
+`Bash` is denied when the command text names one of those paths (or `.attest`)
+and contains a write-shaped token (`>`, `tee`, `sed -i`, `perl -i`, `mv`, `cp`,
+`rm`, `install`, `dd`, `truncate`, `eval`, `bash -c`, `sh -c`); over-denying is
+accepted. **Residuals:** a path built through a variable, glob or command
+substitution, a script or other interpreter (`python`, `awk`, `git`) that does
+the write, and any write-shaped token the list omits are not seen; none changes
+what attestation rests on, the key and the unwritable allowlist.
+
 **v0 builds no attestation**: no entry, no verdict job, no `priors verify`,
 no `priors attest`, no `priors trust check`. Its commit gate refuses every
 `confidence: reviewed` fact as `unattested-review`

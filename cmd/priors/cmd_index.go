@@ -16,6 +16,7 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/commit"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
+	"github.com/noamsto/hookyard/cmd/priors/internal/guard"
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
 	"github.com/noamsto/hookyard/cmd/priors/internal/tier1"
@@ -39,6 +40,14 @@ type hookResult struct {
 	text    string
 	reports []string
 	call    *envelope
+	deny    string
+}
+
+type denyOutput struct {
+	HookSpecificOutput struct {
+		PermissionDecision       string `json:"permissionDecision"`
+		PermissionDecisionReason string `json:"permissionDecisionReason"`
+	} `json:"hookSpecificOutput"`
 }
 
 type hookOutput struct {
@@ -75,7 +84,8 @@ func cmdIndex(args []string, s streams) int {
 
 // cmdBare is hookyard's exec handler: priors takes no arguments there, so the
 // envelope says what to do. session_start answers with the index; pre_tool
-// and post_tool answer nothing and leave gate 2's markers for the session.
+// leaves gate 2's markers for the session and may deny a write to what only
+// priors writes; post_tool answers nothing.
 func cmdBare(s streams) int {
 	if !isPiped(s.in) {
 		s.errText(usage)
@@ -83,7 +93,10 @@ func cmdBare(s streams) int {
 	}
 	res := runHook(func(ctx context.Context) hookResult {
 		input, err := readEnvelope(s.in)
-		if input.CanonicalEvent == "pre_tool" || input.CanonicalEvent == "post_tool" {
+		if input.CanonicalEvent == "pre_tool" {
+			return hookResult{call: &input, deny: guardToolCall(input)}
+		}
+		if input.CanonicalEvent == "post_tool" {
 			return hookResult{call: &input}
 		}
 		if err != nil || input.CanonicalEvent != "session_start" {
@@ -95,7 +108,21 @@ func cmdBare(s streams) int {
 		recordToolCall(*res.call)
 	}
 	printHook(s, res, false)
+	if res.deny != "" {
+		var out denyOutput
+		out.HookSpecificOutput.PermissionDecision = "deny"
+		out.HookSpecificOutput.PermissionDecisionReason = res.deny
+		enc := json.NewEncoder(s.out)
+		enc.SetEscapeHTML(false)
+		_ = enc.Encode(out)
+	}
 	return 0
+}
+
+// guardToolCall returns why a pre_tool call must be denied, or "".
+func guardToolCall(call envelope) string {
+	cfg, err := loadConfig("")
+	return guard.Check(guard.ForConfig(cfg, err), call.CWD, call.ToolName, call.ToolInput)
 }
 
 // recordToolCall marks the call's session as watched, and as having ingested
