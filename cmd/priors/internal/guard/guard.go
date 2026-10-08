@@ -87,11 +87,11 @@ func Check(s Set, cwd, tool string, input json.RawMessage) string {
 		if json.Unmarshal(input, &in) != nil || in.FilePath == "" {
 			return ""
 		}
-		text := in.Content + "\n" + in.NewString
+		texts := []string{in.Content, in.NewString}
 		for _, e := range in.Edits {
-			text += "\n" + e.NewString
+			texts = append(texts, e.NewString)
 		}
-		return s.checkWrite(cwd, in.FilePath, text)
+		return s.checkWrite(cwd, in.FilePath, strings.Join(texts, "\n"))
 	}
 	return ""
 }
