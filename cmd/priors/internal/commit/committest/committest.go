@@ -4,6 +4,7 @@ package committest
 
 import (
 	"context"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -25,18 +26,49 @@ func UnsetRepoEnv() {
 	}
 }
 
-// PinSSH points tools.SSHConfig and tools.KnownHosts at empty files for the
-// length of t, as a push refuses to run without them.
-func PinSSH(t testing.TB) {
+// PinPush points tools.SSHConfig and tools.KnownHosts at empty files, and
+// tools.PushGitDir at an empty bare git dir made read-only as the Nix store's
+// is, for the length of t, as a push refuses to run without them.
+func PinPush(t testing.TB) {
 	t.Helper()
-	savedConfig, savedKnownHosts := tools.SSHConfig, tools.KnownHosts
-	t.Cleanup(func() { tools.SSHConfig, tools.KnownHosts = savedConfig, savedKnownHosts })
+	saved := [3]string{tools.SSHConfig, tools.KnownHosts, tools.PushGitDir}
+	t.Cleanup(func() { tools.SSHConfig, tools.KnownHosts, tools.PushGitDir = saved[0], saved[1], saved[2] })
 	dir := t.TempDir()
 	tools.SSHConfig, tools.KnownHosts = filepath.Join(dir, "ssh_config"), filepath.Join(dir, "known_hosts")
 	for _, path := range []string{tools.SSHConfig, tools.KnownHosts} {
 		if err := os.WriteFile(path, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	gitDir := filepath.Join(dir, "push.git")
+	if out, err := tools.Command(context.Background(), tools.Git, "init", "-q", "--bare", "--template=", "--object-format=sha1", gitDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	t.Cleanup(func() { chmodTree(t, gitDir, 0o200, 0) })
+	chmodTree(t, gitDir, 0, 0o222)
+	tools.PushGitDir = gitDir
+}
+
+// chmodTree adds set to and clears unset from the mode of everything under root.
+func chmodTree(t testing.TB, root string, set, unset fs.FileMode) {
+	t.Helper()
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	err = fs.WalkDir(r.FS(), ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		return r.Chmod(path, (info.Mode().Perm()|set)&^unset)
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

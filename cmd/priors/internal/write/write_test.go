@@ -832,7 +832,7 @@ func TestPush(t *testing.T) {
 	git(t, fx.cfg.PersonalStore, "push", "-q", "-u", "origin", "main")
 	fx.cfg.Push = true
 	fx.cfg.PersonalRemote = remote
-	committest.PinSSH(t)
+	committest.PinPush(t)
 	res, err := Add(context.Background(), fx.cfg, request("pushed-fact", personalRepo), fx.deps)
 	if err != nil || res.Warning != "" {
 		t.Fatalf("result = %+v, %v", res, err)

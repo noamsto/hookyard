@@ -83,11 +83,17 @@ func buildAndRun(m *testing.M) int {
 			return 1
 		}
 	}
+	pushGitDir := filepath.Join(toolsDir, "push.git")
+	if out, err := tools.Command(context.Background(), tools.Git, "init", "-q", "--bare", "--template=", "--object-format=sha1", pushGitDir).CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "git init: %v\n%s", err, out)
+		return 1
+	}
 	// The priorstest build reports every owner as uid 0, so 0 owns verdicts.
 	ldflags := []string{
 		"-X " + attestPkg + ".VerifyUID=0",
 		fmt.Sprintf("-X %s.SSHConfig=%s", toolsPkg, filepath.Join(toolsDir, "ssh_config")),
 		fmt.Sprintf("-X %s.KnownHosts=%s", toolsPkg, filepath.Join(toolsDir, "known_hosts")),
+		fmt.Sprintf("-X %s.PushGitDir=%s", toolsPkg, pushGitDir),
 	}
 	for name, tool := range map[string]struct{ variable, real string }{
 		"git":     {"Git", tools.Git},

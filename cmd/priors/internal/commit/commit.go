@@ -222,13 +222,14 @@ func commitTree(ctx context.Context, dir, parent, tree, msg string) (commit, war
 
 // push publishes commit, the one just made on parent, to the branch's
 // upstream on origin, which must be remote, the trust file's pin. It pushes to
-// the pinned URL from a scratch repo whose only objects come from the checkout
-// through alternates, with user and system config cleared and ssh run with the
-// pinned config and known_hosts: the checkout's own config, where a
-// [remote "<url>"] section redirects even an explicit-URL push, never reaches
-// it. The lease makes the push a compare-and-swap against the real remote, so
-// only commit is transferred even when the tracking ref is stale or tampered
-// with; commit being parent's child, a passing lease is a fast-forward. A
+// the pinned URL from the build-pinned empty bare git dir, read-only and so
+// beyond the owner's reach, reading the checkout's objects through
+// GIT_OBJECT_DIRECTORY, in pin.PushEnv's environment: neither the checkout's
+// config, where a [remote "<url>"] section redirects even an explicit-URL
+// push, nor the caller's environment reaches it. The lease makes the push a
+// compare-and-swap against the real remote, so only commit is transferred even
+// when the tracking ref is stale or tampered with; commit being parent's
+// child, a passing lease is a fast-forward. A
 // branch with no fetched upstream, including a fresh unborn store, is not
 // pushed: the user's first `git push -u` sets it up.
 func push(ctx context.Context, dir, remote, parent, commit string) (warning string) {
@@ -296,41 +297,36 @@ func push(ctx context.Context, dir, remote, parent, commit string) (warning stri
 	if warning != "" {
 		return warning
 	}
+	if format != "sha1" {
+		return refuse("the push repo is sha1; this checkout is %s", format)
+	}
 	common, warning := inspect("git rev-parse", "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if warning != "" {
 		return warning
 	}
-	tmp, err := os.MkdirTemp("", "priors-push-")
-	if err != nil {
-		return refuse("making a scratch repo: %v", err)
-	}
-	defer func() { _ = os.RemoveAll(tmp) }()
-	if out, err := runGitExact(ctx, tmp, env, gitTimeout, nil, "init", "--bare", "-q", "--template=", "--object-format="+format, "."); err != nil {
-		return refuse("%s", gitWarning("git init", out, err))
-	}
-	if err := os.MkdirAll(filepath.Join(tmp, "objects", "info"), 0o700); err != nil {
-		return refuse("making a scratch repo: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(tmp, "objects", "info", "alternates"), []byte(filepath.Join(common, "objects")+"\n"), 0o600); err != nil {
-		return refuse("making a scratch repo: %v", err)
-	}
-	url, err := runGitExact(ctx, tmp, env, gitTimeout, nil, "ls-remote", "--get-url", remote)
+	beforePush()
+	env = append(env, "GIT_DIR="+tools.PushGitDir, "GIT_OBJECT_DIRECTORY="+filepath.Join(common, "objects"))
+	url, err := runGitExact(ctx, tools.PushGitDir, env, gitTimeout, nil, "ls-remote", "--get-url", remote)
 	if err != nil {
 		return refuse("%s", gitWarning("git ls-remote", url, err))
 	}
 	if url = strings.TrimSpace(url); url != remote {
 		return refuse("effective push URL %s differs from the pinned %s", url, remote)
 	}
-	if _, err := runGitExact(ctx, tmp, env, pushTimeout, nil, "push", "-q", "--no-follow-tags", "--recurse-submodules=no", "--no-signed", "--force-with-lease="+mergeRef+":"+parent, "--", remote, commit+":"+mergeRef); err != nil {
+	if _, err := runGitExact(ctx, tools.PushGitDir, env, pushTimeout, nil, "push", "-q", "--no-follow-tags", "--recurse-submodules=no", "--no-signed", "--force-with-lease="+mergeRef+":"+parent, "--", remote, commit+":"+mergeRef); err != nil {
 		return refuse("git push failed: %v", err)
 	}
-	// The push from the scratch repo leaves the checkout's tracking ref behind,
+	// The push from the pinned git dir leaves the checkout's tracking ref behind,
 	// which the next push's ahead check reads.
 	if out, err := runGit(ctx, dir, gitTimeout, nil, "update-ref", tracking, commit, upstream); err != nil {
 		return fmt.Sprintf("pushed, but updating %s failed: %s", tracking, gitWarning("git update-ref", out, err))
 	}
 	return ""
 }
+
+// beforePush is a test seam that runs once the pin and upstream checks have
+// passed, just before the effective push URL is read and the push runs.
+var beforePush = func() {}
 
 // exitsOne reports whether err is a git exit status of 1, the "no such thing" answer of -q queries.
 func exitsOne(err error) bool {

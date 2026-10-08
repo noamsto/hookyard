@@ -108,23 +108,31 @@ func TestUserConfigCannotSetStorePaths(t *testing.T) {
 
 func TestRepointedStoreFailsClosed(t *testing.T) {
 	vectors := []struct {
-		name  string
+		name string
+		// why is what the refusal names.
+		why   string
 		apply func(sb *sandbox, pin pinnedStore, decoyURL string)
 	}{
-		{"origin url", func(sb *sandbox, _ pinnedStore, decoyURL string) {
+		{"origin url", "not the pinned", func(sb *sandbox, _ pinnedStore, decoyURL string) {
 			sb.git(sb.personal, "remote", "set-url", "origin", decoyURL)
 		}},
-		{"insteadOf", func(sb *sandbox, pin pinnedStore, decoyURL string) {
+		{"insteadOf", "not the pinned", func(sb *sandbox, pin pinnedStore, decoyURL string) {
 			sb.git(sb.personal, "config", "url."+decoyURL+".insteadOf", pin.url)
 		}},
-		{"pushInsteadOf", func(sb *sandbox, pin pinnedStore, decoyURL string) {
+		{"pushInsteadOf", "not the pinned", func(sb *sandbox, pin pinnedStore, decoyURL string) {
 			sb.git(sb.personal, "config", "url."+decoyURL+".pushInsteadOf", pin.url)
 		}},
-		{"pushurl", func(sb *sandbox, _ pinnedStore, decoyURL string) {
+		{"pushurl", "not the pinned", func(sb *sandbox, _ pinnedStore, decoyURL string) {
 			sb.git(sb.personal, "config", "remote.origin.pushurl", decoyURL)
 		}},
-		{"global insteadOf", func(sb *sandbox, pin pinnedStore, decoyURL string) {
+		{"global insteadOf", "not the pinned", func(sb *sandbox, pin pinnedStore, decoyURL string) {
 			sb.writeFile(sb.gitConfig, sb.readFile(sb.gitConfig)+fmt.Sprintf("[url %q]\n\tinsteadOf = %s\n", decoyURL, pin.url))
+		}},
+		{"branch remote is a url", "branch.main.remote is file://", func(sb *sandbox, _ pinnedStore, decoyURL string) {
+			sb.git(sb.personal, "config", "branch.main.remote", decoyURL)
+		}},
+		{"extra remote", "has remote(s) origin, other; the trust file pins origin alone", func(sb *sandbox, _ pinnedStore, decoyURL string) {
+			sb.git(sb.personal, "remote", "add", "other", decoyURL)
 		}},
 	}
 	for _, v := range vectors {
@@ -158,19 +166,28 @@ func TestRepointedStoreFailsClosed(t *testing.T) {
 			if got := injected(t, res.stdout); strings.Contains(got, pinnedFactName) {
 				t.Errorf("session_start injects the fact of a repointed checkout:\n%s", got)
 			}
-			wantContains(t, "session_start stderr", res.stderr, "personal store:", "not the pinned")
+			wantContains(t, "session_start stderr", res.stderr, "personal store:", v.why)
 
-			res = sb.run("", "add", "--name", "new-fact", "--description", "d", "--type", "project",
-				"--cwd", repo, "--session", "sess-1")
-			if res.code == 0 {
-				t.Errorf("add succeeded on a repointed checkout\nstdout: %s", res.stdout)
-			}
-			wantContains(t, "add stderr", res.stderr, "refused")
-			if after := filesUnder(t, sb.personal); !slices.Equal(after, before) {
-				t.Errorf("files under the store changed: %v, was %v", after, before)
-			}
-			if got := sb.head(sb.personal); got != head {
-				t.Errorf("personal HEAD moved to %s, was %s", got, head)
+			for _, c := range []struct {
+				args    []string
+				refusal string
+			}{
+				{[]string{"index", "--write"}, "refused: personal store: "},
+				{[]string{"lint"}, "personal store: "},
+				{[]string{"list", "--cwd", repo}, "refused: personal store: "},
+				{[]string{"add", "--name", "new-fact", "--description", "d", "--type", "project", "--cwd", repo, "--session", "sess-1"}, "refused: personal store: "},
+			} {
+				res := sb.run("", c.args...)
+				if res.code != 1 {
+					t.Errorf("%s: exit %d, want 1\nstdout: %s\nstderr: %s", c.args[0], res.code, res.stdout, res.stderr)
+				}
+				wantContains(t, c.args[0]+" stderr", res.stderr, c.refusal, v.why)
+				if after := filesUnder(t, sb.personal); !slices.Equal(after, before) {
+					t.Errorf("%s changed the files under the store: %v, was %v", c.args[0], after, before)
+				}
+				if got := sb.head(sb.personal); got != head {
+					t.Errorf("%s moved personal HEAD to %s, was %s", c.args[0], got, head)
+				}
 			}
 			if got := sb.ref(pin.bare, "main"); got != pinnedMain {
 				t.Errorf("pinned bare main moved to %s, was %s", got, pinnedMain)
@@ -191,10 +208,12 @@ func TestPinnedPushEndToEnd(t *testing.T) {
 	decoyMain := sb.ref(decoy, "main")
 	sb.writeConfig("push = true")
 
+	addArgs := func(name string) []string {
+		return []string{"add", "--name", name, "--description", "d", "--type", "project", "--cwd", repo, "--session", "sess-1"}
+	}
 	add := func(name string) {
 		t.Helper()
-		res := sb.run("", "add", "--name", name, "--description", "d", "--type", "project",
-			"--cwd", repo, "--session", "sess-1")
+		res := sb.run("", addArgs(name)...)
 		wantExit(t, res, 0)
 		wantContains(t, "add stdout", res.stdout, "published personal "+filepath.Join(sb.personal, "demo", name+".md"))
 		if strings.Contains(res.stderr, "not pushed") {
@@ -208,12 +227,25 @@ func TestPinnedPushEndToEnd(t *testing.T) {
 	add("first-fact")
 	add("second-fact")
 
+	// A [remote "<pin>"] section would redirect a push run in the checkout;
+	// it is a second remote, so the store is refused before anything is written.
 	sb.git(sb.personal, "config", "remote."+pin.url+".url", "file://"+decoy)
 	if raw := sb.readFile(filepath.Join(sb.personal, ".git", "config")); !strings.Contains(raw, "file://"+decoy) {
 		t.Fatalf("the hijack is not in the checkout's config:\n%s", raw)
 	}
-	add("third-fact")
-
+	head, pinnedMain := sb.head(sb.personal), sb.ref(pin.bare, "main")
+	res := sb.run("", addArgs("third-fact")...)
+	wantExit(t, res, 1)
+	wantContains(t, "add stderr", res.stderr, "refused: personal store: ", "has remote(s) "+pin.url+", origin")
+	if _, err := os.Stat(filepath.Join(sb.personal, "demo", "third-fact.md")); err == nil {
+		t.Error("the refused add wrote its fact into the store")
+	}
+	if got := sb.head(sb.personal); got != head {
+		t.Errorf("personal HEAD moved to %s, was %s", got, head)
+	}
+	if got := sb.ref(pin.bare, "main"); got != pinnedMain {
+		t.Errorf("pinned bare main moved to %s, was %s", got, pinnedMain)
+	}
 	if got := sb.ref(decoy, "main"); got != decoyMain {
 		t.Errorf("decoy main moved to %s, was %s", got, decoyMain)
 	}

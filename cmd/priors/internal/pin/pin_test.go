@@ -59,6 +59,16 @@ func repo(t *testing.T, base, url string) string {
 	return base
 }
 
+// subdir makes and returns a directory below dir.
+func subdir(t *testing.T, dir string) string {
+	t.Helper()
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return sub
+}
+
 func TestCheck(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -85,20 +95,23 @@ func TestCheck(t *testing.T) {
 			want:  "has remote(s) origin but the trust file pins none",
 		},
 		{
+			name:  "no pin, dir nested in a checkout with origin",
+			setup: func(t *testing.T, base, _ string) string { return subdir(t, repo(t, base, pinned)) },
+			want:  "has remote(s) origin but the trust file pins none",
+		},
+		{
+			name:  "no pin, dir nested in a checkout without remotes",
+			setup: func(t *testing.T, base, _ string) string { return subdir(t, repo(t, base, "")) },
+		},
+		{
 			name: "pin, plain dir", remote: pinned,
 			setup: func(t *testing.T, base, _ string) string { return base },
 			want:  "not the top level of a git checkout",
 		},
 		{
 			name: "pin, subdir of a checkout", remote: pinned,
-			setup: func(t *testing.T, base, _ string) string {
-				sub := filepath.Join(repo(t, base, pinned), "sub")
-				if err := os.Mkdir(sub, 0o700); err != nil {
-					t.Fatal(err)
-				}
-				return sub
-			},
-			want: "not the top level of a git checkout",
+			setup: func(t *testing.T, base, _ string) string { return subdir(t, repo(t, base, pinned)) },
+			want:  "not the top level of a git checkout",
 		},
 		{
 			name: "pin, matching origin", remote: pinned,
@@ -154,6 +167,56 @@ func TestCheck(t *testing.T) {
 			want: "origin fetch url is " + other,
 		},
 		{
+			name: "pin, extra remote", remote: pinned,
+			setup: func(t *testing.T, base, _ string) string {
+				git(t, repo(t, base, pinned), "remote", "add", "other", other)
+				return base
+			},
+			want: "has remote(s) origin, other; the trust file pins origin alone",
+		},
+		{
+			name: "pin, branch upstream on origin", remote: pinned,
+			setup: func(t *testing.T, base, _ string) string {
+				repo(t, base, pinned)
+				git(t, base, "config", "branch.main.remote", "origin")
+				git(t, base, "config", "branch.main.pushRemote", "origin")
+				git(t, base, "config", "remote.pushDefault", "origin")
+				return base
+			},
+		},
+		{
+			name: "pin, branch remote is a url", remote: pinned,
+			setup: func(t *testing.T, base, _ string) string {
+				git(t, repo(t, base, pinned), "config", "branch.main.remote", other)
+				return base
+			},
+			want: "branch.main.remote is " + other + ", not origin",
+		},
+		{
+			name: "pin, branch remote is another name", remote: pinned,
+			setup: func(t *testing.T, base, _ string) string {
+				git(t, repo(t, base, pinned), "config", "branch.main.remote", "upstream")
+				return base
+			},
+			want: "branch.main.remote is upstream, not origin",
+		},
+		{
+			name: "pin, branch pushRemote", remote: pinned,
+			setup: func(t *testing.T, base, _ string) string {
+				git(t, repo(t, base, pinned), "config", "branch.main.pushRemote", other)
+				return base
+			},
+			want: "branch.main.pushremote is " + other + ", not origin",
+		},
+		{
+			name: "pin, pushDefault", remote: pinned,
+			setup: func(t *testing.T, base, _ string) string {
+				git(t, repo(t, base, pinned), "config", "remote.pushDefault", "upstream")
+				return base
+			},
+			want: "remote.pushdefault is upstream, not origin",
+		},
+		{
 			name: "pin, no origin", remote: pinned,
 			setup: func(t *testing.T, base, _ string) string { return repo(t, base, "") },
 			want:  "origin url",
@@ -196,11 +259,24 @@ func TestCheckUnpinnedGitIsErrUnpinned(t *testing.T) {
 	}
 }
 
+// pinPush sets the push pins for the length of t, restoring them after.
+func pinPush(t *testing.T, sshConfig, knownHosts, gitDir string) {
+	t.Helper()
+	saved := [3]string{tools.SSHConfig, tools.KnownHosts, tools.PushGitDir}
+	t.Cleanup(func() { tools.SSHConfig, tools.KnownHosts, tools.PushGitDir = saved[0], saved[1], saved[2] })
+	tools.SSHConfig, tools.KnownHosts, tools.PushGitDir = sshConfig, knownHosts, gitDir
+}
+
 func TestPushEnvUnpinned(t *testing.T) {
-	saved := [2]string{tools.SSHConfig, tools.KnownHosts}
-	t.Cleanup(func() { tools.SSHConfig, tools.KnownHosts = saved[0], saved[1] })
-	for _, pins := range [][2]string{{"", ""}, {"/abs/ssh_config", ""}, {"", "/abs/known_hosts"}, {"ssh_config", "/abs/known_hosts"}} {
-		tools.SSHConfig, tools.KnownHosts = pins[0], pins[1]
+	for _, pins := range [][3]string{
+		{"", "", ""},
+		{"/abs/ssh_config", "", "/abs/push.git"},
+		{"", "/abs/known_hosts", "/abs/push.git"},
+		{"ssh_config", "/abs/known_hosts", "/abs/push.git"},
+		{"/abs/ssh_config", "/abs/known_hosts", ""},
+		{"/abs/ssh_config", "/abs/known_hosts", "push.git"},
+	} {
+		pinPush(t, pins[0], pins[1], pins[2])
 		if env, err := PushEnv(); err == nil {
 			t.Errorf("PushEnv with %q = %v, want an error", pins, env)
 		}
@@ -208,45 +284,68 @@ func TestPushEnvUnpinned(t *testing.T) {
 }
 
 func TestPushEnv(t *testing.T) {
-	saved := [2]string{tools.SSHConfig, tools.KnownHosts}
-	t.Cleanup(func() { tools.SSHConfig, tools.KnownHosts = saved[0], saved[1] })
 	dir := t.TempDir()
-	tools.SSHConfig = filepath.Join(dir, "ssh config")
-	tools.KnownHosts = filepath.Join(dir, "known'hosts")
-	t.Setenv("GIT_SSH_COMMAND", "evil-ssh")
-	t.Setenv("GIT_SSH", "/evil/ssh")
-	t.Setenv("GIT_SSH_VARIANT", "simple")
-	t.Setenv("GIT_EXEC_PATH", "/evil/libexec")
-	t.Setenv("GIT_DIR", "/evil/.git")
+	pinPush(t, filepath.Join(dir, "ssh config"), filepath.Join(dir, "known'hosts"), filepath.Join(dir, "push.git"))
+	for k, v := range map[string]string{
+		"PRIORS_TEST_SENTINEL": "1",
+		"BASH_ENV":             "/evil/bash_env",
+		"LD_PRELOAD":           "/evil/lib.so",
+		"GIT_SSL_NO_VERIFY":    "1",
+		"http_proxy":           "http://evil.invalid:3128",
+		"GIT_SSH_COMMAND":      "evil-ssh",
+		"GIT_SSH":              "/evil/ssh",
+		"GIT_SSH_VARIANT":      "simple",
+		"GIT_EXEC_PATH":        "/evil/libexec",
+		"GIT_DIR":              "/evil/.git",
+		"HOME":                 "/evil/home",
+		"PATH":                 "/evil/bin",
+	} {
+		t.Setenv(k, v)
+	}
+	want := []string{
+		"LC_ALL=C",
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_SSH_COMMAND='" + tools.SSH + "' -F '" + tools.SSHConfig + "' -o 'UserKnownHostsFile=" + dir + "/known'\\''hosts'",
+		"GIT_SSH_VARIANT=ssh",
+	}
 
+	t.Run("without an agent", func(t *testing.T) {
+		t.Setenv("SSH_AUTH_SOCK", "")
+		if err := os.Unsetenv("SSH_AUTH_SOCK"); err != nil {
+			t.Fatal(err)
+		}
+		assertEnv(t, want)
+	})
+	t.Run("with an agent", func(t *testing.T) {
+		t.Setenv("SSH_AUTH_SOCK", "/run/agent.sock")
+		assertEnv(t, append(slices.Clone(want), "SSH_AUTH_SOCK=/run/agent.sock"))
+	})
+}
+
+// assertEnv fails t unless PushEnv is exactly want. It names only the
+// variables that differ, as a leak would carry the test's own environment.
+func assertEnv(t *testing.T, want []string) {
+	t.Helper()
 	env, err := PushEnv()
 	if err != nil {
 		t.Fatal(err)
 	}
-	values := func(key string) []string {
-		var vs []string
-		for _, kv := range env {
-			if k, v, _ := strings.Cut(kv, "="); k == key {
-				vs = append(vs, v)
-			}
-		}
-		return vs
+	if slices.Equal(env, want) {
+		return
 	}
-	wantSSH := "'" + tools.SSH + "' -F '" + tools.SSHConfig + "' -o 'UserKnownHostsFile=" + dir + "/known'\\''hosts'"
-	if got := values("GIT_SSH_COMMAND"); !slices.Equal(got, []string{wantSSH}) {
-		t.Errorf("GIT_SSH_COMMAND = %q, want [%q]", got, wantSSH)
-	}
-	if got := values("GIT_SSH_VARIANT"); !slices.Equal(got, []string{"ssh"}) {
-		t.Errorf("GIT_SSH_VARIANT = %q, want [ssh]", got)
-	}
-	for _, k := range []string{"GIT_SSH", "GIT_EXEC_PATH", "GIT_DIR"} {
-		if got := values(k); got != nil {
-			t.Errorf("%s = %q, want unset", k, got)
+	var extra, missing []string
+	for _, kv := range env {
+		if !slices.Contains(want, kv) {
+			k, _, _ := strings.Cut(kv, "=")
+			extra = append(extra, k)
 		}
 	}
-	for _, kv := range []string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C"} {
+	for _, kv := range want {
 		if !slices.Contains(env, kv) {
-			t.Errorf("env lacks %s", kv)
+			missing = append(missing, kv)
 		}
 	}
+	t.Errorf("PushEnv differs from the allowlist: unexpected %q, missing %q", extra, missing)
 }

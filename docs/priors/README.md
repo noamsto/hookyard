@@ -45,11 +45,13 @@ revision, since an unknown trust key fails closed.
 
 `priors` refuses a checkout (reads, `add`, `index --write`, `lint` and the
 push) unless its `origin` url, fetch url and push url each equal the
-pinned `remote`. The fetch and push urls have git's rewrites (`insteadOf`,
-`pushInsteadOf`, `pushurl`) applied, under the user's git config, so the pin
-must be the post-rewrite URL and the checkout's raw origin must equal it too.
-With no `remote`, a checkout that has any remote is refused and nothing is
-pushed. A checkout git cannot read (a corrupt `.git/config`, say) is
+pinned `remote`, `origin` is its only remote, and every `branch.*.remote`,
+`branch.*.pushRemote` and `remote.pushDefault` is `origin`. The fetch and push
+urls have git's rewrites (`insteadOf`, `pushInsteadOf`, `pushurl`) applied,
+under the user's git config, so the pin must be the post-rewrite URL and the
+checkout's raw origin must equal it too. With no `remote`, a store dir lying
+inside any repo that has a remote is refused and nothing is pushed.
+A checkout git cannot read (a corrupt `.git/config`, say) is
 refused, not published with a warning. A refused checkout also blocks
 `priors add` to that store's local layer; reads still show the local layer.
 
@@ -86,16 +88,27 @@ or nested inside, another (the default state dir included). Symlinks in them
 are resolved first, so a store behind a symlink behaves as the directory
 it names, and the nesting check sees the real paths.
 
-The push goes to the pinned URL from a scratch repo that borrows the
-checkout's objects, with user and system git config cleared. It runs ssh
-through a build-pinned config and known_hosts (github.com's keys), so
-`~/.ssh/config` and the user's `known_hosts` play no part, and it refuses when
-`git ls-remote --get-url <pin>` differs from the pin.
+The push goes to the pinned URL from a build-pinned, empty, read-only bare git
+dir in the Nix store (`GIT_DIR`), reading the checkout's objects through
+`GIT_OBJECT_DIRECTORY`, so neither the checkout's config nor any
+owner-writable config reaches it. Its environment is built from nothing:
+`LC_ALL`, `GIT_TERMINAL_PROMPT`, `GIT_CONFIG_GLOBAL=/dev/null`,
+`GIT_CONFIG_NOSYSTEM`, a pinned `GIT_SSH_COMMAND` (with `-F` and
+`UserKnownHostsFile` pointing at a build-pinned ssh config and known_hosts),
+`GIT_SSH_VARIANT` and `SSH_AUTH_SOCK` passed through. Nothing else the caller
+exports (`BASH_ENV`, loader, TLS or proxy variables) reaches git or ssh, and
+`~/.ssh/config` and the user's `known_hosts` play no part. It refuses when
+`git ls-remote --get-url <pin>` differs from the pin, and for a checkout that
+is not sha1.
 
-Residuals: a sync outside `priors` follows the
-checkout's own config. The scratch dir is owner-writable, so an agent running
-as the owner could race it between init and the push. `GIT_SSL_*` and proxy
-environment variables still reach an https pin.
+The pinned known_hosts covers github.com and `ssh.github.com:443`, so a store
+that must use port 443 pins `ssh://git@ssh.github.com:443/<owner>/<repo>.git`
+as both its origin and its `remote`.
+
+Residuals: a sync outside `priors` follows the checkout's own config.
+`priors` itself is dynamically linked (cgo, via `os/user`), so a loader
+variable such as `LD_PRELOAD` in the environment that runs it reaches `priors`
+itself; out of scope here.
 
 A session's store is picked from its repo's `origin` org (§4.2): a work-org
 repo reads both stores and writes work; any other repo reads the personal

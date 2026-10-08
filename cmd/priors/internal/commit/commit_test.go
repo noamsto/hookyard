@@ -926,7 +926,7 @@ func withRemote(t *testing.T) (fixture, string) {
 	git(t, fx.dir(), "push", "-q", "-u", "origin", "main")
 	fx.cfg.Push = true
 	fx.root.Remote = bare
-	committest.PinSSH(t)
+	committest.PinPush(t)
 	return fx, bare
 }
 
@@ -1038,26 +1038,72 @@ func TestPushRefusesRepointedCheckout(t *testing.T) {
 	}
 }
 
-// A push run in the checkout to the pinned URL would follow these: none of
-// them touches origin, so the pin check passes them. The pin is a file:// URL
-// as git ignores a [remote "<name>"] section whose name starts with '/'.
-func TestPushIgnoresHijack(t *testing.T) {
-	fx, bare := withRemote(t)
-	url := "file://" + bare
-	git(t, fx.dir(), "remote", "set-url", "origin", url)
-	fx.root.Remote = url
-	d := decoy(t, bare)
-	pushed := rev(t, d, "main")
-	script := filepath.Join(t.TempDir(), "receive-pack")
-	writeFile(t, script, []byte("#!/bin/sh\nexit 1\n"))
-	if err := os.Chmod(script, 0o755); err != nil { //nolint:gosec // a test executable
-		t.Fatal(err)
+// A push run in the checkout to the pinned URL would follow a
+// [remote "<pin>"] section without touching origin; that section is itself a
+// second remote, which the pin check refuses. The pin is a file:// URL as git
+// ignores a [remote "<name>"] section whose name starts with '/'.
+func TestPushRefusesNamedRemoteHijack(t *testing.T) {
+	for _, key := range []string{"url", "pushurl", "receivepack"} {
+		t.Run(key, func(t *testing.T) {
+			fx, bare := withRemote(t)
+			url := "file://" + bare
+			git(t, fx.dir(), "remote", "set-url", "origin", url)
+			fx.root.Remote = url
+			d := decoy(t, bare)
+			pushed := rev(t, d, "main")
+			value := d
+			if key == "receivepack" {
+				value = filepath.Join(t.TempDir(), "receive-pack")
+				writeFile(t, value, []byte("#!/bin/sh\nexec git-receive-pack '"+d+"'\n"))
+				if err := os.Chmod(value, 0o755); err != nil { //nolint:gosec // a test executable
+					t.Fatal(err)
+				}
+			}
+			git(t, fx.dir(), "config", "remote."+url+"."+key, value)
+			fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+			fx.index(t)
+
+			if w := fx.checkout(t); !strings.Contains(w, "not pushed") || !strings.Contains(w, "has remote(s) "+url) {
+				t.Errorf("warning = %q", w)
+			}
+			assertMain(t, bare, pushed)
+			assertMain(t, d, pushed)
+		})
 	}
-	git(t, fx.dir(), "config", "remote."+url+".url", d)
-	git(t, fx.dir(), "config", "remote."+url+".pushurl", d)
-	git(t, fx.dir(), "config", "remote."+url+".receivepack", script)
+}
+
+// Both core.hooksPath=/dev/null on every git run and the push's own git dir,
+// which holds no hooks, keep the checkout's pre-push hook out of the push;
+// either alone holds this.
+func TestPushRunsNoCheckoutHook(t *testing.T) {
+	fx, bare := withRemote(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	fx.hook(t, "pre-push", "touch '"+marker+"'\nexit 1\n")
 	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
 	fx.index(t)
+
+	if w := fx.checkout(t); w != "" {
+		t.Errorf("warning = %q", w)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("the checkout's pre-push hook ran")
+	}
+	if got, want := rev(t, bare, "main"), head(t, fx.dir()); got != want {
+		t.Errorf("remote main = %s, want local HEAD %s", got, want)
+	}
+}
+
+// git runs a local push's `git-receive-pack '<path>'` through bash, which
+// sources $BASH_ENV first, so an inherited one could redefine receive-pack.
+func TestPushIgnoresInheritedBashEnv(t *testing.T) {
+	fx, bare := withRemote(t)
+	d := decoy(t, bare)
+	pushed := rev(t, d, "main")
+	bashEnv := filepath.Join(t.TempDir(), "bash_env")
+	writeFile(t, bashEnv, []byte("git-receive-pack() { command git-receive-pack '"+d+"'; }\n"))
+	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+	fx.index(t)
+	t.Setenv("BASH_ENV", bashEnv)
 
 	if w := fx.checkout(t); w != "" {
 		t.Fatalf("warning = %q", w)
@@ -1066,6 +1112,71 @@ func TestPushIgnoresHijack(t *testing.T) {
 		t.Errorf("remote main = %s, want local HEAD %s", got, want)
 	}
 	assertMain(t, d, pushed)
+}
+
+// The pin check reads the checkout's config before the push, so only pushing
+// from the pinned git dir keeps a redirect written there afterwards out. The
+// pin is a file:// URL as git ignores a [remote "<name>"] section whose name
+// starts with '/'.
+func TestPushIgnoresCheckoutConfigWrittenAfterCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		redirect func(t *testing.T, url, decoy string) (key, value string)
+	}{
+		{"remote url", func(_ *testing.T, url, decoy string) (string, string) { return "remote." + url + ".url", decoy }},
+		{"pushInsteadOf", func(_ *testing.T, url, decoy string) (string, string) { return "url." + decoy + ".pushInsteadOf", url }},
+		{"insteadOf", func(_ *testing.T, url, decoy string) (string, string) { return "url." + decoy + ".insteadOf", url }},
+		{"receivepack", func(t *testing.T, url, _ string) (string, string) {
+			script := filepath.Join(t.TempDir(), "receive-pack")
+			writeFile(t, script, []byte("#!/bin/sh\nexit 1\n"))
+			if err := os.Chmod(script, 0o755); err != nil { //nolint:gosec // a test executable
+				t.Fatal(err)
+			}
+			return "remote." + url + ".receivepack", script
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx, bare := withRemote(t)
+			url := "file://" + bare
+			git(t, fx.dir(), "remote", "set-url", "origin", url)
+			fx.root.Remote = url
+			d := decoy(t, bare)
+			pushed := rev(t, d, "main")
+			key, value := tc.redirect(t, url, d)
+			beforePush = func() { git(t, fx.dir(), "config", key, value) }
+			t.Cleanup(func() { beforePush = func() {} })
+			fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+			fx.index(t)
+
+			if w := fx.checkout(t); w != "" {
+				t.Errorf("warning = %q", w)
+			}
+			if got, want := rev(t, bare, "main"), head(t, fx.dir()); got != want {
+				t.Errorf("remote main = %s, want local HEAD %s", got, want)
+			}
+			assertMain(t, d, pushed)
+		})
+	}
+}
+
+// The pinned push dir is sha1, and cannot read a sha256 checkout's objects.
+func TestPushRefusesNonSHA1Checkout(t *testing.T) {
+	setup(t)
+	committest.PinPush(t)
+	dir := filepath.Join(t.TempDir(), "store")
+	bare := filepath.Join(t.TempDir(), "remote.git")
+	git(t, t.TempDir(), "init", "-q", "--object-format=sha256", dir)
+	git(t, t.TempDir(), "init", "-q", "--bare", "--object-format=sha256", bare)
+	git(t, dir, "commit", "-q", "--allow-empty", "-m", "base")
+	git(t, dir, "remote", "add", "origin", bare)
+	git(t, dir, "push", "-q", "-u", "origin", "main")
+	parent := head(t, dir)
+	git(t, dir, "commit", "-q", "--allow-empty", "-m", "next")
+
+	if w := push(context.Background(), dir, bare, parent, head(t, dir)); !strings.Contains(w, "the push repo is sha1; this checkout is sha256") {
+		t.Errorf("warning = %q", w)
+	}
+	assertMain(t, bare, parent)
 }
 
 func TestPushRefusesUserConfigRewrite(t *testing.T) {
@@ -1128,7 +1239,7 @@ func TestPushRefusesUpstreamOtherThanOrigin(t *testing.T) {
 	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
 	fx.index(t)
 
-	if w := fx.checkout(t); !strings.Contains(w, "upstream remote is other, not origin") {
+	if w := fx.checkout(t); !strings.Contains(w, "not pushed") || !strings.Contains(w, "other") {
 		t.Errorf("warning = %q", w)
 	}
 	assertMain(t, bare, pushed)
@@ -1205,7 +1316,7 @@ func TestPushRefusesWithoutUpstream(t *testing.T) {
 	git(t, fx.dir(), "remote", "add", "origin", bare)
 	fx.cfg.Push = true
 	fx.root.Remote = bare
-	committest.PinSSH(t)
+	committest.PinPush(t)
 	base := head(t, fx.dir())
 	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
 	fx.index(t)
