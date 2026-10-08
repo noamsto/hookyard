@@ -43,6 +43,7 @@ func cmdLint(args []string, s streams) int {
 		return 1
 	}
 
+	ctx := context.Background()
 	var cfg config.Config
 	var targets []lintTarget
 	if *dir != "" {
@@ -63,7 +64,7 @@ func cmdLint(args []string, s streams) int {
 			s.errln("config:", err)
 			return 2
 		}
-		if targets, err = configuredTargets(cfg, *storeFlag); err != nil {
+		if targets, err = configuredTargets(ctx, cfg, *storeFlag); err != nil {
 			s.errln(err)
 			return 1
 		}
@@ -83,7 +84,6 @@ func cmdLint(args []string, s streams) int {
 		scanner = &sc
 	}
 
-	ctx := context.Background()
 	failed := false
 	configured := *dir == ""
 	verifier := attest.ForHost(cfg)
@@ -150,7 +150,7 @@ func cmdLint(args []string, s streams) int {
 	return 0
 }
 
-func configuredTargets(cfg config.Config, which string) ([]lintTarget, error) {
+func configuredTargets(ctx context.Context, cfg config.Config, which string) ([]lintTarget, error) {
 	ids := []route.StoreID{route.StorePersonal}
 	if cfg.WorkPresent() {
 		ids = append(ids, route.StoreWork)
@@ -167,7 +167,11 @@ func configuredTargets(cfg config.Config, which string) ([]lintTarget, error) {
 	}
 	targets := make([]lintTarget, len(ids))
 	for i, id := range ids {
-		targets[i] = lintTarget{id: id, checkout: store.CheckoutRoot(cfg, id), local: store.LocalRoot(cfg, id), hasLocal: true}
+		checkout, err := store.CheckoutRoot(ctx, cfg, id)
+		if err != nil {
+			return nil, err
+		}
+		targets[i] = lintTarget{id: id, checkout: checkout, local: store.LocalRoot(cfg, id), hasLocal: true}
 	}
 	return targets, nil
 }

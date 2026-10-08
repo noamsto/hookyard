@@ -76,7 +76,12 @@ func (a *assembler) reportf(format string, args ...any) {
 // minus any name the checkout already has.
 func (a *assembler) storeLines(id route.StoreID, cfg config.Config) []string {
 	seen := map[string]bool{}
-	lines := a.rootLines(store.CheckoutRoot(cfg, id), a.appliesInCheckout, false, seen)
+	var lines []string
+	if checkout, err := store.CheckoutRoot(a.ctx, cfg, id); err != nil {
+		a.reportf("%v", err)
+	} else {
+		lines = a.rootLines(checkout, a.appliesInCheckout, false, seen)
+	}
 	return append(lines, a.rootLines(store.LocalRoot(cfg, id), a.appliesInLocal, true, seen)...)
 }
 

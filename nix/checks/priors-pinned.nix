@@ -74,13 +74,13 @@ in
     personal_orgs = ["github.com/noamsto"]
     [stores.personal]
     id = "pinned-test"
+    path = "$store"
     TRUST
     chmod 0644 "$trustdir/trust.toml"
     export PRIORS_TEST_TRUST=$trustdir/trust.toml
 
     cfg=$TMPDIR/config.toml
     cat > "$cfg" <<CFG
-    personal_store = "$store"
     state_dir = "$TMPDIR/state"
     CFG
 

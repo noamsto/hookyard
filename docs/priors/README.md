@@ -15,7 +15,7 @@ It lives in this repo as `cmd/priors`, but it is not router code: it is an
 ### Trust file
 
 `/etc/priors/trust.toml` holds the host's profile, org lists, work-name floor,
-`trust_root` and each store's id. The path is fixed in the build: no flag, env
+`trust_root` and each store's id, path and remote. The path is fixed in the build: no flag, env
 var or user config overrides it. The nix-config module writes it via
 `environment.etc`.
 
@@ -26,9 +26,13 @@ personal_orgs = ["github.com/you"]
 work_names    = ["build.corp.internal"]       # floor for the work-name scan; config.toml can only add
 trust_root    = "owner-admin"                 # only "separate" turns attestation on
 [stores.personal]
-id = "you-priors"                             # [a-z0-9-]{1,64}
+id     = "you-priors"                         # [a-z0-9-]{1,64}
+path   = "/home/you/memory/personal"          # absolute; no ~/ expansion
+remote = "git@github.com:you/priors.git"      # optional: the only URL this checkout may have and be pushed to
 [stores.work]
-id = "work-priors"                            # only on a work profile
+id     = "work-priors"                        # only on a work profile
+path   = "/home/you/memory/work"
+remote = "git@github.com:your-work-org/priors.git"
 ```
 
 Before reading, `priors` walks the path as traversed, symlinks and their
@@ -39,34 +43,77 @@ keys included) is a missing config: `priors` writes nothing, injects nothing
 and reports it. The trust file and `priors` must come from the same hookyard
 revision, since an unknown trust key fails closed.
 
+`priors` refuses a checkout (reads, `add`, `index --write`, `lint` and the
+push) unless its `origin` url, fetch url and push url each equal the
+pinned `remote`, `origin` is its only remote, and every `branch.*.remote`,
+`branch.*.pushRemote` and `remote.pushDefault` is `origin`. The fetch and push
+urls have git's rewrites (`insteadOf`, `pushInsteadOf`, `pushurl`) applied,
+under the user's git config, so the pin must be the post-rewrite URL and the
+checkout's raw origin must equal it too. Because the check reads the user's
+git config, a user-global `remote.pushDefault` or a globally defined remote
+refuses every pinned store. With no `remote`, a store dir inside a repo that
+has a named remote is refused and nothing is pushed; a remote reached only
+through a URL in `branch.*.remote`, `branch.*.pushRemote` or
+`remote.pushDefault`, or through a legacy `.git/remotes` or `.git/branches`
+file, is not yet caught for an unpinned store (a follow-up).
+A checkout git cannot read (a corrupt `.git/config`, say) is
+refused, not published with a warning. A refused checkout also blocks
+`priors add` to that store's local layer; reads still show the local layer.
+
+The `remote` must be a real-host URL, not an ssh alias: the push drops
+`~/.ssh/config`. The default identities or the ssh-agent must be able to
+authenticate it.
+
 ### User config
 
 `$PRIORS_CONFIG`, else `$XDG_CONFIG_HOME/priors/config.toml`:
 
 ```toml
-personal_store = "~/memory/personal"
-work_store     = "~/memory/work"   # read only on a work-profile host
 # optional:
 # work_names   = ["build.corp.internal"]  # added to the trust file's work_names; also rejected in the personal store
 # state_dir    = ""     # default $XDG_STATE_HOME/priors
 # event_record = ""     # hookyard's state dir; default follows hookyard's own
 # rules        = ""     # extra redaction rules, added to the built-in set; a bad file fails closed
-# ssh_config   = ""     # passed to `ssh -G -F` when resolving host aliases
+# ssh_config   = ""     # passed to `ssh -G -F` when resolving host aliases; plays no part in the push
 # commit       = true   # commit published facts into the checkout
-# push         = false  # needs an upstream set once (git push -u); after a failed push, git push by hand to resume
+# push         = false  # needs an upstream on origin set once (git push -u origin <branch>); after a failed push, git push by hand to resume
 ```
 
-`profile`, `work_orgs`, `personal_orgs`, `trust_root` or `stores` in
-`config.toml` is an error naming the trust file.
+`profile`, `work_orgs`, `personal_orgs`, `trust_root`, `stores`,
+`personal_store` or `work_store` in `config.toml` is an error naming the trust
+file.
 
 `git`, `ssh`, `rg` and the secret scanner (betterleaks) are pinned at build time
 (`nix build .#priors`) and never looked up on `PATH`, so the `scanner` key is gone;
 a plain `go build` binary refuses every subcommand.
 
-`personal_store`, `work_store` and `state_dir` must be absolute once `~/` is expanded, and none may be the same
-as, or nested inside, another (the default state dir included). Symlinks in
-them are resolved first, so a store behind a symlink behaves as the directory
+The store paths in the trust file must be absolute (no `~/` expansion), and so
+must `state_dir` once `~/` is expanded. None of the three may be the same as,
+or nested inside, another (the default state dir included). Symlinks in them
+are resolved first, so a store behind a symlink behaves as the directory
 it names, and the nesting check sees the real paths.
+
+The push goes to the pinned URL from a build-pinned, empty, read-only bare git
+dir in the Nix store (`GIT_DIR`), reading the checkout's objects through
+`GIT_OBJECT_DIRECTORY`, so neither the checkout's config nor any
+owner-writable config reaches it. Its environment is built from nothing:
+`LC_ALL`, `GIT_TERMINAL_PROMPT`, `GIT_CONFIG_GLOBAL=/dev/null`,
+`GIT_CONFIG_NOSYSTEM`, a pinned `GIT_SSH_COMMAND` (with `-F` and
+`UserKnownHostsFile` pointing at a build-pinned ssh config and known_hosts),
+`GIT_SSH_VARIANT` and `SSH_AUTH_SOCK` passed through. Nothing else the caller
+exports (`BASH_ENV`, loader, TLS or proxy variables) reaches git or ssh, and
+`~/.ssh/config` and the user's `known_hosts` play no part. It refuses when
+`git ls-remote --get-url <pin>` differs from the pin, and for a checkout that
+is not sha1.
+
+The pinned known_hosts covers github.com and `ssh.github.com:443`, so a store
+that must use port 443 pins `ssh://git@ssh.github.com:443/<owner>/<repo>.git`
+as both its origin and its `remote`.
+
+Residuals: a sync outside `priors` follows the checkout's own config.
+`priors` itself is dynamically linked (cgo, via `os/user`), so a loader
+variable such as `LD_PRELOAD` in the environment that runs it reaches `priors`
+itself; out of scope here.
 
 A session's store is picked from its repo's `origin` org (§4.2): a work-org
 repo reads both stores and writes work; any other repo reads the personal

@@ -925,12 +925,42 @@ func withRemote(t *testing.T) (fixture, string) {
 	git(t, fx.dir(), "remote", "add", "origin", bare)
 	git(t, fx.dir(), "push", "-q", "-u", "origin", "main")
 	fx.cfg.Push = true
+	fx.root.Remote = bare
+	committest.PinPush(t)
 	return fx, bare
+}
+
+// decoy is a bare clone of the pinned bare, so a push that followed a rewrite
+// to it would land.
+func decoy(t *testing.T, bare string) string {
+	t.Helper()
+	d := filepath.Join(t.TempDir(), "decoy.git")
+	git(t, t.TempDir(), "clone", "--bare", "-q", bare, d)
+	return d
 }
 
 func rev(t *testing.T, dir, spec string) string {
 	t.Helper()
 	return strings.TrimSpace(git(t, dir, "rev-parse", spec))
+}
+
+func assertMain(t *testing.T, bare, want string) {
+	t.Helper()
+	if got := rev(t, bare, "main"); got != want {
+		t.Errorf("%s main moved: %s -> %s", bare, want, got)
+	}
+}
+
+// failPushes installs a pre-receive hook in bare that prints echo and fails;
+// the receiving side runs it whatever the pusher's config says.
+func failPushes(t *testing.T, bare, echo string) string {
+	t.Helper()
+	hook := filepath.Join(bare, "hooks", "pre-receive")
+	writeFile(t, hook, []byte("#!/bin/sh\necho "+echo+"\necho "+echo+" >&2\nexit 1\n"))
+	if err := os.Chmod(hook, 0o755); err != nil { //nolint:gosec // a test executable
+		t.Fatal(err)
+	}
+	return hook
 }
 
 func TestPushSendsOnlyTheGatedCommit(t *testing.T) {
@@ -961,6 +991,264 @@ func TestPushSendsOnlyTheGatedCommit(t *testing.T) {
 	}
 }
 
+func TestPushUpdatesTrackingRef(t *testing.T) {
+	fx, bare := withRemote(t)
+	for _, name := range []string{"first-fact", "second-fact"} {
+		fx.put(t, "_global/"+name+".md", cleanFact(name))
+		fx.index(t)
+		if w := fx.checkout(t); w != "" {
+			t.Fatalf("%s: warning = %q", name, w)
+		}
+		if got, want := rev(t, bare, "main"), head(t, fx.dir()); got != want {
+			t.Errorf("%s: remote main = %s, want local HEAD %s", name, got, want)
+		}
+	}
+	if got, want := rev(t, fx.dir(), "refs/remotes/origin/main"), head(t, fx.dir()); got != want {
+		t.Errorf("origin/main = %s, want local HEAD %s", got, want)
+	}
+}
+
+func TestPushRefusesRepointedCheckout(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		repoint func(bare, decoy string) []string
+	}{
+		{"origin url", func(_, decoy string) []string { return []string{"remote", "set-url", "origin", decoy} }},
+		{"insteadOf", func(bare, decoy string) []string { return []string{"config", "url." + decoy + ".insteadOf", bare} }},
+		{"pushInsteadOf", func(bare, decoy string) []string { return []string{"config", "url." + decoy + ".pushInsteadOf", bare} }},
+		{"pushurl", func(_, decoy string) []string { return []string{"config", "remote.origin.pushurl", decoy} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx, bare := withRemote(t)
+			d := decoy(t, bare)
+			pushed, base := rev(t, bare, "main"), head(t, fx.dir())
+			git(t, fx.dir(), tc.repoint(bare, d)...)
+			fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+			fx.index(t)
+
+			if w := fx.checkout(t); !strings.Contains(w, "not pushed") {
+				t.Errorf("warning = %q", w)
+			}
+			assertMain(t, bare, pushed)
+			assertMain(t, d, pushed)
+			if head(t, fx.dir()) == base {
+				t.Error("nothing was committed")
+			}
+		})
+	}
+}
+
+// A push run in the checkout to the pinned URL would follow a
+// [remote "<pin>"] section without touching origin; that section is itself a
+// second remote, which the pin check refuses. The pin is a file:// URL as git
+// ignores a [remote "<name>"] section whose name starts with '/'.
+func TestPushRefusesNamedRemoteHijack(t *testing.T) {
+	for _, key := range []string{"url", "pushurl", "receivepack"} {
+		t.Run(key, func(t *testing.T) {
+			fx, bare := withRemote(t)
+			url := "file://" + bare
+			git(t, fx.dir(), "remote", "set-url", "origin", url)
+			fx.root.Remote = url
+			d := decoy(t, bare)
+			pushed := rev(t, d, "main")
+			value := d
+			if key == "receivepack" {
+				value = filepath.Join(t.TempDir(), "receive-pack")
+				writeFile(t, value, []byte("#!/bin/sh\nexec git-receive-pack '"+d+"'\n"))
+				if err := os.Chmod(value, 0o755); err != nil { //nolint:gosec // a test executable
+					t.Fatal(err)
+				}
+			}
+			git(t, fx.dir(), "config", "remote."+url+"."+key, value)
+			fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+			fx.index(t)
+
+			if w := fx.checkout(t); !strings.Contains(w, "not pushed") || !strings.Contains(w, "has remote(s) "+url) {
+				t.Errorf("warning = %q", w)
+			}
+			assertMain(t, bare, pushed)
+			assertMain(t, d, pushed)
+		})
+	}
+}
+
+// Both core.hooksPath=/dev/null on every git run and the push's own git dir,
+// which holds no hooks, keep the checkout's pre-push hook out of the push;
+// either alone holds this.
+func TestPushRunsNoCheckoutHook(t *testing.T) {
+	fx, bare := withRemote(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	fx.hook(t, "pre-push", "touch '"+marker+"'\nexit 1\n")
+	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+	fx.index(t)
+
+	if w := fx.checkout(t); w != "" {
+		t.Errorf("warning = %q", w)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("the checkout's pre-push hook ran")
+	}
+	if got, want := rev(t, bare, "main"), head(t, fx.dir()); got != want {
+		t.Errorf("remote main = %s, want local HEAD %s", got, want)
+	}
+}
+
+// git runs a local push's `git-receive-pack '<path>'` through bash, which
+// sources $BASH_ENV first, so an inherited one could redefine receive-pack.
+func TestPushIgnoresInheritedBashEnv(t *testing.T) {
+	fx, bare := withRemote(t)
+	d := decoy(t, bare)
+	pushed := rev(t, d, "main")
+	bashEnv := filepath.Join(t.TempDir(), "bash_env")
+	writeFile(t, bashEnv, []byte("git-receive-pack() { command git-receive-pack '"+d+"'; }\n"))
+	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+	fx.index(t)
+	t.Setenv("BASH_ENV", bashEnv)
+
+	if w := fx.checkout(t); w != "" {
+		t.Fatalf("warning = %q", w)
+	}
+	if got, want := rev(t, bare, "main"), head(t, fx.dir()); got != want {
+		t.Errorf("remote main = %s, want local HEAD %s", got, want)
+	}
+	assertMain(t, d, pushed)
+}
+
+// The pin check reads the checkout's config before the push, so only pushing
+// from the pinned git dir keeps a redirect written there afterwards out. The
+// pin is a file:// URL as git ignores a [remote "<name>"] section whose name
+// starts with '/'.
+func TestPushIgnoresCheckoutConfigWrittenAfterCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		redirect func(t *testing.T, url, decoy string) (key, value string)
+	}{
+		{"remote url", func(_ *testing.T, url, decoy string) (string, string) { return "remote." + url + ".url", decoy }},
+		{"pushInsteadOf", func(_ *testing.T, url, decoy string) (string, string) { return "url." + decoy + ".pushInsteadOf", url }},
+		{"insteadOf", func(_ *testing.T, url, decoy string) (string, string) { return "url." + decoy + ".insteadOf", url }},
+		{"receivepack", func(t *testing.T, url, _ string) (string, string) {
+			script := filepath.Join(t.TempDir(), "receive-pack")
+			writeFile(t, script, []byte("#!/bin/sh\nexit 1\n"))
+			if err := os.Chmod(script, 0o755); err != nil { //nolint:gosec // a test executable
+				t.Fatal(err)
+			}
+			return "remote." + url + ".receivepack", script
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx, bare := withRemote(t)
+			url := "file://" + bare
+			git(t, fx.dir(), "remote", "set-url", "origin", url)
+			fx.root.Remote = url
+			d := decoy(t, bare)
+			pushed := rev(t, d, "main")
+			key, value := tc.redirect(t, url, d)
+			beforePush = func() { git(t, fx.dir(), "config", key, value) }
+			t.Cleanup(func() { beforePush = func() {} })
+			fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+			fx.index(t)
+
+			if w := fx.checkout(t); w != "" {
+				t.Errorf("warning = %q", w)
+			}
+			if got, want := rev(t, bare, "main"), head(t, fx.dir()); got != want {
+				t.Errorf("remote main = %s, want local HEAD %s", got, want)
+			}
+			assertMain(t, d, pushed)
+		})
+	}
+}
+
+// The pinned push dir is sha1, and cannot read a sha256 checkout's objects.
+func TestPushRefusesNonSHA1Checkout(t *testing.T) {
+	setup(t)
+	committest.PinPush(t)
+	dir := filepath.Join(t.TempDir(), "store")
+	bare := filepath.Join(t.TempDir(), "remote.git")
+	git(t, t.TempDir(), "init", "-q", "--object-format=sha256", dir)
+	git(t, t.TempDir(), "init", "-q", "--bare", "--object-format=sha256", bare)
+	git(t, dir, "commit", "-q", "--allow-empty", "-m", "base")
+	git(t, dir, "remote", "add", "origin", bare)
+	git(t, dir, "push", "-q", "-u", "origin", "main")
+	parent := head(t, dir)
+	git(t, dir, "commit", "-q", "--allow-empty", "-m", "next")
+
+	if w := push(context.Background(), dir, bare, parent, head(t, dir)); !strings.Contains(w, "the push repo is sha1; this checkout is sha256") {
+		t.Errorf("warning = %q", w)
+	}
+	assertMain(t, bare, parent)
+}
+
+func TestPushRefusesUserConfigRewrite(t *testing.T) {
+	for _, key := range []string{"insteadOf", "pushInsteadOf"} {
+		t.Run(key, func(t *testing.T) {
+			fx, bare := withRemote(t)
+			d := decoy(t, bare)
+			pushed := rev(t, bare, "main")
+			git(t, fx.dir(), "config", "--global", "url."+d+"."+key, bare)
+			fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+			fx.index(t)
+
+			if w := fx.checkout(t); !strings.Contains(w, "not pushed") {
+				t.Errorf("warning = %q", w)
+			}
+			assertMain(t, bare, pushed)
+			assertMain(t, d, pushed)
+		})
+	}
+}
+
+func TestPushRefusesWithoutPinnedRemote(t *testing.T) {
+	fx, bare := withRemote(t)
+	fx.root.Remote = ""
+	pushed, base := rev(t, bare, "main"), head(t, fx.dir())
+	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+	fx.index(t)
+
+	if w := fx.checkout(t); !strings.Contains(w, "not pushed") || !strings.Contains(w, "pins no remote") {
+		t.Errorf("warning = %q", w)
+	}
+	assertMain(t, bare, pushed)
+	if head(t, fx.dir()) == base {
+		t.Error("nothing was committed")
+	}
+}
+
+func TestPushRefusesUnpinnedSSHConfig(t *testing.T) {
+	fx, bare := withRemote(t)
+	savedConfig, savedKnownHosts := tools.SSHConfig, tools.KnownHosts
+	t.Cleanup(func() { tools.SSHConfig, tools.KnownHosts = savedConfig, savedKnownHosts })
+	tools.SSHConfig, tools.KnownHosts = "", ""
+	pushed := rev(t, bare, "main")
+	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+	fx.index(t)
+
+	if w := fx.checkout(t); !strings.Contains(w, "not pushed") || !strings.Contains(w, "known_hosts") {
+		t.Errorf("warning = %q", w)
+	}
+	assertMain(t, bare, pushed)
+}
+
+func TestPushRefusesSecondRemote(t *testing.T) {
+	fx, bare := withRemote(t)
+	d := decoy(t, bare)
+	pushed := rev(t, bare, "main")
+	git(t, fx.dir(), "remote", "add", "other", d)
+	git(t, fx.dir(), "fetch", "-q", "other")
+	git(t, fx.dir(), "branch", "-q", "--set-upstream-to=other/main")
+	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+	fx.index(t)
+
+	w := fx.checkout(t)
+	for _, want := range []string{"not pushed", "has remote(s) origin, other; the trust file pins origin alone"} {
+		if !strings.Contains(w, want) {
+			t.Errorf("warning %q lacks %q", w, want)
+		}
+	}
+	assertMain(t, bare, pushed)
+	assertMain(t, d, pushed)
+}
+
 func TestPushRefusesUngatedCommitsAhead(t *testing.T) {
 	fx, bare := withRemote(t)
 	pushed := rev(t, bare, "main")
@@ -983,14 +1271,9 @@ func TestPushRefusesUngatedCommitsAhead(t *testing.T) {
 }
 
 func TestPushFailureQuotesNoRemoteOutput(t *testing.T) {
-	fx, _ := withRemote(t)
+	fx, bare := withRemote(t)
 	const echo = "SECRET-REMOTE-ECHO"
-	script := filepath.Join(t.TempDir(), "receive-pack")
-	writeFile(t, script, []byte("#!/bin/sh\necho "+echo+"\necho "+echo+" >&2\nexit 1\n"))
-	if err := os.Chmod(script, 0o755); err != nil { //nolint:gosec // a test executable
-		t.Fatal(err)
-	}
-	git(t, fx.dir(), "config", "remote.origin.receivepack", script)
+	failPushes(t, bare, echo)
 	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
 	fx.index(t)
 
@@ -1006,19 +1289,16 @@ func TestPushFailureQuotesNoRemoteOutput(t *testing.T) {
 func TestPushRefusesAfterFailedPush(t *testing.T) {
 	fx, bare := withRemote(t)
 	pushed := rev(t, bare, "main")
-	script := filepath.Join(t.TempDir(), "receive-pack")
-	writeFile(t, script, []byte("#!/bin/sh\nexit 1\n"))
-	if err := os.Chmod(script, 0o755); err != nil { //nolint:gosec // a test executable
-		t.Fatal(err)
-	}
-	git(t, fx.dir(), "config", "remote.origin.receivepack", script)
+	hook := failPushes(t, bare, "rejected")
 	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
 	fx.index(t)
 	if w := fx.checkout(t); !strings.Contains(w, "git push failed") {
 		t.Fatalf("warning = %q, want a failed push", w)
 	}
 
-	git(t, fx.dir(), "config", "--unset", "remote.origin.receivepack")
+	if err := os.Remove(hook); err != nil {
+		t.Fatal(err)
+	}
 	fx.put(t, "_global/second-fact.md", cleanFact("second-fact"))
 	fx.index(t)
 	w := fx.checkout(t)
@@ -1034,7 +1314,12 @@ func TestPushRefusesAfterFailedPush(t *testing.T) {
 
 func TestPushRefusesWithoutUpstream(t *testing.T) {
 	fx := setup(t)
+	bare := filepath.Join(t.TempDir(), "remote.git")
+	git(t, t.TempDir(), "init", "--bare", "-q", bare)
+	git(t, fx.dir(), "remote", "add", "origin", bare)
 	fx.cfg.Push = true
+	fx.root.Remote = bare
+	committest.PinPush(t)
 	base := head(t, fx.dir())
 	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
 	fx.index(t)
@@ -1066,16 +1351,12 @@ func TestPushRefusesStaleTrackingRef(t *testing.T) {
 	}
 }
 
-func TestPushReportsDetachedHeadAndGitFailuresApart(t *testing.T) {
+func TestPushRefusesDetachedHead(t *testing.T) {
 	fx, _ := withRemote(t)
 	base := head(t, fx.dir())
 	git(t, fx.dir(), "checkout", "-q", "--detach")
-	if w := push(context.Background(), fx.dir(), base, base); !strings.Contains(w, "HEAD is not on a branch") {
-		t.Errorf("detached warning = %q", w)
-	}
-	w := push(context.Background(), t.TempDir(), base, base)
-	if !strings.Contains(w, "git symbolic-ref failed") || strings.Contains(w, "not on a branch") {
-		t.Errorf("non-repo warning = %q", w)
+	if w := push(context.Background(), fx.dir(), fx.root.Remote, base, base); !strings.Contains(w, "HEAD is not on a branch") {
+		t.Errorf("warning = %q", w)
 	}
 }
 

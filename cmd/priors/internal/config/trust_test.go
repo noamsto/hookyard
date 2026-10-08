@@ -77,10 +77,12 @@ personal_orgs = ["GitHub.com/noamsto"]
 trust_root    = "separate"
 
 [stores.personal]
-id = "noamsto-priors"
+id   = "noamsto-priors"
+path = "/m/personal"
 
 [stores.work]
-id = "factify-priors"
+id   = "factify-priors"
+path = "/m/work"
 `
 
 const etcTrust = "/etc/priors/trust.toml"
@@ -392,13 +394,13 @@ func TestCheckTrustPathRealFSRefusesAUserOwnedFile(t *testing.T) {
 func TestReadTrust(t *testing.T) {
 	const (
 		orgs     = "work_orgs = [\"github.com/w\"]\n"
-		personal = "\n[stores.personal]\nid = \"p\"\n"
-		work     = "\n[stores.work]\nid = \"w\"\n"
+		personal = "\n[stores.personal]\nid = \"p\"\npath = \"/m/p\"\n"
+		work     = "\n[stores.work]\nid = \"w\"\npath = \"/m/w\"\n"
 	)
 	rejected := map[string]struct{ body, want string }{
 		"unparsable":                {"profile = \n", "toml: line 1 (last key \"profile\"): expected value"},
 		"unknown key":               {"profile = \"personal\"\n" + orgs + "seam_probe = 1\n" + personal, "unknown keys: seam_probe"},
-		"unknown store key":         {"profile = \"personal\"\n" + orgs + personal + "path = \"/x\"\n", "unknown keys: stores.personal.path"},
+		"unknown store key":         {"profile = \"personal\"\n" + orgs + personal + "url = \"/x\"\n", "unknown keys: stores.personal.url"},
 		"unknown store kind":        {"profile = \"personal\"\n" + orgs + personal + "\n[stores.other]\nid = \"o\"\n", "unknown keys: stores.other"},
 		"no profile":                {orgs + personal, `profile must be "work" or "personal", got ""`},
 		"bad profile":               {"profile = \"office\"\n" + orgs + personal, `profile must be "work" or "personal", got "office"`},
@@ -413,8 +415,17 @@ func TestReadTrust(t *testing.T) {
 		"upper-case store id":       {"profile = \"personal\"\n" + orgs + "\n[stores.personal]\nid = \"P\"\n", `stores.personal.id "P" must match`},
 		"store id with a slash":     {"profile = \"personal\"\n" + orgs + "\n[stores.personal]\nid = \"a/b\"\n", "must match"},
 		"store id too long":         {"profile = \"personal\"\n" + orgs + "\n[stores.personal]\nid = \"" + strings.Repeat("a", 65) + "\"\n", "must match"},
+		"no personal path":          {"profile = \"personal\"\n" + orgs + "\n[stores.personal]\nid = \"p\"\n", "stores.personal.path is required"},
+		"relative personal path":    {"profile = \"personal\"\n" + orgs + "\n[stores.personal]\nid = \"p\"\npath = \"m/p\"\n", `stores.personal.path "m/p" must be absolute`},
+		"tilde personal path":       {"profile = \"personal\"\n" + orgs + "\n[stores.personal]\nid = \"p\"\npath = \"~/p\"\n", `stores.personal.path "~/p" must be absolute`},
+		"personal remote with dash": {"profile = \"personal\"\n" + orgs + personal + "remote = \"-oProxyCommand=x\"\n", `stores.personal.remote "-oProxyCommand=x" must not start with "-"`},
+		"personal remote w/ space":  {"profile = \"personal\"\n" + orgs + personal + "remote = \"git@h:p .git\"\n", "stores.personal.remote"},
+		"personal remote w/ tab":    {"profile = \"personal\"\n" + orgs + personal + "remote = \"git@h:p\\t.git\"\n", "whitespace or control characters"},
+		"no work path":              {"profile = \"work\"\n" + orgs + personal + "\n[stores.work]\nid = \"w\"\n", "stores.work.path is required"},
+		"relative work path":        {"profile = \"work\"\n" + orgs + personal + "\n[stores.work]\nid = \"w\"\npath = \"m/w\"\n", `stores.work.path "m/w" must be absolute`},
+		"work remote with dash":     {"profile = \"work\"\n" + orgs + personal + work + "remote = \"-x\"\n", `stores.work.remote "-x" must not start with "-"`},
 		"bad work store id":         {"profile = \"work\"\n" + orgs + personal + "\n[stores.work]\nid = \"../w\"\n", `stores.work.id "../w" must match`},
-		"duplicate store ids":       {"profile = \"work\"\n" + orgs + personal + "\n[stores.work]\nid = \"p\"\n", `must differ, both are "p"`},
+		"duplicate store ids":       {"profile = \"work\"\n" + orgs + personal + "\n[stores.work]\nid = \"p\"\npath = \"/m/w\"\n", `must differ, both are "p"`},
 		"work profile no work":      {"profile = \"work\"\n" + orgs + personal, "stores.work is required on a work profile"},
 		"personal profile has work": {"profile = \"personal\"\n" + orgs + personal + work, "stores.work is listed on a personal profile"},
 		"scalar work names":         {"profile = \"personal\"\n" + orgs + "work_names = \"acme\"\n" + personal, "work_names"},
@@ -443,10 +454,22 @@ func TestReadTrust(t *testing.T) {
 			digest:       sha256Hex(validTrust),
 			rootLabel:    "separate",
 		}
-		want.Stores.Personal = &trustStore{ID: "noamsto-priors"}
-		want.Stores.Work = &trustStore{ID: "factify-priors"}
+		want.Stores.Personal = &trustStore{ID: "noamsto-priors", Path: "/m/personal"}
+		want.Stores.Work = &trustStore{ID: "factify-priors", Path: "/m/work"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("readTrust = %+v\nwant       %+v", got, want)
+		}
+	})
+
+	t.Run("store remotes", func(t *testing.T) {
+		f := etcFS()
+		f[etcTrust] = file("profile = \"work\"\n" + orgs + personal + "remote = \"git@h:p.git\"\n" + work + "remote = \"\"\n")
+		got, err := readTrust(f, etcTrust)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Stores.Personal.Remote != "git@h:p.git" || got.Stores.Work.Remote != "" {
+			t.Errorf("remotes = %q, %q; want git@h:p.git and none", got.Stores.Personal.Remote, got.Stores.Work.Remote)
 		}
 	})
 
@@ -530,7 +553,7 @@ func skKeyLine(t *testing.T) (string, ssh.PublicKey) {
 	return strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(key)), "\n") + " owner@token", key
 }
 
-const personalTrust = "profile = \"personal\"\nwork_orgs = [\"github.com/w\"]\n\n[stores.personal]\nid = \"p\"\n"
+const personalTrust = "profile = \"personal\"\nwork_orgs = [\"github.com/w\"]\n\n[stores.personal]\nid = \"p\"\npath = \"/m/p\"\n"
 
 func attestEntry(key, attestation, challenge string) string {
 	return fmt.Sprintf("\n[[attest_keys]]\nkey = %q\nattestation = %q\nchallenge = %q\n", key, attestation, challenge)

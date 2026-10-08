@@ -87,8 +87,15 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 	}
 	defer unlock()
 
-	checkout := store.CheckoutRoot(cfg, dest.Store)
-	if err := checkDuplicate(cfg, dest, f.Name); err != nil {
+	var checkout store.Root
+	roots := []store.Root{store.QuarantineRoot(cfg)}
+	if !dest.Quarantine {
+		if checkout, err = store.CheckoutRoot(ctx, cfg, dest.Store); err != nil {
+			return Result{}, err
+		}
+		roots = []store.Root{checkout, store.LocalRoot(cfg, dest.Store)}
+	}
+	if err := checkDuplicate(roots, f.Name); err != nil {
 		return Result{}, err
 	}
 	if !dest.Quarantine {
@@ -187,11 +194,7 @@ func refusal(findings []lint.Finding) error {
 // checkDuplicate refuses a name the destination already holds. A store's
 // checkout and its local layer share one namespace, since a flagged fact is
 // published under its name once reviewed.
-func checkDuplicate(cfg config.Config, dest route.Dest, name string) error {
-	roots := []store.Root{store.CheckoutRoot(cfg, dest.Store), store.LocalRoot(cfg, dest.Store)}
-	if dest.Quarantine {
-		roots = []store.Root{store.QuarantineRoot(cfg)}
-	}
+func checkDuplicate(roots []store.Root, name string) error {
 	for _, r := range roots {
 		if e, ok := r.FindByName(name); ok {
 			return fmt.Errorf("a fact named %q already exists at %s", name, filepath.Join(r.Path, filepath.FromSlash(e.Rel)))

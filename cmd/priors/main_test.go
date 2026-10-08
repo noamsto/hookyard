@@ -77,8 +77,24 @@ func buildAndRun(m *testing.M) int {
 		return 1
 	}
 	toolstest.Pin()
+	for _, name := range []string{"ssh_config", "known_hosts"} {
+		if err := os.WriteFile(filepath.Join(toolsDir, name), nil, 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+	}
+	pushGitDir := filepath.Join(toolsDir, "push.git")
+	if out, err := tools.Command(context.Background(), tools.Git, "init", "-q", "--bare", "--template=", "--object-format=sha1", pushGitDir).CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "git init: %v\n%s", err, out)
+		return 1
+	}
 	// The priorstest build reports every owner as uid 0, so 0 owns verdicts.
-	ldflags := []string{"-X " + attestPkg + ".VerifyUID=0"}
+	ldflags := []string{
+		"-X " + attestPkg + ".VerifyUID=0",
+		fmt.Sprintf("-X %s.SSHConfig=%s", toolsPkg, filepath.Join(toolsDir, "ssh_config")),
+		fmt.Sprintf("-X %s.KnownHosts=%s", toolsPkg, filepath.Join(toolsDir, "known_hosts")),
+		fmt.Sprintf("-X %s.PushGitDir=%s", toolsPkg, pushGitDir),
+	}
 	for name, tool := range map[string]struct{ variable, real string }{
 		"git":     {"Git", tools.Git},
 		"ssh":     {"SSH", tools.SSH},
@@ -124,6 +140,9 @@ type sandbox struct {
 	configPath, scanner, path      string
 	trustPath, profile             string
 	verdicts                       string
+	// personalRemote and workRemote are the remotes the trust file pins for
+	// each store; empty pins none.
+	personalRemote, workRemote string
 }
 
 // trustOpts are the trust-file lines writeTrustWith adds to writeTrust's.
@@ -165,7 +184,7 @@ func newSandbox(t *testing.T, profile string) *sandbox {
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	sb.writeFile(sb.gitConfig, "[user]\n\tname = Test\n\temail = test@example.com\n[commit]\n\tgpgsign = false\n")
+	sb.writeFile(sb.gitConfig, "[user]\n\tname = Test\n\temail = test@example.com\n[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n")
 	sb.writeFile(sb.sshConfig, "")
 	sb.setScanner(cleanScanner)
 	for _, d := range []string{sb.personal, sb.work} {
@@ -208,6 +227,12 @@ func (sb *sandbox) writeTrust(extra ...string) { sb.writeTrustWith(trustOpts{ext
 // attest keys added.
 func (sb *sandbox) writeTrustWith(o trustOpts) {
 	sb.t.Helper()
+	sb.writeFile(sb.trustPath, sb.trustContent(sb.personal, sb.work, o))
+}
+
+// trustContent is a trust file for the sandbox's profile with the given store
+// paths, the sandbox's remote pins and o's additions.
+func (sb *sandbox) trustContent(personal, work string, o trustOpts) string {
 	lines := []string{
 		fmt.Sprintf("profile = %q", sb.profile),
 		`work_orgs = ["github.com/factify-inc"]`,
@@ -217,23 +242,27 @@ func (sb *sandbox) writeTrustWith(o trustOpts) {
 	if o.root != "" {
 		lines = append(lines, fmt.Sprintf("trust_root = %q", o.root))
 	}
-	lines = append(lines, "[stores.personal]", `id = "personal-test"`)
+	lines = append(lines, "[stores.personal]", `id = "personal-test"`, fmt.Sprintf("path = %q", personal))
+	if sb.personalRemote != "" {
+		lines = append(lines, fmt.Sprintf("remote = %q", sb.personalRemote))
+	}
 	if sb.profile == "work" {
-		lines = append(lines, "[stores.work]", `id = "work-test"`)
+		lines = append(lines, "[stores.work]", `id = "work-test"`, fmt.Sprintf("path = %q", work))
+		if sb.workRemote != "" {
+			lines = append(lines, fmt.Sprintf("remote = %q", sb.workRemote))
+		}
 	}
 	for _, k := range o.keys {
 		lines = append(lines, "[[attest_keys]]",
 			fmt.Sprintf("key = %q", k.AuthorizedKey()), `attestation = "YQ=="`, `challenge = "YQ=="`)
 	}
-	sb.writeFile(sb.trustPath, strings.Join(lines, "\n")+"\n")
+	return strings.Join(lines, "\n") + "\n"
 }
 
 // writeConfig rewrites the config; extra lines are appended to it.
 func (sb *sandbox) writeConfig(extra ...string) {
 	sb.t.Helper()
 	lines := []string{
-		fmt.Sprintf("personal_store = %q", sb.personal),
-		fmt.Sprintf("work_store = %q", sb.work),
 		fmt.Sprintf("state_dir = %q", sb.state),
 		fmt.Sprintf("ssh_config = %q", sb.sshConfig),
 	}
@@ -693,6 +722,7 @@ func TestSymlinkedStoreBehavesLikeItsTarget(t *testing.T) {
 	if err := os.Symlink(target, sb.personal); err != nil {
 		t.Fatal(err)
 	}
+	sb.writeTrust()
 	sb.writeConfig()
 
 	if linked := sb.run("", "lint"); direct.stdout == "" || linked != direct {
@@ -1374,12 +1404,17 @@ func TestLintDirWithKind(t *testing.T) {
 	}
 }
 
-// writeStoreIndex regenerates dir's MEMORY.md through a throwaway config
-// that points personal_store at it.
+// writeStoreIndex regenerates dir's MEMORY.md through a throwaway config and
+// trust file that point every store the profile requires at it. The trust file
+// sits under sb.dir because the trust walk rejects a group-writable parent.
 func writeStoreIndex(t *testing.T, sb *sandbox, dir string) {
 	t.Helper()
 	cfg := filepath.Join(t.TempDir(), "config.toml")
-	sb.writeFile(cfg, fmt.Sprintf("personal_store = %q\nstate_dir = %q\n", dir, filepath.Join(t.TempDir(), "state")))
+	sb.writeFile(cfg, fmt.Sprintf("state_dir = %q\n", filepath.Join(t.TempDir(), "state")))
+	saved := sb.trustPath
+	sb.trustPath = filepath.Join(sb.dir, "index-trust.toml")
+	defer func() { sb.trustPath = saved }()
+	sb.writeFile(sb.trustPath, sb.trustContent(dir, sb.work, trustOpts{}))
 	if res := sb.run("", "index", "--write", "--config", cfg); res.code != 0 {
 		t.Fatalf("index --write: %s", res.stderr)
 	}
@@ -1782,6 +1817,7 @@ func TestListReportsProblems(t *testing.T) {
 	wantContains(t, "list stderr", res.stderr, "skipped personal/demo/broken.md: ")
 
 	sb.personal = filepath.Join(sb.dir, "absent")
+	sb.writeTrust()
 	sb.writeConfig()
 	res = sb.run("", "list", "--cwd", repo)
 	wantExit(t, res, 0)
@@ -2099,8 +2135,6 @@ func TestPostToolMarkerHonoursXDGStateHome(t *testing.T) {
 	sb := newSandbox(t, "personal")
 	sb.configPath = filepath.Join(sb.dir, "config-no-state.toml")
 	sb.writeFile(sb.configPath, strings.Join([]string{
-		fmt.Sprintf("personal_store = %q", sb.personal),
-		fmt.Sprintf("work_store = %q", sb.work),
 		fmt.Sprintf("ssh_config = %q", sb.sshConfig),
 	}, "\n")+"\n")
 	sb.toolCall("post_tool", "sess-1", "Bash", `{"command":"go test ./..."}`)

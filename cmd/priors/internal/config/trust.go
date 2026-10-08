@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"unicode"
 
 	"github.com/BurntSushi/toml"
 	"golang.org/x/crypto/ssh"
@@ -221,6 +222,10 @@ type AttestKey struct {
 
 type trustStore struct {
 	ID string `toml:"id"`
+	// Path is where the store is checked out. Remote is the origin the checkout
+	// must have; empty means none is pinned.
+	Path   string `toml:"path"`
+	Remote string `toml:"remote"`
 }
 
 // storeID keeps an id usable as a path component.
@@ -281,7 +286,7 @@ func readTrust(fsys StatFS, path string) (trust, error) {
 	if t.Stores.Personal == nil {
 		return trust{}, errors.New("stores.personal is required")
 	}
-	if err := checkStoreID("stores.personal.id", t.Stores.Personal.ID); err != nil {
+	if err := checkStore("stores.personal", *t.Stores.Personal); err != nil {
 		return trust{}, err
 	}
 	switch {
@@ -290,7 +295,7 @@ func readTrust(fsys StatFS, path string) (trust, error) {
 	case t.Profile == "work" && t.Stores.Work == nil:
 		return trust{}, errors.New("stores.work is required on a work profile")
 	case t.Stores.Work != nil:
-		if err := checkStoreID("stores.work.id", t.Stores.Work.ID); err != nil {
+		if err := checkStore("stores.work", *t.Stores.Work); err != nil {
 			return trust{}, err
 		}
 		if t.Stores.Work.ID == t.Stores.Personal.ID {
@@ -300,9 +305,21 @@ func readTrust(fsys StatFS, path string) (trust, error) {
 	return t, nil
 }
 
-func checkStoreID(key, id string) error {
-	if !storeID.MatchString(id) {
-		return fmt.Errorf("%s %q must match [a-z0-9-]{1,64}", key, id)
+func checkStore(key string, s trustStore) error {
+	if !storeID.MatchString(s.ID) {
+		return fmt.Errorf("%s.id %q must match [a-z0-9-]{1,64}", key, s.ID)
+	}
+	if s.Path == "" {
+		return fmt.Errorf("%s.path is required", key)
+	}
+	if !filepath.IsAbs(s.Path) {
+		return fmt.Errorf("%s.path %q must be absolute", key, s.Path)
+	}
+	if strings.HasPrefix(s.Remote, "-") {
+		return fmt.Errorf(`%s.remote %q must not start with "-"`, key, s.Remote)
+	}
+	if strings.ContainsFunc(s.Remote, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+		return fmt.Errorf("%s.remote %q must not hold whitespace or control characters", key, s.Remote)
 	}
 	return nil
 }

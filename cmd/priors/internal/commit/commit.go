@@ -30,6 +30,7 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 	"github.com/noamsto/hookyard/cmd/priors/internal/lint"
+	"github.com/noamsto/hookyard/cmd/priors/internal/pin"
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 	"github.com/noamsto/hookyard/cmd/priors/internal/sanitize"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
@@ -150,7 +151,7 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 	}
 	var notes []string
 	if cfg.Push {
-		notes = append(notes, push(ctx, dir, parent, commit))
+		notes = append(notes, push(ctx, dir, root.Remote, parent, commit))
 	}
 	if len(left) > 0 {
 		notes = append(notes, fmt.Sprintf("%s in %s", leftNote(left), dir))
@@ -220,16 +221,18 @@ func commitTree(ctx context.Context, dir, parent, tree, msg string) (commit, war
 }
 
 // push publishes commit, the one just made on parent, to the branch's
-// upstream. The explicit refspec makes remote.<r>.push and push.default
-// irrelevant, and the flags neutralise push.followTags, push.recurseSubmodules
-// and push.gpgSign. The lease makes the push a compare-and-swap against the
-// real remote, so only commit is transferred even when the tracking ref is
-// stale or tampered with; commit being parent's child, a passing lease is a
-// fast-forward. pushurl, insteadOf, pushInsteadOf and transport config are
-// honoured: they pick where the remote is, not what is pushed, and whoever can
-// set them already controls the store's git. A branch with no fetched upstream, including a fresh unborn
-// store, is not pushed: the user's first `git push -u` sets it up.
-func push(ctx context.Context, dir, parent, commit string) (warning string) {
+// upstream on origin, which must be remote, the trust file's pin. It pushes to
+// the pinned URL from the build-pinned empty bare git dir, read-only and so
+// beyond the owner's reach, reading the checkout's objects through
+// GIT_OBJECT_DIRECTORY, in pin.PushEnv's environment: neither the checkout's
+// config, where a [remote "<url>"] section redirects even an explicit-URL
+// push, nor the caller's environment reaches it. The lease makes the push a
+// compare-and-swap against the real remote, so only commit is transferred even
+// when the tracking ref is stale or tampered with; commit being parent's
+// child, a passing lease is a fast-forward. A branch with no fetched upstream,
+// including a fresh unborn store, is not pushed: the user's first
+// `git push -u` sets it up.
+func push(ctx context.Context, dir, remote, parent, commit string) (warning string) {
 	refuse := func(format string, args ...any) string {
 		return fmt.Sprintf("not pushed from %s: ", dir) + fmt.Sprintf(format, args...)
 	}
@@ -242,6 +245,17 @@ func push(ctx context.Context, dir, parent, commit string) (warning string) {
 	}
 	if parent == "" {
 		return refuse("the store has no earlier commit to push onto")
+	}
+	if remote == "" {
+		return refuse("the trust file pins no remote for this store")
+	}
+	env, err := pin.PushEnv()
+	if err != nil {
+		return refuse("%v", err)
+	}
+	// Re-checked under the store's lock, right before pushing.
+	if err := pin.Check(ctx, dir, remote); err != nil {
+		return refuse("%v", err)
 	}
 	ref, err := runGit(ctx, dir, gitTimeout, nil, "symbolic-ref", "-q", "HEAD")
 	if exitsOne(err) {
@@ -260,7 +274,7 @@ func push(ctx context.Context, dir, parent, commit string) (warning string) {
 	if len(fields) != 3 || fields[0] == "" || fields[1] == "" || fields[1] == "." || !strings.HasPrefix(fields[2], "refs/heads/") {
 		return refuse("%s has no upstream", branch)
 	}
-	tracking, remote, mergeRef := fields[0], fields[1], fields[2]
+	tracking, mergeRef := fields[0], fields[2]
 	upstream, err := runGit(ctx, dir, gitTimeout, nil, "rev-parse", "-q", "--verify", tracking+"^{commit}")
 	if exitsOne(err) {
 		return refuse("upstream %s is not fetched", tracking)
@@ -275,11 +289,41 @@ func push(ctx context.Context, dir, parent, commit string) (warning string) {
 	if out != commit {
 		return refuse("%s has commits ahead of %s other than this one; push them yourself (git push) to resume", branch, tracking)
 	}
-	if _, err := runGit(ctx, dir, pushTimeout, nil, "push", "-q", "--no-follow-tags", "--recurse-submodules=no", "--no-signed", "--force-with-lease="+mergeRef+":"+parent, "--", remote, commit+":"+mergeRef); err != nil {
+
+	format, warning := inspect("git rev-parse", "rev-parse", "--show-object-format")
+	if warning != "" {
+		return warning
+	}
+	if format != "sha1" {
+		return refuse("the push repo is sha1; this checkout is %s", format)
+	}
+	common, warning := inspect("git rev-parse", "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if warning != "" {
+		return warning
+	}
+	beforePush()
+	env = append(env, "GIT_DIR="+tools.PushGitDir, "GIT_OBJECT_DIRECTORY="+filepath.Join(common, "objects"))
+	url, err := runGitExact(ctx, tools.PushGitDir, env, gitTimeout, nil, "ls-remote", "--get-url", remote)
+	if err != nil {
+		return refuse("%s", gitWarning("git ls-remote", url, err))
+	}
+	if url = strings.TrimSpace(url); url != remote {
+		return refuse("effective push URL %s differs from the pinned %s", url, remote)
+	}
+	if _, err := runGitExact(ctx, tools.PushGitDir, env, pushTimeout, nil, "push", "-q", "--no-follow-tags", "--recurse-submodules=no", "--no-signed", "--force-with-lease="+mergeRef+":"+parent, "--", remote, commit+":"+mergeRef); err != nil {
 		return refuse("git push failed: %v", err)
+	}
+	// The push from the pinned git dir leaves the checkout's tracking ref behind,
+	// which the next push's ahead check reads.
+	if out, err := runGit(ctx, dir, gitTimeout, nil, "update-ref", tracking, commit, upstream); err != nil {
+		return fmt.Sprintf("pushed, but updating %s failed: %s", tracking, gitWarning("git update-ref", out, err))
 	}
 	return ""
 }
+
+// beforePush is a test seam that runs once the pin and upstream checks have
+// passed, just before the effective push URL is read and the push runs.
+var beforePush = func() {}
 
 // exitsOne reports whether err is a git exit status of 1, the "no such thing" answer of -q queries.
 func exitsOne(err error) bool {
@@ -850,20 +894,26 @@ func runGit(ctx context.Context, dir string, timeout time.Duration, stdin io.Rea
 }
 
 // runGitEnv is runGit with env set after the repo-locating variables are
-// stripped. No hook runs: one could stage, amend or move a ref after the
-// gates passed.
+// stripped.
 func runGitEnv(ctx context.Context, dir string, env []string, timeout time.Duration, stdin io.Reader, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	cmd := tools.Command(ctx, tools.Git, append([]string{"-C", dir, "-c", "core.hooksPath=/dev/null"}, args...)...)
 	// Checkout matches git's English "not a git repository"; literal
 	// pathspecs keep a file named like a glob from staging its neighbours.
 	// GIT_SSH_COMMAND goes last, as exec keeps the final duplicate, so git's own
 	// transport cannot find ssh on PATH; GIT_EXEC_PATH would swap git's helpers.
-	cmd.Env = append(slices.DeleteFunc(
+	env = append(slices.DeleteFunc(
 		route.RepoEnv(append([]string{"GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "GIT_LITERAL_PATHSPECS=1"}, env...)...),
 		func(kv string) bool { return strings.HasPrefix(kv, "GIT_EXEC_PATH=") },
 	), "GIT_SSH_COMMAND="+tools.SSH)
+	return runGitExact(ctx, dir, env, timeout, stdin, args...)
+}
+
+// runGitExact runs git in dir with exactly env as its environment. No hook
+// runs: one could stage, amend or move a ref after the gates passed.
+func runGitExact(ctx context.Context, dir string, env []string, timeout time.Duration, stdin io.Reader, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := tools.Command(ctx, tools.Git, append([]string{"-C", dir, "-c", "core.hooksPath=/dev/null"}, args...)...)
+	cmd.Env = env
 	cmd.Stdin = stdin
 	cmd.WaitDelay = waitDelay
 	var stdout, stderr bytes.Buffer

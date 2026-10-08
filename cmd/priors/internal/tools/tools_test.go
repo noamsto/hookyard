@@ -78,6 +78,20 @@ func TestUnpinned(t *testing.T) {
 	}
 }
 
+// -X on a variable that does not exist is silently ignored, so a renamed or
+// dropped pin would build a binary that refuses every push. Under
+// `nix build .#priors` the tests get the build's ldflags.
+func TestPinnedBuildPinsPushInputs(t *testing.T) {
+	if Git == "" {
+		t.Skip("unpinned build")
+	}
+	for name, path := range map[string]string{"SSHConfig": SSHConfig, "KnownHosts": KnownHosts, "PushGitDir": PushGitDir} {
+		if !filepath.IsAbs(path) {
+			t.Errorf("%s = %q in a build that pins git, want an absolute path", name, path)
+		}
+	}
+}
+
 func TestNoPATHExec(t *testing.T) {
 	root, err := filepath.Abs("../..")
 	if err != nil {

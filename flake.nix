@@ -100,6 +100,28 @@
             attest = "github.com/noamsto/hookyard/cmd/priors/internal/attest";
             # The tests exec these; the binary gets them as pinned paths.
             runtimeDeps = [pkgs.git pkgs.ripgrep pkgs.betterleaks pkgs.openssh];
+            # The push runs ssh with -F and UserKnownHostsFile pointing here,
+            # so neither ~/.ssh/config nor the user's known_hosts can redirect
+            # or vouch for the host.
+            sshConfig = pkgs.writeText "priors-ssh-config" ''
+              Host *
+                StrictHostKeyChecking yes
+                UpdateHostKeys no
+                GlobalKnownHostsFile /dev/null
+            '';
+            # The push runs from this empty bare git dir: in the store, so no
+            # one but root can write a config into it.
+            pushGitDir = pkgs.runCommand "priors-push-gitdir" {nativeBuildInputs = [pkgs.git];} ''
+              HOME=$TMPDIR git init -q --bare --template= --object-format=sha1 $out
+            '';
+            knownHosts = pkgs.writeText "priors-known-hosts" ''
+              github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+              github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+              github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+              [ssh.github.com]:443 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+              [ssh.github.com]:443 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+              [ssh.github.com]:443 ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+            '';
           in
             pkgs.lib.makeOverridable ({
               # nix-config sets the priors-verify account's uid (memory-layer §4.4).
@@ -118,6 +140,9 @@
                     "-X ${tools}.SSH=${pkgs.openssh}/bin/ssh"
                     "-X ${tools}.Rg=${pkgs.ripgrep}/bin/rg"
                     "-X ${tools}.Scanner=${pkgs.betterleaks}/bin/betterleaks"
+                    "-X ${tools}.SSHConfig=${sshConfig}"
+                    "-X ${tools}.KnownHosts=${knownHosts}"
+                    "-X ${tools}.PushGitDir=${pushGitDir}"
                   ]
                   ++ pkgs.lib.optional (priorsVerifyUid != null) "-X ${attest}.VerifyUID=${toString priorsVerifyUid}";
                 nativeCheckInputs = runtimeDeps;

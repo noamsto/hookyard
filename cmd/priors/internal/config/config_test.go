@@ -44,18 +44,31 @@ type fakeRootInfo struct {
 
 func (i fakeRootInfo) Sys() any { return i.sys }
 
-const sampleTrust = `
-profile       = "work"
+// trustBody is a trust file whose stores sit at personal and work: a work
+// profile when work is set, else a personal one. An empty personal leaves the
+// path out.
+func trustBody(personal, work string) string {
+	profile := "personal"
+	if work != "" {
+		profile = "work"
+	}
+	body := fmt.Sprintf(`
+profile       = %q
 work_orgs     = ["github.com/Factify-Inc"]
 personal_orgs = ["GitHub.com/noamsto"]
 trust_root    = "separate"
 
 [stores.personal]
 id = "personal-test"
-
-[stores.work]
-id = "work-test"
-`
+`, profile)
+	if personal != "" {
+		body += fmt.Sprintf("path = %q\n", personal)
+	}
+	if work != "" {
+		body += fmt.Sprintf("\n[stores.work]\nid = \"work-test\"\npath = %q\n", work)
+	}
+	return body
+}
 
 func writeTrust(t *testing.T, body string) string {
 	t.Helper()
@@ -71,10 +84,23 @@ func writeTrust(t *testing.T, body string) string {
 	return path
 }
 
+// trustWith writes a trust file whose stores sit at personal and work.
+func trustWith(t *testing.T, personal, work string) string {
+	t.Helper()
+	return writeTrust(t, trustBody(personal, work))
+}
+
+// loadStores loads the user config at path against a trust file whose stores
+// sit at personal and work.
+func loadStores(t *testing.T, path, personal, work string) (Config, error) {
+	t.Helper()
+	return load(path, trustWith(t, personal, work), fakeRoot{})
+}
+
 // loadUser loads the user config at path against a valid trust file.
 func loadUser(t *testing.T, path string) (Config, error) {
 	t.Helper()
-	return load(path, writeTrust(t, sampleTrust), fakeRoot{})
+	return loadStores(t, path, "/m/personal", "/m/work")
 }
 
 func isolate(t *testing.T) string {
@@ -88,8 +114,6 @@ func isolate(t *testing.T) string {
 }
 
 const sample = `
-personal_store = "~/memory/personal"
-work_store     = "~/memory/work"
 work_names     = ["corp-host.internal"]
 state_dir      = "~/state"
 event_record   = "/abs/record"
@@ -102,7 +126,14 @@ push           = true
 func TestLoadFullSample(t *testing.T) {
 	home := isolate(t)
 
-	got, err := loadUser(t, writeConfig(t, sample))
+	remotes := strings.NewReplacer(
+		`id = "personal-test"`, "id = \"personal-test\"\nremote = \"git@example.com:p.git\"",
+		`id = "work-test"`, "id = \"work-test\"\nremote = \"git@example.com:w.git\"",
+	)
+	body := remotes.Replace(trustBody(filepath.Join(home, "memory/personal"), filepath.Join(home, "memory/work")))
+	trust := writeTrust(t, body)
+
+	got, err := load(writeConfig(t, sample), trust, fakeRoot{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,6 +148,8 @@ func TestLoadFullSample(t *testing.T) {
 		TrustRoot:       "separate",
 		PersonalStore:   filepath.Join(home, "memory/personal"),
 		WorkStore:       filepath.Join(home, "memory/work"),
+		PersonalRemote:  "git@example.com:p.git",
+		WorkRemote:      "git@example.com:w.git",
 		workNames:       []string{"corp-host.internal"},
 		StateDir:        filepath.Join(home, "state"),
 		EventRecord:     "/abs/record",
@@ -124,7 +157,7 @@ func TestLoadFullSample(t *testing.T) {
 		SSHConfig:       filepath.Join(home, "ssh_config"),
 		Commit:          &no,
 		Push:            true,
-		TrustDigest:     sha256Hex(sampleTrust),
+		TrustDigest:     sha256Hex(body),
 		TrustRootLabel:  "separate",
 		fsys:            fakeRoot{},
 	}
@@ -137,9 +170,10 @@ func TestLoadWorkNamesFloor(t *testing.T) {
 	isolate(t)
 	const (
 		floor = "work_names    = [\"acme\"]\n\n[stores.personal]"
-		base  = "personal_store = \"/m/personal\"\n"
+		base  = ""
 	)
-	withFloor := strings.Replace(sampleTrust, "[stores.personal]", floor, 1)
+	noFloor := trustBody("/m/personal", "/m/work")
+	withFloor := strings.Replace(noFloor, "[stores.personal]", floor, 1)
 	cases := []struct {
 		name        string
 		trust, user string
@@ -149,8 +183,8 @@ func TestLoadWorkNamesFloor(t *testing.T) {
 		{"floor, user empty", withFloor, base + "work_names = []\n", []string{"acme"}},
 		{"floor plus user addition", withFloor, base + "work_names = [\"globex\"]\n", []string{"acme", "globex"}},
 		{"floor, user repeats and duplicates", withFloor, base + "work_names = [\"acme\", \"globex\", \"globex\"]\n", []string{"acme", "globex"}},
-		{"no floor, user addition", sampleTrust, base + "work_names = [\"globex\"]\n", []string{"globex"}},
-		{"neither", sampleTrust, base, nil},
+		{"no floor, user addition", noFloor, base + "work_names = [\"globex\"]\n", []string{"globex"}},
+		{"neither", noFloor, base, nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -194,7 +228,7 @@ func TestLoadCopiesAttestKeys(t *testing.T) {
 	isolate(t)
 	sk, key := skKeyLine(t)
 
-	got, err := load(writeConfig(t, sample), writeTrust(t, sampleTrust+attestEntry(sk, "YQ==", "Yg==")), fakeRoot{})
+	got, err := load(writeConfig(t, sample), writeTrust(t, trustBody("/m/personal", "/m/work")+attestEntry(sk, "YQ==", "Yg==")), fakeRoot{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +255,7 @@ func TestLoadTrustRoot(t *testing.T) {
 		"other text": {`trust_root = "owner-admin"`, "owner-admin", "owner-admin"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			body := strings.Replace(sampleTrust, `trust_root    = "separate"`, c.line, 1)
+			body := strings.Replace(trustBody("/m/personal", "/m/work"), `trust_root    = "separate"`, c.line, 1)
 			got, err := load(writeConfig(t, sample), writeTrust(t, body), fakeRoot{})
 			if err != nil {
 				t.Fatal(err)
@@ -250,36 +284,37 @@ func TestLoadRejects(t *testing.T) {
 
 func TestLoadValidatesStores(t *testing.T) {
 	home := isolate(t)
-	accepted := map[string]string{
-		"minimal":                 "personal_store = \"/m/personal\"\n",
-		"tilde paths":             "personal_store = \"~/p\"\nwork_store = \"~/w\"\nstate_dir = \"~/s\"\n",
-		"siblings share a prefix": "personal_store = \"/m/store\"\nwork_store = \"/m/store-work\"\nstate_dir = \"/m/store-state\"\n",
+	accepted := map[string]struct{ user, personal, work string }{
+		"minimal":                 {"", "/m/personal", ""},
+		"tilde state dir":         {"state_dir = \"~/s\"\n", "/m/p", "/m/w"},
+		"siblings share a prefix": {"state_dir = \"/m/store-state\"\n", "/m/store", "/m/store-work"},
 	}
-	for name, body := range accepted {
+	for name, c := range accepted {
 		t.Run(name, func(t *testing.T) {
-			if _, err := loadUser(t, writeConfig(t, body)); err != nil {
-				t.Errorf("Load(%q): %v", body, err)
+			if _, err := loadStores(t, writeConfig(t, c.user), c.personal, c.work); err != nil {
+				t.Errorf("Load(%q, %q, %q): %v", c.user, c.personal, c.work, err)
 			}
 		})
 	}
-	rejected := map[string]struct{ body, want string }{
-		"no personal store":               {"", `personal_store must be an absolute path, got ""`},
-		"relative personal store":         {"personal_store = \"memory/p\"\n", `personal_store must be an absolute path, got "memory/p"`},
-		"relative work store":             {"personal_store = \"/m/p\"\nwork_store = \"memory/w\"\n", `work_store must be an absolute path, got "memory/w"`},
-		"relative state dir":              {"personal_store = \"/m/p\"\nstate_dir = \"state\"\n", `state_dir must be an absolute path, got "state"`},
-		"stores equal":                    {"personal_store = \"/m/s\"\nwork_store = \"/m/s/\"\n", "personal_store (/m/s) and work_store (/m/s) must not be the same or nested"},
-		"work inside personal":            {"personal_store = \"/m/p\"\nwork_store = \"/m/p/w\"\n", "personal_store (/m/p) and work_store (/m/p/w) must not"},
-		"personal inside work":            {"personal_store = \"/m/w/p\"\nwork_store = \"/m/w\"\n", "personal_store (/m/w/p) and work_store (/m/w) must not"},
-		"state inside personal":           {"personal_store = \"/m/p\"\nstate_dir = \"/m/p/.state\"\n", "personal_store (/m/p) and state_dir (/m/p/.state) must not"},
-		"personal inside state":           {"personal_store = \"/m/s/p\"\nstate_dir = \"/m/s\"\n", "personal_store (/m/s/p) and state_dir (/m/s) must not"},
-		"work inside state":               {"personal_store = \"/m/p\"\nwork_store = \"/m/s/w\"\nstate_dir = \"/m/s\"\n", "work_store (/m/s/w) and state_dir (/m/s) must not"},
-		"default state inside home store": {"personal_store = \"" + home + "\"\n", "personal_store (" + home + ") and the default state dir"},
+	rejected := map[string]struct{ user, personal, work, want string }{
+		"no personal store":               {"", "", "", "stores.personal.path is required"},
+		"tilde personal store":            {"", "~/p", "", `stores.personal.path "~/p" must be absolute`},
+		"relative personal store":         {"", "memory/p", "", `stores.personal.path "memory/p" must be absolute`},
+		"relative work store":             {"", "/m/p", "memory/w", `stores.work.path "memory/w" must be absolute`},
+		"relative state dir":              {"state_dir = \"state\"\n", "/m/p", "", `state_dir must be an absolute path, got "state"`},
+		"stores equal":                    {"", "/m/s", "/m/s/", "stores.personal.path (/m/s) and stores.work.path (/m/s) must not be the same or nested"},
+		"work inside personal":            {"", "/m/p", "/m/p/w", "stores.personal.path (/m/p) and stores.work.path (/m/p/w) must not"},
+		"personal inside work":            {"", "/m/w/p", "/m/w", "stores.personal.path (/m/w/p) and stores.work.path (/m/w) must not"},
+		"state inside personal":           {"state_dir = \"/m/p/.state\"\n", "/m/p", "", "stores.personal.path (/m/p) and state_dir (/m/p/.state) must not"},
+		"personal inside state":           {"state_dir = \"/m/s\"\n", "/m/s/p", "", "stores.personal.path (/m/s/p) and state_dir (/m/s) must not"},
+		"work inside state":               {"state_dir = \"/m/s\"\n", "/m/p", "/m/s/w", "stores.work.path (/m/s/w) and state_dir (/m/s) must not"},
+		"default state inside home store": {"", home, "", "stores.personal.path (" + home + ") and the default state dir"},
 	}
 	for name, c := range rejected {
 		t.Run(name, func(t *testing.T) {
-			_, err := loadUser(t, writeConfig(t, c.body))
+			_, err := loadStores(t, writeConfig(t, c.user), c.personal, c.work)
 			if err == nil || !strings.Contains(err.Error(), c.want) {
-				t.Errorf("Load(%q) = %v, want an error containing %q", c.body, err, c.want)
+				t.Errorf("Load(%q, %q, %q) = %v, want an error containing %q", c.user, c.personal, c.work, err, c.want)
 			}
 		})
 	}
@@ -306,12 +341,11 @@ func TestLoadResolvesSymlinkedStores(t *testing.T) {
 	isolate(t)
 	personal, work, state := t.TempDir(), t.TempDir(), t.TempDir()
 	links := t.TempDir()
-	body := fmt.Sprintf("personal_store = %q\nwork_store = %q\nstate_dir = %q\n",
-		symlink(t, personal, filepath.Join(links, "p")),
-		filepath.Join(symlink(t, work, filepath.Join(links, "w")), "not-yet"),
-		symlink(t, state, filepath.Join(links, "s")))
+	body := fmt.Sprintf("state_dir = %q\n", symlink(t, state, filepath.Join(links, "s")))
 
-	c, err := loadUser(t, writeConfig(t, body))
+	c, err := loadStores(t, writeConfig(t, body),
+		symlink(t, personal, filepath.Join(links, "p")),
+		filepath.Join(symlink(t, work, filepath.Join(links, "w")), "not-yet"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,9 +361,8 @@ func TestLoadResolvesTheDefaultStateDir(t *testing.T) {
 	isolate(t)
 	xdg := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", symlink(t, xdg, filepath.Join(t.TempDir(), "xdg")))
-	body := fmt.Sprintf("personal_store = %q\n", t.TempDir())
 
-	c, err := loadUser(t, writeConfig(t, body))
+	c, err := loadStores(t, writeConfig(t, ""), t.TempDir(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,10 +379,9 @@ func TestLoadRejectsNestingThroughASymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	work := symlink(t, filepath.Join(personal, "w"), filepath.Join(t.TempDir(), "work"))
-	body := fmt.Sprintf("personal_store = %q\nwork_store = %q\nstate_dir = %q\n",
-		personal, work, t.TempDir())
+	body := fmt.Sprintf("state_dir = %q\n", t.TempDir())
 
-	_, err := loadUser(t, writeConfig(t, body))
+	_, err := loadStores(t, writeConfig(t, body), personal, work)
 
 	if err == nil || !strings.Contains(err.Error(), "must not be the same or nested") {
 		t.Errorf("err = %v, want a nesting error", err)
@@ -359,12 +391,35 @@ func TestLoadRejectsNestingThroughASymlink(t *testing.T) {
 func TestLoadRejectsADanglingSymlinkStore(t *testing.T) {
 	isolate(t)
 	dangling := symlink(t, filepath.Join(t.TempDir(), "absent"), filepath.Join(t.TempDir(), "p"))
-	body := fmt.Sprintf("personal_store = %q\nstate_dir = %q\n", dangling, t.TempDir())
+	trust := trustWith(t, dangling, "")
 
-	_, err := loadUser(t, writeConfig(t, body))
+	_, err := load(writeConfig(t, ""), trust, fakeRoot{})
 
-	if err == nil || !strings.Contains(err.Error(), "personal_store") {
-		t.Errorf("err = %v, want an error naming personal_store", err)
+	if err == nil || !strings.HasPrefix(err.Error(), trust+": stores.personal.path: ") {
+		t.Errorf("err = %v, want a stores.personal.path error prefixed with %s", err, trust)
+	}
+}
+
+func TestLoadPrefixesAStateDirErrorWithTheUserConfig(t *testing.T) {
+	isolate(t)
+	dangling := symlink(t, filepath.Join(t.TempDir(), "absent"), filepath.Join(t.TempDir(), "s"))
+	user := writeConfig(t, fmt.Sprintf("state_dir = %q\n", dangling))
+
+	_, err := loadUser(t, user)
+
+	if err == nil || !strings.HasPrefix(err.Error(), user+": state_dir: ") {
+		t.Errorf("err = %v, want a state_dir error prefixed with %s", err, user)
+	}
+}
+
+func TestLoadPrefixesAStoreNestingErrorWithTheTrustFile(t *testing.T) {
+	isolate(t)
+	trust := trustWith(t, "/m/p", "/m/p/w")
+
+	_, err := load(writeConfig(t, ""), trust, fakeRoot{})
+
+	if err == nil || !strings.HasPrefix(err.Error(), trust+": stores.personal.path (/m/p)") {
+		t.Errorf("err = %v, want a nesting error prefixed with %s", err, trust)
 	}
 }
 
@@ -427,12 +482,12 @@ func TestLoadRejectsAStateDirInAGitWorkTree(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			isolate(t)
 			stateDir, root, state := tc.setup(t)
-			body := fmt.Sprintf("personal_store = %q\n", t.TempDir())
+			var body string
 			if stateDir != "" {
-				body += fmt.Sprintf("state_dir = %q\n", stateDir)
+				body = fmt.Sprintf("state_dir = %q\n", stateDir)
 			}
 
-			_, err := loadUser(t, writeConfig(t, body))
+			_, err := loadStores(t, writeConfig(t, body), t.TempDir(), "")
 
 			if err == nil {
 				t.Fatal("Load accepted a state dir inside a git work tree")
@@ -449,9 +504,8 @@ func TestLoadRejectsAStateDirInAGitWorkTree(t *testing.T) {
 func TestLoadRejectsARelativeDefaultStateDir(t *testing.T) {
 	isolate(t)
 	t.Setenv("XDG_STATE_HOME", "rel")
-	body := fmt.Sprintf("personal_store = %q\n", t.TempDir())
 
-	_, err := loadUser(t, writeConfig(t, body))
+	_, err := loadStores(t, writeConfig(t, ""), t.TempDir(), "")
 
 	if err == nil || !strings.Contains(err.Error(), "the default state dir must be an absolute path") {
 		t.Errorf("err = %v, want an absolute-path error for the default state dir", err)
@@ -468,9 +522,9 @@ func TestLoadAcceptsAStateDirOutsideAnyRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := filepath.Join(parent, "repo-state")
-	body := fmt.Sprintf("personal_store = %q\nstate_dir = %q\n", t.TempDir(), state)
+	body := fmt.Sprintf("state_dir = %q\n", state)
 
-	c, err := loadUser(t, writeConfig(t, body))
+	c, err := loadStores(t, writeConfig(t, body), t.TempDir(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,16 +586,18 @@ func TestLoadMissingFile(t *testing.T) {
 func TestLoadRefusesTrustKeysInTheUserConfig(t *testing.T) {
 	isolate(t)
 	for key, body := range map[string]string{
-		"profile":       "profile = \"personal\"\n",
-		"work_orgs":     "work_orgs = [\"github.com/noamsto\"]\n",
-		"personal_orgs": "personal_orgs = [\"github.com/factify-inc\"]\n",
-		"trust_root":    "trust_root = \"separate\"\n",
-		"stores":        "[stores.personal]\nid = \"mine\"\n",
-		"attest_keys":   "[[attest_keys]]\nkey = \"x\"\n",
+		"profile":        "profile = \"personal\"\n",
+		"work_orgs":      "work_orgs = [\"github.com/noamsto\"]\n",
+		"personal_orgs":  "personal_orgs = [\"github.com/factify-inc\"]\n",
+		"trust_root":     "trust_root = \"separate\"\n",
+		"stores":         "[stores.personal]\nid = \"mine\"\n",
+		"personal_store": "personal_store = \"/m/p\"\n",
+		"work_store":     "work_store = \"/m/w\"\n",
+		"attest_keys":    "[[attest_keys]]\nkey = \"x\"\n",
 	} {
 		t.Run(key, func(t *testing.T) {
-			trust := writeTrust(t, sampleTrust)
-			_, err := load(writeConfig(t, "personal_store = \"/m/p\"\n"+body), trust, fakeRoot{})
+			trust := trustWith(t, "/m/personal", "/m/work")
+			_, err := load(writeConfig(t, body), trust, fakeRoot{})
 			want := key + " is read from the trust file " + trust + ", not the user config"
 			if err == nil || !strings.Contains(err.Error(), want) {
 				t.Errorf("err = %v, want it to contain %q", err, want)
@@ -552,7 +608,7 @@ func TestLoadRefusesTrustKeysInTheUserConfig(t *testing.T) {
 
 func TestPriorsConfigCannotOverrideTheTrustFile(t *testing.T) {
 	isolate(t)
-	t.Setenv("PRIORS_CONFIG", writeConfig(t, "personal_store = \"/m/p\"\nprofile = \"personal\"\nwork_orgs = [\"github.com/noamsto\"]\n"))
+	t.Setenv("PRIORS_CONFIG", writeConfig(t, "profile = \"personal\"\nwork_orgs = [\"github.com/noamsto\"]\n"))
 
 	c, err := loadUser(t, DefaultPath())
 
@@ -563,7 +619,7 @@ func TestPriorsConfigCannotOverrideTheTrustFile(t *testing.T) {
 
 func TestLoadNamesTheTrustFile(t *testing.T) {
 	isolate(t)
-	user := writeConfig(t, "personal_store = \"/m/p\"\n")
+	user := writeConfig(t, "")
 	missing := filepath.Join(t.TempDir(), "trust.toml")
 
 	_, err := load(user, missing, fakeRoot{})
@@ -572,7 +628,7 @@ func TestLoadNamesTheTrustFile(t *testing.T) {
 		t.Errorf("err = %v, want a not-exist error naming %s", err, missing)
 	}
 
-	bad := writeTrust(t, "seam_probe = 1\n"+sampleTrust)
+	bad := writeTrust(t, "seam_probe = 1\n"+trustBody("/m/personal", "/m/work"))
 	_, err = load(user, bad, fakeRoot{})
 	if err == nil || !strings.Contains(err.Error(), "trust file "+bad+": unknown keys: seam_probe") {
 		t.Errorf("err = %v, want an unknown-key error naming %s", err, bad)
@@ -630,10 +686,9 @@ func TestProvenanceDir(t *testing.T) {
 func TestStatePathsDeriveFromTheResolvedState(t *testing.T) {
 	isolate(t)
 	real := realPath(t, t.TempDir())
-	body := fmt.Sprintf("personal_store = %q\nstate_dir = %q\n",
-		t.TempDir(), symlink(t, real, filepath.Join(t.TempDir(), "link")))
+	body := fmt.Sprintf("state_dir = %q\n", symlink(t, real, filepath.Join(t.TempDir(), "link")))
 
-	c, err := loadUser(t, writeConfig(t, body))
+	c, err := loadStores(t, writeConfig(t, body), t.TempDir(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
