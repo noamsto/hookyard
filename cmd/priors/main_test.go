@@ -1279,6 +1279,32 @@ func TestSearch(t *testing.T) {
 	}
 }
 
+func TestSearchReportsConfigError(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.writeConfig(`scanner = "x"`)
+
+	res := sb.run("", "search", "zebra", "--cwd", repo)
+	wantExit(t, res, 0)
+	wantContains(t, "stderr", res.stderr, "config:", "pinned at build time")
+	if res.stdout != "" {
+		t.Errorf("stdout %q", res.stdout)
+	}
+}
+
+func TestSearchReportsRulesFileError(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.writeConfig(`rules = "/nonexistent/rules.toml"`)
+
+	res := sb.run("", "search", "zebra", "--cwd", repo)
+	wantExit(t, res, 0)
+	wantContains(t, "stderr", res.stderr, "redaction rule set unavailable", "/nonexistent/rules.toml")
+	if res.stdout != "" {
+		t.Errorf("stdout %q", res.stdout)
+	}
+}
+
 func TestSearchWithoutRgFailsOpen(t *testing.T) {
 	sb := newSandbox(t, "personal")
 	repo := sb.repo(personalRemote)

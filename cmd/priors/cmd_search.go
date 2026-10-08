@@ -14,7 +14,8 @@ import (
 
 const searchDeadline = 800 * time.Millisecond
 
-// cmdSearch is a read path: whatever goes wrong, it prints no hits and exits 0.
+// cmdSearch is a read path: whatever goes wrong, it prints no hits, says why
+// on stderr and exits 0.
 func cmdSearch(args []string, s streams) int {
 	fs := newFlagSet("search", s)
 	cfgPath := fs.String("config", "", "config file")
@@ -36,14 +37,17 @@ func cmdSearch(args []string, s streams) int {
 
 	cfg, err := loadConfig(*cfgPath)
 	if err != nil {
+		s.errln("config:", err)
 		return 0
 	}
 	rules, err := gate.LoadRules(cfg.Rules)
 	if err != nil {
+		s.errln("search unavailable: redaction rule set unavailable:", err)
 		return 0
 	}
 	id, err := resolveIdentity(*cwd, "", "")
 	if err != nil {
+		s.errln("search unavailable:", err)
 		return 0
 	}
 
