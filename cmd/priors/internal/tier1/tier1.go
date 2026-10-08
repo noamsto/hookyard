@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
@@ -28,16 +29,16 @@ const Budget = 4000
 const flaggedPrefix = "(flagged, unreviewed) "
 
 // Assemble is the tier-1 injection for session s, and what it skipped (never
-// the skipped text itself). It returns "" when there is nothing to inject or
-// ctx is done.
-func Assemble(ctx context.Context, s route.Session, cfg config.Config, rules gate.Rules) (text string, reports []string) {
-	a := assembler{ctx: ctx, session: s, rules: rules}
+// the skipped text itself), then v's attestation reports. It returns "" when
+// there is nothing to inject or ctx is done.
+func Assemble(ctx context.Context, s route.Session, cfg config.Config, rules gate.Rules, v *attest.Verifier) (text string, reports []string) {
+	a := assembler{ctx: ctx, session: s, rules: rules, verifier: v}
 	avail := Budget
 	var blocks []string
 	for _, id := range route.ReadStores(s, cfg) {
 		lines := a.storeLines(id, cfg)
 		if ctx.Err() != nil {
-			return "", a.reports
+			return "", a.allReports()
 		}
 		if len(lines) == 0 {
 			continue
@@ -50,7 +51,7 @@ func Assemble(ctx context.Context, s route.Session, cfg config.Config, rules gat
 		body := strings.Join(lines, "\n") + "\n"
 		blocks = append(blocks, sanitize.Fence(sanitize.Header(string(id)+" store"), body, sanitize.NewDelimiter()))
 	}
-	return strings.Join(blocks, "\n"), a.reports
+	return strings.Join(blocks, "\n"), a.allReports()
 }
 
 type assembler struct {
@@ -58,6 +59,13 @@ type assembler struct {
 	session route.Session
 	rules   gate.Rules
 	reports []string
+	// verifier judges each indexed fact that claims review; the index shows no
+	// verdict, so only its reports reach the output.
+	verifier *attest.Verifier
+}
+
+func (a *assembler) allReports() []string {
+	return append(a.reports, a.verifier.Reports()...)
 }
 
 func (a *assembler) reportf(format string, args ...any) {
@@ -120,6 +128,7 @@ func (a *assembler) rootLines(root store.Root, applies func(rel string, f fact.F
 			a.reportf("excluded %s/%s: rule %s", root.Store, rel, strings.Join(ids, ","))
 			continue
 		}
+		a.verifier.Reviewed(store.Entry{Root: root, Rel: rel, Fact: f, Raw: raw})
 		rendered := root.IndexLines([]store.Entry{{Root: root, Rel: rel, Fact: f}})
 		if len(rendered) == 0 {
 			continue

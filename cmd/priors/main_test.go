@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +20,10 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
+	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
+	"github.com/noamsto/hookyard/cmd/priors/internal/attest/attesttest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/commit/committest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 	"github.com/noamsto/hookyard/cmd/priors/internal/tools"
@@ -33,13 +39,18 @@ var (
 	toolsDir string
 )
 
-const toolsPkg = "github.com/noamsto/hookyard/cmd/priors/internal/tools"
+const (
+	toolsPkg  = "github.com/noamsto/hookyard/cmd/priors/internal/tools"
+	attestPkg = "github.com/noamsto/hookyard/cmd/priors/internal/attest"
+)
 
 func pinnedTool(name string) string { return filepath.Join(toolsDir, name) }
 
 func goBuild(out string, ldflags ...string) ([]byte, error) {
-	// priorstest makes the binary read its trust file from $PRIORS_TEST_TRUST
-	// and treat every owner as root; production builds never set the tag.
+	// priorstest makes the binary read its trust file from $PRIORS_TEST_TRUST,
+	// its verdicts from $PRIORS_TEST_VERDICTS and its groups from
+	// $PRIORS_TEST_GROUPS, and treat every owner as root; production builds
+	// never set the tag.
 	args := []string{"build", "-tags", "priorstest"}
 	if len(ldflags) > 0 {
 		args = append(args, "-ldflags", strings.Join(ldflags, " "))
@@ -66,7 +77,8 @@ func buildAndRun(m *testing.M) int {
 		return 1
 	}
 	toolstest.Pin()
-	var ldflags []string
+	// The priorstest build reports every owner as uid 0, so 0 owns verdicts.
+	ldflags := []string{"-X " + attestPkg + ".VerifyUID=0"}
 	for name, tool := range map[string]struct{ variable, real string }{
 		"git":     {"Git", tools.Git},
 		"ssh":     {"SSH", tools.SSH},
@@ -111,6 +123,17 @@ type sandbox struct {
 	hookyard, gitConfig, sshConfig string
 	configPath, scanner, path      string
 	trustPath, profile             string
+	verdicts                       string
+}
+
+// trustOpts are the trust-file lines writeTrustWith adds to writeTrust's.
+type trustOpts struct {
+	// extra are top-level lines written before the store tables.
+	extra []string
+	// root is trust_root's value, written when non-empty.
+	root string
+	// keys are enrolled as [[attest_keys]].
+	keys []attesttest.Key
 }
 
 func newSandbox(t *testing.T, profile string) *sandbox {
@@ -132,6 +155,7 @@ func newSandbox(t *testing.T, profile string) *sandbox {
 		sshConfig:  filepath.Join(dir, "ssh_config"),
 		configPath: filepath.Join(dir, "config.toml"),
 		trustPath:  filepath.Join(dir, "trust.toml"),
+		verdicts:   filepath.Join(dir, "verdicts"),
 		scanner:    pinnedTool("scanner"),
 		path:       os.Getenv("PATH"),
 		profile:    profile,
@@ -178,17 +202,28 @@ func (sb *sandbox) setScanner(script string) {
 
 // writeTrust writes the host trust file the binary reads through
 // $PRIORS_TEST_TRUST; extra top-level lines go before the store tables.
-func (sb *sandbox) writeTrust(extra ...string) {
+func (sb *sandbox) writeTrust(extra ...string) { sb.writeTrustWith(trustOpts{extra: extra}) }
+
+// writeTrustWith is writeTrust with o's top-level lines, trust_root and
+// attest keys added.
+func (sb *sandbox) writeTrustWith(o trustOpts) {
 	sb.t.Helper()
 	lines := []string{
 		fmt.Sprintf("profile = %q", sb.profile),
 		`work_orgs = ["github.com/factify-inc"]`,
 		`personal_orgs = ["github.com/noamsto"]`,
 	}
-	lines = append(lines, extra...)
+	lines = append(lines, o.extra...)
+	if o.root != "" {
+		lines = append(lines, fmt.Sprintf("trust_root = %q", o.root))
+	}
 	lines = append(lines, "[stores.personal]", `id = "personal-test"`)
 	if sb.profile == "work" {
 		lines = append(lines, "[stores.work]", `id = "work-test"`)
+	}
+	for _, k := range o.keys {
+		lines = append(lines, "[[attest_keys]]",
+			fmt.Sprintf("key = %q", k.AuthorizedKey()), `attestation = "YQ=="`, `challenge = "YQ=="`)
 	}
 	sb.writeFile(sb.trustPath, strings.Join(lines, "\n")+"\n")
 }
@@ -216,6 +251,8 @@ func (sb *sandbox) childEnv() []string {
 		"PATH=" + sb.path,
 		"PRIORS_CONFIG=" + sb.configPath,
 		"PRIORS_TEST_TRUST=" + sb.trustPath,
+		"PRIORS_TEST_VERDICTS=" + sb.verdicts,
+		"PRIORS_TEST_GROUPS=users:100",
 	}
 }
 
@@ -340,6 +377,56 @@ func (sb *sandbox) putFact(root, rel string, f fact.Fact) string {
 	return path
 }
 
+// writeVerdicts writes the verdict file of the store with trust id storeID,
+// fetched now and bound to the current trust file, with body as its entry
+// lines.
+func (sb *sandbox) writeVerdicts(storeID string, body ...string) {
+	sb.t.Helper()
+	trust, err := os.ReadFile(sb.trustPath)
+	if err != nil {
+		sb.t.Fatal(err)
+	}
+	digest := sha256.Sum256(trust)
+	lines := append([]string{
+		"priors-verdicts v1",
+		"store: " + storeID,
+		"trust: " + hex.EncodeToString(digest[:]),
+		"tip: " + strings.Repeat("0", 40),
+		fmt.Sprintf("fetched: %d", time.Now().Unix()),
+		"status: ok",
+	}, body...)
+	sb.writeFile(filepath.Join(sb.verdicts, storeID, "verdicts"), strings.Join(lines, "\n")+"\n")
+}
+
+// attestFact signs the fact at storeRoot/rel as it is now and writes the
+// entry to storeRoot/.attest/<name>, returning the entry's sha256 for a
+// verdict line.
+func (sb *sandbox) attestFact(storeRoot, rel string, key attesttest.Key, flags byte) string {
+	sb.t.Helper()
+	var storeID string
+	switch storeRoot {
+	case sb.personal:
+		storeID = "personal-test"
+	case sb.work:
+		storeID = "work-test"
+	default:
+		sb.t.Fatalf("attestFact: %s is neither sandbox store", storeRoot)
+	}
+	raw, err := os.ReadFile(filepath.Join(storeRoot, filepath.FromSlash(rel)))
+	if err != nil {
+		sb.t.Fatal(err)
+	}
+	f, err := fact.Parse(raw)
+	if err != nil {
+		sb.t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	entry := attesttest.Signed(key, attesttest.Entry(storeID, f.Name, rel, hex.EncodeToString(sum[:]), 1, "attest"), flags, attest.Namespace)
+	sb.writeFile(filepath.Join(storeRoot, ".attest", f.Name), string(entry))
+	digest := sha256.Sum256(entry)
+	return hex.EncodeToString(digest[:])
+}
+
 func (sb *sandbox) indexWrite() {
 	sb.t.Helper()
 	if res := sb.run("", "index", "--write"); res.code != 0 {
@@ -383,6 +470,53 @@ func wantExit(t *testing.T, res result, code int) {
 	t.Helper()
 	if res.code != code {
 		t.Fatalf("exit %d, want %d\nstdout: %s\nstderr: %s", res.code, code, res.stdout, res.stderr)
+	}
+}
+
+func TestAttestHelpersWriteWhatTheVerifierReads(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	key := attesttest.NewSKEd25519(t)
+	sb.writeTrustWith(trustOpts{root: "separate", keys: []attesttest.Key{key}})
+	sb.putFact(sb.personal, "demo/attested.md", newFact("attested", "demo", "project"))
+	digest := sb.attestFact(sb.personal, "demo/attested.md", key, 0x05)
+	sb.writeVerdicts("personal-test", digest+" reviewed")
+
+	raw, err := os.ReadFile(filepath.Join(sb.personal, ".attest", "attested"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum := sha256.Sum256(raw); hex.EncodeToString(sum[:]) != digest {
+		t.Errorf("attestFact returned %s, not the entry's digest", digest)
+	}
+	entry, err := attest.ParseEntry(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := attest.VerifyEntry(entry, []ssh.PublicKey{key.PublicKey()}, "personal-test", "attested"); err != nil {
+		t.Errorf("VerifyEntry: %v", err)
+	}
+	factRaw, err := os.ReadFile(filepath.Join(sb.personal, "demo", "attested.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := attest.Bind(entry, "demo/attested.md", factRaw); err != nil {
+		t.Errorf("Bind: %v", err)
+	}
+
+	verdicts, err := os.ReadFile(filepath.Join(sb.verdicts, "personal-test", "verdicts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := attest.ParseVerdicts(verdicts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trust, err := os.ReadFile(sb.trustPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum := sha256.Sum256(trust); v.Trust != hex.EncodeToString(sum[:]) || v.States[digest] != attest.StateReviewed {
+		t.Errorf("verdicts = %+v, want trust of the trust file and %s reviewed", v, digest)
 	}
 }
 

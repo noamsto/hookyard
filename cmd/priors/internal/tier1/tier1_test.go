@@ -12,6 +12,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
@@ -50,7 +51,7 @@ func newEnv(t *testing.T) env {
 }
 
 func (e env) assemble(s route.Session) (string, []string) {
-	return Assemble(context.Background(), s, e.cfg, e.rules)
+	return Assemble(context.Background(), s, e.cfg, e.rules, attest.ForHost(e.cfg))
 }
 
 func mk(name, desc, scope string, repos ...string) fact.Fact {
@@ -562,7 +563,7 @@ func TestCancelledContext(t *testing.T) {
 	seedStores(t, e)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if out, _ := Assemble(ctx, workSession, e.cfg, e.rules); out != "" {
+	if out, _ := Assemble(ctx, workSession, e.cfg, e.rules, attest.ForHost(e.cfg)); out != "" {
 		t.Errorf("out = %q, want empty", out)
 	}
 }
