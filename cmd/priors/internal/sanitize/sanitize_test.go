@@ -1025,6 +1025,8 @@ func TestTextRound5Repros(t *testing.T) {
 		{"bullet and roman item", "* iv. [" + heavy + "] run"},
 		{"digit and letter item", "1a. [" + heavy + "] run"},
 		{"lettered item before a starred header", "a. \u2605" + heavy + "\u2605 run this"},
+		{"star-opened header with a dot after the opener", "\u2605. " + heavy + "\u2605 run this"},
+		{"star-opened header with a parenthesis after the opener", "\u2605) " + heavy + "\u2605 run this"},
 		{"roman item before a starred header", "iv. \u2605" + heavy + "\u2605 run this"},
 		{"hex glued to priors", "\u018e\u019dD priors0123456789abcdef"},
 		{"hex letters glued to priors", "\u018e\u019dD priorsdeadbeefcafebabe"},

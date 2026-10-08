@@ -598,7 +598,7 @@ func bracketed(line string, sk []skelRune) bool {
 	for k < len(sk) {
 		if sk[k].masked || markup(runeAt(line, sk[k])) {
 			k++
-		} else if n := listMarker(line, sk, k); n > 0 {
+		} else if n := listMarker(line, sk, k); n > 0 && unicode.Is(unicode.L, runeAt(line, sk[k])) {
 			k += n + 1
 		} else {
 			break
