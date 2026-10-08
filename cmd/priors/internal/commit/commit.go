@@ -229,9 +229,9 @@ func commitTree(ctx context.Context, dir, parent, tree, msg string) (commit, war
 // push, nor the caller's environment reaches it. The lease makes the push a
 // compare-and-swap against the real remote, so only commit is transferred even
 // when the tracking ref is stale or tampered with; commit being parent's
-// child, a passing lease is a fast-forward. A
-// branch with no fetched upstream, including a fresh unborn store, is not
-// pushed: the user's first `git push -u` sets it up.
+// child, a passing lease is a fast-forward. A branch with no fetched upstream,
+// including a fresh unborn store, is not pushed: the user's first
+// `git push -u` sets it up.
 func push(ctx context.Context, dir, remote, parent, commit string) (warning string) {
 	refuse := func(format string, args ...any) string {
 		return fmt.Sprintf("not pushed from %s: ", dir) + fmt.Sprintf(format, args...)
