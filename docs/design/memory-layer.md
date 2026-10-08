@@ -828,7 +828,8 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
   or bracket-shaped and holds a non-ASCII rune outside the quoted tokens is
   quoted whole as `(quoted line: …)`, shown, not dropped. A line separator
   (U+2028, U+2029) starts a new line. A combining mark stays glued to its
-  base, and three or more in a row, each on a space, draw a rule (` ̲ ̲ ̲`).
+  base, and three or more in a row, each on a space, draw a rule (` ̲ ̲ ̲`); a
+  non-ASCII rule rune counts as one of them (`— ̲ ̲`), an ASCII one breaks the row.
   Bracket-shaped means a bracket or quote opener (ASCII
   ``[ ( { < " ' ` ``, non-ASCII opening or quote punctuation, a UTS #39
   bracket or quote lookalike, or a letter or digit only when it looks like
@@ -859,7 +860,8 @@ everyone who pulls. Shared memory is a prompt-injection channel with a fan-out.
   Tifinagh `ⵦ`), a Hebrew vav or Arabic alef standing before a bracket
   (`ו [café]`), a roman item before a bracketed name (`iv. [Søren]`),
   sixteen hex-like runes glued inside a word (`id0123456789abcdef café`),
-  spacing accents (`´´´`, which NFKC turns into marks on spaces), and ASCII
+  spacing accents (`´´´`, which NFKC turns into marks on spaces; two beside a
+  dash or symbol, `x ´´ — café`), and ASCII
   identifiers that join both token words
   with `-` or `_` (`priors-memory-layer.md`) are quoted. Plain ASCII prose,
   smart-quoted prose and unbracketed non-ASCII prose (a Hebrew sentence) are

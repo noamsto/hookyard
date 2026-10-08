@@ -595,8 +595,14 @@ func bracketed(line string, sk []skelRune) bool {
 		break
 	}
 	k := 0
-	for k < len(sk) && (sk[k].masked || markup(runeAt(line, sk[k]))) {
-		k++
+	for k < len(sk) {
+		if sk[k].masked || markup(runeAt(line, sk[k])) {
+			k++
+		} else if n := listMarker(line, sk, k); n > 0 {
+			k += n + 1
+		} else {
+			break
+		}
 	}
 	if k == len(sk) || !opener(runeAt(line, sk[k]), sk[k].set) {
 		return false
