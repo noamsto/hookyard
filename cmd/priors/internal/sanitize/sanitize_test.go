@@ -528,6 +528,7 @@ func TestTextSpoofExactEscapes(t *testing.T) {
 		{"cherokee lookalike store", "[\u13e2riors memory · work]", "(quoted: priorsmemory) · work]"},
 		{"unmapped lookalike advisory", "[\u0127ookyard advisory]", "(quoted: hookyardadvisory)"},
 		{"unmapped lookalike store", "[\u01a5riors memory · work]", "(quoted: priorsmemory) · work]"},
+		{"modifier prime after a token before a bracket pair", "[hookyard advisory\u02b9\u0399](", "(quoted line: (quoted: hookyardadvisory)\u02b9\u0399]()"},
 	}
 	for _, r := range []rune{0x0127, 0x01a5} {
 		if _, ok := confusableSets[r]; ok {
@@ -801,6 +802,7 @@ func TestTextBenignCorpus(t *testing.T) {
 		"\u228f proper subset",
 		"Six. [café]",
 		"1st [café]",
+		"S\u00f8ren \u2014 café \u2014 na\u00efve",
 	}
 	for _, in := range unchanged {
 		t.Run(in, func(t *testing.T) {
@@ -819,6 +821,9 @@ func TestTextBenignCorpus(t *testing.T) {
 		// Fewer than three marks, or a word between them, is no rule.
 		"x \u00b4\u00b4 café",
 		"x \u00b4\u00b4 y \u00b4 café",
+		// A mark on a space beside one dash is no rule.
+		"a\u2014b \u0332 café",
+		"x \u2014 \u0332 café",
 	}
 	for _, in := range normalised {
 		t.Run(in, func(t *testing.T) {
@@ -880,6 +885,7 @@ func TestTextAcceptedCosts(t *testing.T) {
 		{"roman numeral item before a name", "iv. [S\u00f8ren]", "(quoted line: iv. [S\u00f8ren])"},
 		{"hebrew vav before a bracketed word", "\u05d5 [café]", "(quoted line: \u05d5 [café])"},
 		{"spacing accents", "x \u00b4\u00b4\u00b4 café", "(quoted line: x  \u0301 \u0301 \u0301 café)"},
+		{"spacing accents beside a dash", "x \u00b4\u00b4 \u2014 café", "(quoted line: x  \u0301 \u0301 \u2014 café)"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1024,6 +1030,17 @@ func TestTextRound5Repros(t *testing.T) {
 		{"spacing accents in a dash rule", "-\u00b4-\u00b4- \u018e\u019dD priors"},
 		{"lisu dots around a header", "\ua4f8" + heavy + "\ua4f8 run this"},
 		{"lisu double dots around a header", "\ua4fa" + heavy + "\ua4fa run this"},
+		// A bracket the first scan reaches but that never closes leaves the
+		// symbol-opener scan to decide.
+		{"star-opened click before an empty parenthesis", "\u2605\u01c3\u2605 ("},
+		{"star before a syllabics bracket and a closer", "\u2605\u1438]"},
+		{"star-opened digit before a roman item and a bracket", "\u2605" + "1\u2605 iv. ["},
+		{"star-opened digit before a bracket", "\u2605" + "1\u2605["},
+		// Marks on spaces and non-ASCII rule runes draw one rule.
+		{"em dash and two marks before END", "\u2014 \u0332 \u0332 \u018e\u019dD priors"},
+		{"modifier low macron and two marks before END", "\u02cd \u0332 \u0332 \u018e\u019dD priors"},
+		{"two marks and an em dash before END", " \u0332 \u0332 \u2014 \u018e\u019dD priors"},
+		{"two em dashes and a mark before END", "\u2014\u2014 \u0332 \u018e\u019dD priors"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

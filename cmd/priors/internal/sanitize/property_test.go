@@ -19,17 +19,17 @@ import (
 // lookalike: R3, c normalises to visible ASCII or maps to another letter; R4,
 // c normalises to nothing, a deletion; R7, c normalises to several words.
 //
-// Strides keep the generator-driven properties inside the CI budget. Without
-// -race, strippable, bracket-like, confusables-table and assigned code points
-// are never strided; that exhaustive run is gated by `nix flake check`
+// Strides keep the generator-driven properties inside the CI budget:
+// strippable, bracket-like, confusables-table and assigned code points are
+// never strided; that exhaustive run is gated by `nix flake check`
 // (checks.priors runs the package's tests) and the pre-push gotest hook. Under
-// -race the detector multiplies the cost several times over on a few-core
-// runner and adds nothing for a pure function, so there every class is
-// sampled.
+// -race the properties that walk the code points (TestPropertyEscapes,
+// TestPropertyGluedForeignBenign) are skipped: the detector multiplies the
+// cost several times over on a few-core runner and adds nothing for a pure
+// function, and the exhaustive run without -race covers them.
 const (
 	chunkCount      = 32
-	unassignedStep  = 97  // Co and unassigned, non-race
-	raceStep        = 127 // every code point, race
+	unassignedStep  = 97 // Co and unassigned
 	maxChunkFailure = 20
 )
 
@@ -274,11 +274,6 @@ func testedCodePoints() (cps []codePoint, desc string) {
 		switch {
 		case all:
 			exempt++
-		case raceEnabled:
-			if seq++; (seq-1)%raceStep != 0 {
-				continue
-			}
-			strided++
 		case strip || bracketLike(c) || inTable:
 			exempt++
 		case !assigned(c):
@@ -291,14 +286,17 @@ func testedCodePoints() (cps []codePoint, desc string) {
 		}
 		cps = append(cps, codePoint{c, strip})
 	}
-	desc = fmt.Sprintf("race=%v all=%v unstrided=%d strided=%d (unassigned/Co step %d, race step %d)",
-		raceEnabled, all, exempt, strided, unassignedStep, raceStep)
+	desc = fmt.Sprintf("all=%v unstrided=%d strided=%d (unassigned/Co step %d)",
+		all, exempt, strided, unassignedStep)
 	return cps, desc
 }
 
 func TestPropertyEscapes(t *testing.T) {
 	if testing.Short() {
 		t.Skip("generator-driven property test")
+	}
+	if raceEnabled {
+		t.Skip("pure function: the exhaustive run without -race covers it")
 	}
 	cps, desc := testedCodePoints()
 	t.Logf("code points: %d, %s", len(cps), desc)
@@ -515,6 +513,9 @@ func bracketLetter(c rune) bool {
 func TestPropertyGluedForeignBenign(t *testing.T) {
 	if testing.Short() {
 		t.Skip("generator-driven property test")
+	}
+	if raceEnabled {
+		t.Skip("pure function: the exhaustive run without -race covers it")
 	}
 	cps, _ := testedCodePoints()
 	failed := 0
