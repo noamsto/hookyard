@@ -36,8 +36,20 @@ func coarseRows() []string {
 		`shopt -u globasciiranges; X=Bgh; ${X#[a-c]} issue view 1`,
 		`X=g; ${X/g/&h} issue view 1`,
 		`X='\0'aaaaaaaa; : ${X@E}; gh issue view 1`,
-		`source "$F"; curl x`,
-		`eval "$CMD"; gh issue view 1`,
+		`X=; X+=g; X+=h; source <(echo '$X issue view 1')`,
+		`X=; X+=g; X+=h; eval "$X issue view 1"`,
+		`X=; X+=g; X+=h; \eval '$X issue view 1'`,
+		`X=x; unset X; X+=g; X+=h; e\val '$X issue view 1'`,
+		`X=x; unset X; X+=g; X+=h; \bash -c '$X issue view 1'`,
+		"\\bash <<'EOF'\n$'\\x67h' issue view 1\nEOF",
+		`X=; X+=g; X+=h; command eval '$X issue view 1'`,
+		`export X=; X+=g; X+=h; env bash -c '$X issue view 1'`,
+		`X=; X+=g; X+=h; nohup $X issue view 1`,
+		`X=; X+=g; X+=h; sudo -E $X issue view 1`,
+		"exec bash <<'EOF'\n$'\\x67h' issue view 1\nEOF",
+		"sudo bash <<'EOF'\n$'\\x67h' issue view 1\nEOF",
+		"cat <<'EOF' | env bash\n$'\\x67h' issue view 1\nEOF",
+		"exec 3<<'EOF'\n$'\\x67h' issue view 1\nEOF\nbash <&3",
 	}
 }
 

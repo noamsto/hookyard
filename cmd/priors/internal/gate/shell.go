@@ -206,6 +206,7 @@ func (j *judge) script(text string, depth int) string {
 	var reason string
 	// quiet texts hold nothing a listed name could hide in, so coarse skips them.
 	quiet := !involves(text)
+	var seen coarseSeen
 	// The parser yields each statement as it ends, so one after a syntax error
 	// is still judged. A loop body that returns early would make the parser
 	// yield its error again, so a found reason only skips the rest.
@@ -219,9 +220,13 @@ func (j *judge) script(text string, depth int) string {
 			}
 		default:
 			if reason = j.stmt(stmt, text, depth); reason == "" && !quiet {
-				reason = coarse(stmt)
+				reason = coarse(stmt, &seen)
 			}
 		}
+	}
+	// A heredoc may be handed to its shell by a later statement (`bash <&3`).
+	if reason == "" && !quiet && seen.hdoc && seen.shell {
+		reason = "coarse"
 	}
 	return reason
 }
@@ -1100,50 +1105,59 @@ func subsequence(text, name string) bool {
 // here-string fed to a shell, an operator or subscript on a parameter
 // expansion, `eval`, `bash -c`, `source` of a non-literal path, and a variable
 // as a command word. It runs after the judge and only ever adds a flag.
-func coarse(s *syntax.Stmt) string {
+func coarse(s *syntax.Stmt, seen *coarseSeen) string {
 	var reason string
-	var hdoc, shell bool
 	walkBounded(s, func(n syntax.Node) bool {
 		if reason != "" {
 			return false
 		}
 		switch n := n.(type) {
 		case *syntax.Redirect:
-			hdoc = hdoc || n.Op == syntax.Hdoc || n.Op == syntax.DashHdoc || n.Op == syntax.WordHdoc
+			seen.hdoc = seen.hdoc || n.Op == syntax.Hdoc || n.Op == syntax.DashHdoc || n.Op == syntax.WordHdoc
 		case *syntax.ParamExp:
 			if !n.Short && (n.Exp != nil || n.Repl != nil || n.Slice != nil || n.Index != nil || n.Excl || n.Length || n.Width || n.Names != 0 || n.Flags != nil) {
 				reason = "coarse"
 			}
 		case *syntax.CallExpr:
-			reason = coarseCall(n)
-			shell = shell || len(n.Args) > 0 && slices.Contains(shells, wordName(literal(n.Args[0])))
+			reason = coarseCall(n, seen)
 		}
 		return reason == ""
 	})
-	if reason == "" && hdoc && shell {
-		reason = "coarse"
-	}
 	return reason
 }
 
+// coarseSeen records what a script's statements held, for the check that
+// pairs a heredoc with a shell.
+type coarseSeen struct{ hdoc, shell bool }
+
 // coarseCall flags a command word that is not a literal, `eval`, a shell run
-// with -c, and `source` or `.` of a path that is not a literal.
-func coarseCall(c *syntax.CallExpr) string {
-	if len(c.Args) == 0 {
-		return ""
-	}
-	name := literal(c.Args[0])
-	switch {
-	case name == "":
-		return "coarse"
-	case name == "source" || name == ".":
-		if len(c.Args) < 2 || literal(c.Args[1]) == "" {
+// with -c, and `source` or `.` of a path that is not a literal. The command
+// word is found past wrappers, flags and assignments, as the judge does.
+func coarseCall(c *syntax.CallExpr, seen *coarseSeen) string {
+	i := 0
+	for ; i < len(c.Args); i++ {
+		l := literal(c.Args[i])
+		if l == "" {
 			return "coarse"
 		}
-	case name == "eval", slices.Contains(shells, wordName(name)) && runsScript(c.Args[1:]):
+		if n := wordName(l); !slices.Contains(wrappers, n) && !strings.HasPrefix(l, "-") && !assignment(l) && !number(l) {
+			break
+		}
+	}
+	if i == len(c.Args) {
+		return ""
+	}
+	name, args := wordName(literal(c.Args[i])), c.Args[i+1:]
+	seen.shell = seen.shell || slices.Contains(shells, name)
+	switch {
+	case name == "source" || name == ".":
+		if len(args) == 0 || literal(args[0]) == "" {
+			return "coarse"
+		}
+	case name == "eval", slices.Contains(shells, name) && runsScript(args):
 		// A literal script is parsed and judged as one, so only one that
 		// reads a variable or runs a substitution is flagged here.
-		for _, a := range c.Args[1:] {
+		for _, a := range args {
 			if l := literal(a); l == "" || expands(l) {
 				return "coarse"
 			}
@@ -1182,7 +1196,7 @@ func literal(w *syntax.Word) string {
 		for _, p := range parts {
 			switch p := p.(type) {
 			case *syntax.Lit:
-				b.WriteString(p.Value)
+				b.WriteString(strings.ReplaceAll(p.Value, `\`, ""))
 			case *syntax.SglQuoted:
 				b.WriteString(p.Value)
 			case *syntax.DblQuoted:
