@@ -144,19 +144,16 @@ func visibleEntries(root store.Root, sess route.Session, repo string, s streams)
 	}), skipped
 }
 
-// printReports prints v's attestation reports on stderr.
 func printReports(s streams, v *attest.Verifier) {
 	for _, r := range v.Reports() {
 		s.errln(r)
 	}
 }
 
-// reviewedMark leads the row of a fact that verified as reviewed. It goes
-// before the store name, which no fact controls, so a description can neither
-// forge it nor push it past the truncation point.
+// reviewedMark leads a verified fact's row, before the store name, which no
+// fact controls: a description can neither forge it nor truncate it away.
 const reviewedMark = "reviewed · "
 
-// listRow is e's row; reviewed marks a fact that verified as reviewed.
 func listRow(e store.Entry, reviewed bool) string {
 	f := e.Fact
 	where := string(e.Root.Store)

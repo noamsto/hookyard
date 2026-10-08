@@ -99,7 +99,7 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 	}
 	c := classifier{
 		root: snap, rules: rules, findings: findings, special: special,
-		host: attest.Classify(cfg, groups), storeID: storeID(cfg, root.Store), pending: pending,
+		host: attest.Classify(cfg, groups), storeID: attest.TrustStoreID(cfg, root.Store), pending: pending,
 		inHead: func(rel string, raw []byte) bool { return inHead(ctx, dir, rel, raw) },
 	}
 	var accepted, refused, left []string
@@ -570,14 +570,6 @@ type classifier struct {
 // attestDir holds the attest entries, gated content only when attestation is
 // on; off, they stay outside the fact layout as any dot directory does.
 const attestDir = ".attest/"
-
-// storeID is the trust file's id for s.
-func storeID(cfg config.Config, s route.StoreID) string {
-	if s == route.StoreWork {
-		return cfg.WorkStoreID
-	}
-	return cfg.PersonalStoreID
-}
 
 // refusal says why e must not reach a commit: "" to stage it, skip to leave
 // it out without blocking, leave to leave it out and report it, or a
