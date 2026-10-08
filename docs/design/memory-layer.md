@@ -977,6 +977,15 @@ distillation) and again as each store's required check on its remote:
    flags. The syntax-tree walk holds at most 512 levels on the stack and
    resumes deeper subtrees from their own root.
 
+   A last coarse pass, run only on a text where a listed name, or an escape
+   or append that could build one, sits within a few bytes, flags what the
+   judge cannot read simply, without modelling it: a heredoc or here-string
+   fed to a shell, a parameter expansion with an operator, subscript or
+   transform (anything but `$X` and `${X}`), `eval` or `sh -c` of a script
+   that reads a variable or substitutes, `source` of a non-literal path, and
+   a command word that is not a literal. It can only add a flag. It
+   over-flags ordinary scripts that do these things near such a name.
+
    It misses what the command text does not show: content arriving through
    `git fetch` or `git pull` without a URL; aliases, shell functions and
    scripts on disk; and an unlisted fetcher with no URL literal (a language
@@ -984,10 +993,8 @@ distillation) and again as each store's required check on its remote:
    parser cannot resolve: a variable set outside the command (`$CMD`), a
    value other than a variable's first literal assignment before its use (a
    reassignment, `+=`, `a=gh; b=$a`, `f(){ $X issue view 1; }; X=gh; f`, a
-   value read from a file), a pattern removal or replacement on an assigned
-   value (`X=xgh; ${X#x}`), escapes decoded by `${X@E}`, a quoted heredoc
-   body's backslash escapes (`bash <<'EOF'` with `$'\x67h' issue view 1`),
-   a spelling built by command
+   value read from a file) when the name is out of the coarse pass's reach, a
+   spelling built by command
    substitution (`$(printf g)h`), a spelling that depends on a variable's
    real value (`${0/bas/g}`), a command inside arithmetic beyond what the
    token scan sees, and globs (`/usr/bin/g[h]`), since globbing is off. It
