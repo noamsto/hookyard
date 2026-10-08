@@ -49,8 +49,13 @@ pinned `remote`, `origin` is its only remote, and every `branch.*.remote`,
 `branch.*.pushRemote` and `remote.pushDefault` is `origin`. The fetch and push
 urls have git's rewrites (`insteadOf`, `pushInsteadOf`, `pushurl`) applied,
 under the user's git config, so the pin must be the post-rewrite URL and the
-checkout's raw origin must equal it too. With no `remote`, a store dir lying
-inside any repo that has a remote is refused and nothing is pushed.
+checkout's raw origin must equal it too. Because the check reads the user's
+git config, a user-global `remote.pushDefault` or a globally defined remote
+refuses every pinned store. With no `remote`, a store dir inside a repo that
+has a named remote is refused and nothing is pushed; a remote reached only
+through a URL in `branch.*.remote`, `branch.*.pushRemote` or
+`remote.pushDefault`, or through a legacy `.git/remotes` or `.git/branches`
+file, is not yet caught for an unpinned store (a follow-up).
 A checkout git cannot read (a corrupt `.git/config`, say) is
 refused, not published with a warning. A refused checkout also blocks
 `priors add` to that store's local layer; reads still show the local layer.

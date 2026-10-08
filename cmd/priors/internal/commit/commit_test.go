@@ -1229,7 +1229,7 @@ func TestPushRefusesUnpinnedSSHConfig(t *testing.T) {
 	assertMain(t, bare, pushed)
 }
 
-func TestPushRefusesUpstreamOtherThanOrigin(t *testing.T) {
+func TestPushRefusesSecondRemote(t *testing.T) {
 	fx, bare := withRemote(t)
 	d := decoy(t, bare)
 	pushed := rev(t, bare, "main")
@@ -1239,8 +1239,11 @@ func TestPushRefusesUpstreamOtherThanOrigin(t *testing.T) {
 	fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
 	fx.index(t)
 
-	if w := fx.checkout(t); !strings.Contains(w, "not pushed") || !strings.Contains(w, "other") {
-		t.Errorf("warning = %q", w)
+	w := fx.checkout(t)
+	for _, want := range []string{"not pushed", "has remote(s) origin, other; the trust file pins origin alone"} {
+		if !strings.Contains(w, want) {
+			t.Errorf("warning %q lacks %q", w, want)
+		}
 	}
 	assertMain(t, bare, pushed)
 	assertMain(t, d, pushed)

@@ -274,10 +274,7 @@ func push(ctx context.Context, dir, remote, parent, commit string) (warning stri
 	if len(fields) != 3 || fields[0] == "" || fields[1] == "" || fields[1] == "." || !strings.HasPrefix(fields[2], "refs/heads/") {
 		return refuse("%s has no upstream", branch)
 	}
-	tracking, upstreamRemote, mergeRef := fields[0], fields[1], fields[2]
-	if upstreamRemote != "origin" {
-		return refuse("%s's upstream remote is %s, not origin", branch, upstreamRemote)
-	}
+	tracking, mergeRef := fields[0], fields[2]
 	upstream, err := runGit(ctx, dir, gitTimeout, nil, "rev-parse", "-q", "--verify", tracking+"^{commit}")
 	if exitsOne(err) {
 		return refuse("upstream %s is not fetched", tracking)
