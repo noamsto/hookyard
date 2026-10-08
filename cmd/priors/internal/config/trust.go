@@ -191,7 +191,7 @@ type trust struct {
 	PersonalOrgs []string `toml:"personal_orgs"`
 	// WorkNames is the floor the user config's work_names can only add to.
 	WorkNames []string `toml:"work_names"`
-	// TrustRoot is any so that a non-string scalar or array is off, not a parse error.
+	// TrustRoot is any so that any non-string value is off, not a parse error.
 	TrustRoot  any              `toml:"trust_root"`
 	AttestKeys []trustAttestKey `toml:"attest_keys"`
 	Stores     struct {
@@ -243,11 +243,16 @@ func readTrust(fsys StatFS, path string) (trust, error) {
 		return trust{}, err
 	}
 	if undecoded := md.Undecoded(); len(undecoded) > 0 {
-		keys := make([]string, len(undecoded))
-		for i, k := range undecoded {
-			keys[i] = k.String()
+		var keys []string
+		for _, k := range undecoded {
+			// trust_root decodes into any, so a table value's sub-keys stay undecoded.
+			if k[0] != "trust_root" {
+				keys = append(keys, k.String())
+			}
 		}
-		return trust{}, fmt.Errorf("unknown keys: %s", strings.Join(keys, ", "))
+		if len(keys) > 0 {
+			return trust{}, fmt.Errorf("unknown keys: %s", strings.Join(keys, ", "))
+		}
 	}
 	sum := sha256.Sum256(data)
 	t.digest = hex.EncodeToString(sum[:])
@@ -310,6 +315,12 @@ func rootLabel(md toml.MetaData, v any) (string, error) {
 	}
 	if s, ok := v.(string); ok {
 		return s, nil
+	}
+	switch v.(type) {
+	case map[string]any:
+		return "a table", nil
+	case []map[string]any:
+		return "an array of tables", nil
 	}
 	var b strings.Builder
 	if err := toml.NewEncoder(&b).Encode(map[string]any{"v": v}); err != nil {

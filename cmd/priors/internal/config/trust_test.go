@@ -478,8 +478,11 @@ func TestReadTrust(t *testing.T) {
 	})
 
 	for name, body := range map[string]string{
-		"trust_root = true": "trust_root = true\n",
-		"trust_root = 1":    "trust_root = 1\n",
+		"trust_root = true":    "trust_root = true\n",
+		"trust_root = 1":       "trust_root = 1\n",
+		"trust_root = [1]":     "trust_root = [1]\n",
+		"trust_root = {a = 1}": "trust_root = {a = 1}\n",
+		"[[trust_root]]":       "[[trust_root]]\na = 1\n",
 	} {
 		t.Run(name+" is off, not an error", func(t *testing.T) {
 			f := etcFS()

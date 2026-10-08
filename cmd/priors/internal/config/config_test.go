@@ -216,6 +216,8 @@ func TestLoadTrustRoot(t *testing.T) {
 		"bool":       {"trust_root = true", "", "true"},
 		"int":        {"trust_root = 1", "", "1"},
 		"array":      {`trust_root = ["a"]`, "", `["a"]`},
+		"table":      {`trust_root = {a = 1}`, "", "a table"},
+		"tables":     {"[[trust_root]]\na = 1", "", "an array of tables"},
 		"other text": {`trust_root = "owner-admin"`, "owner-admin", "owner-admin"},
 	} {
 		t.Run(name, func(t *testing.T) {
