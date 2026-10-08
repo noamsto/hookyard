@@ -204,6 +204,9 @@ func (j *judge) script(text string, depth int) string {
 		return "budget"
 	}
 	var reason string
+	// quiet texts hold nothing a listed name could hide in, so coarse skips them.
+	quiet := !involves(text)
+	var seen coarseSeen
 	// The parser yields each statement as it ends, so one after a syntax error
 	// is still judged. A loop body that returns early would make the parser
 	// yield its error again, so a found reason only skips the rest.
@@ -212,9 +215,18 @@ func (j *judge) script(text string, depth int) string {
 		case reason != "":
 		case err != nil:
 			reason = fallback(text)
+			if reason == "" && !quiet && strings.Contains(text, "${") {
+				reason = "coarse"
+			}
 		default:
-			reason = j.stmt(stmt, text, depth)
+			if reason = j.stmt(stmt, text, depth); reason == "" && !quiet {
+				reason = coarse(stmt, &seen)
+			}
 		}
+	}
+	// A heredoc may be handed to its shell by a later statement (`bash <&3`).
+	if reason == "" && !quiet && seen.hdoc && seen.shell {
+		reason = "coarse"
 	}
 	return reason
 }
@@ -1041,4 +1053,164 @@ func forgeIngests(group, verb string) bool {
 		return !slices.Contains(forgeWrite, verb)
 	}
 	return true
+}
+
+// shells run a script they are given as an argument, a heredoc or stdin.
+var shells = []string{"bash", "sh", "zsh", "dash", "ksh", "ash", "ssh", "eval", "source", "."}
+
+// involves reports that text may run a listed tool: a listed name is a byte
+// subsequence of a short run of it, which covers a name split or padded by a
+// variable operation (`X=gxh; ${X/x/}`), or it decodes an escape that could
+// spell one (`$'\x67h'`, `${X@E}`, `${X/g/&h}`). It is deliberately loose: it
+// only gates coarse.
+func involves(text string) bool {
+	for _, marker := range []string{`$'`, `\x`, `\u`, `\0`, "@E", "@P", "/&", "+="} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	for _, names := range [][]string{fetchers, forgesAny, {"gh", "glab"}} {
+		for _, name := range names {
+			if subsequence(text, name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// subsequence reports that name's bytes appear in order within a run of text
+// of at most len(name)+slack bytes.
+func subsequence(text, name string) bool {
+	const slack = 4
+	for i := 0; i < len(text); i++ {
+		if text[i] != name[0] {
+			continue
+		}
+		k := 1
+		for j := i + 1; j < len(text) && k < len(name) && j-i < len(name)+slack; j++ {
+			if text[j] == name[k] {
+				k++
+			}
+		}
+		if k == len(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// coarse is the fail-closed backstop for what the literaliser cannot read
+// simply, in a statement of a text that involves a listed tool: a heredoc or
+// here-string fed to a shell, an operator or subscript on a parameter
+// expansion, `eval`, `bash -c`, `source` of a non-literal path, and a variable
+// as a command word. It runs after the judge and only ever adds a flag.
+func coarse(s *syntax.Stmt, seen *coarseSeen) string {
+	var reason string
+	walkBounded(s, func(n syntax.Node) bool {
+		if reason != "" {
+			return false
+		}
+		switch n := n.(type) {
+		case *syntax.Redirect:
+			seen.hdoc = seen.hdoc || n.Op == syntax.Hdoc || n.Op == syntax.DashHdoc || n.Op == syntax.WordHdoc
+		case *syntax.ParamExp:
+			if !n.Short && (n.Exp != nil || n.Repl != nil || n.Slice != nil || n.Index != nil || n.Excl || n.Length || n.Width || n.Names != 0 || n.Flags != nil) {
+				reason = "coarse"
+			}
+		case *syntax.CallExpr:
+			reason = coarseCall(n, seen)
+		}
+		return reason == ""
+	})
+	return reason
+}
+
+// coarseSeen records what a script's statements held, for the check that
+// pairs a heredoc with a shell.
+type coarseSeen struct{ hdoc, shell bool }
+
+// coarseCall flags a command word that is not a literal, `eval`, a shell run
+// with -c, and `source` or `.` of a path that is not a literal. The command
+// word is found past wrappers, flags and assignments, as the judge does.
+func coarseCall(c *syntax.CallExpr, seen *coarseSeen) string {
+	i := 0
+	for ; i < len(c.Args); i++ {
+		l := literal(c.Args[i])
+		if l == "" {
+			return "coarse"
+		}
+		if n := wordName(l); !slices.Contains(wrappers, n) && !strings.HasPrefix(l, "-") && !assignment(l) && !number(l) {
+			break
+		}
+	}
+	if i == len(c.Args) {
+		return ""
+	}
+	name, args := wordName(literal(c.Args[i])), c.Args[i+1:]
+	seen.shell = seen.shell || slices.Contains(shells, name)
+	switch {
+	case name == "source" || name == ".":
+		if len(args) == 0 || literal(args[0]) == "" {
+			return "coarse"
+		}
+	case name == "eval", slices.Contains(shells, name) && runsScript(args):
+		// A literal script is parsed and judged as one, so only one that
+		// reads a variable or runs a substitution is flagged here.
+		for _, a := range args {
+			if l := literal(a); l == "" || expands(l) {
+				return "coarse"
+			}
+		}
+	}
+	return ""
+}
+
+// expands reports a `$` that opens an expansion, or a backtick, in a script.
+func expands(script string) bool {
+	if strings.Contains(script, "`") {
+		return true
+	}
+	for i := 0; i+1 < len(script); i++ {
+		if script[i] == '$' && (nameByte(script[i+1]) || strings.IndexByte("{(@*#?!$-", script[i+1]) >= 0) {
+			return true
+		}
+	}
+	return false
+}
+
+// runsScript reports a -c flag, alone or among short ones (`-lc`), in args.
+func runsScript(args []*syntax.Word) bool {
+	return slices.ContainsFunc(args, func(a *syntax.Word) bool {
+		l := literal(a)
+		return strings.HasPrefix(l, "-") && !strings.HasPrefix(l, "--") && strings.Contains(l, "c")
+	})
+}
+
+// literal returns w's text when it is only literal and quoted parts,
+// and "" when it holds any expansion.
+func literal(w *syntax.Word) string {
+	var b strings.Builder
+	var add func(parts []syntax.WordPart) bool
+	add = func(parts []syntax.WordPart) bool {
+		for _, p := range parts {
+			switch p := p.(type) {
+			case *syntax.Lit:
+				b.WriteString(strings.ReplaceAll(p.Value, `\`, ""))
+			case *syntax.SglQuoted:
+				b.WriteString(p.Value)
+			case *syntax.DblQuoted:
+				if !add(p.Parts) {
+					return false
+				}
+			default:
+				return false
+			}
+		}
+		return true
+	}
+	if !add(w.Parts) {
+		return ""
+	}
+	return b.String()
 }
