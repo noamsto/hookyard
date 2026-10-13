@@ -54,3 +54,19 @@ jobs:
         run: nix develop -c golangci-lint run --build-tags priorstest ./cmd/priors/...
       - name: nilaway
         run: nix develop -c nilaway -include-pkgs=github.com/noamsto/hookyard ./...
+
+  # Pushes the package the Home Manager module installs, for Linux and macOS,
+  # to dispatcher.cachix.org so downstream rebuilds substitute it.
+  cache:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: cachix/cachix-action@v17
+        with:
+          name: dispatcher
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - run: nix build .#hookyard --no-link
