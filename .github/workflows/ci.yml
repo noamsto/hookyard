@@ -57,19 +57,21 @@ jobs:
 
   # Builds the packages the Home Manager module installs, for Linux and macOS,
   # and pushes them to dispatcher.cachix.org so downstream rebuilds substitute
-  # them. Pushes from main only: every host trusts this cache, so a PR
-  # branch's build must never land in it.
+  # them. Pushes from main only, and PR runs never get the token: every host
+  # trusts this cache, so a PR branch's build must never land in it. The cache
+  # is public, so PR runs still pull.
   cache:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: cachix/cachix-action@v17
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
         with:
           name: dispatcher
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          authToken: ${{ github.event_name == 'push' && secrets.CACHIX_AUTH_TOKEN || '' }}
           skipPush: ${{ github.event_name != 'push' }}
       - run: nix build .#hookyard .#priors --no-link
