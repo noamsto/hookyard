@@ -55,8 +55,10 @@ jobs:
       - name: nilaway
         run: nix develop -c nilaway -include-pkgs=github.com/noamsto/hookyard ./...
 
-  # Pushes the package the Home Manager module installs, for Linux and macOS,
-  # to dispatcher.cachix.org so downstream rebuilds substitute it.
+  # Builds the packages the Home Manager module installs, for Linux and macOS,
+  # and pushes them to dispatcher.cachix.org so downstream rebuilds substitute
+  # them. Pushes from main only: every host trusts this cache, so a PR
+  # branch's build must never land in it.
   cache:
     strategy:
       matrix:
@@ -69,4 +71,5 @@ jobs:
         with:
           name: dispatcher
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-      - run: nix build .#hookyard --no-link
+          skipPush: ${{ github.event_name != 'push' }}
+      - run: nix build .#hookyard .#priors --no-link
