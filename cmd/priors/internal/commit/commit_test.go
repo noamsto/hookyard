@@ -835,6 +835,12 @@ func TestRefusesTamperedIndex(t *testing.T) {
 }
 
 func TestSigningFailureCommitsNothing(t *testing.T) {
+	// The timeout covers git's own start-up as well as the signer, so a loaded
+	// host needs it long enough for git to reach the signer before it expires.
+	const hangTimeout = 5 * time.Second
+	// loadSlack is Checkout's own git work under load, kept well under the
+	// signer's 30s sleep so the bound still shows the timeout killed it.
+	const loadSlack = 10 * time.Second
 	tests := []struct {
 		name    string
 		format  string
@@ -842,10 +848,10 @@ func TestSigningFailureCommitsNothing(t *testing.T) {
 		timeout time.Duration
 	}{
 		{"signer fails", "openpgp", "exit 1", gitTimeout},
-		{"signer hangs", "openpgp", "exec sleep 10", 200 * time.Millisecond},
+		{"signer hangs", "openpgp", "exec sleep 30", hangTimeout},
 		// git hands an ssh signer its own stdout, so a hung one outlives the
 		// killed git while holding our pipe open.
-		{"ssh signer hangs", "ssh", "exec sleep 10", 200 * time.Millisecond},
+		{"ssh signer hangs", "ssh", "exec sleep 30", hangTimeout},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -872,7 +878,7 @@ func TestSigningFailureCommitsNothing(t *testing.T) {
 			if !strings.Contains(w, "signing the commit failed") || !strings.Contains(w, "git commit-tree") {
 				t.Errorf("warning = %q, want a signing failure", w)
 			}
-			if took := time.Since(start); took > tt.timeout+waitDelay+time.Second {
+			if took := time.Since(start); took > tt.timeout+waitDelay+loadSlack {
 				t.Errorf("Checkout took %v, past the signing timeout", took)
 			}
 			if _, err := os.Stat(marker); err != nil {
