@@ -1235,15 +1235,15 @@ root; not a Nix trusted user, directly or through a group. Second, no
 credential of root, or of any account that can become root, is ever entered
 in a session agents run in (a separate admin account on another VT, another
 macOS user or another device; never `sudo` or `su admin` in the owner's
-terminal or tmux); that admin account runs nothing the agents' user can write:
-no user-owned prefix such as Homebrew's on its `PATH`, and no git command, a
-rebuild's included, in a checkout the agents' user can write (its config and
-hooks run code), so the admin rebuilds from its own clone; and the trust file
-and allowlist come from the Nix store through that admin's rebuild, or are
-root-owned with no agent route to root. Third, a host becomes `separate` only
-after a reinstall, or after a wipe of all root-writable state outside
-module-managed config, a list that is open: for example root's dotfiles and
-`authorized_keys`; root's Nix profiles and channels
+terminal or tmux); whichever account enters that credential, root or an admin
+account, runs nothing the agents' user can write: no user-owned prefix such as
+Homebrew's on its `PATH`, and no git command, a rebuild's included, in a
+checkout the agents' user can write (its config and hooks run code), so that
+account rebuilds from its own clone; and the trust file and allowlist come
+from the Nix store through that account's rebuild, or are root-owned with no
+agent route to root. Third, a host becomes `separate` only after a reinstall,
+or after a wipe of all root-writable state outside module-managed config, a
+list that is open: for example root's dotfiles and `authorized_keys`; root's Nix profiles and channels
 (`/nix/var/nix/profiles/per-user/root`, `/root/.nix-defexpr`); system cron and
 launchd jobs; setuid files; `/var/lib/priors`; a `nix.conf` include the module
 does not manage, such as darwin's `/etc/nix/nix.custom.conf`, where a planted
@@ -1314,14 +1314,14 @@ An out-of-band root while the owner's own user stays root-capable: a
 hardware-key-signed allowlist replacing the root-owned trust file, or polkit
 or an admin credential entered outside tmux. The user agents run as keeps a
 route to root, so the first condition of *When `separate` is honest* fails
-however the credential is entered, and the owner holds no FIDO2 key; revisit
-if the owner adopts one. A host where the agents' user has no route to root
-and never sees the admin credential (another VT's admin account, another
-macOS user or another device) is not (c): it is what `separate` declares once
-all three conditions of *When `separate` is honest* hold, so a converted
-owner-admin host only after the third's reinstall or wipe; it is simply not
-deployed on the owner's hosts today. Attesting also needs the FIDO2
-attestation key, so promotion waits on both that key and a `separate` host.
+however the credential is entered, and a hardware key does not change that.
+A host where the agents' user has no route to root and never sees the admin
+credential (another VT's admin account, another macOS user or another device)
+is not (c): it is what `separate` declares once all three conditions of *When
+`separate` is honest* hold, so a converted owner-admin host qualifies only
+after the third's reinstall or wipe; it is simply not deployed on the owner's
+hosts today. Attesting also needs the FIDO2 attestation key, so promotion
+waits on both that key and a `separate` host.
 
 **Unwritable means no agent write takes effect without a human's root act.**
 The trust file's source lives in nix-config, and the `priors` binary, with
@@ -1386,16 +1386,20 @@ seven-line payload over the sha256 of the fact's bytes with
 payload with every control, bidi, tag and other non-printing character
 visibly escaped, never sent raw to the terminal. It signs (PIN and touch). It
 writes the fact file only if the file still holds the bytes it read, and
-otherwise aborts with nothing written. It then writes `.attest/<name>`,
-commits the fact and its entry together, and pushes the commit to the pinned
-URL by §4.2's clean push with the explicit refspec
-`HEAD:refs/heads/<that branch>`, never the checkout's own branch or push
-config; a non-fast-forward push is reported as not pushed. It pokes its
+otherwise aborts with nothing written. It then writes `.attest/<name>` and
+keeps the bytes it signed and wrote in memory, commits the fact and its entry
+together, and refuses to push unless the committed `.attest/<name>` blob, read
+with replace objects off, hashes to those bytes (reported as not pushed,
+below), since the working tree can change between the write and `git add`. It
+pushes the commit to the pinned URL by §4.2's clean push with the explicit
+refspec `HEAD:refs/heads/<that branch>`, never the checkout's own branch or
+push config; a non-fast-forward push is reported as not pushed. It pokes its
 store's trigger socket, waits up to 60 s for the verdict file to show the
 entry's new state, or an `ok` verdict whose `tip` descends from the entry's
 commit (below), prints `<name> <entry sha256> <commit>` — the name, the
-sha256 of the entry file's bytes (the verdict file's key) and the entry's
-commit id, the arguments `--check` takes — and tells the human one of:
+sha256 of the bytes it signed and wrote, kept in memory and never rehashed
+from the file or blob (the verdict file's key), and the entry's commit id, the
+arguments `--check` takes — and tells the human one of:
 
 - in effect: the verdict file lists the entry `reviewed` for an attest; for a
   revoke, only a `revoked` line counts, at the tip or not (below).
@@ -1434,13 +1438,16 @@ commit id, the arguments `--check` takes — and tells the human one of:
   the entry to pass checks 4–6 for `<name>`, with `op: revoke` accepted as for
   a verdict line: an allowlisted sk signature with both flags, `store` this
   store's id and `name` equal to `<name>`; an entry that fails them is
-  refused, naming the failing check. It prints the name and the entry digest
-  it checked, and reports by the same rules against the current verdict file,
-  so an entry the job walks after the wait, under junk or a restore pushed on
-  top, still reads observed but not in effect. Other hosts see the entry at
+  refused, naming the failing check. It prints the name, the entry digest it
+  checked and the entry's `op` and `sequence`, so a human's revoke is not read
+  as in effect from an older `reviewed` attest, and reports by the same rules
+  against the current verdict file, so an entry the job walks after the wait,
+  under junk or a restore pushed on top, still reads observed but not in
+  effect. Other hosts see the entry at
   their next run of that store's unit, within 15 min + 2 × 300 s, about 25
   min, of the push landing while they can fetch.
-- not pushed: the commit exists only in this working tree. An attest reads
+- not pushed: the commit exists only in this working tree, including when its
+  entry blob did not hash to the signed bytes. An attest reads
   `proposed` everywhere, and a revoke is in effect nowhere (residual (e)).
 
 `priors attest --revoke <name>` writes a signed `op: revoke` entry the same
@@ -2365,8 +2372,6 @@ flagged facts stops being optional.
 - **Owner-readable store credentials keep Administration.** §4.4's deployment
   requirement is unmet, so its residual (a) and (b) are open to agents. Revisit
   with an append-only remote or verdicts signed off-host.
-- **The owner adopts a FIDO2 key.** Revisit rejected option (c) for
-  single-user admin hosts (§4.4).
 - **A work fact is ever found in the personal store.** The write rule, or both
   of §4.2's layers, failed, and a leak cannot be recalled (R9). Stop writing and
   revisit §4.2 before anything else. The personal store's lint scans for
@@ -2523,10 +2528,11 @@ flagged facts stops being optional.
   job's run still going past the 60 s wait, so the revoke reports pushed but
   not yet observed, and junk then a restore of H pushed on top before the next
   run, `priors attest --check <name> <entry sha256> <commit>` on the revoke's
-  commit reports it observed but not in effect, printing the name and digest
-  it checked, and a replace ref planted for the revoke's commit, pointing at a
-  commit whose entry bytes have a `revoked` line (another fact's tip revoke),
-  does not change what it reports, and a loose tree object for that commit
+  commit reports it observed but not in effect, printing the name, digest,
+  `op: revoke` and sequence it checked, and a replace ref planted for the
+  revoke's commit, pointing at a commit whose entry bytes have a `revoked`
+  line (another fact's tip revoke), does not change what it reports, and a
+  loose tree object for that commit
   rewritten to point at an earlier same-name attest still listed `reviewed` is
   refused on the digest mismatch; the retry numbers 11 and reads `revoked`;
   with the remote rewritten after the job's last fetch to drop a name's
@@ -2601,14 +2607,16 @@ flagged facts stops being optional.
   planted replace ref and a planted commit-graph that falsifies parents are
   ignored by both its walks, the `HEAD` check and the sequence walk, and by
   `--check`'s entry read, and a checkout with `info/grafts`, or a `shallow`
-  file in its git common dir, is refused, by `--check` too; a superseded
-  attest or revoke is retried under the
-  same name; it pushes the commit, and a checkout on another branch, or with a
-  repo-local push refspec or `push.default`, still pushes to the remote's
-  default branch or reports not pushed, while a checkout whose `HEAD` does
-  not descend from that branch's fetched tip is refused; it pokes its
-  store's socket, prints `<name> <entry sha256> <commit>` and reports the
-  entry as in effect, observed but not in effect (`superseded` or `lapsed`,
+  file in its git common dir, is refused, by `--check` too; with
+  `.attest/<name>` swapped in the working tree for an earlier same-name attest
+  between its write and `git add`, it refuses to push, reports not pushed and
+  never prints the swapped bytes' digest; a superseded attest or revoke is
+  retried under the same name; it pushes the commit, and a checkout on another
+  branch, or with a repo-local push refspec or `push.default`, still pushes to
+  the remote's default branch or reports not pushed, while a checkout whose
+  `HEAD` does not descend from that branch's fetched tip is refused; it pokes
+  its store's socket, prints `<name> <entry sha256> <commit>`, the sha256 of
+  the bytes it signed, and reports the entry as in effect, observed but not in effect (`superseded` or `lapsed`,
   with the action, or an `ok` verdict with no line whose `tip` descends from
   the entry's commit), pushed but not yet observed (re-checked by
   `priors attest --check <name> <entry sha256> <commit>`, which signs and
@@ -2810,13 +2818,13 @@ declares `trust_root = "separate"` (decision 8). It is not a v0 blocker
    root while the owner's own user stays root-capable (a hardware-key-signed
    allowlist replacing the root-owned trust file, or polkit or an admin
    credential outside tmux), since the user agents run as keeps a route to
-   root however the credential is entered, and the owner holds no FIDO2 key. A
-   host where the agents' user has no route to root and never sees the admin
-   credential (another VT's admin account, another macOS user or another
-   device) is not (c); it is what `separate` declares once all three
+   root however the credential is entered, and a hardware key does not change
+   that. A host where the agents' user has no route to root and never sees
+   the admin credential (another VT's admin account, another macOS user or
+   another device) is not (c); it is what `separate` declares once all three
    conditions of §4.4's *When `separate` is honest* hold (a converted
    owner-admin host only after a reinstall or wipe), not deployed on the
-   owner's hosts today. Revisit (c) if the owner adopts a FIDO2 key (§6).
+   owner's hosts today.
 
 ---
 
