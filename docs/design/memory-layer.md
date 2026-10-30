@@ -1907,8 +1907,8 @@ missing user config loads the defaults, since an agent can delete it; a trust
 file that fails the ownership walk, or a trust file or user config that
 cannot be read, parsed or validated, denies every call that may write. It fails
 open only where hookyard abstains, on a handler that crashes or outlasts its
-budget, and on an envelope priors cannot read within 800 ms (hookyard writes
-the envelope, so an agent cannot cause that). Hard links to any store file or the
+budget, and on an envelope priors cannot read within 800 ms, which fails open
+like a handler past its budget (load on the host can cause either). Hard links to any store file or the
 config, tools the guard does not know and pi's path and edit
 forms are covered, and what it does not catch is
 listed in the [priors README](../priors/README.md#write-guard). The key's

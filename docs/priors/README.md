@@ -283,9 +283,9 @@ In a shell command:
   sed, git and fd options (`sed --in-pl`, `git grep -O…`, `fd -Hx`), count as
   writes; git's `--ext-diff` and `--textconv` count as running a program;
 - `CDPATH` assigned in the command makes a relative `cd` or `pushd` a dir the
-  guard cannot tell. With a `CDPATH` set on the host, or exported by an
-  earlier call of a persistent shell, into a store dir, a relative `cd` under
-  it with a write is denied when the command names a guarded path;
+  guard cannot tell. With a `CDPATH` in the guard's own environment that
+  leads into a store dir, a relative `cd` under it with a write is denied when
+  the command names a guarded path;
 - `pushd` and `popd` with `+N` or `-N` name a dir the guard cannot tell;
 - naming `PATH`, `BASH_ENV`, `ENV`, `CDPATH` or `IFS` other than as an
   expansion (or in `let`, `(( ))`, `read`, `mapfile` or `printf -v`), or
@@ -301,11 +301,12 @@ In a shell command:
   mentions `MEMORY.md` is allowed. Any other command's such option is judged,
   and a command run inside such a message is still judged.
 
-`LSP` and an MCP tool are reads when the start of the tool's last name
-segment matches `search*`, `list_*`, `get_file_contents`, `read_file` or
-`read_text_file` (the last three also as suffixes: `*get_file_contents`,
-`*read_file`, `*read_text_file`), and the name holds no write verb such as
-replace, write, edit, create, delete, move, save or add.
+`LSP` and an MCP tool are reads when the tool's last name segment starts with
+`search` or `list_`, or is `get_file_contents`, `read_file` or
+`read_text_file` or ends with one of them, and the segment holds no write verb
+anywhere in it (replace, write, edit, create, delete, move, save, add, set,
+start and the like). A read-shaped name that holds one, such as
+`list_commits` or `list_assets`, is judged as an unknown tool.
 
 What the guard does when it cannot load its inputs depends on what is
 missing. A host with no trust file (`/etc/priors/trust.toml`) is inert, and
@@ -317,8 +318,9 @@ the user config, a bad state dir), denies every call that may write, naming
 the load error. So do a command past the parser's budget, a call whose tool
 input cannot be read, a guard that panics and a guard that runs past 750 ms.
 It fails open only where hookyard abstains (a call it does not route, a
-handler past its budget) and on an envelope priors cannot read within
-800 ms (hookyard writes the envelope, so an agent cannot cause that).
+handler that crashes or runs past its budget) and on an envelope priors cannot
+read within 800 ms, which fails open like a handler past its budget. Load on
+the host can cause either.
 
 It is not a sandbox. It does not see a path computed at run time from
 nothing the command names (`base64 -d`, a file's content, a script file), a
@@ -332,11 +334,27 @@ a variable a shell profile sets, `/proc/<pid>/cwd`, a bind mount, or macOS
 Unicode normalization. It does not see an MCP tool named like a read, with no
 write verb, that writes, nor an MCP tool that runs a command under a key
 other than `command` (a process-interaction tool's `input`). It does not see
-`git fetch` or `git push` into a store's refs (git's own refs count as git
-reading), or a `git commit` run inside a store. It does not see a fact edited
-through a hard link created after the check. It does not see a call hookyard
-does not route, a call after hookyard abstains past its budget, or a race
-that swaps a path between the check and the write.
+`git add`, `git commit`, `git fetch` or `git push` run in or on a store (git's
+own index, objects and refs count as git reading). It does not see a fact
+edited through a hard link created after the check. It does not see a call
+hookyard does not route, a call after hookyard abstains for a handler that
+crashes or runs past its budget, or a race that swaps a path between the check
+and the write.
+
+It also does not see these open classes:
+
+- a variable that changes how a word resolves or splits, or which program
+  runs (`PATH`, `IFS`, `CDPATH`, `GIT_*`, `LD_*`), set under a spelled name:
+  quoted, escaped or brace-expanded, through `eval`, a `{var}>` redirect, or a
+  nameref reached indirectly;
+- a wrapper's dir option in a spelling the guard does not parse (a
+  short-option cluster, an abbreviated long option, inside `env -S`, behind a
+  wrapper it does not list), and another runner's glued relative dir
+  (`unshare --wd=dir`, `--directory=dir`, `--prefix=dir`);
+- paths packed into one string: a comma- or newline-separated list, or a JSON
+  document in a string;
+- a `file:` URI with a single slash;
+- a reviewed claim split across the elements of a line array.
 
 It over-denies:
 
@@ -369,6 +387,11 @@ It over-denies:
   that names an `.attest` element or a store path, since `gh` may write and
   the command's own words are judged;
 - a git short-option cluster holding `O` (`git log -SOops`);
+- a git long option that is a prefix of one that runs a program (`git diff
+  --text`, a prefix of `--textconv`);
+- prose or patch bodies under an unknown or content key (a PR body, a chat
+  message) that hold a path with an `.attest` element, since each short string
+  is judged as a path;
 - an abbreviation of a harmless sed or fd long option.
 
 ## Store repositories
