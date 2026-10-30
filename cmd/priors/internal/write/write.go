@@ -26,12 +26,24 @@ import (
 // session runs; SessionID, Engine and Host become the fact's provenance.
 // External marks a session that ingested external content; IdentityConflict
 // marks an asserted session identity the caller could not corroborate.
+//
+// Imported marks a fact copied from an engine's native memory (§4.9): its
+// provenance, source, engines and modified are the importer's, and verified
+// stays null, since a migrated fact is not freshly verified. Pending names
+// facts the same batch is about to write, which a wiki-link may name before
+// they land. DryRun runs every check and reports where the fact would land,
+// writing nothing. NoCommit leaves a published fact uncommitted for a human
+// to review.
 type Request struct {
 	Fact                    fact.Fact
 	Session                 route.Session
 	SessionID, Engine, Host string
 	External                bool
 	IdentityConflict        bool
+	Imported                bool
+	Pending                 []string
+	DryRun                  bool
+	NoCommit                bool
 }
 
 // Result says where the fact landed. Outcome is "published", "flagged" or
@@ -104,7 +116,7 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 			return Result{}, err
 		}
 		candidate := store.Entry{Root: checkout, Rel: filepath.ToSlash(rel), Fact: f, Raw: data}
-		opts := lint.Options{Store: dest.Store, WorkOrgs: cfg.WorkOrgs, WorkNames: cfg.WorkNames(), Rules: d.Rules}
+		opts := lint.Options{Store: dest.Store, WorkOrgs: cfg.WorkOrgs, WorkNames: cfg.WorkNames(), Rules: d.Rules, Pending: req.Pending}
 		if findings := lint.Candidate(ctx, checkout, candidate, opts); len(findings) > 0 {
 			return Result{}, refusal(findings)
 		}
@@ -140,6 +152,9 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 	if err := root.CheckWrite(filepath.Dir(res.Path)); err != nil {
 		return Result{}, err
 	}
+	if req.DryRun {
+		return res, nil
+	}
 	if data, err = f.Marshal(); err != nil {
 		return Result{}, err
 	}
@@ -153,7 +168,7 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 	}
 	res.Reports = reports
 
-	if res.Outcome == "published" {
+	if res.Outcome == "published" && !req.NoCommit {
 		res.Warning = commit.Checkout(ctx, cfg, root, d.Rules, d.Scanner, "priors: add "+f.Name)
 	}
 	return res, nil
@@ -166,9 +181,13 @@ func complete(req Request, now time.Time) fact.Fact {
 	m := &f.Metadata
 	m.NodeType = "memory"
 	m.Confidence = "proposed"
+	m.Flags = nil
 	today := now.Format(time.DateOnly)
 	if m.ValidFrom == "" {
 		m.ValidFrom = today
+	}
+	if req.Imported {
+		return f
 	}
 	if m.Verified == "" {
 		m.Verified = today
@@ -179,7 +198,6 @@ func complete(req Request, now time.Time) fact.Fact {
 	if len(m.Engines) == 0 && req.Engine != "" && req.Engine != "unknown" {
 		m.Engines = []string{req.Engine}
 	}
-	m.Flags = nil
 	return f
 }
 

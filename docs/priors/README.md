@@ -124,6 +124,7 @@ store only.
 ```
 priors add --name N --description D --type project|reference|feedback|user \
            [--scope repo|global] [--repo R ...] [--session ID] [--external] --stdin
+priors import [--dry-run] [--claude-dir D] [--session ID] [--external]
 priors list [--repo R] [--type T] [--store S] [--stale] [--flagged] [--all]
 priors show <name>
 priors search <terms...> [--repo R] [--any-repo] [--type T] [--scope S] [--all]
@@ -210,6 +211,32 @@ permission prompt): the marker is written before the decision.
 
 `list`, `show` and `search` fence what they print as reference data, with a
 delimiter drawn per call.
+
+`import` copies Claude Code's native memories (the topic files under
+`~/.claude/projects/<project>/memory/`, or `--claude-dir`) into the personal
+store (§4.9), each through the same write path as `add`. The native files are
+never changed. Each copy keeps the native `name` (slugified when it is not a
+valid fact name), `description`, `type`, body and `modified`; the importer
+sets `confidence: proposed`, `scope: repo` with the repo decoded from the
+project dir, `verified: null`, `superseded_by: null`, `provenance` and a
+`source` block carrying the `sha256` of the native bytes. It prints one line
+per item:
+
+- `published personal <path> <- <source>` or `flagged ...`, as for `add`.
+- `unchanged <source>: <path>`: this source was imported before, unchanged.
+- `duplicate <source>: <path>`: a fact already holds these exact bytes.
+- `propose <source> -> <path>: <why>`: a near-duplicate (same name, same
+  folded description, body overlap) or a changed source. Nothing is written;
+  the owner merges by hand.
+- `skipped <source>: <why>`: a secret match or other refusal, a name that
+  cannot be slugified, a symlink, no repo, or a repo §4.2 routes anywhere but
+  the personal store (the work store and the quarantine are not imported).
+
+`MEMORY.md` is not imported, since each store generates its own; a line in
+it that is not a link to a topic file in the same dir is reported. Run
+`priors import --dry-run` first: it runs every check, prints what would land
+and what is only proposed, and writes nothing. A real run commits what it
+published once, through the store's commit gate. Running it again is safe.
 
 ## Wire it into hookyard
 

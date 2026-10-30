@@ -22,6 +22,7 @@ const usage = `usage: priors <command> [flags]
 
 commands:
   add      write one fact through redaction, routing and gates
+  import   copy Claude Code's native memories into the personal store
   list     list facts visible to this session
   show     print one fact, fenced
   search   search facts visible to this session
@@ -60,6 +61,8 @@ func run(args []string, s streams) int {
 	switch args[0] {
 	case "add":
 		return cmdAdd(rest, s)
+	case "import":
+		return cmdImport(rest, s)
 	case "list":
 		return cmdList(rest, s)
 	case "show":

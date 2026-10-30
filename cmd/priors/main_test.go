@@ -774,6 +774,35 @@ func TestAddQuarantinesWorkRepoOnPersonalHost(t *testing.T) {
 	}
 }
 
+func TestImportDryRunThenImport(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.record("sess-1")
+	project := regexp.MustCompile(`[^A-Za-z0-9]`).ReplaceAllString(repo, "-")
+	src := filepath.Join(sb.dir, ".claude", "projects", project, "memory", "store-format.md")
+	sb.writeFile(src, "---\nname: store-format\ndescription: how the store is laid out\nmetadata:\n  type: project\n---\n\nOne fact per file.\n")
+	path := filepath.Join(sb.personal, "demo", "store-format.md")
+	from := " <- ~/.claude/projects/" + project + "/memory/store-format.md\n"
+
+	dry := sb.run("", "import", "--dry-run", "--session", "sess-1")
+	wantExit(t, dry, 0)
+	if want := "would publish personal " + path + from; dry.stdout != want {
+		t.Fatalf("dry run stdout %q, want %q", dry.stdout, want)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("dry run wrote %s: %v", path, err)
+	}
+
+	res := sb.run("", "import", "--session", "sess-1")
+	wantExit(t, res, 0)
+	if want := "published personal " + path + from; res.stdout != want {
+		t.Fatalf("stdout %q, want %q", res.stdout, want)
+	}
+	again := sb.run("", "import", "--session", "sess-1")
+	wantExit(t, again, 0)
+	wantContains(t, "re-run", again.stdout, "unchanged ~/.claude/projects/")
+}
+
 // TestSymlinkedStateDirIsOneDir: the marker handler and the write path both
 // land under the symlink's target.
 func TestSymlinkedStateDirIsOneDir(t *testing.T) {
