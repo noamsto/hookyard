@@ -247,24 +247,89 @@ configured store. A shell command cannot have its content judged, so a shell
 write anywhere in a store is denied, and so is any write while the command
 names a store path, runs in a store, or changes into one. Paths resolve
 against the call's cwd and every dir the command changes into, with `..` and
-symlinks resolved as the kernel does, and hard links to the index, attest
-entries and config file are caught. A write through a path built at run time
-(`$(…)`, an unknown variable, xargs, a pipe into a writer) is denied when the
-command names a guarded path anywhere. A command past the parser's budget, a
-call whose input cannot be read, a guard that panics or runs past 750 ms, and
-a host whose trust file or config cannot be loaded all deny every call that
-may write.
+symlinks resolved as the kernel does, and also with `..` cleaned first, as
+Claude Code and pi clean a file tool's path. A hard link elsewhere to any store file (a fact,
+`.git/config`, the index, an attest entry) or to the config file is caught: a
+file tool's write through a link to a fact is judged for a reviewed claim like
+a write to the fact itself, and a shell write through any such link is denied.
+A write through a path built at run time (`$(…)`, an unknown variable, xargs,
+a pipe into a writer) is denied when the command names a guarded path
+anywhere.
+
+A tool the guard does not know (an MCP server's, say) is judged on every short
+single-line string in its input, under any key, read as a path relative to the
+call's cwd; every string also counts as content for the reviewed check. Keys
+that differ only in case, `_` or `-` all count. A leading `@`, `~` and `~/`,
+`file://` URIs and Unicode spaces in a path are read the way pi reads them.
+An edit through pi's `edit` whose new text holds `reviewed`, `\`, `!` or `*`
+in a store fact is denied, since pi matches fuzzily and applies every edit
+against the original file. The file as each edit would leave it is also
+judged, under Claude's sequential matching and under pi's all-at-once,
+fuzzy-normalized matching.
+
+In a shell command:
+
+- a wrapper flag's value is not trusted as a reader's name (`env -u cat rm …`);
+- git global options outside a known list, and abbreviated or bundled
+  sed, git and fd options (`sed --in-pl`, `git grep -O…`, `fd -Hx`), count as
+  writes;
+- `CDPATH`, assigned in the command or set on the host, makes a relative `cd`
+  or `pushd` a dir the guard cannot tell;
+- assigning or exporting `PATH`, `BASH_ENV` or `ENV`, or `printf -v`, makes
+  the command one that may write;
+- bash `[!…]` globs are read as negated classes;
+- `git commit -m` and `--message`, and `--body`, `--title`, `--message`,
+  `--notes` and `--description` (`-b`, `-t`, `-m`) of `gh` and `glab`, hold
+  data, so their values are not judged as paths: a commit heredoc that
+  mentions `MEMORY.md` is allowed. A command run inside such a message is
+  still judged.
+
+`LSP` and an MCP tool whose name matches `*get_file_contents`,
+`*read_text_file`, `*read_file`, `*list_*` or `*search*`, and holds no write
+verb (replace, write, edit, create, delete, move), are reads.
+
+What the guard does when it cannot load its inputs depends on what is
+missing. A host with no trust file (`/etc/priors/trust.toml`) is inert, and
+the guard allows every call. A missing user config loads the defaults, since
+an agent can delete the config and a missing file must not open the guard. A
+trust file or config that is present but cannot be read, fails the ownership
+check or does not parse denies every call that may write, naming the load
+error. So do a command past the parser's budget, a call whose input cannot be
+read, a guard that panics and a guard that runs past 750 ms.
 
 It is not a sandbox. It does not see a path computed at run time from
 nothing the command names (`base64 -d`, a file's content, a script file), a
-path an interpreter assembles from pieces, a command that shadows a reader's
-name on `PATH`, or code run from config an agent can write (git's global
-`core.hooksPath`, shell profiles, Makefiles). It does not see a call
-hookyard does not route, a call after hookyard abstains past its budget, or a
-race that swaps a path between the check and the write. It over-denies a
-shell command that reads a store path while it writes elsewhere, a shell
-write to a store fact, and a write that may name a dir holding a store
-(`cmake ..` from a dir directly under one).
+path an interpreter assembles from pieces, an archive or patch unpacked from
+a cwd that holds a store, a command that shadows a reader's name on `PATH`
+(including one set up by an earlier call of a persistent shell), code run
+from config an agent can write (git's global `core.hooksPath`, Makefiles) or
+a variable a shell profile sets, `/proc/<pid>/cwd`, a bind mount, or macOS
+Unicode normalization. It does not see a fact edited through a hard link
+created after the check. It does not see a call hookyard does not route, a call after hookyard
+abstains past its budget, or a race that swaps a path between the check and
+the write.
+
+It over-denies:
+
+- a shell command that reads a store path while it writes elsewhere, a shell
+  write to a store fact, and a write that may name a dir holding a store
+  (`cmake ..` from a dir directly under one);
+- a reader run behind a flagged wrapper (`nice -n 5 git status`) in a store or
+  naming one;
+- an unknown tool whose input holds `.`, `..`, `/`, or a word that names a
+  store or a dir holding one relative to the cwd (`{"repo":"notes"}` from
+  `~`);
+- an MCP read tool outside the list that names a store's `.git`
+  (`read_multiple_files`);
+- a pi edit to a fact whose new text holds `reviewed`, `\`, `!` or `*`,
+  markdown emphasis included;
+- a commit message that names a guarded path in a command that also writes
+  through a path built at run time;
+- a `gh` or `glab` body built by a command (`--body "$(cat <<'EOF' …)"`)
+  that names an `.attest` element or a store path, since `gh` may write and
+  the command's own words are judged;
+- a git short-option cluster holding `O` (`git log -SOops`);
+- an abbreviation of a harmless sed or fd long option.
 
 ## Store repositories
 
