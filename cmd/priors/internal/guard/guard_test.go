@@ -12,7 +12,8 @@ import (
 )
 
 // sandbox is a home with a store at ~/notes, priors' state and config dirs, a
-// project at ~/work and links into the store.
+// project at ~/work and links into the store: symlinks, and hard links to the
+// index, a fact and the git config.
 type sandbox struct {
 	home, store, work string
 	guard             *Guard
@@ -54,13 +55,16 @@ func newSandbox(t *testing.T) sandbox {
 		"work/rel":   "../notes/.attest",
 		"work/chain": filepath.Join(home, "link"),
 		"work/dang":  filepath.Join(sb.store, ".attest", "new"),
+		"work/lk":    home,
 	} {
 		if err := os.Symlink(target, filepath.Join(home, link)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Link(filepath.Join(sb.store, "MEMORY.md"), filepath.Join(sb.work, "hard")); err != nil {
-		t.Fatal(err)
+	for link, target := range map[string]string{"hard": "MEMORY.md", "hardfact": "facts/b.md", "hardgit": ".git/config"} {
+		if err := os.Link(filepath.Join(sb.store, target), filepath.Join(sb.work, link)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	env := map[string]string{"HOME": home, "NOTES": sb.store}
 	host := &gate.Host{
@@ -144,6 +148,7 @@ func TestShellDenies(t *testing.T) {
 		{name: "dotdot past symlink", want: "/notes/MEMORY.md, inside the personal store", input: bash("echo x > ~/work/rel/../MEMORY.md")},
 		{name: "relative dotdot past symlink", want: "/notes/MEMORY.md, inside the personal store", input: bash("echo x > rel/../MEMORY.md")},
 		{name: "proc root", want: "/notes/MEMORY.md, inside the personal store", input: bash("echo x > /proc/self/root@H/notes/MEMORY.md")},
+		{name: "dotdot cleaned before symlink", want: "/notes/MEMORY.md, inside the personal store", input: bash("echo x > ~/work/lk/../lk/notes/MEMORY.md")},
 
 		// Symlinked dirs.
 		{name: "symlinked store", want: "/notes/MEMORY.md, inside the personal store", input: bash("echo x > ~/link/MEMORY.md")},
@@ -180,6 +185,8 @@ func TestShellDenies(t *testing.T) {
 		{name: "option value", want: "/notes/facts, inside the personal store", input: bash("cp --target-directory=~/notes/facts x")},
 		{name: "extglob", want: "/+(no)tes/f, inside the personal store", input: bash("shopt -s extglob; echo x > ~/+(no)tes/f")},
 		{name: "dot glob attest", want: "/work/.a*, an .attest dir", input: bash("rm -rf ~/work/.a*")},
+		{name: "negated class rm", want: "/[!q]otes, inside the personal store", input: bash("rm -rf ~/[!q]otes")},
+		{name: "negated class redirect", want: "/[!q]otes/MEMORY.md, inside the personal store", input: bash("echo x > ~/[!q]otes/MEMORY.md")},
 
 		// Wrappers.
 		{name: "sudo tee", want: "/notes/MEMORY.md, inside the personal store", input: bash("echo x | sudo tee ~/notes/MEMORY.md")},
@@ -206,6 +213,25 @@ func TestShellDenies(t *testing.T) {
 		{name: "path piped to interpreter", want: "inside the personal store, and may write", input: bash(`echo ~/notes/MEMORY.md | python3 -c "import sys; open(sys.stdin.read().strip(),'w')"`)},
 		{name: "symlink listing to xargs", want: "/notes, the personal store, and may write", input: bash("ls ~/link/ | xargs rm")},
 
+		// Options and wrappers that read as something else.
+		{name: "env unset option", want: "/notes, the personal store", input: bash("env -u cat rm -rf ~/notes")},
+		{name: "exec name option", want: "inside the personal store", input: bash(`exec -a cat bash -c 'echo x > ~/notes/facts/a.md'`)},
+		{name: "xargs replace option", want: "/notes, the personal store, and may write", input: bash("echo ~/notes | xargs -I cat rm -rf ~/notes")},
+		{name: "xargs replace option alone", want: "builds at run time", input: bash("xargs -I cat rm -rf ~/notes")},
+		{name: "git -C abbreviated option", want: "and runs in", input: bash("git -C ~/notes --attr-source log reset --hard")},
+		{name: "sed abbreviated in-place", want: "inside the personal store", input: bash("sed --in-pl s/a/b/ ~/notes/facts/a.md")},
+		{name: "sed expression option", want: "inside the personal store", input: bash("sed --expr='w @H/notes/facts/x' ~/work/a.md")},
+		{name: "sed clustered expression", want: "inside the personal store", input: bash("sed -ne'w @H/notes/facts/x' ~/work/a.md")},
+		{name: "git grep abbreviated open-files", want: "inside the personal store", input: bash("git grep --open='touch ~/notes/MEMORY.md;:' x")},
+		{name: "git fetch abbreviated upload-pack", want: "and runs in", input: bash("git -C ~/notes fetch --upload=x origin")},
+		{name: "git grep clustered open-files", want: "and runs in", input: bash("git -C ~/notes grep -iOx y")},
+		{name: "fd clustered exec", want: "/notes, the personal store", input: bash("fd . ~/notes -Hx touch")},
+		{name: "cdpath cd", want: "from a dir it changes into at run time", input: bash("CDPATH=~ cd notes && touch x")},
+		{name: "exported PATH", want: "inside the personal store, and may write", input: bash("export PATH=/tmp/evil:$PATH; cat ~/notes/MEMORY.md")},
+		{name: "exported BASH_ENV", want: "inside the personal store, and may write", input: bash("export BASH_ENV=/tmp/x; cat ~/notes/MEMORY.md")},
+		{name: "printf -v PATH", want: "inside the personal store, and may write", input: bash("printf -v PATH /tmp/evil; cat ~/notes/MEMORY.md")},
+		{name: "path in a commit message substitution", want: "builds at run time", input: bash("git commit -m \"$(rm $(echo ~/notes/MEMORY.md))\"")},
+
 		// Paths built at run time.
 		{name: "opaque under store", want: "notes/…\", which reaches into the personal store", input: bash("echo x > ~/notes/$(echo MEMORY.md)")},
 		{name: "opaque partial element", want: "/no…\", which reaches into the personal store", input: bash("echo x > ~/no$(echo tes)/f")},
@@ -217,6 +243,8 @@ func TestShellDenies(t *testing.T) {
 
 		// Hard links.
 		{name: "hard link", want: "a hard link to", input: bash("echo x > ~/work/hard")},
+		{name: "hard link to a fact", want: "a hard link to", input: bash("echo x > ~/work/hardfact")},
+		{name: "hard link to git config", want: "a hard link to", input: bash("echo x > ~/work/hardgit")},
 
 		// Input the guard cannot read.
 		{name: "malformed command", want: "neither a string nor a list of strings", input: `{"command":5}`},
@@ -254,6 +282,8 @@ func TestShellAllows(t *testing.T) {
 		{name: "pipe to tee", input: bash("go test ./... 2>&1 | tee /tmp/out.txt")},
 		{name: "read loop", input: bash(`while read -r f; do rm "$f"; done < /tmp/list`)},
 		{name: "no command", input: `{}`},
+		{name: "commit message heredoc", input: bash("git commit -m \"$(cat <<'EOF'\nfix MEMORY.md handling\nEOF\n)\"")},
+		{name: "commit message with store name", input: bash(`git commit -m "notes $(date)"`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.tool == "" {
@@ -281,7 +311,13 @@ func TestToolDenies(t *testing.T) {
 		{name: "traversal", want: "/notes/.git/config, inside the personal store's git dir", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/../notes/.git/config", "content": "x"})},
 		{name: "relative in store", want: "/notes/MEMORY.md, the personal store's generated index", cwd: "notes", tool: "Write", input: sb.input(map[string]any{"file_path": "MEMORY.md", "content": "x"})},
 		{name: "relative past symlink", want: "/notes/MEMORY.md, the personal store's generated index", tool: "Write", input: sb.input(map[string]any{"file_path": "rel/../MEMORY.md", "content": "x"})},
+		{name: "dotdot cleaned before symlink", want: "/notes/MEMORY.md, the personal store's generated index", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/lk/../lk/notes/MEMORY.md", "content": "x"})},
+		{name: "dotdot cleaned before symlink git", want: "/hooks/pre-commit, inside the personal store's git dir", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/lk/../lk/notes/.git/hooks/pre-commit", "content": "x"})},
 		{name: "hard link", want: "a hard link to", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/hard", "content": "x"})},
+		{name: "hard link to git config", want: "a hard link to", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/hardgit", "content": "x"})},
+		{name: "hard link to a fact reviewed", want: "/work/hardfact claiming confidence: reviewed", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/hardfact", "content": reviewed})},
+		{name: "hard link to a fact edit to reviewed", want: "/work/hardfact claiming confidence: reviewed", tool: "Edit", input: sb.input(map[string]any{"file_path": "@H/work/hardfact", "old_string": "unverified", "new_string": "reviewed"})},
+		{name: "hard link to a fact patch", want: "/work/hardfact claiming confidence: reviewed", tool: "Write", input: sb.input(map[string]any{"input": "*** Begin Patch\n*** Update File: @H/work/hardfact\n@@\n-  confidence: unverified\n+  confidence: reviewed\n*** End Patch"})},
 		{name: "edit index", want: "/notes/MEMORY.md, the personal store's generated index", tool: "Edit", input: sb.input(map[string]any{"file_path": "@H/notes/MEMORY.md", "old_string": "a", "new_string": "b"})},
 		{name: "reviewed fact", want: "/facts/n.md claiming confidence: reviewed", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/notes/facts/n.md", "content": reviewed})},
 		{name: "reviewed yaml escape", want: "/facts/n.md claiming confidence: reviewed", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/notes/facts/n.md", "content": "---\nname: n\nmetadata:\n  confidence: \"re\\x76iewed\"\n---\n"})},
@@ -371,6 +407,7 @@ func TestToolAllows(t *testing.T) {
 		{name: "sibling store", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/notes-old/MEMORY.md", "content": "x"})},
 		{name: "attestation dir", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/sub/.attestation/y", "content": "x"})},
 		{name: "unreviewed fact", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/notes/facts/n.md", "content": "---\nname: n\nmetadata:\n  confidence: unverified\n---\nThe PR was reviewed.\n"})},
+		{name: "unreviewed fact through a hard link", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/hardfact", "content": "---\nname: b\nmetadata:\n  confidence: unverified\n---\nmore\n"})},
 		{name: "benign edit", tool: "Edit", input: sb.input(map[string]any{"file_path": "@H/notes/facts/b.md", "old_string": "body", "new_string": "more body"})},
 		{name: "read attest", tool: "Read", input: sb.input(map[string]any{"file_path": "@H/notes/.attest/e1"})},
 		{name: "grep store", tool: "Grep", input: sb.input(map[string]any{"pattern": "x", "path": "@H/notes"})},
@@ -421,6 +458,21 @@ func TestBrokenDeniesWrites(t *testing.T) {
 		if tt.deny && !strings.Contains(r, "trust file missing") {
 			t.Errorf("%s %s: reason %q does not name the cause", tt.tool, tt.input, r)
 		}
+	}
+}
+
+// TestLinkedBudget checks that a file with other links the walk ran out of
+// budget before matching is unknown, and one it matched is not.
+func TestLinkedBudget(t *testing.T) {
+	sb := newSandbox(t)
+	c := sb.guard.newCheck(sb.work, nil)
+	c.budget = 1
+	if to, unknown := c.linked(filepath.Join(sb.work, "hardfact")); len(to) != 0 || !unknown {
+		t.Errorf("linked = %v, %v; want unknown", to, unknown)
+	}
+	c = sb.guard.newCheck(sb.work, nil)
+	if to, unknown := c.linked(filepath.Join(sb.work, "hardfact")); len(to) == 0 || unknown {
+		t.Errorf("linked = %v, %v; want a match", to, unknown)
 	}
 }
 

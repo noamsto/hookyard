@@ -46,6 +46,8 @@ const (
 	maxDepth = 16
 	// maxEntries bounds the attest entries read to match a hard link.
 	maxEntries = 4096
+	// maxFiles bounds the store files walked to match a hard link.
+	maxFiles = 1 << 16
 	// maxPath bounds a string under an unknown key that is judged as a path.
 	maxPath = 4096
 )
@@ -143,7 +145,9 @@ type Guard struct {
 	links []string
 	// attests are the attest dirs whose entries a hard link could reach.
 	attests []string
-	host    *gate.Host
+	// stores are the resolved store roots, whose files a hard link could reach.
+	stores []string
+	host   *gate.Host
 	// tokens are the lowercased texts, and names the lowercased path
 	// elements, whose mention in a command makes a write through a path it
 	// builds at run time a write to a guarded root.
@@ -166,6 +170,11 @@ func New(p Paths, host *gate.Host) *Guard {
 		g.add(filepath.Join(s.Path, ".git"), kindGit, label+"'s git dir")
 		g.links = append(g.links, filepath.Join(s.Path, store.IndexFile))
 		g.attests = append(g.attests, filepath.Join(s.Path, attestDir))
+		res := filepath.Clean(s.Path)
+		if r, ok := physical(res); ok {
+			res = r
+		}
+		g.stores = append(g.stores, res)
 		g.names = append(g.names, strings.ToLower(filepath.Base(s.Path)))
 	}
 	if p.State != "" {
@@ -327,8 +336,12 @@ func (c *check) shellTouch(t gate.Touch, writes, involved bool) string {
 		return ""
 	}
 	for _, p := range cands {
-		if label := c.linked(p); label != "" {
-			return deny("the command writes %s, a hard link to %s", p, label)
+		to, unknown := c.linked(p)
+		switch {
+		case unknown:
+			return deny("the command writes %s, which has hard links the guard cannot match to a store file", p)
+		case len(to) > 0:
+			return deny("the command writes %s, a hard link to %s", p, to[0])
 		}
 	}
 	return ""
@@ -401,7 +414,8 @@ func (g *Guard) tool(cwd, name string, input json.RawMessage) string {
 }
 
 // toolPath judges one path a file tool names, and the content in writes it
-// to a store file. in is nil for a patch, judged by patch.
+// to a store file, or a hard link to one. in is nil for a patch, judged by
+// patch.
 func (c *check) toolPath(name, p string, in *toolInput) string {
 	cands := c.toolCandidates(p)
 	for _, cand := range cands {
@@ -415,15 +429,21 @@ func (c *check) toolPath(name, p string, in *toolInput) string {
 		}
 	}
 	for _, cand := range cands {
-		if label := c.linked(cand); label != "" {
-			return deny("%s would write %s, a hard link to %s", name, cand, label)
+		to, unknown := c.linked(cand)
+		if unknown {
+			return deny("%s would write %s, which has hard links the guard cannot match to a store file", name, cand)
+		}
+		for _, t := range to {
+			if r := c.relate(t, toolKinds); r.rel == inside {
+				return deny("%s would write %s, a hard link to %s, %s", name, cand, t, describe(r.root, t))
+			}
 		}
 	}
 	if in == nil {
 		return ""
 	}
 	for _, cand := range cands {
-		if c.relate(cand, []kind{kindStore}).rel != inside {
+		if !c.storeFile(cand) {
 			continue
 		}
 		if r := c.reviewed(name, cand, in); r != "" {
@@ -577,14 +597,14 @@ func reviewedClaim(text string) bool {
 	return strings.Contains(strings.ToLower(text), "reviewed")
 }
 
-// patch judges a patch's change to a store file. A new file's content is read
-// as a fact. A change to an existing one is judged by its lines, since the
-// guard does not apply hunks: an added line that holds the word, or an escape,
-// tag or alias that could spell it, or a file that already holds any of them
-// (a deleted line can join what is left), is denied.
+// patch judges a patch's change to a store file, or a hard link to one. A new
+// file's content is read as a fact. A change to an existing one is judged by
+// its lines, since the guard does not apply hunks: an added line that holds the
+// word, or an escape, tag or alias that could spell it, or a file that already
+// holds any of them (a deleted line can join what is left), is denied.
 func (c *check) patch(name, p string, pf patchFile) string {
 	cands := c.toolCandidates(p)
-	if !slices.ContainsFunc(cands, func(cand string) bool { return c.relate(cand, []kind{kindStore}).rel == inside }) {
+	if !slices.ContainsFunc(cands, c.storeFile) {
 		return ""
 	}
 	const claim = "%s may leave %s claiming confidence: reviewed, which only attestation writes"
@@ -648,20 +668,24 @@ type check struct {
 	dirs []string
 	// lost reports a dir the call changes into that cannot be told.
 	lost bool
-	// linkInfo are the guarded files a hard link could reach, read once.
+	// linkInfo are the files a hard link could reach, read once; cut reports
+	// a store walk that ran out of budget or could not read a dir.
 	linkInfo []linkTarget
 	linkRead bool
+	cut      bool
+	// budget is the store files the walk may read.
+	budget int
 }
 
 type linkTarget struct {
-	info  fs.FileInfo
-	label string
+	info fs.FileInfo
+	path string
 }
 
 // newCheck resolves the dirs a command's relative words may be relative to:
 // cwd and every dir it changes into, each against every dir before it.
 func (g *Guard) newCheck(cwd string, touches []gate.Touch) *check {
-	c := &check{g: g}
+	c := &check{g: g, budget: maxFiles}
 	if filepath.IsAbs(cwd) {
 		c.dirs = c.candidates(cwd)
 	} else {
@@ -689,8 +713,9 @@ func (g *Guard) newCheck(cwd string, touches []gate.Touch) *check {
 }
 
 // candidates are the absolute paths p may be: against each dir, cleaned as
-// the shell's logical cd does and resolved as the kernel does, `..` taken
-// after the symlink before it.
+// the shell's logical cd does, resolved as the kernel does with `..` taken
+// after the symlink before it, and resolved after a lexical clean, as Claude
+// Code and pi pass a path.
 func (c *check) candidates(p string) []string {
 	if p == "" {
 		return nil
@@ -710,12 +735,15 @@ func (c *check) candidates(p string) []string {
 	}
 	var out []string
 	for _, a := range abs {
-		out = append(out, filepath.Clean(a))
+		clean := filepath.Clean(a)
+		out = append(out, clean)
 		if glob(a) {
 			continue
 		}
-		if r, ok := physical(a); ok {
-			out = append(out, r)
+		for _, f := range []string{a, clean} {
+			if r, ok := physical(f); ok {
+				out = append(out, r)
+			}
 		}
 	}
 	slices.Sort(out)
@@ -828,21 +856,28 @@ func (c *check) prefix(text string) match {
 	return best
 }
 
-// linked returns the label of a guarded file p is a hard link to.
-func (c *check) linked(p string) string {
+// storeFile reports a path inside a store, or a hard link to one of its files.
+func (c *check) storeFile(p string) bool {
+	to, _ := c.linked(p)
+	return c.relate(p, []kind{kindStore}).rel == inside || len(to) > 0
+}
+
+// linked returns the guarded files p is a hard link to. unknown is set when p
+// has other links and the store walk ran out of budget before matching one.
+func (c *check) linked(p string) (to []string, unknown bool) {
 	fi, err := os.Lstat(p)
 	if err != nil || !fi.Mode().IsRegular() {
-		return ""
+		return nil, false
 	}
 	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || st.Nlink < 2 {
-		return ""
+		return nil, false
 	}
 	for _, t := range c.links() {
 		if os.SameFile(fi, t.info) {
-			return t.label
+			to = append(to, t.path)
 		}
 	}
-	return ""
+	return to, len(to) == 0 && c.cut
 }
 
 func (c *check) links() []linkTarget {
@@ -850,13 +885,13 @@ func (c *check) links() []linkTarget {
 		return c.linkInfo
 	}
 	c.linkRead = true
-	add := func(p, label string) {
+	add := func(p string) {
 		if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() {
-			c.linkInfo = append(c.linkInfo, linkTarget{fi, label})
+			c.linkInfo = append(c.linkInfo, linkTarget{fi, p})
 		}
 	}
 	for _, p := range c.g.links {
-		add(p, p)
+		add(p)
 	}
 	for _, dir := range c.g.attests {
 		entries, err := os.ReadDir(dir)
@@ -864,8 +899,29 @@ func (c *check) links() []linkTarget {
 			continue
 		}
 		for _, e := range entries[:min(len(entries), maxEntries)] {
-			add(filepath.Join(dir, e.Name()), filepath.Join(dir, e.Name()))
+			add(filepath.Join(dir, e.Name()))
 		}
+	}
+	for _, dir := range c.g.stores {
+		_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+			switch {
+			case err != nil:
+				c.cut = c.cut || !errors.Is(err, fs.ErrNotExist)
+				return nil //nolint:nilerr // the walk goes on past an unreadable entry, and is cut
+			case d.IsDir() && d.Name() == "objects" && filepath.Base(filepath.Dir(p)) == ".git":
+				return filepath.SkipDir
+			case !d.Type().IsRegular():
+				return nil
+			case c.budget == 0:
+				c.cut = true
+				return filepath.SkipAll
+			}
+			c.budget--
+			if fi, err := d.Info(); err == nil {
+				c.linkInfo = append(c.linkInfo, linkTarget{fi, p})
+			}
+			return nil
+		})
 	}
 	return c.linkInfo
 }
@@ -893,12 +949,13 @@ func (c *check) hasPrefix(s, prefix string) bool {
 }
 
 // matches reports whether the glob element pattern may match name; a pattern
-// it cannot read matches.
+// it cannot read matches. A class negated with `!` is read as `^`, which is
+// how path.Match negates one.
 func (c *check) matches(pattern, name string) bool {
 	if c.g.fold {
 		pattern, name = strings.ToLower(pattern), strings.ToLower(name)
 	}
-	ok, err := path.Match(convertExtglob(pattern), name)
+	ok, err := path.Match(strings.ReplaceAll(convertExtglob(pattern), "[!", "[^"), name)
 	return ok || err != nil
 }
 
