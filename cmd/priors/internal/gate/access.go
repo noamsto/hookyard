@@ -81,6 +81,8 @@ var (
 	}
 	// findActions make find write or run a command.
 	findActions = []string{"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
+	// programVars change which program a command name, or a shell, runs.
+	programVars = []string{"PATH", "BASH_ENV", "ENV"}
 	// chdirTools take -C as the dir they run in.
 	chdirTools = []string{"git", "make", "tar"}
 	// sinks are redirect targets that are not files.
@@ -210,8 +212,12 @@ func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
 }
 
 // assign records name's value as gate 2 does, and taints it when a word may
-// read another value than the one recorded.
+// read another value than the one recorded. Setting a variable that picks the
+// program a name runs writes, whatever the command that follows.
 func (a *accessor) assign(name string, values ...*syntax.Word) {
+	if slices.Contains(programVars, name) {
+		a.acc.Writes = true
+	}
 	if _, ok := a.j.vars[name]; ok || len(values) != 1 || values[0] == nil || a.opaque(values[0]) {
 		a.tainted[name] = true
 	}
@@ -248,13 +254,15 @@ func (a *accessor) command(st *syntax.Stmt, text string, depth int) {
 // call reads a simple command's words and reports whether it may write.
 func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 	argv := a.argv(c.Args, text)
-	idx, _ := commandWord(argv)
+	idx, afterFlag := commandWord(argv)
 	name := ""
 	if idx < len(argv) {
 		name = argv[idx]
 	}
 	assigned := len(c.Assigns) > 0 || slices.ContainsFunc(argv[:idx], assignment)
-	writer := idx < len(argv) && (assigned || !readOnly(name, argv[idx+1:]))
+	// A command word found after a flag may be that flag's value, not the
+	// command that runs.
+	writer := idx < len(argv) && (assigned || afterFlag || !readOnly(name, argv[idx+1:]))
 	if writer {
 		a.acc.Writes = true
 		// xargs writes through operands it reads from stdin.
@@ -265,8 +273,15 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 	// A word renders to any number of fields, so the command word is found
 	// again among the syntax words to leave it out of the writes.
 	cmdArg := commandArg(c.Args, argv, idx)
+	var messages []int
+	if cmdArg >= 0 && (name == "git" || name == "gh" || name == "glab") {
+		messages = messageArgs(name, argv[idx+1:], a.heads(c.Args[idx+1:], argv[idx+1:]))
+	}
 	for i, w := range c.Args {
 		a.done[w] = true
+		if slices.Contains(messages, i-idx-1) {
+			continue
+		}
 		a.word(w, text, depth, writer && i != cmdArg, writer)
 	}
 	a.chdirs(name, c.Args, argv, idx, cmdArg, text)
@@ -315,30 +330,113 @@ func readOnly(name string, args []string) bool {
 		return gitReads(args)
 	case "sed":
 		return sedReads(args)
+	case "printf":
+		return !printfAssigns(args)
 	case "rg":
 		return !slices.ContainsFunc(args, func(w string) bool { return w == "" || strings.HasPrefix(w, "--pre") })
 	case "find":
 		return !slices.ContainsFunc(args, func(w string) bool { return w == "" || slices.Contains(findActions, w) })
 	case "fd":
-		return !slices.ContainsFunc(args, func(w string) bool { return w == "" || w == "-x" || w == "-X" || strings.HasPrefix(w, "--exec") })
+		return !slices.ContainsFunc(args, fdRuns)
 	}
 	return slices.Contains(readers, name)
 }
 
-// gitReads reports a git command that leaves the work tree as it is: one of
-// gitReaders, with no option that sets config, runs a program or writes a
-// file.
-func gitReads(args []string) bool {
+// printfAssigns reports a printf whose -v sets a variable.
+func printfAssigns(args []string) bool {
+	for _, w := range args {
+		if !strings.HasPrefix(w, "-") {
+			return false
+		}
+		if strings.HasPrefix(w, "-v") {
+			return true
+		}
+	}
+	return false
+}
+
+// fdRuns reports an option that runs a command: --exec or --exec-batch, or
+// an unambiguous prefix of one, or x or X in a short cluster before a letter
+// that takes the rest of it as its value.
+func fdRuns(w string) bool {
+	switch {
+	case w == "":
+		return true
+	case strings.HasPrefix(w, "--"):
+		name, _, _ := strings.Cut(w[2:], "=")
+		return name != "" && (strings.HasPrefix("exec-batch", name) || strings.HasPrefix(name, "exec"))
+	case strings.HasPrefix(w, "-"):
+		for _, c := range w[1:] {
+			switch c {
+			case 'x', 'X':
+				return true
+			case 'e', 't', 'd', 'E', 'S', 'j', 'c', 'o':
+				return false
+			}
+		}
+	}
+	return false
+}
+
+var (
+	// gitValueOpts and gitFlagOpts are the options git takes before its
+	// subcommand that set no config and run no program; gitGlueOpts take their
+	// value after an =.
+	gitValueOpts = []string{"-C", "--git-dir", "--work-tree", "--namespace"}
+	gitGlueOpts  = []string{"--git-dir=", "--work-tree=", "--namespace="}
+	gitFlagOpts  = []string{
+		"-p", "--paginate", "-P", "--no-pager", "--no-replace-objects", "--literal-pathspecs",
+		"--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--bare",
+		"--no-optional-locks", "--no-advice",
+	}
+	// gitRunOpts are the options after the subcommand that write a file or run a
+	// program; git takes any unambiguous prefix of a long option.
+	gitRunOpts = []string{"output", "exec", "upload-pack", "receive-pack", "open-files-in-pager"}
+	// forgeMessageOpts take a message or body as their value.
+	forgeMessageOpts = []string{"-b", "--body", "-t", "--title", "-m", "--message", "--notes", "--description"}
+	forgeGlueOpts    = []string{"--body=", "--title=", "--message=", "--notes=", "--description="}
+)
+
+// gitSub returns the index of git's subcommand in args, len(args) when there
+// is none, and false when an option before it is not a known harmless one.
+func gitSub(args []string) (int, bool) {
 	for i := 0; i < len(args); i++ {
 		w := args[i]
 		switch {
-		case w == "", strings.HasPrefix(w, "-c"), strings.HasPrefix(w, "--exec-path"), strings.HasPrefix(w, "--config-env"):
-			return false
-		case w == "-C", w == "--git-dir", w == "--work-tree", w == "--namespace":
+		case slices.Contains(gitValueOpts, w):
 			i++
-		case strings.HasPrefix(w, "-"):
+		case slices.Contains(gitFlagOpts, w), hasAnyPrefix(w, gitGlueOpts):
+		case w == "", strings.HasPrefix(w, "-"):
+			return 0, false
 		default:
-			return slices.Contains(gitReaders, w) && !slices.ContainsFunc(args[i+1:], gitRuns)
+			return i, true
+		}
+	}
+	return len(args), true
+}
+
+func hasAnyPrefix(w string, prefixes []string) bool {
+	return slices.ContainsFunc(prefixes, func(p string) bool { return strings.HasPrefix(w, p) })
+}
+
+// gitReads reports a git command that leaves the work tree as it is: one of
+// gitReaders, with no option that sets config, runs a program or writes a
+// file. A commit's message is text, not an option.
+func gitReads(args []string) bool {
+	sub, ok := gitSub(args)
+	if !ok {
+		return false
+	}
+	if sub == len(args) {
+		return true
+	}
+	if !slices.Contains(gitReaders, args[sub]) {
+		return false
+	}
+	skip := messageArgs("git", args, args)
+	for i := sub + 1; i < len(args); i++ {
+		if !slices.Contains(skip, i) && gitRuns(args[i]) {
+			return false
 		}
 	}
 	return true
@@ -346,43 +444,117 @@ func gitReads(args []string) bool {
 
 // gitRuns reports an option that writes a file or runs a program.
 func gitRuns(w string) bool {
-	for _, p := range []string{"--output", "--exec", "--upload-pack", "--receive-pack", "--open-files-in-pager", "-O"} {
-		if strings.HasPrefix(w, p) {
-			return true
+	switch {
+	case w == "":
+		return true
+	case strings.HasPrefix(w, "--"):
+		name, _, _ := strings.Cut(w[2:], "=")
+		return name != "" && slices.ContainsFunc(gitRunOpts, func(o string) bool {
+			return strings.HasPrefix(o, name) || strings.HasPrefix(name, o)
+		})
+	}
+	return strings.HasPrefix(w, "-") && strings.Contains(w, "O")
+}
+
+// messageArgs returns the indexes in args of the words that are a git
+// commit's or a forge command's message, which is text, not a path. heads
+// holds each word's text, or the start of an opaque one.
+func messageArgs(name string, args, heads []string) []int {
+	switch name {
+	case "git":
+		sub, ok := gitSub(args)
+		if !ok || sub == len(args) || args[sub] != "commit" {
+			return nil
+		}
+		return messageWords(args, heads, sub+1, []string{"-m", "--message"}, []string{"--message="}, true)
+	case "gh", "glab":
+		return messageWords(args, heads, 0, forgeMessageOpts, forgeGlueOpts, false)
+	}
+	return nil
+}
+
+// messageWords scans args from i for an option in opts, or with cluster a
+// short cluster ending in m, and returns the index of its value, and for a
+// word starting with one of glue its own.
+func messageWords(args, heads []string, from int, opts, glue []string, cluster bool) []int {
+	var out []int
+	for i := from; i < len(args); i++ {
+		w := args[i]
+		if slices.Contains(opts, w) || cluster && strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "--") && strings.HasSuffix(w, "m") {
+			if i++; i < len(args) {
+				out = append(out, i)
+			}
+			continue
+		}
+		if hasAnyPrefix(heads[i], glue) {
+			out = append(out, i)
 		}
 	}
-	return w == ""
+	return out
+}
+
+// heads returns the text of each word in args, or for an opaque one what
+// precedes its first opaque part.
+func (a *accessor) heads(words []*syntax.Word, args []string) []string {
+	heads := slices.Clone(args)
+	for i, w := range words {
+		if prefix, ok := a.opaquePrefix(w); ok {
+			heads[i] = prefix
+		}
+	}
+	return heads
+}
+
+// sedLong are the long options of sed that take no value and read or write
+// nothing.
+var sedLong = []string{
+	"quiet", "silent", "debug", "posix", "regexp-extended", "sandbox", "separate", "unbuffered",
+	"null-data", "zero-terminated", "follow-symlinks", "help", "version",
 }
 
 // sedReads reports a sed command that edits nothing in place, reads no script
 // file, and whose scripts hold no w, W or e, which write a file or run one.
-// The letters are refused anywhere in a script, regexes included.
+// The letters are refused anywhere in a script, regexes included. Options are
+// read as GNU sed does: anywhere before --, a long one by any prefix of
+// --expression, a short cluster letter by letter, where e takes the rest of
+// the cluster as its script and l as a number.
 func sedReads(args []string) bool {
-	script := false
+	script, opts := false, true
 	for i := 0; i < len(args); i++ {
 		w := args[i]
+		// next takes the following word as an option's value; a missing one is
+		// "", which no script passes.
+		next := func() string {
+			if i++; i < len(args) {
+				return args[i]
+			}
+			return ""
+		}
 		switch {
-		case w == "", w == "-f", strings.HasPrefix(w, "--file"), strings.HasPrefix(w, "--in-place"):
+		case w == "":
 			return false
-		case w == "--expression" || strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "--") && strings.Contains(w, "e"):
-			if w != "--expression" && strings.ContainsAny(w[1:], "if") {
+		case w == "--" && opts:
+			opts = false
+		case opts && strings.HasPrefix(w, "--"):
+			name, v, glued := strings.Cut(w[2:], "=")
+			switch {
+			case name != "" && strings.HasPrefix("expression", name):
+				if !glued {
+					v = next()
+				}
+				if !sedScript(v) {
+					return false
+				}
+				script = true
+			case glued, !slices.Contains(sedLong, name):
 				return false
 			}
-			i++
-			if i >= len(args) || !sedScript(args[i]) {
+		case opts && len(w) > 1 && w[0] == '-':
+			isScript, ok := sedCluster(w[1:], next)
+			if !ok {
 				return false
 			}
-			script = true
-		case strings.HasPrefix(w, "--expression="):
-			if !sedScript(strings.TrimPrefix(w, "--expression=")) {
-				return false
-			}
-			script = true
-		case strings.HasPrefix(w, "--"):
-		case strings.HasPrefix(w, "-") && len(w) > 1:
-			if strings.ContainsAny(w[1:], "if") {
-				return false
-			}
+			script = script || isScript
 		case !script:
 			if !sedScript(w) {
 				return false
@@ -393,7 +565,32 @@ func sedReads(args []string) bool {
 	return true
 }
 
-func sedScript(s string) bool { return !strings.ContainsAny(s, "wWe") }
+// sedCluster reads a short-option cluster, and reports whether it gave a
+// script and whether every letter is harmless. e takes the rest of the cluster
+// as its script, else next's; l takes a number the same way.
+func sedCluster(cluster string, next func() string) (script, ok bool) {
+	for k, c := range cluster {
+		switch c {
+		case 'e':
+			rest := cluster[k+1:]
+			if rest == "" {
+				rest = next()
+			}
+			return true, sedScript(rest)
+		case 'l':
+			if k+1 == len(cluster) {
+				next()
+			}
+			return false, true
+		case 'n', 'E', 'r', 's', 'u', 'z':
+		default:
+			return false, false
+		}
+	}
+	return false, true
+}
+
+func sedScript(s string) bool { return s != "" && !strings.ContainsAny(s, "wWe") }
 
 // chdirs records the dirs a command changes into: cd's and pushd's operand
 // (home without one), and the -C dir of git, make and tar. One whose value
@@ -415,6 +612,9 @@ func (a *accessor) chdirs(name string, words []*syntax.Word, argv []string, idx,
 				continue
 			default:
 				a.chdir(syntaxAt(i), w, text)
+				if a.searchesCDPATH(w) {
+					a.touch(Touch{Opaque: true, Chdir: true})
+				}
 			}
 			return
 		}
@@ -441,6 +641,21 @@ func (a *accessor) chdirs(name string, words []*syntax.Word, argv []string, idx,
 			}
 		}
 	}
+}
+
+// searchesCDPATH reports a cd operand that may resolve under a CDPATH dir:
+// relative, and not starting with . or .., which skip it, while CDPATH is
+// assigned in the command or set on the host.
+func (a *accessor) searchesCDPATH(operand string) bool {
+	first, _, _ := strings.Cut(operand, "/")
+	if operand == "" || first == "" || first == "." || first == ".." {
+		return false
+	}
+	if _, ok := a.j.vars["CDPATH"]; ok || a.tainted["CDPATH"] {
+		return true
+	}
+	v, ok := a.j.host.lookup("CDPATH")
+	return ok && v != ""
 }
 
 // chdir records one dir operand: its syntax word when the fields map back to
