@@ -208,11 +208,15 @@ func request(p candidate, o Options, pending []string, dryRun bool) write.Reques
 // and the rest re-prepared, so a near duplicate no longer shadows against a
 // fact that will not land.
 //
-// A refusal that only an in-run link explains is not final, since the target
-// may be shadowed now and land once another item is dropped. Such an item
-// waits: it is dry-run again every round, and leaves the live and publishing
-// names while it is refused. One that waits a second time is dropped, so the
-// rounds stay bounded.
+// A refusal that only a link to another item of the run explains is not
+// final, since that item may be shadowed now and land once another is
+// dropped. Within a round such an item is held: it leaves the names others
+// may link, and the round dry-runs the rest again until nothing more is held.
+// Held only grows, so that settles. A drop or a newly flagged item changes
+// the next round, so the held items are dry-run afresh in it; only once
+// planning settles with items still held are they dropped, so they stop
+// shadowing their near duplicates. Dropped only grows, so the rounds stay
+// bounded.
 func planRun(ctx context.Context, items []Item, o Options, base []existing, damaged []damagedFact) plan {
 	damagedPaths := map[string]bool{}
 	for _, d := range damaged {
@@ -226,17 +230,22 @@ func planRun(ctx context.Context, items []Item, o Options, base []existing, dama
 	}
 	dropped := map[int]excluded{}
 	unpublished := map[int]bool{}
-	waiting, waited := map[int]Report{}, map[int]bool{}
 	for {
 		known := slices.Clone(base)
 		var cands []candidate
 		idxs := make([]int, 0, len(items))
 		var notes []Report
+		inRun := map[string]bool{}
 		for i, it := range items {
 			if why, ok := dropped[i]; ok {
 				notes = append(notes, droppedReport(it, why))
 				continue
 			}
+			n := it.Native.Name
+			if !fact.NameRE.MatchString(n) {
+				n = slug(n)
+			}
+			inRun[n] = true
 			c, rep, ok := prepare(it, o, known)
 			if !ok {
 				notes = append(notes, rep)
@@ -250,68 +259,66 @@ func planRun(ctx context.Context, items []Item, o Options, base []existing, dama
 		for _, k := range known {
 			names[k.fact.Name] = true
 		}
-		pending, live := map[string]bool{}, map[string]bool{}
 		for j := range cands {
 			cands[j].fact.Body = relink(cands[j].fact.Body, names)
-			if _, ok := waiting[idxs[j]]; ok {
-				continue
-			}
-			live[cands[j].fact.Name] = true
-			if !unpublished[idxs[j]] {
-				pending[cands[j].fact.Name] = true
-			}
 		}
-		publishing, all := slices.Sorted(maps.Keys(pending)), slices.Sorted(maps.Keys(live))
 
-		changed := false
+		held := map[int]excluded{}
 		var out []planned
-		stillWaiting := map[int]Report{}
-		for j, c := range cands {
-			targets := publishing
-			if unpublished[idxs[j]] {
-				targets = all
+		changed, grew := false, true
+		for grew && !changed {
+			grew = false
+			out = nil
+			pending, live := map[string]bool{}, map[string]bool{}
+			for j := range cands {
+				if _, ok := held[idxs[j]]; ok {
+					continue
+				}
+				live[cands[j].fact.Name] = true
+				if !unpublished[idxs[j]] {
+					pending[cands[j].fact.Name] = true
+				}
 			}
-			if _, ok := waiting[idxs[j]]; ok {
-				targets = append(slices.Clone(targets), c.fact.Name)
-			}
-			res, err := write.AddLocked(ctx, o.Config, request(c, o, targets, true), o.Deps)
-			switch {
-			case err != nil && errors.Is(err, write.ErrRefusal) && refusedOnlyForLinks(ctx, o, c, targets, inCheckout):
-				if _, was := waiting[idxs[j]]; !was && waited[idxs[j]] {
-					dropped[idxs[j]] = excluded{err: err, policy: true}
+			publishing, all := slices.Sorted(maps.Keys(pending)), slices.Sorted(maps.Keys(live))
+			for j, c := range cands {
+				if _, ok := held[idxs[j]]; ok {
+					continue
+				}
+				targets := publishing
+				if unpublished[idxs[j]] {
+					targets = all
+				}
+				res, err := write.AddLocked(ctx, o.Config, request(c, o, targets, true), o.Deps)
+				switch {
+				case err != nil && errors.Is(err, write.ErrRefusal) && refusedOnlyForLinks(ctx, o, c, targets, inCheckout, inRun):
+					held[idxs[j]] = excluded{err: err, policy: true}
+					grew = true
+					continue
+				case err != nil:
+					dropped[idxs[j]] = excluded{err: err, policy: errors.Is(err, write.ErrRefusal)}
+					changed = true
+					continue
+				case damagedPaths[filepath.Clean(res.Path)]:
+					dropped[idxs[j]] = excluded{err: fmt.Errorf("it would overwrite the unreadable store fact %s", res.Path), policy: true}
 					changed = true
 					continue
 				}
-				stillWaiting[idxs[j]] = droppedReport(c.item, excluded{err: err, policy: true})
-				waited[idxs[j]] = true
-				continue
-			case err != nil:
-				dropped[idxs[j]] = excluded{err: err, policy: errors.Is(err, write.ErrRefusal)}
-				changed = true
-				continue
-			case damagedPaths[filepath.Clean(res.Path)]:
-				dropped[idxs[j]] = excluded{err: fmt.Errorf("it would overwrite the unreadable store fact %s", res.Path), policy: true}
-				changed = true
-				continue
+				publishes := res.Outcome == "published"
+				if !publishes && !unpublished[idxs[j]] {
+					unpublished[idxs[j]] = true
+					changed = true
+				}
+				out = append(out, planned{candidate: c, idx: idxs[j], res: res, publishes: publishes})
 			}
-			publishes := res.Outcome == "published"
-			if !publishes && !unpublished[idxs[j]] {
-				unpublished[idxs[j]] = true
-				changed = true
-			}
-			out = append(out, planned{candidate: c, idx: idxs[j], res: res, publishes: publishes})
 		}
-		if !maps.EqualFunc(waiting, stillWaiting, func(Report, Report) bool { return true }) {
-			changed = true
-		}
-		waiting = stillWaiting
 		if changed {
 			continue
 		}
-		pl := plan{items: out, notes: notes}
-		for _, i := range slices.Sorted(maps.Keys(waiting)) {
-			pl.notes = append(pl.notes, waiting[i])
+		if len(held) > 0 {
+			maps.Copy(dropped, held)
+			continue
 		}
+		pl := plan{items: out, notes: notes}
 		for _, why := range dropped {
 			if !why.policy {
 				pl.failed++
@@ -322,12 +329,13 @@ func planRun(ctx context.Context, items []Item, o Options, base []existing, dama
 }
 
 // refusedOnlyForLinks reports whether c, refused with targets as the names its
-// links may name, links a fact of neither the checkout nor targets, and would
-// pass if it could name them.
-func refusedOnlyForLinks(ctx context.Context, o Options, c candidate, targets []string, inCheckout map[string]bool) bool {
+// links may name, links an item of the run (inRun) that is in neither the
+// checkout nor targets, and would pass if it could name those. A link to a
+// name outside the run cannot come to resolve, so it never qualifies.
+func refusedOnlyForLinks(ctx context.Context, o Options, c candidate, targets []string, inCheckout, inRun map[string]bool) bool {
 	var missing []string
 	for _, t := range linkTargets(c.fact.Body) {
-		if !inCheckout[t] && !slices.Contains(targets, t) {
+		if inRun[t] && !inCheckout[t] && !slices.Contains(targets, t) {
 			missing = append(missing, t)
 		}
 	}
@@ -412,6 +420,7 @@ func writeAll(ctx context.Context, o Options, checkout store.Root, pl plan, out 
 			out.Reports[report] = written(res, p.item.Source, false)
 			if res.Outcome == "published" {
 				landing = append(landing, landed{p: planned{candidate: p.candidate, res: res}, report: report})
+				pending[p.fact.Name] = true
 			}
 		}
 		if !p.publishes || (err == nil && res.Outcome == "published") {

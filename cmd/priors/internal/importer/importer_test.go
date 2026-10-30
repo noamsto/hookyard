@@ -905,3 +905,151 @@ func TestFactsAreWrittenAfterTheFactsTheyLink(t *testing.T) {
 		t.Errorf("write order = %v, want %v", got, want)
 	}
 }
+
+func TestLinkersOfFactsAShadowHidUntilItWasRefusedPublish(t *testing.T) {
+	const body = "Facts are plain markdown files with frontmatter, one per file, in a store.\n"
+	const secret = "one two three four five six seven eight nine ten eleven twelve " + "AK" + "IA" + "IOSFODNN7EXAMPLE\n"
+	type file struct{ name, description, body string }
+	tests := []struct {
+		name            string
+		files           []file
+		refused, landed []string
+	}{
+		// c-bravo is shadowed by a-secret until a-secret is refused; b-alpha
+		// and c-bravo link each other.
+		{"link cycle", []file{
+			{"a-secret", "the same description", secret},
+			{"b-alpha", "links to bravo", "See [[c-bravo]]. " + body},
+			{"c-bravo", "the same description", "See [[b-alpha]]. a different body\n"},
+		}, []string{"a-secret"}, []string{"b-alpha", "c-bravo"}},
+		// e-lima links c-tango, which links d-uniform; each of those is
+		// shadowed in turn by a refused near duplicate, d-uniform by b-secret
+		// only once a-secret is refused.
+		{"link chain", []file{
+			{"a-secret", "alpha", secret},
+			{"b-secret", "beta", secret},
+			{"c-tango", "alpha", "See [[d-uniform]]. " + body},
+			{"d-uniform", "beta", "something else entirely here\n"},
+			{"e-lima", "gamma", "See [[c-tango]]. A link to tango with words.\n"},
+		}, []string{"a-secret", "b-secret"}, []string{"c-tango", "d-uniform", "e-lima"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := setup(t, "personal")
+			mem := fx.memDir(repo(t, personalRemote))
+			for _, f := range tt.files {
+				writeFile(t, filepath.Join(mem, f.name+".md"), native(f.name, f.description, f.body))
+			}
+			for _, dryRun := range []bool{true, false} {
+				landed := "published personal "
+				if dryRun {
+					landed = "would publish personal "
+				}
+				var want []string
+				for _, n := range tt.refused {
+					want = append(want, "skipped "+sourcePath(filepath.Join(mem, n+".md"))+": refused: ")
+				}
+				for _, n := range tt.landed {
+					want = append(want, landed+filepath.Join(fx.cfg.PersonalStore, "demo", n+".md"))
+				}
+				wantLines(t, fx.run(t, dryRun), want)
+			}
+			fx.checkoutCommits(t)
+		})
+	}
+}
+
+func TestALinkerRefusedForItsLinkDoesNotShadowItsNearDuplicate(t *testing.T) {
+	const body = "Facts are plain markdown files with frontmatter, one per file, in a store.\n"
+	tests := []struct {
+		name   string
+		link   string
+		target string
+		want   func(dryRun bool) []string
+	}{
+		{"link names no fact", "ghost", "", func(bool) []string { return nil }},
+		{"link target lands flagged", "c-flag", "see https://example.com/doc for the layout of the store\n", func(dryRun bool) []string {
+			if dryRun {
+				return []string{"would flag personal "}
+			}
+			return []string{"flagged personal "}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := setup(t, "personal")
+			mem := fx.memDir(repo(t, personalRemote))
+			writeFile(t, filepath.Join(mem, "a-linker.md"), native("a-linker", "the same description", "See [["+tt.link+"]]. "+body))
+			writeFile(t, filepath.Join(mem, "b-dup.md"), native("b-dup", "the same description", "a different body\n"))
+			if tt.target != "" {
+				writeFile(t, filepath.Join(mem, tt.link+".md"), native(tt.link, "the target", tt.target))
+			}
+			linker := sourcePath(filepath.Join(mem, "a-linker.md"))
+			for _, dryRun := range []bool{true, false} {
+				landed := "published personal "
+				if dryRun {
+					landed = "would publish personal "
+				}
+				got := fx.run(t, dryRun)
+				wantLines(t, got, append(tt.want(dryRun),
+					"skipped "+linker+": refused: ",
+					landed+filepath.Join(fx.cfg.PersonalStore, "demo", "b-dup.md"),
+				))
+				if !slices.ContainsFunc(got, func(l string) bool {
+					return strings.HasPrefix(l, "skipped "+linker+": refused: ") && strings.Contains(l, "wikilink-dangling")
+				}) {
+					t.Errorf("dry=%v: the linker is not refused for its dangling link:\n%s", dryRun, strings.Join(got, "\n"))
+				}
+			}
+			fx.checkoutCommits(t)
+		})
+	}
+}
+
+func TestFactsThatPublishAfterPlanningFlaggedThemMayLinkEachOther(t *testing.T) {
+	const body = "Facts are plain markdown files with frontmatter, one per file, in a store.\n"
+	fx := setup(t, "personal")
+	mem := fx.memDir(repo(t, personalRemote))
+	writeFile(t, filepath.Join(mem, "a-target.md"), native("a-target", "the target", "The target fact body.\n"))
+	writeFile(t, filepath.Join(mem, "b-linker.md"), native("b-linker", "links to the target", "See [[a-target]]. "+body))
+
+	// The importing session has no tool record, so the plan flags both facts;
+	// the scanner records one on the first write's scan, so both writes find
+	// the session clean.
+	fx.opts.SessionID = "s2"
+	if err := gate.MarkSession(fx.cfg.ProvenanceDir(), "s2", false); err != nil {
+		t.Fatal(err)
+	}
+	sig := tempDir(t)
+	count, trigger := filepath.Join(sig, "count"), filepath.Join(sig, "trigger")
+	stream := filepath.Join(fx.cfg.EventRecord, "stream", time.Now().UTC().Format(time.DateOnly)+".jsonl")
+	fx.opts.Deps.Scanner = gate.Scanner{Bin: script(t, "n=$(cat '"+count+"' 2>/dev/null || echo 0)\nn=$((n+1))\nprintf '%s' \"$n\" > '"+count+"'\n"+
+		"if [ -f '"+trigger+"' ] && [ \"$n\" = \"$(cat '"+trigger+"')\" ]; then\n"+
+		"  printf '%s\\n' '{\"session_id\":\"s2\",\"canonical_event\":\"post_tool\",\"tool_name\":\"Bash\"}' >> '"+stream+"'\nfi\nprintf '[]'\n")}
+
+	_, lines := fx.runResult(t, true)
+	wantLines(t, lines, []string{"would flag personal ", "would flag personal "})
+	planCalls, err := os.ReadFile(count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan int
+	if _, err := fmt.Sscan(string(planCalls), &plan); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, count, "0")
+	writeFile(t, trigger, strconv.Itoa(plan+1))
+
+	res, lines := fx.runResult(t, false)
+	wantLines(t, lines, []string{
+		"published personal " + filepath.Join(fx.cfg.PersonalStore, "demo", "a-target.md"),
+		"published personal " + filepath.Join(fx.cfg.PersonalStore, "demo", "b-linker.md"),
+	})
+	if res.Failed != 0 {
+		t.Errorf("Failed = %d, want 0", res.Failed)
+	}
+	if res.Warning != "" {
+		t.Errorf("warning: %s", res.Warning)
+	}
+	fx.checkoutCommits(t)
+}
