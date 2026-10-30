@@ -216,20 +216,22 @@ delimiter drawn per call.
 `<claude-dir>/projects/*/memory/`) into the personal store (§4.9), each
 through the same write path as `add`. `--claude-dir` replaces the whole
 `~/.claude`, not a memory dir: pointed at a memory dir it finds no
-`projects/` and prints nothing, exit 0. The native files are never changed.
-Each copy keeps the native `name` (slugified when it is not a valid fact
-name), `description`, `type`, body and `modified`; the importer sets
-`confidence: proposed`, `scope: repo` with the repo decoded from the project
-dir, `verified: null`, `superseded_by: null`, `provenance` and a `source`
-block carrying the `sha256` of the native bytes. It prints one line per
-item, then exits 0, or 1 if any item failed (below):
+`projects/` and imports nothing, exit 0 (the run still reports unreadable
+store facts and commits the checkout, as every run does). The native files
+are never changed. Each copy keeps the native `name` (slugified when it is
+not a valid fact name), `description`, `type`, body and `modified`; the
+importer sets `confidence: proposed`, `scope: repo` with the repo decoded
+from the project dir, `verified: null`, `superseded_by: null`, `provenance`
+and a `source` block carrying the `sha256` of the native bytes. It prints one
+line per item, then exits 0, or 1 if any item failed (below):
 
 - `published personal <path> <- <source>`: it passed every gate and was
   written into the checkout.
 - `flagged personal <path> <- <source>: <reasons>`: a gate flagged it, so it
   waits, `proposed`, in the host-local layer.
 - `unchanged <source>: <path>`: this source was imported before, unchanged.
-- `duplicate <source>: <path>`: a fact already holds these exact bytes.
+- `duplicate <source>: <path>: same source bytes`: a fact already holds these
+  exact bytes.
 - `propose <source> -> <path>: <why>`: a near-duplicate (same name, same
   folded description, body overlap) or a changed source. Nothing is written;
   the owner merges by hand.
@@ -238,40 +240,52 @@ item, then exits 0, or 1 if any item failed (below):
     that cannot be opened, or a memory dir that cannot be read or is not a
     directory;
   - not a fact: no or invalid frontmatter;
-  - not routed to the personal store: no repo (the project dir does not
-    decode to exactly one existing directory), a repo that is not a valid
-    name, or a repo §4.2 routes to the work store or the quarantine;
+  - not routed to the personal store: no repo (the project dir decodes but
+    is outside any git repo), a repo that is not a valid name, or a repo
+    §4.2 routes to the work store or the quarantine. A project dir that does
+    not decode to exactly one existing directory is unresolvable, so it
+    routes to the quarantine: `routes to the quarantine (...)`;
   - a name that cannot be slugified;
   - `refused: <why>`: the write path's policy said no (a secret match, a
     lint finding such as `wikilink-dangling`, a name already taken, a
     destination it will not write through), or the destination is a store
     file that cannot be parsed;
-  - `failed: <why>`: the machinery broke (scanner unavailable, lock, write),
-    not a decision. A re-run may clear it. After printing every line the
-    command exits 1 with a count on stderr.
+  - `failed: <why>`: the machinery broke (scanner unavailable, a file or
+    index write, a filesystem error checking the destination), not a
+    decision. A re-run may clear it. After printing every line the command
+    exits 1 with a count on stderr.
 - `skipped <path>: unreadable store fact: <err>`: a store file that cannot be
   parsed, so dedup cannot see it. It is reported on dry runs too, and an
   item whose destination is that file is refused rather than overwriting it.
 
+A store the run cannot lock or read stops it before any item: `refused:
+<err>` on stderr, exit 1.
+
 A fact that would publish is refused (`wikilink-dangling`) when a wiki-link
 names a fact of the same run that will not reach the checkout, because it is
 refused or flagged into the local layer; otherwise the checkout would fail
-the commit gate. The dry run predicts the same. If a write fails after the
-plan held, a fact already written that links the failed one (directly or
-through another) is removed and reported `skipped <source>: failed: rolled
-back, ...`.
+the commit gate. A linker whose target only becomes publishable later in
+planning is re-checked, so the dry run and the real run agree. Facts are
+written link targets first. If a fact planned to publish is not published
+(its write failed, or it landed flagged), a fact that links it (directly or
+through another) is not kept: it is reported
+`skipped <source>: failed: it links <name>, which was not written`, or
+`failed: rolled back, ...` when a link cycle had it written first. So is a
+fact that publishes only because a flag cleared mid-run while it links an
+in-run fact that will not reach the checkout.
 
 `MEMORY.md` is not imported, since each store generates its own; a line in
 it that is not a link to a topic file in the same dir is reported as
 `skipped <source>:<line>: <why>`. Run `priors import --dry-run` first: it
 runs every check and writes nothing. Where a real run would publish or flag
 it prints `would publish personal <path> <- <source>` or
-`would flag personal <path> <- <source>: <reasons>`, and the same `propose`
-and `skipped` lines. A real run holds the personal store's lock throughout,
-so no other writer commits a half-imported checkout, and commits what it
-published once, through the store's commit gate. It commits on every run, so
-a commit held back last time is retried; that is why running it again is
-safe.
+`would flag personal <path> <- <source>: <reasons>`, and the same
+`unchanged`, `duplicate`, `propose` and `skipped` lines. A real run holds
+the personal store's lock throughout, so no other writer commits a
+half-imported checkout, and commits what it published once, through the
+store's commit gate. It commits on every run, so a commit held back last time
+(`warning: ...` on stderr, exit still 0) is retried. Running it again is safe:
+an imported source reports `unchanged`, by the sha256 of its bytes.
 
 ## Wire it into hookyard
 
