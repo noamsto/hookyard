@@ -30,7 +30,7 @@ func TestOverCapIsErrorWithAMessage(t *testing.T) {
 	h := writeHandler(t, dir, "runaway", body)
 
 	start := time.Now()
-	got := runSingle(t, h, scaledBudget)
+	got := runSingle(t, h, loadBudget)
 	elapsed := time.Since(start)
 
 	if got.Outcome != record.OutcomeError {
@@ -42,15 +42,15 @@ func TestOverCapIsErrorWithAMessage(t *testing.T) {
 	if got.Verdict != verdict.Abstain {
 		t.Errorf("verdict = %q, want %q: a defect's output is not a verdict", got.Verdict, verdict.Abstain)
 	}
-	if elapsed >= scaledBudget.Handler {
+	if elapsed >= loadBudget.Handler {
 		t.Errorf("runaway ran %v, want it killed as bytes arrived rather than at its sub-budget", elapsed)
 	}
-	t.Logf("runaway handler killed after %v, sub-budget %v", elapsed, scaledBudget.Handler)
+	t.Logf("runaway handler killed after %v, sub-budget %v", elapsed, loadBudget.Handler)
 }
 
 func TestExactlyAtCapIsNotError(t *testing.T) {
 	dir := t.TempDir()
-	got := runSingle(t, emits(t, dir, "exact", MaxHandlerOutput), scaledBudget)
+	got := runSingle(t, emits(t, dir, "exact", MaxHandlerOutput), loadBudget)
 
 	if got.Outcome != record.OutcomeAbstain {
 		t.Errorf("outcome = %q, want %q: exactly at the cap is not over it", got.Outcome, record.OutcomeAbstain)
@@ -69,7 +69,7 @@ func TestOverCapDiscardsAWellFormedDeny(t *testing.T) {
 		"\nline=" + strings.Repeat("a", 256) + "\nwhile :; do printf '%s' \"$line\"; done"
 	h := writeHandler(t, dir, "denies-then-floods", body)
 
-	res := Run(context.Background(), []manifest.Handler{h}, testEnvelope(), scaledBudget)
+	res := Run(context.Background(), []manifest.Handler{h}, testEnvelope(), loadBudget)
 
 	if res.Handlers[0].Outcome != record.OutcomeError {
 		t.Errorf("outcome = %q, want %q", res.Handlers[0].Outcome, record.OutcomeError)
@@ -81,7 +81,7 @@ func TestOverCapDiscardsAWellFormedDeny(t *testing.T) {
 
 func TestMissingBinaryIsError(t *testing.T) {
 	h := manifest.Handler{ID: "gone", Exec: filepath.Join(t.TempDir(), "not-there")}
-	got := runSingle(t, h, scaledBudget)
+	got := runSingle(t, h, loadBudget)
 
 	if got.Outcome != record.OutcomeError {
 		t.Errorf("outcome = %q, want %q", got.Outcome, record.OutcomeError)
@@ -118,7 +118,7 @@ func TestStdoutShapesClassifyPerTheTable(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := runSingle(t, writeHandler(t, dir, strings.ReplaceAll(c.name, " ", "-"), c.body), scaledBudget)
+			got := runSingle(t, writeHandler(t, dir, strings.ReplaceAll(c.name, " ", "-"), c.body), loadBudget)
 			if got.Outcome != c.outcome {
 				t.Errorf("outcome = %q, want %q", got.Outcome, c.outcome)
 			}
@@ -140,7 +140,7 @@ func TestBothArmsContributeVerdictAndAdvice(t *testing.T) {
 	h := writeHandler(t, dir, "both", `printf '%s' `+
 		`'{"hookSpecificOutput":{"permissionDecision":"ask","permissionDecisionReason":"confirm","additionalContext":"prefer rg"}}'`)
 
-	res := Run(context.Background(), []manifest.Handler{h}, testEnvelope(), scaledBudget)
+	res := Run(context.Background(), []manifest.Handler{h}, testEnvelope(), loadBudget)
 
 	if res.Handlers[0].Outcome != record.OutcomeAsk {
 		t.Errorf("outcome = %q, want %q: recording advise would lose the verdict",
@@ -163,7 +163,7 @@ func TestHandlerReadsTheEnvelopeFromStdin(t *testing.T) {
 		`case "$payload" in *'"tool_name":"Bash"'*'"command":"ls"'*) `+
 		`printf '%s' '{"hookSpecificOutput":{"additionalContext":"saw the envelope"}}' ;; esac`)
 
-	got := runSingle(t, h, scaledBudget)
+	got := runSingle(t, h, loadBudget)
 
 	if got.Advice != "saw the envelope" {
 		t.Errorf("advice = %q, want the handler to have read the marshalled envelope", got.Advice)

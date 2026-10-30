@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,9 +19,11 @@ import (
 	"github.com/noamsto/hookyard/internal/vocab"
 )
 
-// scaledBudget keeps every test but the margin and constants tests in
-// milliseconds, so the suite stays fast while exercising the same code paths.
-var scaledBudget = Budget{Deadline: 2 * time.Second, Handler: time.Second}
+// loadBudget is for tests whose proof is an outcome or a structure rather than
+// a duration: no sub-budget can expire on a host slow enough to delay a process
+// start. A test that must not hang carries its own guard, and one that needs a
+// sub-budget to expire quickly states its own.
+var loadBudget = Budget{Deadline: 30 * time.Second, Handler: 20 * time.Second}
 
 func writeHandler(t *testing.T, dir, id, body string) manifest.Handler {
 	t.Helper()
@@ -103,32 +106,42 @@ func TestSelectPreservesInputOrder(t *testing.T) {
 }
 
 // TestRunFansOutConcurrentlyInTableOrder proves both halves of §5's promise at
-// once: the handlers sleep 400/300/200 ms, so completion order is the reverse
-// of table order, and a sequential run would take 900 ms.
+// once. Each handler waits until all three have started, so a sequential run
+// never gets past the first and it times out; then they finish in reverse of
+// table order (c, b, a), so results come back in table order only because Run
+// places them by index, not by arrival.
 func TestRunFansOutConcurrentlyInTableOrder(t *testing.T) {
 	dir := t.TempDir()
-	advises := func(id, sleep string) manifest.Handler {
-		return writeHandler(t, dir, id,
-			"sleep "+sleep+`; printf '%s' '{"hookSpecificOutput":{"additionalContext":"`+id+`"}}'`)
+	marker := func(name string) string { return filepath.Join(dir, name) }
+	wait := func(name string) string {
+		return "while [ ! -e '" + marker(name) + "' ]; do sleep 0.02; done\n"
 	}
-	handlers := []manifest.Handler{advises("a", "0.4"), advises("b", "0.3"), advises("c", "0.2")}
-
-	start := time.Now()
-	res := Run(context.Background(), handlers, testEnvelope(), scaledBudget)
-	elapsed := time.Since(start)
-
-	if elapsed >= 700*time.Millisecond {
-		t.Errorf("fan-out took %v, want well under the 900ms a sequential run costs", elapsed)
+	ids := []string{"a", "b", "c"}
+	advises := func(id, after string) manifest.Handler {
+		body := "touch '" + marker("started-"+id) + "'\n"
+		for _, other := range ids {
+			body += wait("started-" + other)
+		}
+		if after != "" {
+			body += wait(after)
+		}
+		body += "touch '" + marker("done-"+id) + "'\n" +
+			`printf '%s' '{"hookSpecificOutput":{"additionalContext":"` + id + `"}}'`
+		return writeHandler(t, dir, id, body)
 	}
-	var ids []string
+	handlers := []manifest.Handler{advises("a", "done-b"), advises("b", "done-c"), advises("c", "")}
+
+	res := Run(context.Background(), handlers, testEnvelope(), loadBudget)
+
+	var got []string
 	for _, h := range res.Handlers {
-		ids = append(ids, h.ID)
+		got = append(got, h.ID)
 		if h.Outcome != record.OutcomeAdvise {
 			t.Errorf("handler %s outcome = %q, want %q", h.ID, h.Outcome, record.OutcomeAdvise)
 		}
 	}
-	if strings.Join(ids, ",") != "a,b,c" {
-		t.Errorf("results in order %v, want table order [a b c]", ids)
+	if strings.Join(got, ",") != "a,b,c" {
+		t.Errorf("results in order %v, want table order [a b c]", got)
 	}
 	if res.Advice != "a\n\nb\n\nc" {
 		t.Errorf("advice = %q, want it joined in table order", res.Advice)
@@ -196,7 +209,7 @@ func TestHandlerOverSubBudgetIsTimeoutWhileRouterIsNot(t *testing.T) {
 	h := writeHandler(t, dir, "slow", "exec sleep 5")
 
 	res := Run(context.Background(), []manifest.Handler{h}, testEnvelope(),
-		Budget{Deadline: 2 * time.Second, Handler: 200 * time.Millisecond})
+		Budget{Deadline: 30 * time.Second, Handler: 200 * time.Millisecond})
 
 	if res.Handlers[0].Outcome != record.OutcomeTimeout {
 		t.Errorf("outcome = %q, want %q", res.Handlers[0].Outcome, record.OutcomeTimeout)
@@ -211,18 +224,18 @@ func TestHandlerOverSubBudgetIsTimeoutWhileRouterIsNot(t *testing.T) {
 
 func TestHandlerTimeoutOverrideNarrowsTheSubBudget(t *testing.T) {
 	dir := t.TempDir()
-	h := writeHandler(t, dir, "slow", "exec sleep 5")
+	h := writeHandler(t, dir, "slow", "exec sleep 60")
 	h.TimeoutMS = 150
 
 	start := time.Now()
-	res := runSingle(t, h, Budget{Deadline: 3 * time.Second, Handler: 2 * time.Second})
+	res := runSingle(t, h, loadBudget)
 	elapsed := time.Since(start)
 
 	if res.Outcome != record.OutcomeTimeout {
 		t.Errorf("outcome = %q, want %q", res.Outcome, record.OutcomeTimeout)
 	}
-	if elapsed >= time.Second {
-		t.Errorf("handler ran %v, want it killed at its own 150ms override", elapsed)
+	if elapsed >= 10*time.Second {
+		t.Errorf("handler ran %v, want it killed at its own 150ms override, not the %v sub-budget", elapsed, loadBudget.Handler)
 	}
 }
 
@@ -230,20 +243,45 @@ func TestHandlerTimeoutOverrideNarrowsTheSubBudget(t *testing.T) {
 // overrun consolidates what it has: a deny that came back is a computed
 // verdict, and discarding it would be the permissive choice.
 func TestRouterDeadlineKeepsDenyThatReturned(t *testing.T) {
-	dir := t.TempDir()
-	handlers := []manifest.Handler{
-		decides(t, dir, "denier", "deny", "path is protected"),
-		writeHandler(t, dir, "hangs", "exec sleep 5"),
+	handlers := []manifest.Handler{{ID: "denier"}, {ID: "hangs"}}
+
+	original := runOne
+	release := make(chan struct{})
+	var running sync.WaitGroup
+	running.Add(len(handlers))
+	// Restoring runOne only after both handler goroutines have returned keeps
+	// the write from racing their reads of it.
+	t.Cleanup(func() {
+		close(release)
+		running.Wait()
+		runOne = original
+	})
+	runOne = func(_ context.Context, h manifest.Handler, _ []byte, _ time.Duration) HandlerResult {
+		defer running.Done()
+		if h.ID == "denier" {
+			return HandlerResult{
+				ID:      h.ID,
+				Outcome: record.OutcomeDeny,
+				Verdict: verdict.Deny,
+				Reason:  "path is protected",
+			}
+		}
+		<-release
+		return HandlerResult{ID: h.ID}
 	}
 
-	start := time.Now()
-	res := Run(context.Background(), handlers, testEnvelope(),
-		Budget{Deadline: 300 * time.Millisecond, Handler: 5 * time.Second})
-	elapsed := time.Since(start)
-
-	if elapsed >= time.Second {
-		t.Errorf("Run took %v, want it to return at its own 300ms deadline", elapsed)
+	done := make(chan Result, 1)
+	go func() {
+		done <- Run(context.Background(), handlers, testEnvelope(),
+			Budget{Deadline: time.Second, Handler: 5 * time.Second})
+	}()
+	var res Result
+	select {
+	case res = <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("Run ignored its own deadline")
 	}
+
 	if !res.DeadlineExpired {
 		t.Error("DeadlineExpired = false, want true")
 	}
@@ -279,7 +317,7 @@ func TestPanicInHandlerGoroutineIsRecordedAsError(t *testing.T) {
 		return original(ctx, h, payload, budget)
 	}
 
-	res := Run(context.Background(), handlers, testEnvelope(), scaledBudget)
+	res := Run(context.Background(), handlers, testEnvelope(), loadBudget)
 
 	boom := res.Handlers[0]
 	if boom.Outcome != record.OutcomeError {
@@ -331,29 +369,38 @@ func pollSentinel(t *testing.T, path string, want []byte, timeout time.Duration)
 
 // TestFireAndForgetHandlerReturnsWithoutWaiting proves the router does not
 // wait for a fire-and-forget handler: the handler prints a well-formed deny,
-// then sleeps 5x the whole run budget before it ever touches the sentinel, so
-// Run returning well inside that budget is only possible if it never waited.
+// then blocks on a release file the test only creates after Run has returned,
+// so Run returning at all is only possible if it never waited on the child.
 // The deny going unheard (not overridden) is the point: stdout was wired to
 // /dev/null, so there was nothing to disbelieve.
 func TestFireAndForgetHandlerReturnsWithoutWaiting(t *testing.T) {
 	dir := t.TempDir()
 	sentinel := filepath.Join(dir, "sentinel")
+	release := filepath.Join(dir, "release")
+	releaseHandler := func() {
+		if err := os.WriteFile(release, nil, 0o600); err != nil {
+			t.Errorf("write release: %v", err)
+		}
+	}
+	t.Cleanup(releaseHandler)
 	h := writeHandler(t, dir, "detached",
 		"printf '%s' '{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"unheard\"}}'\n"+
-			"sleep 1\n"+
+			"while [ ! -e '"+release+"' ]; do sleep 0.02; done\n"+
 			"cat > '"+sentinel+"'")
 	h.Lane = manifest.LaneFireAndForget
 
-	budget := Budget{Deadline: 200 * time.Millisecond, Handler: 200 * time.Millisecond}
 	env := testEnvelope()
 
-	start := time.Now()
-	res := Run(context.Background(), []manifest.Handler{h}, env, budget)
-	elapsed := time.Since(start)
-
-	if elapsed >= budget.Deadline {
-		t.Errorf("Run took %v, want well inside the %v deadline", elapsed, budget.Deadline)
+	done := make(chan Result, 1)
+	go func() { done <- Run(context.Background(), []manifest.Handler{h}, env, loadBudget) }()
+	var res Result
+	select {
+	case res = <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("Run waited for the handler")
 	}
+	releaseHandler()
+
 	if len(res.Handlers) != 1 {
 		t.Fatalf("got %d handler results, want 1", len(res.Handlers))
 	}
@@ -371,7 +418,7 @@ func TestFireAndForgetHandlerReturnsWithoutWaiting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal envelope: %v", err)
 	}
-	got := pollSentinel(t, sentinel, want, 5*time.Second)
+	got := pollSentinel(t, sentinel, want, 30*time.Second)
 	if !bytes.Equal(got, want) {
 		t.Errorf("sentinel bytes = %q, want the marshaled envelope %q", got, want)
 	}
@@ -397,8 +444,7 @@ func TestFireAndForgetHandlerDeliversPayloadPastPipeBuffer(t *testing.T) {
 		t.Fatalf("marshaled payload is %d bytes, want over 65536 so this test still exercises the pipe-buffer boundary", len(want))
 	}
 
-	res := Run(context.Background(), []manifest.Handler{h}, env,
-		Budget{Deadline: 2 * time.Second, Handler: time.Second})
+	res := Run(context.Background(), []manifest.Handler{h}, env, loadBudget)
 	if len(res.Handlers) != 1 {
 		t.Fatalf("got %d handler results, want 1", len(res.Handlers))
 	}
@@ -422,7 +468,7 @@ func TestFireAndForgetHandlerWithMissingExecIsError(t *testing.T) {
 		Lane: manifest.LaneFireAndForget,
 	}
 
-	res := runSingle(t, h, scaledBudget)
+	res := runSingle(t, h, loadBudget)
 
 	if res.Outcome != record.OutcomeError {
 		t.Errorf("outcome = %q, want %q", res.Outcome, record.OutcomeError)
