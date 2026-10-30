@@ -1194,7 +1194,13 @@ func TestPiBridgeResolvesAgainstItsRootAndAppendsPluginRoot(t *testing.T) {
 	if err := json.Unmarshal(raw, &argv); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"route", "--registered-for", "pi", "--event", "pre_tool", "--plugin-root", run.dir}
+	// The bridge reports the resolved real path; on darwin t.TempDir() sits
+	// under the /tmp symlink, so compare against the resolved form.
+	pluginRoot, err := filepath.EvalSymlinks(run.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"route", "--registered-for", "pi", "--event", "pre_tool", "--plugin-root", pluginRoot}
 	if !slices.Equal(argv, want) {
 		t.Errorf("argv = %q, want %q", argv, want)
 	}
