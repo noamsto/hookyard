@@ -104,7 +104,7 @@ func cmdBare(s streams) int {
 		return assembleIndex(ctx, "", input.CWD)
 	})
 	if res.call != nil && res.call.CanonicalEvent == "pre_tool" {
-		res.deny = guardCall(*res.call, res.callErr, start, recordToolCall)
+		res.deny = guardCall(*res.call, res.callErr, start, checkWrite, recordToolCall, s.err)
 	} else if res.call != nil {
 		recordToolCall(*res.call)
 	}
@@ -112,42 +112,59 @@ func cmdBare(s streams) int {
 	return 0
 }
 
-// guardCall returns why the write guard denies call, marking it with record
-// meanwhile. A guard that panics or outlasts guardDeadline from start denies:
-// hookyard abstains for a handler that answers past its budget, and the guard
-// must answer within it.
-func guardCall(call envelope, readErr error, start time.Time, record func(envelope)) string {
+// guardCall returns why check denies call, marking it with record meanwhile.
+// The clock runs from start: a check that panics or outlasts guardDeadline
+// denies, since hookyard abstains for a handler that answers past its budget.
+// A record still running at the deadline is abandoned and the verdict stands.
+// A panic's value goes in the reason and to errw.
+func guardCall(call envelope, readErr error, start time.Time, check func(envelope, error) string, record func(envelope), errw io.Writer) string {
+	deadline := time.NewTimer(guardDeadline - time.Since(start))
+	defer deadline.Stop()
 	verdict := make(chan string, 1)
 	go func() {
 		reason := "priors write guard: the guard failed, so the call is denied"
 		defer func() {
-			_ = recover()
+			if r := recover(); r != nil {
+				reason = fmt.Sprintf("priors write guard: the guard failed (%v), so the call is denied", r)
+				_, _ = fmt.Fprintln(errw, "priors:", reason)
+			}
 			verdict <- reason
 		}()
-		reason = checkWrite(call, readErr)
+		reason = check(call, readErr)
 	}()
-	record(call)
-	timer := time.NewTimer(guardDeadline - time.Since(start))
-	defer timer.Stop()
+	recorded := make(chan struct{})
+	go func() {
+		defer close(recorded)
+		record(call)
+	}()
+	var reason string
 	select {
-	case r := <-verdict:
-		return r
-	case <-timer.C:
+	case reason = <-verdict:
+	case <-deadline.C:
 		return "priors write guard: the guard ran out of time, so the call is denied"
 	}
+	select {
+	case <-recorded:
+	case <-deadline.C:
+	}
+	return reason
 }
 
 // checkWrite is the write guard's verdict on call, under the paths priors'
-// config pins on this host.
+// config pins on this host. A host without a trust file runs no priors stores,
+// so the guard is inert there.
 func checkWrite(call envelope, readErr error) string {
+	cfgPath := config.DefaultPath()
+	cfg, err := config.LoadPaths(cfgPath)
+	if errors.Is(err, config.ErrNoTrust) {
+		return ""
+	}
 	if readErr != nil && call.ToolInput == nil {
 		return fmt.Sprintf("priors write guard: the call's input could not be read, so it is denied: %v", readErr)
 	}
 	home, _ := os.UserHomeDir()
 	host := &gate.Host{Home: home, Env: os.LookupEnv, Users: userHome}
 	cwd := guard.CallDir(call.CWD, call.ToolInput)
-	cfgPath := config.DefaultPath()
-	cfg, err := config.LoadPaths(cfgPath)
 	if err != nil {
 		return guard.Broken(err, host).Check(cwd, call.ToolName, call.ToolInput)
 	}

@@ -2145,6 +2145,53 @@ func TestPreToolWriteGuardBrokenConfig(t *testing.T) {
 	sb.toolCall("pre_tool", "sess-1", "Read", fmt.Sprintf(`{"file_path":%q}`, filepath.Join(sb.dir, "notes.md")))
 }
 
+// TestPreToolWriteGuardNoTrustFile: a host without a trust file runs no priors
+// stores, so the guard has nothing to protect and lets every call run.
+func TestPreToolWriteGuardNoTrustFile(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	if err := os.Remove(sb.trustPath); err != nil {
+		t.Fatal(err)
+	}
+	sb.toolCall("pre_tool", "sess-1", "Write", `{"file_path":"/tmp/x","content":"x"}`)
+	sb.toolCall("pre_tool", "sess-1", "Write", fmt.Sprintf(`{"file_path":%q,"content":"x"}`, filepath.Join(sb.personal, ".attest", "e")))
+}
+
+// TestPreToolWriteGuardNoUserConfig: an agent can delete the user config, so a
+// missing one loads the defaults and the guard still protects the stores.
+func TestPreToolWriteGuardNoUserConfig(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	if err := os.Remove(sb.configPath); err != nil {
+		t.Fatal(err)
+	}
+	attestWrite := fmt.Sprintf(`{"file_path":%q,"content":"x"}`, filepath.Join(sb.personal, ".attest", "e"))
+	res := sb.run(sb.toolEnvelope("pre_tool", "sess-1", "Write", attestWrite, `null`))
+	wantExit(t, res, 0)
+	wantDeny(t, res.stdout, "inside an .attest dir")
+
+	sb.toolCall("pre_tool", "sess-1", "Write", fmt.Sprintf(`{"file_path":%q,"content":"x"}`, filepath.Join(sb.dir, "notes.md")))
+}
+
+// TestPreToolWriteGuardBrokenTrustFile: a trust file that is present but
+// unreadable is not an absent one; the guard cannot tell where anything is and
+// denies.
+func TestPreToolWriteGuardBrokenTrustFile(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	sb.writeFile(sb.trustPath, "profile = \n")
+	res := sb.run(sb.toolEnvelope("pre_tool", "sess-1", "Write", fmt.Sprintf(`{"file_path":%q,"content":"x"}`, filepath.Join(sb.dir, "notes.md")), `null`))
+	wantExit(t, res, 0)
+	wantDeny(t, res.stdout, "cannot tell where priors' stores and dirs are")
+}
+
+// TestPreToolWriteGuardUnreadableInput: a pre_tool call whose input was cut by
+// the size cap is denied.
+func TestPreToolWriteGuardUnreadableInput(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	big := strconv.Quote(strings.Repeat("x", 2<<20))
+	res := sb.run(sb.toolEnvelope("pre_tool", "sess-1", "Write", `{"file_path":"/tmp/x","content":`+big+`}`, `null`))
+	wantExit(t, res, 0)
+	wantDeny(t, res.stdout, "could not be read")
+}
+
 func wantDeny(t *testing.T, stdout string, subs ...string) {
 	t.Helper()
 	var out struct {
