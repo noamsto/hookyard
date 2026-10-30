@@ -104,7 +104,7 @@ type candidate struct {
 
 // Result is a run's reports, one per item, and the commit's warning, as
 // write.Result.Warning words it. Failed counts the items that did not land
-// because something broke (the scanner, a lock, a write), not because the
+// because something broke (the scanner, a write), not because the
 // write path refused them: a re-run may clear these, and the caller should
 // not report the run as clean.
 type Result struct {
@@ -358,11 +358,10 @@ func droppedReport(it Item, why excluded) Report {
 // order, and returns how many it published. An item is written after the facts
 // of the run it links, so a run killed half way leaves no published link
 // dangling. The plan holds, but a write can still fail, and a fact planned
-// flagged can publish once the session's record has caught up: then a link to
-// a fact that is not in the checkout would dangle, so a fact that links one is
-// not kept, the facts already written that link it, and in turn those they
-// link from, are taken back out, and later ones no longer count it as a link
-// target.
+// flagged can publish once the session's record has caught up. A published
+// fact that links an in-run fact outside the checkout is not kept; neither
+// are the facts already written that link it, directly or through another,
+// and later facts no longer count it as a link target.
 func writeAll(ctx context.Context, o Options, checkout store.Root, pl plan, out *Result) (published int) {
 	pending, live, inRun := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, p := range pl.items {
@@ -387,8 +386,6 @@ func writeAll(ctx context.Context, o Options, checkout store.Root, pl plan, out 
 		if !p.publishes {
 			targets = live
 		}
-		// Only a failure takes a name out of pending, so this holds across the
-		// write.
 		dangling := ""
 		for _, t := range linkTargets(p.fact.Body) {
 			if t != p.fact.Name && inRun[t] && !pending[t] {
