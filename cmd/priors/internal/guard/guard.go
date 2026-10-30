@@ -185,6 +185,9 @@ func New(p Paths, host *gate.Host) *Guard {
 		}
 		g.add(p.Config, kindConfig, "priors' config file")
 		g.links = append(g.links, p.Config)
+		if r, ok := physical(filepath.Clean(p.Config)); ok && r != filepath.Clean(p.Config) {
+			g.links = append(g.links, r)
+		}
 	}
 	return g
 }

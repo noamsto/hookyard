@@ -14,7 +14,7 @@ import (
 // sandbox is a home with a store at ~/notes, priors' state dir, a config file
 // that links to ~/dotfiles/priors.toml, a project at ~/work and links into the
 // store: symlinks, and hard links to the index, a fact, the git config and a
-// git object.
+// git object and the config target.
 type sandbox struct {
 	home, store, work string
 	guard             *Guard
@@ -70,7 +70,7 @@ func newSandbox(t *testing.T) sandbox {
 			t.Fatal(err)
 		}
 	}
-	for link, target := range map[string]string{"hard": "MEMORY.md", "hardfact": "facts/b.md", "hardgit": ".git/config", "hobj": ".git/objects/ab/cdef"} {
+	for link, target := range map[string]string{"hard": "MEMORY.md", "hardfact": "facts/b.md", "hardgit": ".git/config", "hobj": ".git/objects/ab/cdef", "hcfg": "../dotfiles/priors.toml"} {
 		if err := os.Link(filepath.Join(sb.store, target), filepath.Join(sb.work, link)); err != nil {
 			t.Fatal(err)
 		}
@@ -255,6 +255,7 @@ func TestShellDenies(t *testing.T) {
 		{name: "hard link to a fact", want: "a hard link to", input: bash("echo x > ~/work/hardfact")},
 		{name: "hard link to git config", want: "a hard link to", input: bash("echo x > ~/work/hardgit")},
 		{name: "hard link to a git object", want: "a hard link to", input: bash("echo y > ~/work/hobj")},
+		{name: "hard link to the config target", want: "a hard link to", input: bash("echo y > ~/work/hcfg")},
 
 		// Config behind a symlink.
 		{name: "config symlink target", want: "/dotfiles/priors.toml, priors' config file", input: bash("rm ~/dotfiles/priors.toml")},
@@ -330,6 +331,7 @@ func TestToolDenies(t *testing.T) {
 		{name: "hard link", want: "a hard link to", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/hard", "content": "x"})},
 		{name: "hard link to git config", want: "a hard link to", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/hardgit", "content": "x"})},
 		{name: "hard link to a git object", want: "a hard link to", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/hobj", "content": "x"})},
+		{name: "hard link to the config target", want: "a hard link to", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/hcfg", "content": "x"})},
 		{name: "config symlink target", want: "/dotfiles/priors.toml, priors' config file", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/dotfiles/priors.toml", "content": "x"})},
 		{name: "hard link to a fact reviewed", want: "/work/hardfact claiming confidence: reviewed", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/hardfact", "content": reviewed})},
 		{name: "hard link to a fact edit to reviewed", want: "/work/hardfact claiming confidence: reviewed", tool: "Edit", input: sb.input(map[string]any{"file_path": "@H/work/hardfact", "old_string": "unverified", "new_string": "reviewed"})},
