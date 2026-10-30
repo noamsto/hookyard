@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,12 +27,24 @@ import (
 // session runs; SessionID, Engine and Host become the fact's provenance.
 // External marks a session that ingested external content; IdentityConflict
 // marks an asserted session identity the caller could not corroborate.
+//
+// Imported marks a fact copied from an engine's native memory (§4.9): its
+// provenance, source, engines and modified are the importer's, and verified
+// stays null, since a migrated fact is not freshly verified. Pending names
+// facts the same batch is about to write, which a wiki-link may name before
+// they land. DryRun runs every check and reports where the fact would land,
+// writing nothing. NoCommit leaves a published fact uncommitted, for a caller
+// that commits a whole batch once.
 type Request struct {
 	Fact                    fact.Fact
 	Session                 route.Session
 	SessionID, Engine, Host string
 	External                bool
 	IdentityConflict        bool
+	Imported                bool
+	Pending                 []string
+	DryRun                  bool
+	NoCommit                bool
 }
 
 // Result says where the fact landed. Outcome is "published", "flagged" or
@@ -55,9 +68,36 @@ type Deps struct {
 	Now     func() time.Time
 }
 
-// Add writes req's fact. A non-nil error is a refusal (or a failed write) and
-// leaves nothing written.
+// ErrRefusal marks an error that is the write path's own decision not to
+// write the fact: a lint finding, a secret match, a name already taken or a
+// destination it will not write through. Any other error is a failure of the
+// machinery (the scanner, a lock, a write), which a retry may clear.
+var ErrRefusal = errors.New("refused")
+
+type refusalError struct{ msg string }
+
+func (e refusalError) Error() string        { return e.msg }
+func (e refusalError) Is(target error) bool { return target == ErrRefusal }
+
+func refused(format string, a ...any) error {
+	return refusalError{msg: fmt.Sprintf(format, a...)}
+}
+
+// Add writes req's fact under the destination store's lock. A non-nil error
+// is a refusal (see ErrRefusal) or a failed write, and leaves nothing written.
 func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, error) {
+	return add(ctx, cfg, req, d, true)
+}
+
+// AddLocked is Add for a caller that already holds the lock of the store the
+// fact routes to (store.Lock, named for the store), such as a batch that
+// writes many facts and commits them under one hold. Taking the lock again
+// would deadlock.
+func AddLocked(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, error) {
+	return add(ctx, cfg, req, d, false)
+}
+
+func add(ctx context.Context, cfg config.Config, req Request, d Deps, lock bool) (Result, error) {
 	f := complete(req, d.Now())
 	data, err := f.Marshal()
 	if err != nil {
@@ -72,7 +112,7 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 		return Result{}, fmt.Errorf("secret scanner unavailable: %w", err)
 	}
 	if len(ids) > 0 {
-		return Result{}, fmt.Errorf("secret scan matched: %s", strings.Join(ids, ", "))
+		return Result{}, refused("secret scan matched: %s", strings.Join(ids, ", "))
 	}
 
 	dest := route.WriteDest(req.Session, cfg)
@@ -81,11 +121,13 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 	if dest.Quarantine {
 		lockName = "quarantine"
 	}
-	unlock, err := store.Lock(cfg, lockName)
-	if err != nil {
-		return Result{}, err
+	if lock {
+		unlock, err := store.Lock(cfg, lockName)
+		if err != nil {
+			return Result{}, err
+		}
+		defer unlock()
 	}
-	defer unlock()
 
 	var checkout store.Root
 	roots := []store.Root{store.QuarantineRoot(cfg)}
@@ -104,7 +146,7 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 			return Result{}, err
 		}
 		candidate := store.Entry{Root: checkout, Rel: filepath.ToSlash(rel), Fact: f, Raw: data}
-		opts := lint.Options{Store: dest.Store, WorkOrgs: cfg.WorkOrgs, WorkNames: cfg.WorkNames(), Rules: d.Rules}
+		opts := lint.Options{Store: dest.Store, WorkOrgs: cfg.WorkOrgs, WorkNames: cfg.WorkNames(), Rules: d.Rules, Pending: req.Pending}
 		if findings := lint.Candidate(ctx, checkout, candidate, opts); len(findings) > 0 {
 			return Result{}, refusal(findings)
 		}
@@ -138,7 +180,15 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 		res.Outcome = "published"
 	}
 	if err := root.CheckWrite(filepath.Dir(res.Path)); err != nil {
-		return Result{}, err
+		// A filesystem error is the machinery failing, which a retry may clear;
+		// the rest are the store's policy messages.
+		if _, ok := errors.AsType[*fs.PathError](err); ok {
+			return Result{}, err
+		}
+		return Result{}, refusalError{msg: err.Error()}
+	}
+	if req.DryRun {
+		return res, nil
 	}
 	if data, err = f.Marshal(); err != nil {
 		return Result{}, err
@@ -153,7 +203,7 @@ func Add(ctx context.Context, cfg config.Config, req Request, d Deps) (Result, e
 	}
 	res.Reports = reports
 
-	if res.Outcome == "published" {
+	if res.Outcome == "published" && !req.NoCommit {
 		res.Warning = commit.Checkout(ctx, cfg, root, d.Rules, d.Scanner, "priors: add "+f.Name)
 	}
 	return res, nil
@@ -166,9 +216,13 @@ func complete(req Request, now time.Time) fact.Fact {
 	m := &f.Metadata
 	m.NodeType = "memory"
 	m.Confidence = "proposed"
+	m.Flags = nil
 	today := now.Format(time.DateOnly)
 	if m.ValidFrom == "" {
 		m.ValidFrom = today
+	}
+	if req.Imported {
+		return f
 	}
 	if m.Verified == "" {
 		m.Verified = today
@@ -179,7 +233,6 @@ func complete(req Request, now time.Time) fact.Fact {
 	if len(m.Engines) == 0 && req.Engine != "" && req.Engine != "unknown" {
 		m.Engines = []string{req.Engine}
 	}
-	m.Flags = nil
 	return f
 }
 
@@ -188,7 +241,7 @@ func refusal(findings []lint.Finding) error {
 	for i, f := range findings {
 		msgs[i] = f.String()
 	}
-	return errors.New(strings.Join(msgs, "; "))
+	return refusalError{msg: strings.Join(msgs, "; ")}
 }
 
 // checkDuplicate refuses a name the destination already holds. A store's
@@ -197,7 +250,7 @@ func refusal(findings []lint.Finding) error {
 func checkDuplicate(roots []store.Root, name string) error {
 	for _, r := range roots {
 		if e, ok := r.FindByName(name); ok {
-			return fmt.Errorf("a fact named %q already exists at %s", name, filepath.Join(r.Path, filepath.FromSlash(e.Rel)))
+			return refused("a fact named %q already exists at %s", name, filepath.Join(r.Path, filepath.FromSlash(e.Rel)))
 		}
 	}
 	return nil

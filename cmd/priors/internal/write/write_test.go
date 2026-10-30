@@ -297,6 +297,66 @@ func TestKeepsGivenDatesAndEngines(t *testing.T) {
 	}
 }
 
+func TestImportedKeepsImporterFields(t *testing.T) {
+	fx := setup(t, "work")
+	req := request("imported-fact", personalRepo)
+	m := &req.Fact.Metadata
+	m.Engines = []string{"claude"}
+	m.Provenance = &fact.Provenance{Engine: "claude", Session: "native-1", Host: "laptop"}
+	m.Source = &fact.Source{Engine: "claude", Path: "~/.claude/projects/p/memory/imported-fact.md", SHA256: "abc"}
+	m.OriginSessionID = "native-1"
+	m.Modified = "2026-01-02T03:04:05.000Z"
+	req.Imported = true
+	res, err := Add(context.Background(), fx.cfg, req, fx.deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := readFact(t, res.Path).Metadata
+	if got.Verified != "" || got.Modified != m.Modified || got.OriginSessionID != "native-1" || got.Confidence != "proposed" {
+		t.Errorf("metadata = %+v", got)
+	}
+	if p := got.Provenance; p == nil || p.Session != "native-1" {
+		t.Errorf("provenance = %+v, want the native session", p)
+	}
+	if s := got.Source; s == nil || s.SHA256 != "abc" {
+		t.Errorf("source = %+v", s)
+	}
+}
+
+func TestBatchOptions(t *testing.T) {
+	tests := []struct {
+		name    string
+		edit    func(r *Request)
+		written bool
+		commits bool
+	}{
+		{"dry run writes nothing", func(r *Request) { r.DryRun = true }, false, false},
+		{"no commit leaves the fact uncommitted", func(r *Request) { r.NoCommit = true }, true, false},
+		// The commit gate lints the whole store, so it waits for the named fact.
+		{"pending names satisfy a wiki-link", func(r *Request) {
+			r.Fact.Body = "See [[later-fact]].\n"
+			r.Pending = []string{"later-fact"}
+		}, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := setup(t, "work")
+			req := request("batch-fact", personalRepo)
+			tt.edit(&req)
+			res, err := Add(context.Background(), fx.cfg, req, fx.deps)
+			if err != nil || res.Outcome != "published" {
+				t.Fatalf("result = %+v, %v", res, err)
+			}
+			if exists(res.Path) != tt.written {
+				t.Errorf("%s exists = %v, want %v", res.Path, !tt.written, tt.written)
+			}
+			if got := head(t, fx.cfg.PersonalStore) != ""; got != tt.commits {
+				t.Errorf("committed = %v, want %v", got, tt.commits)
+			}
+		})
+	}
+}
+
 func TestUnknownEngineNotRecordedInEngines(t *testing.T) {
 	fx := setup(t, "work")
 	req := request("unknown-engine", personalRepo)
@@ -562,6 +622,34 @@ func TestRefusesSymlinkedDestination(t *testing.T) {
 			}
 			assertNothingWritten(t, fx)
 		})
+	}
+}
+
+func TestAnUnreadableDestinationIsAFailureNotARefusal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads any directory")
+	}
+	fx := setup(t, "work")
+	local := store.LocalRoot(fx.cfg, route.StorePersonal).Path
+	if err := os.MkdirAll(filepath.Join(local, "hookyard"), 0o755); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+	if err := os.Chmod(local, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(local, 0o755) }) //nolint:gosec // restores the test fixture so TempDir can remove it
+
+	req := request("unreachable-fact", personalRepo)
+	req.External = true
+	_, err := Add(context.Background(), fx.cfg, req, fx.deps)
+	if err == nil {
+		t.Fatal("Add wrote into a directory it cannot read")
+	}
+	if errors.Is(err, ErrRefusal) {
+		t.Errorf("err = %v: an unreadable directory is a failure, not a refusal", err)
+	}
+	if _, ok := errors.AsType[*fs.PathError](err); !ok {
+		t.Errorf("err = %v, want the filesystem error to survive", err)
 	}
 }
 

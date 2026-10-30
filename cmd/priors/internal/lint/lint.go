@@ -38,6 +38,9 @@ type Options struct {
 	Rules     gate.Rules
 	Scanner   *gate.Scanner
 	Gates     bool
+	// Pending names facts the candidate's batch writes besides it, which
+	// Candidate lets a wiki-link name before they land.
+	Pending []string
 }
 
 var wikilinkRE = regexp.MustCompile(`\[\[([^\[\]\n]*)\]\]`)
@@ -150,6 +153,9 @@ func Candidate(_ context.Context, root store.Root, e store.Entry, opts Options) 
 		out = append(out, Finding{File: e.Rel, Rule: "duplicate-name", Msg: "name is also used by " + first})
 	}
 	addName(names, e)
+	for _, name := range opts.Pending {
+		addName(names, store.Entry{Rel: name + ".md", Fact: fact.Fact{Name: name}})
+	}
 
 	c := checker{root: root, opts: opts, names: names, workTerms: workTerms(opts)}
 	if m := e.Fact.Metadata; e.Root.Kind == store.KindCheckout && m.Scope == "repo" && len(m.Repos) > 0 {
