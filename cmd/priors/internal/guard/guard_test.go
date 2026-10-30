@@ -179,7 +179,7 @@ func TestShellDenies(t *testing.T) {
 		{name: "make -C", want: "and runs in", input: bash("make -C ~/notes")},
 		{name: "cd unknown then involved write", want: "from a dir it changes into at run time", input: bash(`cd "$(git rev-parse --show-toplevel)"; echo x > .attest/e`)},
 		{name: "tar -C ancestor", want: "which holds the personal store", input: bash("tar -xf a.tar -C ~")},
-		{name: "env -C", want: "/notes, the personal store, and may write", input: bash("env -C ~/notes touch x")},
+		{name: "env -C", want: "runs in", input: bash("env -C ~/notes touch x")},
 		{name: "cd through symlink lookup", want: "/notes, the personal store, and may write", input: bash(`cd "$(ls -d ~/link)" && touch x`)},
 
 		// Quoting and escaping.

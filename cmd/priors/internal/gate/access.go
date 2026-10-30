@@ -81,8 +81,15 @@ var (
 	}
 	// findActions make find write or run a command.
 	findActions = []string{"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
-	// programVars change which program a command name, or a shell, runs.
+	// programVars change which program a command name, or a shell, runs; so
+	// do the GIT_ and LD_ ones.
 	programVars = []string{"PATH", "BASH_ENV", "ENV"}
+	// shellVars are the variables a script can change without assigning them
+	// (`let`, `read`, `mapfile`, `(( ))`, a nameref), which move what a name
+	// runs, where cd looks, or how a word splits.
+	shellVars = []string{"PATH", "BASH_ENV", "ENV", "CDPATH", "IFS"}
+	// declarers take -n to declare a nameref.
+	declarers = []string{"declare", "typeset", "local"}
 	// chdirTools take -C as the dir they run in.
 	chdirTools = []string{"git", "make", "tar"}
 	// sinks are redirect targets that are not files.
@@ -135,7 +142,12 @@ type accessor struct {
 	touched map[Touch]bool
 	// piped are the statements that read a pipe.
 	piped map[*syntax.Stmt]bool
-	acc   Access
+	// cdpath and ifs report a script that sets CDPATH or IFS, or declares a
+	// nameref that may name either, by a means the assignments do not show.
+	// While ifs holds a word's split cannot be told, so an unquoted expansion
+	// is opaque.
+	cdpath, ifs bool
+	acc         Access
 }
 
 func (a *accessor) script(text string, depth int) {
@@ -148,17 +160,101 @@ func (a *accessor) script(text string, depth int) {
 		a.acc.Unreadable = "budget"
 		return
 	}
+	var stmts []*syntax.Stmt
 	failed := false
 	for stmt, err := range syntax.NewParser(syntax.Variant(syntax.LangBash)).StmtsSeq(strings.NewReader(text)) {
-		switch {
-		case a.acc.Unreadable != "", failed:
-		case err != nil:
+		if err != nil {
 			failed = true
-			a.unparsed(text)
-		default:
-			a.stmt(stmt, text, depth)
+			break
+		}
+		stmts = append(stmts, stmt)
+	}
+	a.scan(text, stmts)
+	for _, stmt := range stmts {
+		if a.acc.Unreadable != "" {
+			break
+		}
+		a.stmt(stmt, text, depth)
+	}
+	if failed && a.acc.Unreadable == "" {
+		a.unparsed(text)
+	}
+}
+
+// scan reads a script before any of it is read as commands, since a later
+// statement can change what an earlier function body runs: a script that names
+// one of shellVars other than as an expansion, or declares a nameref, writes.
+func (a *accessor) scan(text string, stmts []*syntax.Stmt) {
+	for _, name := range shellVars {
+		if namesVar(text, name) {
+			a.changes(name == "CDPATH", name == "IFS")
 		}
 	}
+	for _, s := range stmts {
+		walkBounded(s, func(n syntax.Node) bool {
+			if declaresNameref(n) {
+				a.changes(true, true)
+			}
+			return !arithmetic(n) && a.j.parsed <= maxParsed
+		})
+	}
+}
+
+func (a *accessor) changes(cdpath, ifs bool) {
+	a.acc.Writes = true
+	a.cdpath = a.cdpath || cdpath
+	a.ifs = a.ifs || ifs
+}
+
+// namesVar reports text holding name as a whole word that is not an
+// expansion: not after a $ or {, nor inside a longer name.
+func namesVar(text, name string) bool {
+	for from := 0; ; {
+		k := strings.Index(text[from:], name)
+		if k < 0 {
+			return false
+		}
+		start := from + k
+		end := start + len(name)
+		from = end
+		if start > 0 && (text[start-1] == '$' || text[start-1] == '{' || nameByte(text[start-1])) {
+			continue
+		}
+		if end < len(text) && nameByte(text[end]) {
+			continue
+		}
+		return true
+	}
+}
+
+// declaresNameref reports a declare, typeset or local with an option cluster
+// holding n; a word that is not literal may be one.
+func declaresNameref(n syntax.Node) bool {
+	var opts []string
+	switch n := n.(type) {
+	case *syntax.DeclClause:
+		if !slices.Contains(declarers, n.Variant.Value) {
+			return false
+		}
+		for _, o := range n.Args {
+			if o.Name == nil && o.Value != nil {
+				opts = append(opts, literal(o.Value))
+			}
+		}
+	case *syntax.CallExpr:
+		words := make([]string, len(n.Args))
+		for i, w := range n.Args {
+			words[i] = literal(w)
+		}
+		idx, _ := commandWord(words)
+		if idx == len(words) || !slices.Contains(declarers, words[idx]) {
+			return false
+		}
+		opts = words[idx+1:]
+	}
+	return slices.ContainsFunc(opts, func(w string) bool {
+		return w == "" || len(w) > 1 && w[0] == '-' && w[1] != '-' && strings.Contains(w, "n")
+	})
 }
 
 // unparsed reads text the parser cannot: whatever it runs is unknown, so it
@@ -215,9 +311,10 @@ func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
 // read another value than the one recorded. Setting a variable that picks the
 // program a name runs writes, whatever the command that follows.
 func (a *accessor) assign(name string, values ...*syntax.Word) {
-	if slices.Contains(programVars, name) {
+	if slices.Contains(programVars, name) || strings.HasPrefix(name, "GIT_") || strings.HasPrefix(name, "LD_") {
 		a.acc.Writes = true
 	}
+	a.ifs = a.ifs || name == "IFS"
 	if _, ok := a.j.vars[name]; ok || len(values) != 1 || values[0] == nil || a.opaque(values[0]) {
 		a.tainted[name] = true
 	}
@@ -260,9 +357,18 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 		name = argv[idx]
 	}
 	assigned := len(c.Assigns) > 0 || slices.ContainsFunc(argv[:idx], assignment)
+	// A word renders to any number of fields, so the command word is found
+	// again among the syntax words to leave it out of the writes.
+	cmdArg := commandArg(c.Args, argv, idx)
+	args := argv[min(idx+1, len(argv)):]
+	heads := args
+	if cmdArg >= 0 {
+		heads = a.heads(c.Args[idx+1:], args)
+	}
 	// A command word found after a flag may be that flag's value, not the
-	// command that runs.
-	writer := idx < len(argv) && (assigned || afterFlag || !readOnly(name, argv[idx+1:]))
+	// command that runs; none found after one may be a wrapper's split string
+	// (`env -S 'rm -rf x'`), which runs.
+	writer := afterFlag || idx < len(argv) && (assigned || !readOnly(name, args, heads))
 	if writer {
 		a.acc.Writes = true
 		// xargs writes through operands it reads from stdin.
@@ -270,12 +376,9 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 			a.touch(Touch{Write: true, Opaque: true})
 		}
 	}
-	// A word renders to any number of fields, so the command word is found
-	// again among the syntax words to leave it out of the writes.
-	cmdArg := commandArg(c.Args, argv, idx)
 	var messages []int
 	if cmdArg >= 0 && (name == "git" || name == "gh" || name == "glab") {
-		messages = messageArgs(name, argv[idx+1:], a.heads(c.Args[idx+1:], argv[idx+1:]))
+		messages = messageArgs(name, args, heads)
 	}
 	for i, w := range c.Args {
 		a.done[w] = true
@@ -284,7 +387,7 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 		}
 		a.word(w, text, depth, writer && i != cmdArg, writer)
 	}
-	a.chdirs(name, c.Args, argv, idx, cmdArg, text)
+	a.chdirs(name, c.Args, argv, idx, afterFlag, cmdArg, text)
 	return writer
 }
 
@@ -318,7 +421,7 @@ func commandArg(words []*syntax.Word, argv []string, idx int) int {
 
 // readOnly reports a command that only reads its operands. An empty word in
 // args is opaque, and may be any flag.
-func readOnly(name string, args []string) bool {
+func readOnly(name string, args, heads []string) bool {
 	if name == "" || strings.Contains(name, "/") {
 		return false
 	}
@@ -327,7 +430,7 @@ func readOnly(name string, args []string) bool {
 		// priors writes a store only through its own gates.
 		return true
 	case "git":
-		return gitReads(args)
+		return gitReads(args, heads)
 	case "sed":
 		return sedReads(args)
 	case "printf":
@@ -391,10 +494,13 @@ var (
 	}
 	// gitRunOpts are the options after the subcommand that write a file or run a
 	// program; git takes any unambiguous prefix of a long option.
-	gitRunOpts = []string{"output", "exec", "upload-pack", "receive-pack", "open-files-in-pager"}
-	// forgeMessageOpts take a message or body as their value.
-	forgeMessageOpts = []string{"-b", "--body", "-t", "--title", "-m", "--message", "--notes", "--description"}
-	forgeGlueOpts    = []string{"--body=", "--title=", "--message=", "--notes=", "--description="}
+	gitRunOpts = []string{"output", "exec", "upload-pack", "receive-pack", "open-files-in-pager", "ext-diff", "textconv"}
+	// forgeMessageOpts take a message or body as their value, but only in a
+	// command of forgeMessageGroups and forgeMessageVerbs.
+	forgeMessageOpts   = []string{"-b", "--body", "-t", "--title", "-m", "--message", "--notes", "--description"}
+	forgeGlueOpts      = []string{"--body=", "--title=", "--message=", "--notes=", "--description="}
+	forgeMessageGroups = []string{"pr", "issue", "mr", "release"}
+	forgeMessageVerbs  = []string{"create", "edit", "comment", "review", "merge", "close", "reopen", "note"}
 )
 
 // gitSub returns the index of git's subcommand in args, len(args) when there
@@ -422,7 +528,7 @@ func hasAnyPrefix(w string, prefixes []string) bool {
 // gitReads reports a git command that leaves the work tree as it is: one of
 // gitReaders, with no option that sets config, runs a program or writes a
 // file. A commit's message is text, not an option.
-func gitReads(args []string) bool {
+func gitReads(args, heads []string) bool {
 	sub, ok := gitSub(args)
 	if !ok {
 		return false
@@ -433,7 +539,7 @@ func gitReads(args []string) bool {
 	if !slices.Contains(gitReaders, args[sub]) {
 		return false
 	}
-	skip := messageArgs("git", args, args)
+	skip := messageArgs("git", args, heads)
 	for i := sub + 1; i < len(args); i++ {
 		if !slices.Contains(skip, i) && gitRuns(args[i]) {
 			return false
@@ -468,29 +574,62 @@ func messageArgs(name string, args, heads []string) []int {
 		}
 		return messageWords(args, heads, sub+1, []string{"-m", "--message"}, []string{"--message="}, true)
 	case "gh", "glab":
+		if !forgeMessages(args) {
+			return nil
+		}
 		return messageWords(args, heads, 0, forgeMessageOpts, forgeGlueOpts, false)
 	}
 	return nil
 }
 
+// forgeMessages reports a forge command whose first two words that are not
+// flags are a group and a verb that take a message.
+func forgeMessages(args []string) bool {
+	var words []string
+	for _, w := range args {
+		if len(words) < 2 && !strings.HasPrefix(w, "-") {
+			words = append(words, w)
+		}
+	}
+	return len(words) == 2 && slices.Contains(forgeMessageGroups, words[0]) && slices.Contains(forgeMessageVerbs, words[1])
+}
+
 // messageWords scans args from i for an option in opts, or with cluster a
-// short cluster ending in m, and returns the index of its value, and for a
-// word starting with one of glue its own.
+// short cluster of commit flags ending in m, and returns the index of its
+// value, and for a word starting with one of glue its own. An opaque word
+// (an empty arg) whose head is such a cluster, glued to its message, is one.
 func messageWords(args, heads []string, from int, opts, glue []string, cluster bool) []int {
 	var out []int
 	for i := from; i < len(args); i++ {
-		w := args[i]
-		if slices.Contains(opts, w) || cluster && strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "--") && strings.HasSuffix(w, "m") {
+		w, head := args[i], heads[i]
+		glued, short := false, false
+		if cluster {
+			glued, short = shortMessage(head)
+		}
+		switch {
+		case slices.Contains(opts, w), short && !glued && w != "":
 			if i++; i < len(args) {
 				out = append(out, i)
 			}
-			continue
-		}
-		if hasAnyPrefix(heads[i], glue) {
+		case short, hasAnyPrefix(head, glue):
 			out = append(out, i)
 		}
 	}
 	return out
+}
+
+// shortMessage reads w as a git commit's short options up to an m, which only
+// valueless flags may precede, as in -am: glued reports that the message
+// follows the m in the same word.
+func shortMessage(w string) (glued, ok bool) {
+	if len(w) < 2 || w[0] != '-' || w[1] == '-' {
+		return false, false
+	}
+	rest := strings.TrimLeft(w[1:], "asnvqeiop")
+	if rest == "" || rest[0] != 'm' {
+		return false, false
+	}
+	return len(rest) > 1, true
 }
 
 // heads returns the text of each word in args, or for an opaque one what
@@ -593,20 +732,33 @@ func sedCluster(cluster string, next func() string) (script, ok bool) {
 func sedScript(s string) bool { return s != "" && !strings.ContainsAny(s, "wWe") }
 
 // chdirs records the dirs a command changes into: cd's and pushd's operand
-// (home without one), and the -C dir of git, make and tar. One whose value
-// cannot be told (cd -, popd, an opaque word) is an opaque chdir.
-func (a *accessor) chdirs(name string, words []*syntax.Word, argv []string, idx, cmdArg int, text string) {
+// (home without one), the -C dir of git, make and tar, and the chdir option of
+// an env or sudo word before the command word. One whose value cannot be told
+// (cd -, popd, pushd +N, an opaque word) is an opaque chdir.
+func (a *accessor) chdirs(name string, words []*syntax.Word, argv []string, idx int, afterFlag bool, cmdArg int, text string) {
 	syntaxAt := func(i int) *syntax.Word {
 		if cmdArg < 0 || i >= len(words) {
 			return nil
 		}
 		return words[i]
 	}
+	// After a flag the command word may be a flag's value, so the wrapper's own
+	// options run to the end of the words.
+	if afterFlag {
+		for i, w := range argv {
+			switch wordName(w) {
+			case "env":
+				a.chdirOpts(argv, i+1, syntaxAt, text, "-C", "--chdir")
+			case "sudo":
+				a.chdirOpts(argv, i+1, syntaxAt, text, "-D", "--chdir")
+			}
+		}
+	}
 	switch {
 	case name == "cd" || name == "pushd":
 		for i := idx + 1; i < len(argv); i++ {
 			switch w := argv[i]; {
-			case w == "-":
+			case w == "-", name == "pushd" && stackIndex(w):
 				a.touch(Touch{Opaque: true, Chdir: true})
 			case strings.HasPrefix(w, "-") && w != "":
 				continue
@@ -626,17 +778,29 @@ func (a *accessor) chdirs(name string, words []*syntax.Word, argv []string, idx,
 	case name == "popd":
 		a.touch(Touch{Opaque: true, Chdir: true})
 	case slices.Contains(chdirTools, name):
-		for i := idx + 1; i < len(argv); i++ {
-			w := argv[i]
-			switch {
-			case w == "-C" || w == "--directory" || w == "--work-tree" || w == "--git-dir":
-				if i+1 < len(argv) {
-					a.chdir(syntaxAt(i+1), argv[i+1], text)
-				}
-			case strings.HasPrefix(w, "-C") && len(w) > 2:
-				a.touch(Touch{Text: w[2:], Chdir: true})
-			case strings.HasPrefix(w, "--directory="), strings.HasPrefix(w, "--work-tree="), strings.HasPrefix(w, "--git-dir="):
-				_, v, _ := strings.Cut(w, "=")
+		a.chdirOpts(argv, idx+1, syntaxAt, text, "-C", "--directory", "--work-tree", "--git-dir")
+	}
+}
+
+// stackIndex reports a +N or -N operand, which names a dir on the stack.
+func stackIndex(w string) bool {
+	return len(w) > 1 && (w[0] == '+' || w[0] == '-') && digits(w[1:])
+}
+
+// chdirOpts records the dir each option in argv[from:] sets: short as `-C dir`
+// or `-Cdir`, a long one as `--opt dir` or `--opt=dir`.
+func (a *accessor) chdirOpts(argv []string, from int, syntaxAt func(int) *syntax.Word, text, short string, long ...string) {
+	for i := from; i < len(argv); i++ {
+		w := argv[i]
+		switch {
+		case w == short || slices.Contains(long, w):
+			if i+1 < len(argv) {
+				a.chdir(syntaxAt(i+1), argv[i+1], text)
+			}
+		case strings.HasPrefix(w, short) && len(w) > len(short):
+			a.touch(Touch{Text: w[len(short):], Chdir: true})
+		case strings.HasPrefix(w, "--"):
+			if opt, v, ok := strings.Cut(w, "="); ok && slices.Contains(long, opt) {
 				a.touch(Touch{Text: v, Chdir: true})
 			}
 		}
@@ -651,7 +815,7 @@ func (a *accessor) searchesCDPATH(operand string) bool {
 	if operand == "" || first == "" || first == "." || first == ".." {
 		return false
 	}
-	if _, ok := a.j.vars["CDPATH"]; ok || a.tainted["CDPATH"] {
+	if _, ok := a.j.vars["CDPATH"]; ok || a.tainted["CDPATH"] || a.cdpath {
 		return true
 	}
 	v, ok := a.j.host.lookup("CDPATH")
@@ -836,13 +1000,13 @@ func (a *accessor) touch(t Touch) {
 
 // opaque reports a word holding a part whose value the text does not tell.
 func (a *accessor) opaque(w *syntax.Word) bool {
-	_, ok := a.cut(w.Parts)
+	_, ok := a.cut(w.Parts, false)
 	return ok
 }
 
 // opaquePrefix renders what precedes an opaque word's first opaque part.
 func (a *accessor) opaquePrefix(w *syntax.Word) (string, bool) {
-	prefix, ok := a.cut(w.Parts)
+	prefix, ok := a.cut(w.Parts, false)
 	if !ok {
 		return "", false
 	}
@@ -853,22 +1017,22 @@ func (a *accessor) opaquePrefix(w *syntax.Word) (string, bool) {
 
 // cut returns parts up to the first opaque one, cutting inside a
 // double-quoted part, and whether there is one.
-func (a *accessor) cut(parts []syntax.WordPart) ([]syntax.WordPart, bool) {
+func (a *accessor) cut(parts []syntax.WordPart, quoted bool) ([]syntax.WordPart, bool) {
 	for i, p := range parts {
 		if dq, ok := p.(*syntax.DblQuoted); ok {
-			if inner, cut := a.cut(dq.Parts); cut {
+			if inner, cut := a.cut(dq.Parts, true); cut {
 				return append(slices.Clone(parts[:i]), &syntax.DblQuoted{Parts: inner}), true
 			}
 			continue
 		}
-		if a.opaquePart(p, i) {
+		if a.opaquePart(p, i, quoted) {
 			return parts[:i], true
 		}
 	}
 	return nil, false
 }
 
-func (a *accessor) opaquePart(p syntax.WordPart, i int) bool {
+func (a *accessor) opaquePart(p syntax.WordPart, i int, quoted bool) bool {
 	switch p := p.(type) {
 	case *syntax.Lit:
 		// ~+ and ~- are the command's PWD and OLDPWD.
@@ -876,7 +1040,7 @@ func (a *accessor) opaquePart(p syntax.WordPart, i int) bool {
 	case *syntax.CmdSubst:
 		return true
 	case *syntax.ParamExp:
-		return a.opaqueParam(p)
+		return a.ifs && !quoted || a.opaqueParam(p)
 	}
 	return false
 }
@@ -898,9 +1062,9 @@ func (a *accessor) opaqueParam(p *syntax.ParamExp) bool {
 
 // known reports a variable whose value the renderer has: assigned once in the
 // command, a special parameter that is no path, or set in the host's
-// environment.
+// environment. IFS is not once the script may have changed it.
 func (a *accessor) known(name string) bool {
-	if a.tainted[name] {
+	if a.tainted[name] || name == "IFS" && a.ifs {
 		return false
 	}
 	if _, ok := a.j.vars[name]; ok {
