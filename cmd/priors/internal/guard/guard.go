@@ -88,17 +88,16 @@ var (
 		"directory", "dir",
 	}
 	contentKeys = []string{"content", "contents", "codeedit", "newsource", "text", "newstring", "newtext"}
-	// editKeys are the keys an edit reads besides its new text, which is a
-	// content key.
-	editKeys = []string{"oldstring", "oldtext", "replaceall", "edits"}
-	keyNorm  = strings.NewReplacer("_", "", "-", "")
-	quotes   = strings.NewReplacer(`"`, "", "'", "", `\`, "")
-	// mcpReads are the last segments of an MCP tool's name that read, and
-	// writeVerbs the words that make one a write all the same.
-	mcpReads   = []string{"*get_file_contents", "*read_text_file", "*read_file", "*list_*", "*search*"}
+	keyNorm     = strings.NewReplacer("_", "", "-", "")
+	quotes      = strings.NewReplacer(`"`, "", "'", "", `\`, "")
+	// mcpReads are the patterns the last segment of an MCP tool's name matches
+	// when it reads, and writeVerbs the words that make one a write all the
+	// same.
+	mcpReads   = []string{"search*", "list_*", "*get_file_contents", "*read_file", "*read_text_file"}
 	writeVerbs = []string{
 		"replace", "write", "edit", "create", "delete", "remove", "move", "rename", "update", "set", "put",
 		"patch", "insert", "append", "upload", "push", "commit", "merge",
+		"save", "add", "download", "export", "copy", "send", "run", "exec", "interact", "kill", "start", "stop", "install",
 	}
 	// fuzzy folds what pi's edit forgives when its old text is not found.
 	fuzzy = strings.NewReplacer(
@@ -115,8 +114,8 @@ type Store struct{ Name, Path string }
 type Paths struct {
 	Stores []Store
 	State  string
-	// Config is the user config file. Its dir is guarded when it is priors'
-	// own, else the file alone.
+	// Config is the user config file, which may link elsewhere. Its dir is
+	// guarded as well when it is priors' own.
 	Config string
 }
 
@@ -183,9 +182,8 @@ func New(p Paths, host *gate.Host) *Guard {
 	if p.Config != "" {
 		if dir := filepath.Dir(p.Config); filepath.Base(dir) == "priors" {
 			g.add(dir, kindConfig, "priors' config dir")
-		} else {
-			g.add(p.Config, kindConfig, "priors' config file")
 		}
+		g.add(p.Config, kindConfig, "priors' config file")
 		g.links = append(g.links, p.Config)
 	}
 	return g
@@ -395,11 +393,6 @@ func (g *Guard) tool(cwd, name string, input json.RawMessage) string {
 		return deny("the %s input names an edit text more than once, and the guard cannot tell which the tool uses", name)
 	}
 	c := g.newCheck(cwd, nil)
-	for _, p := range paths {
-		if r := c.toolPath(name, p, in); r != "" {
-			return r
-		}
-	}
 	for _, pf := range in.patches {
 		for _, p := range pf.paths {
 			if r := c.toolPath(name, p, nil); r != "" {
@@ -408,6 +401,11 @@ func (g *Guard) tool(cwd, name string, input json.RawMessage) string {
 			if r := c.patch(name, p, pf); r != "" {
 				return r
 			}
+		}
+	}
+	for _, p := range paths {
+		if r := c.toolPath(name, p, in); r != "" {
+			return r
 		}
 	}
 	return ""
@@ -908,8 +906,6 @@ func (c *check) links() []linkTarget {
 			case err != nil:
 				c.cut = c.cut || !errors.Is(err, fs.ErrNotExist)
 				return nil //nolint:nilerr // the walk goes on past an unreadable entry, and is cut
-			case d.IsDir() && d.Name() == "objects" && filepath.Base(filepath.Dir(p)) == ".git":
-				return filepath.SkipDir
 			case !d.Type().IsRegular():
 				return nil
 			case c.budget == 0:
@@ -1044,13 +1040,27 @@ type edit struct {
 	pi bool
 }
 
-// judged are the strings judged as paths: those under a path key, and the
-// single lines of other.
+// judged are the strings judged as paths, as they are and trimmed: those
+// under a path key, and the short ones of other. A call that names no path
+// is judged by its content too.
 func (in *toolInput) judged() []string {
-	out := slices.Clone(in.paths)
-	for _, s := range in.other {
-		if len(s) <= maxPath && !strings.ContainsAny(s, "\r\n") {
-			out = append(out, s)
+	var out []string
+	add := func(s string) {
+		out = append(out, s)
+		if t := strings.TrimSpace(s); t != s {
+			out = append(out, t)
+		}
+	}
+	for _, s := range in.paths {
+		add(s)
+	}
+	short := in.other
+	if len(in.paths) == 0 {
+		short = slices.Concat(short, in.contents)
+	}
+	for _, s := range short {
+		if len(s) <= maxPath {
+			add(s)
 		}
 	}
 	return out
@@ -1089,18 +1099,17 @@ func (in *toolInput) object(m map[string]any, depth int) {
 		nk := keyNorm.Replace(strings.ToLower(k))
 		byKey[nk] = append(byKey[nk], m[k])
 	}
-	in.editsOf(byKey)
+	taken := in.editsOf(byKey)
 	for _, k := range slices.Sorted(maps.Keys(byKey)) {
 		for _, v := range byKey[k] {
 			switch {
+			case slices.Contains(taken, k):
 			case slices.Contains(pathKeys, k):
-				in.strings(v, &in.paths)
+				in.strings(v, &in.paths, depth+1)
 			case slices.Contains(contentKeys, k):
-				if _, edit := byKey["old"+strings.TrimPrefix(k, "new")]; !edit || !strings.HasPrefix(k, "new") {
-					in.strings(v, &in.contents)
-				}
-			case !slices.Contains(editKeys, k):
-				in.strings(v, &in.other)
+				in.strings(v, &in.contents, depth+1)
+			default:
+				in.strings(v, &in.other, depth+1)
 			}
 			in.walk(v, depth+1)
 		}
@@ -1108,8 +1117,9 @@ func (in *toolInput) object(m map[string]any, depth int) {
 }
 
 // editsOf reads old/new replacements: Claude's old_string and new_string,
-// Pi's oldText and newText.
-func (in *toolInput) editsOf(m map[string][]any) {
+// Pi's oldText and newText. It returns the keys the edits it read take, which
+// are neither paths nor contents.
+func (in *toolInput) editsOf(m map[string][]any) (taken []string) {
 	for _, pair := range []struct {
 		old, new string
 		pi       bool
@@ -1126,19 +1136,24 @@ func (in *toolInput) editsOf(m map[string][]any) {
 		nw, ok2 := news[0].(string)
 		if ok1 && ok2 {
 			in.edits = append(in.edits, edit{old: old, new: nw, all: slices.Contains(m["replaceall"], any(true)), pi: pair.pi})
+			taken = append(taken, pair.old, pair.new, "replaceall")
 		}
 	}
+	return taken
 }
 
-func (in *toolInput) strings(v any, out *[]string) {
+// strings adds the strings in v, in arrays nested to any depth, to out.
+func (in *toolInput) strings(v any, out *[]string, depth int) {
 	switch v := v.(type) {
 	case string:
 		*out = append(*out, v)
 	case []any:
+		if depth > maxDepth {
+			in.truncated = true
+			return
+		}
 		for _, e := range v {
-			if s, ok := e.(string); ok {
-				*out = append(*out, s)
-			}
+			in.strings(e, out, depth+1)
 		}
 	}
 }
