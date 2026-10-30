@@ -8,8 +8,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -101,86 +103,283 @@ type candidate struct {
 }
 
 // Result is a run's reports, one per item, and the commit's warning, as
-// write.Result.Warning words it.
+// write.Result.Warning words it. Failed counts the items that did not land
+// because something broke (the scanner, a lock, a write), not because the
+// write path refused them: a re-run may clear these, and the caller should
+// not report the run as clean.
 type Result struct {
 	Reports []Report
 	Warning string
+	Failed  int
 }
 
 // Run imports items into the personal store. A dry run is the review step:
 // it runs every check and writes nothing, so the owner sees what would land
-// and what is only proposed before a real run commits. A real run commits
-// what it published once, at the end, through the store's commit gate. The
-// error is a store the run cannot read, before anything is written.
+// and what is only proposed before a real run commits. A real run holds the
+// store's lock throughout, so no other writer commits a half-imported
+// checkout, and commits what it published once, at the end, through the
+// store's commit gate; it commits on every run, so a commit held back last
+// time is retried. The error is a store the run cannot read, before anything
+// is written.
 func Run(ctx context.Context, items []Item, o Options) (Result, error) {
-	checkout, known, err := loadStore(ctx, o.Config)
+	if !o.DryRun {
+		unlock, err := store.Lock(o.Config, string(route.StorePersonal))
+		if err != nil {
+			return Result{}, err
+		}
+		defer unlock()
+	}
+	checkout, known, damaged, err := loadStore(ctx, o.Config)
 	if err != nil {
 		return Result{}, err
 	}
 	var out Result
-	var accepted []candidate
-	for _, it := range items {
-		c, rep, ok := prepare(it, o, known)
-		if !ok {
-			out.Reports = append(out.Reports, rep)
-			continue
+	for _, d := range damaged {
+		out.Reports = append(out.Reports, Report{Outcome: Skipped, Source: d.path, Detail: "unreadable store fact: " + d.err.Error()})
+	}
+	pl := planRun(ctx, items, o, known, damaged)
+	out.Reports = append(out.Reports, pl.notes...)
+	out.Failed = pl.failed
+	if o.DryRun {
+		for _, p := range pl.items {
+			out.Reports = append(out.Reports, written(p.res, p.item.Source, true))
 		}
-		known = append(known, existing{path: it.Source + " (this run)", fact: c.fact, sum: c.fact.Metadata.Source.SHA256})
-		accepted = append(accepted, c)
+		return out, nil
 	}
-
-	names := map[string]bool{}
-	for _, k := range known {
-		names[k.fact.Name] = true
-	}
-	// A wiki-link may name a fact this run writes later, or, in a dry run,
-	// one it would have written earlier; a refused fact stops counting.
-	pending := map[string]bool{}
-	for _, c := range accepted {
-		pending[c.fact.Name] = true
-	}
-	published := 0
-	for _, c := range accepted {
-		f := c.fact
-		f.Body = relink(f.Body, names)
-		res, err := write.Add(ctx, o.Config, write.Request{
-			Fact:             f,
-			Session:          c.item.Session,
-			SessionID:        o.SessionID,
-			Engine:           o.Engine,
-			Host:             o.Host,
-			External:         o.External,
-			IdentityConflict: o.IdentityConflict,
-			Imported:         true,
-			Pending:          slices.Sorted(maps.Keys(pending)),
-			DryRun:           o.DryRun,
-			NoCommit:         true,
-		}, o.Deps)
-		if err != nil {
-			delete(pending, f.Name)
-			out.Reports = append(out.Reports, Report{Outcome: Skipped, Source: c.item.Source, Detail: "refused: " + err.Error()})
-			continue
-		}
-		if res.Outcome == "published" {
-			published++
-		}
-		out.Reports = append(out.Reports, written(res, c.item.Source, o.DryRun))
-	}
-	if published > 0 && !o.DryRun {
-		out.Warning = commitImport(ctx, o, checkout, published)
-	}
+	published := writeAll(ctx, o, checkout, pl, &out)
+	out.Warning = joinWarnings(out.Warning, commitImport(ctx, o, checkout, published))
 	return out, nil
 }
 
-// commitImport commits the checkout under the store's lock, as write.Add
-// commits one fact.
-func commitImport(ctx context.Context, o Options, checkout store.Root, n int) (warning string) {
-	unlock, err := store.Lock(o.Config, string(route.StorePersonal))
-	if err != nil {
-		return "nothing committed: " + err.Error()
+func joinWarnings(a, b string) string {
+	if a == "" || b == "" {
+		return a + b
 	}
-	defer unlock()
-	return commit.Checkout(ctx, o.Config, checkout, o.Deps.Rules, o.Deps.Scanner, fmt.Sprintf("priors: import %d facts", n))
+	return a + "; " + b
+}
+
+// planned is a candidate with the outcome of its dry run: where it would
+// land, and whether that is the checkout, which only a published fact's
+// wiki-link target counts.
+type planned struct {
+	candidate
+	idx       int
+	res       write.Result
+	publishes bool
+}
+
+type plan struct {
+	items  []planned
+	notes  []Report
+	failed int
+}
+
+// excluded is why an item left the plan. policy is true for a decision (the
+// write path's refusal, a damaged file in the way), false for a failure.
+type excluded struct {
+	err    error
+	policy bool
+}
+
+func request(p candidate, o Options, pending []string, dryRun bool) write.Request {
+	return write.Request{
+		Fact:             p.fact,
+		Session:          p.item.Session,
+		SessionID:        o.SessionID,
+		Engine:           o.Engine,
+		Host:             o.Host,
+		External:         o.External,
+		IdentityConflict: o.IdentityConflict,
+		Imported:         true,
+		Pending:          pending,
+		DryRun:           dryRun,
+		NoCommit:         true,
+	}
+}
+
+// planRun decides every item's fate before anything is written. A fact's
+// wiki-link may name another fact of the run, but only one that lands in the
+// checkout: a target that is refused, or that lands flagged in the local
+// layer, leaves a published fact's link dangling and the commit gate refusing
+// the checkout. A fact that lands flagged is not under that gate, so it may
+// name any fact of the run still live. So each round dry-runs the items with
+// the names that published last round as the ones a published fact's link may
+// name, and repeats until nothing changes; an item the write path refuses is
+// dropped and the rest re-prepared, so a near duplicate no longer shadows
+// against a fact that will not land. Both sets only grow, so it ends.
+func planRun(ctx context.Context, items []Item, o Options, base []existing, damaged []damagedFact) plan {
+	damagedPaths := map[string]bool{}
+	for _, d := range damaged {
+		damagedPaths[filepath.Clean(d.path)] = true
+	}
+	dropped := map[int]excluded{}
+	unpublished := map[int]bool{}
+	for {
+		known := slices.Clone(base)
+		var cands []candidate
+		idxs := make([]int, 0, len(items))
+		var notes []Report
+		for i, it := range items {
+			if why, ok := dropped[i]; ok {
+				notes = append(notes, droppedReport(it, why))
+				continue
+			}
+			c, rep, ok := prepare(it, o, known)
+			if !ok {
+				notes = append(notes, rep)
+				continue
+			}
+			known = append(known, existing{path: it.Source + " (this run)", fact: c.fact, sum: c.fact.Metadata.Source.SHA256})
+			cands = append(cands, c)
+			idxs = append(idxs, i)
+		}
+		names := map[string]bool{}
+		for _, k := range known {
+			names[k.fact.Name] = true
+		}
+		pending, live := map[string]bool{}, map[string]bool{}
+		for j := range cands {
+			cands[j].fact.Body = relink(cands[j].fact.Body, names)
+			live[cands[j].fact.Name] = true
+			if !unpublished[idxs[j]] {
+				pending[cands[j].fact.Name] = true
+			}
+		}
+		publishing, all := slices.Sorted(maps.Keys(pending)), slices.Sorted(maps.Keys(live))
+
+		changed := false
+		var out []planned
+		for j, c := range cands {
+			targets := publishing
+			if unpublished[idxs[j]] {
+				targets = all
+			}
+			res, err := write.AddLocked(ctx, o.Config, request(c, o, targets, true), o.Deps)
+			switch {
+			case err != nil:
+				dropped[idxs[j]] = excluded{err: err, policy: errors.Is(err, write.ErrRefusal)}
+				changed = true
+				continue
+			case damagedPaths[filepath.Clean(res.Path)]:
+				dropped[idxs[j]] = excluded{err: fmt.Errorf("it would overwrite the unreadable store fact %s", res.Path), policy: true}
+				changed = true
+				continue
+			}
+			publishes := res.Outcome == "published"
+			if !publishes && !unpublished[idxs[j]] {
+				unpublished[idxs[j]] = true
+				changed = true
+			}
+			out = append(out, planned{candidate: c, idx: idxs[j], res: res, publishes: publishes})
+		}
+		if changed {
+			continue
+		}
+		pl := plan{items: out, notes: notes}
+		for _, why := range dropped {
+			if !why.policy {
+				pl.failed++
+			}
+		}
+		return pl
+	}
+}
+
+func droppedReport(it Item, why excluded) Report {
+	kind := "failed: "
+	if why.policy {
+		kind = "refused: "
+	}
+	return Report{Outcome: Skipped, Source: it.Source, Detail: kind + why.err.Error()}
+}
+
+// writeAll writes the plan's items in order, appending their reports to out,
+// and returns how many it published. The plan holds, but a write can still
+// fail: then a link to that fact would dangle, so the facts already written
+// that link to it, and in turn those they link from, are taken back out, and
+// later ones no longer count it as a link target.
+func writeAll(ctx context.Context, o Options, checkout store.Root, pl plan, out *Result) (published int) {
+	pending, live := map[string]bool{}, map[string]bool{}
+	for _, p := range pl.items {
+		live[p.fact.Name] = true
+		if p.publishes {
+			pending[p.fact.Name] = true
+		}
+	}
+	type landed struct {
+		p      planned
+		report int
+	}
+	var landing []landed
+	rolledBack := false
+	for _, p := range pl.items {
+		targets := pending
+		if !p.publishes {
+			targets = live
+		}
+		res, err := write.AddLocked(ctx, o.Config, request(p.candidate, o, slices.Sorted(maps.Keys(targets)), false), o.Deps)
+		if err != nil {
+			delete(live, p.fact.Name)
+			rep := droppedReport(p.item, excluded{err: err, policy: errors.Is(err, write.ErrRefusal)})
+			out.Reports = append(out.Reports, rep)
+			if !errors.Is(err, write.ErrRefusal) {
+				out.Failed++
+			}
+		} else {
+			out.Reports = append(out.Reports, written(res, p.item.Source, false))
+			if res.Outcome == "published" {
+				landing = append(landing, landed{p: planned{candidate: p.candidate, res: res}, report: len(out.Reports) - 1})
+			}
+		}
+		if !p.publishes || (err == nil && res.Outcome == "published") {
+			continue
+		}
+		delete(pending, p.fact.Name)
+		dead := map[string]bool{p.fact.Name: true}
+		for grew := true; grew; {
+			grew = false
+			for _, l := range landing {
+				if dead[l.p.fact.Name] || !slices.ContainsFunc(linkTargets(l.p.fact.Body), func(t string) bool { return dead[t] }) {
+					continue
+				}
+				dead[l.p.fact.Name] = true
+				grew = true
+				if err := os.Remove(l.p.res.Path); err != nil {
+					out.Warning = joinWarnings(out.Warning, "rolling back "+l.p.item.Source+": "+err.Error())
+				}
+				out.Reports[l.report] = Report{Outcome: Skipped, Source: l.p.item.Source, Detail: "failed: rolled back, it links " + p.fact.Name + " or a fact that links it, which was not written"}
+				out.Failed++
+				delete(pending, l.p.fact.Name)
+				rolledBack = true
+			}
+		}
+		landing = slices.DeleteFunc(landing, func(l landed) bool { return dead[l.p.fact.Name] })
+	}
+	if rolledBack {
+		if _, _, err := checkout.WriteIndex(o.Deps.Rules); err != nil {
+			out.Warning = joinWarnings(out.Warning, "regenerating the index after a rollback: "+err.Error())
+		}
+	}
+	return len(landing)
+}
+
+// linkTargets names the facts body links to.
+func linkTargets(body string) []string {
+	var out []string
+	for _, m := range wikilinkRE.FindAllStringSubmatch(body, -1) {
+		out = append(out, strings.TrimSpace(m[1]))
+	}
+	return out
+}
+
+// commitImport commits the checkout, as write.Add commits one fact. The
+// caller holds the store's lock.
+func commitImport(ctx context.Context, o Options, checkout store.Root, n int) (warning string) {
+	msg := "priors: import"
+	if n > 0 {
+		msg = fmt.Sprintf("priors: import %d facts", n)
+	}
+	return commit.Checkout(ctx, o.Config, checkout, o.Deps.Rules, o.Deps.Scanner, msg)
 }
 
 func written(res write.Result, source string, dryRun bool) Report {
@@ -208,16 +407,25 @@ type existing struct {
 	raw  string
 }
 
+// damagedFact is a file in the store Walk could not read, which dedup cannot
+// see.
+type damagedFact struct {
+	path string
+	err  error
+}
+
 // loadStore reads the personal store's checkout and local layer, the
-// destinations an import can land in.
-func loadStore(ctx context.Context, cfg config.Config) (store.Root, []existing, error) {
+// destinations an import can land in, and the files in them it could not
+// read.
+func loadStore(ctx context.Context, cfg config.Config) (store.Root, []existing, []damagedFact, error) {
 	checkout, err := store.CheckoutRoot(ctx, cfg, route.StorePersonal)
 	if err != nil {
-		return store.Root{}, nil, err
+		return store.Root{}, nil, nil, err
 	}
 	var out []existing
+	var damaged []damagedFact
 	for _, root := range []store.Root{checkout, store.LocalRoot(cfg, route.StorePersonal)} {
-		entries, _ := root.Walk()
+		entries, walkErrs := root.Walk()
 		for _, e := range entries {
 			k := existing{path: filepath.Join(root.Path, filepath.FromSlash(e.Rel)), fact: e.Fact, raw: digest(e.Raw)}
 			if s := e.Fact.Metadata.Source; s != nil {
@@ -225,8 +433,11 @@ func loadStore(ctx context.Context, cfg config.Config) (store.Root, []existing, 
 			}
 			out = append(out, k)
 		}
+		for _, we := range walkErrs {
+			damaged = append(damaged, damagedFact{path: filepath.Join(root.Path, filepath.FromSlash(we.Rel)), err: we.Err})
+		}
 	}
-	return checkout, out, nil
+	return checkout, out, damaged, nil
 }
 
 // prepare routes, names, normalises and dedups one item. ok is false when

@@ -12,11 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/noamsto/hookyard/cmd/priors/internal/commit"
 	"github.com/noamsto/hookyard/cmd/priors/internal/commit/committest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
+	"github.com/noamsto/hookyard/cmd/priors/internal/store"
 	"github.com/noamsto/hookyard/cmd/priors/internal/tools/toolstest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/write"
 )
@@ -146,7 +148,8 @@ func native(name, description, body string) string {
 		"\nmetadata:\n  node_type: memory\n  type: project\n  originSessionId: native-session\n  modified: 2026-09-24T10:27:52.269Z\n---\n\n" + body
 }
 
-func (fx fixture) run(t *testing.T, dryRun bool) []string {
+// runResult is a run's Result and its output lines, whatever it warned.
+func (fx fixture) runResult(t *testing.T, dryRun bool) (Result, []string) {
 	t.Helper()
 	ctx := context.Background()
 	items, notes, err := Claude(ctx, fx.claude, fx.cfg, route.Resolver{SSHHost: func(_ context.Context, alias string) string { return alias }})
@@ -159,14 +162,32 @@ func (fx fixture) run(t *testing.T, dryRun bool) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Warning != "" {
-		t.Errorf("warning: %s", res.Warning)
-	}
 	var lines []string
 	for _, r := range append(notes, res.Reports...) {
 		lines = append(lines, r.String())
 	}
+	return res, lines
+}
+
+func (fx fixture) run(t *testing.T, dryRun bool) []string {
+	t.Helper()
+	res, lines := fx.runResult(t, dryRun)
+	if res.Warning != "" {
+		t.Errorf("warning: %s", res.Warning)
+	}
 	return lines
+}
+
+// script is an executable shell script in a fresh dir, standing in for the
+// secret scanner.
+func script(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(tempDir(t), "scanner")
+	writeFile(t, path, "#!/bin/sh\n"+body)
+	if err := os.Chmod(path, 0o755); err != nil { //nolint:gosec // a test executable
+		t.Fatal(err)
+	}
+	return path
 }
 
 // wantLines checks that each want is a prefix of some line, and that there
@@ -462,5 +483,292 @@ func TestDecodeProjectDir(t *testing.T) {
 				t.Errorf("decodeProjectDir(%q) = %q, %v; want %q", tt.encoded, got, ok, tt.want)
 			}
 		})
+	}
+}
+
+// checkoutCommits fails when the personal store's commit gate is wedged: a
+// later commit of the checkout must neither be refused nor leave it dirty.
+func (fx fixture) checkoutCommits(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	checkout, err := store.CheckoutRoot(ctx, fx.cfg, route.StorePersonal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := commit.Checkout(ctx, fx.cfg, checkout, fx.opts.Deps.Rules, fx.opts.Deps.Scanner, "priors: test"); w != "" {
+		t.Errorf("the commit gate is held back: %s", w)
+	}
+	if status := git(t, fx.cfg.PersonalStore, "status", "--porcelain"); status != "" {
+		t.Errorf("the checkout is dirty after a commit:\n%s", status)
+	}
+}
+
+func TestLinkToATargetThatDoesNotPublishIsNotPublished(t *testing.T) {
+	const body = "Facts are plain markdown files with frontmatter, one per file, in a store.\n"
+	tests := []struct {
+		name   string
+		target string
+		want   func(dryRun bool, source string) string
+	}{
+		{"target lands flagged", "see https://example.com/doc for the layout of the store\n",
+			func(dryRun bool, source string) string {
+				if dryRun {
+					return "would flag personal "
+				}
+				return "flagged personal "
+			}},
+		{"target is refused", "the key is " + "AK" + "IA" + "IOSFODNN7EXAMPLE\n",
+			func(_ bool, source string) string { return "skipped " + source + ": refused: " }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := setup(t, "personal")
+			mem := fx.memDir(repo(t, personalRemote))
+			writeFile(t, filepath.Join(mem, "a-linker.md"), native("a-linker", "links to the target", "See [[b-target]]. "+body))
+			writeFile(t, filepath.Join(mem, "b-target.md"), native("b-target", "the target", tt.target))
+			linker := sourcePath(filepath.Join(mem, "a-linker.md"))
+			targetSource := sourcePath(filepath.Join(mem, "b-target.md"))
+			for _, dryRun := range []bool{true, false} {
+				got := fx.run(t, dryRun)
+				if len(got) != 2 {
+					t.Fatalf("dry=%v: lines = %v", dryRun, got)
+				}
+				if !slices.ContainsFunc(got, func(l string) bool {
+					return strings.HasPrefix(l, "skipped "+linker+": refused: ") && strings.Contains(l, "wikilink-dangling")
+				}) {
+					t.Errorf("dry=%v: the linker is not refused for its dangling link:\n%s", dryRun, strings.Join(got, "\n"))
+				}
+				if want := tt.want(dryRun, targetSource); !slices.ContainsFunc(got, func(l string) bool { return strings.HasPrefix(l, want) }) {
+					t.Errorf("dry=%v: no line starts %q in:\n%s", dryRun, want, strings.Join(got, "\n"))
+				}
+			}
+			if _, err := os.Stat(filepath.Join(fx.cfg.PersonalStore, "demo", "a-linker.md")); err == nil {
+				t.Error("the linker reached the checkout")
+			}
+			fx.checkoutCommits(t)
+		})
+	}
+}
+
+func TestADroppedItemNoLongerShadowsItsNearDuplicate(t *testing.T) {
+	fx := setup(t, "personal")
+	mem := fx.memDir(repo(t, personalRemote))
+	writeFile(t, filepath.Join(mem, "a-first.md"), native("a-first", "the same description", "the key is "+"AK"+"IA"+"IOSFODNN7EXAMPLE\n"))
+	writeFile(t, filepath.Join(mem, "b-second.md"), native("b-second", "the same description", "a different body\n"))
+	wantLines(t, fx.run(t, false), []string{
+		"skipped " + sourcePath(filepath.Join(mem, "a-first.md")) + ": refused: ",
+		"published personal " + filepath.Join(fx.cfg.PersonalStore, "demo", "b-second.md"),
+	})
+}
+
+func waitFor(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s never appeared", path)
+}
+
+func TestAConcurrentWriterWaitsForTheImportsCommit(t *testing.T) {
+	fx := setup(t, "personal")
+	mem := fx.memDir(repo(t, personalRemote))
+	writeFile(t, filepath.Join(mem, "store-format.md"), native("store-format", "how the store is laid out", "One fact per file.\n"))
+	ctx := context.Background()
+	items, _, err := Claude(ctx, fx.claude, fx.cfg, route.Resolver{SSHHost: func(_ context.Context, alias string) string { return alias }})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// write.Add scans before it takes the store's lock, so the import's scanner
+	// is what holds the import inside the lock while the writer arrives.
+	sig := tempDir(t)
+	started, release, scanned := filepath.Join(sig, "started"), filepath.Join(sig, "release"), filepath.Join(sig, "scanned")
+	slow := script(t, ": > '"+started+"'\ni=0\nwhile [ ! -e '"+release+"' ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done\nprintf '[]'\n")
+	fast := script(t, ": > '"+scanned+"'\nprintf '[]'\n")
+	o := fx.opts
+	o.Deps.Scanner = gate.Scanner{Bin: slow}
+
+	importDone := make(chan error, 1)
+	go func() {
+		_, err := Run(ctx, items, o)
+		importDone <- err
+	}()
+	waitFor(t, started)
+
+	type added struct {
+		res write.Result
+		err error
+	}
+	addDone := make(chan added, 1)
+	go func() {
+		d := fx.opts.Deps
+		d.Scanner = gate.Scanner{Bin: fast}
+		res, err := write.Add(ctx, fx.cfg, write.Request{
+			Fact:      storedFact("concurrent-note", "an unrelated note", "Written while the import runs.\n"),
+			Session:   route.Session{Class: route.ClassPersonal, Repo: "demo"},
+			SessionID: "s1", Engine: "claude", Host: "laptop",
+		}, d)
+		addDone <- added{res, err}
+	}()
+	waitFor(t, scanned)
+	select {
+	case a := <-addDone:
+		t.Fatalf("the writer finished while the import held the lock: %+v", a)
+	case <-time.After(300 * time.Millisecond):
+	}
+	writeFile(t, release, "")
+
+	select {
+	case err := <-importDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the import never finished")
+	}
+	select {
+	case a := <-addDone:
+		if a.err != nil || a.res.Warning != "" || a.res.Outcome != "published" {
+			t.Errorf("the writer = %+v, %v", a.res, a.err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the writer never finished")
+	}
+	want := "priors: add concurrent-note\npriors: import 1 facts\n"
+	if got := git(t, fx.cfg.PersonalStore, "log", "--format=%s"); got != want {
+		t.Errorf("commits, newest first:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestAFailureThatIsNotARefusalFailsTheRun(t *testing.T) {
+	const body = "Facts are plain markdown files with frontmatter, one per file, in a store.\n"
+	t.Run("a write that fails rolls back the facts that link it", func(t *testing.T) {
+		fx := setup(t, "personal")
+		mem := fx.memDir(repo(t, personalRemote))
+		writeFile(t, filepath.Join(mem, "a-linker.md"), native("a-linker", "links to the target", "See [[b-target]]. "+body))
+		writeFile(t, filepath.Join(mem, "b-target.md"), native("b-target", "the target", "The target.\n"))
+		linker := sourcePath(filepath.Join(mem, "a-linker.md"))
+		target := sourcePath(filepath.Join(mem, "b-target.md"))
+		blocker := filepath.Join(fx.cfg.PersonalStore, "demo", "b-target.md")
+		if err := os.MkdirAll(blocker, 0o755); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+
+		if res, lines := fx.runResult(t, true); res.Failed != 0 || len(lines) != 2 {
+			t.Fatalf("the dry run passes the plan: failed %d, lines:\n%s", res.Failed, strings.Join(lines, "\n"))
+		}
+		res, lines := fx.runResult(t, false)
+		if res.Failed != 2 {
+			t.Errorf("Failed = %d, want 2", res.Failed)
+		}
+		wantLines(t, lines, []string{
+			"skipped " + target + ": failed: ",
+			"skipped " + linker + ": failed: rolled back, it links b-target",
+		})
+		if _, err := os.Stat(filepath.Join(fx.cfg.PersonalStore, "demo", "a-linker.md")); err == nil {
+			t.Error("the rolled-back linker is still in the checkout")
+		}
+		if res.Warning != "" {
+			t.Errorf("warning: %s", res.Warning)
+		}
+		if err := os.Remove(blocker); err != nil {
+			t.Fatal(err)
+		}
+		fx.checkoutCommits(t)
+		wantLines(t, fx.run(t, false), []string{"published personal ", "published personal "})
+	})
+
+	t.Run("an unavailable scanner is a failure, not a refusal", func(t *testing.T) {
+		fx := setup(t, "personal")
+		mem := fx.memDir(repo(t, personalRemote))
+		writeFile(t, filepath.Join(mem, "store-format.md"), native("store-format", "how the store is laid out", body))
+		fx.opts.Deps.Scanner = gate.Scanner{Bin: script(t, "exit 1\n")}
+		for _, dryRun := range []bool{true, false} {
+			res, lines := fx.runResult(t, dryRun)
+			wantLines(t, lines, []string{"skipped " + sourcePath(filepath.Join(mem, "store-format.md")) + ": failed: secret scanner unavailable"})
+			if res.Failed != 1 {
+				t.Errorf("dry=%v: Failed = %d, want 1", dryRun, res.Failed)
+			}
+		}
+	})
+}
+
+func TestACommitHeldBackLastRunIsRetried(t *testing.T) {
+	fx := setup(t, "personal")
+	mem := fx.memDir(repo(t, personalRemote))
+	writeFile(t, filepath.Join(mem, "store-format.md"), native("store-format", "how the store is laid out", "One fact per file.\n"))
+	stray := filepath.Join(fx.cfg.PersonalStore, "demo", "stray.md")
+	writeFile(t, stray, "not a fact\n")
+
+	res, lines := fx.runResult(t, false)
+	wantLines(t, lines, []string{"skipped " + stray + ": unreadable store fact: ", "published personal "})
+	if !strings.Contains(res.Warning, "nothing committed") {
+		t.Errorf("warning = %q, want the commit held back", res.Warning)
+	}
+	if status := git(t, fx.cfg.PersonalStore, "status", "--porcelain", "--untracked-files=all"); !strings.Contains(status, "demo/store-format.md") {
+		t.Fatalf("the imported fact is not waiting in the checkout:\n%s", status)
+	}
+
+	if err := os.Remove(stray); err != nil {
+		t.Fatal(err)
+	}
+	wantLines(t, fx.run(t, false), []string{"unchanged " + sourcePath(filepath.Join(mem, "store-format.md")) + ": "})
+	if status := git(t, fx.cfg.PersonalStore, "status", "--porcelain"); status != "" {
+		t.Errorf("the retry left the checkout dirty:\n%s", status)
+	}
+	if got := git(t, fx.cfg.PersonalStore, "log", "--format=%s"); got != "priors: import\n" {
+		t.Errorf("commits:\n%s", got)
+	}
+}
+
+func TestAnUnreadableStoreFactIsReportedAndNeverOverwritten(t *testing.T) {
+	const damaged = "not a fact\n"
+	tests := []struct {
+		name      string
+		sessionID string
+		dir       func(fx fixture) string
+		dry, real string
+	}{
+		{"checkout", "s1", func(fx fixture) string { return filepath.Join(fx.cfg.PersonalStore, "demo") }, "would publish", "published"},
+		{"local layer", "", func(fx fixture) string { return filepath.Join(fx.cfg.State(), "local", "personal", "demo") }, "would flag", "flagged"},
+	}
+	for _, tt := range tests {
+		for _, dryRun := range []bool{true, false} {
+			name, landed := tt.name+" real run", tt.real
+			if dryRun {
+				name, landed = tt.name+" dry run", tt.dry
+			}
+			t.Run(name, func(t *testing.T) {
+				fx := setup(t, "personal")
+				fx.opts.SessionID = tt.sessionID
+				mem := fx.memDir(repo(t, personalRemote))
+				writeFile(t, filepath.Join(mem, "clashes.md"), native("clashes", "lands on the damaged file", "One fact per file.\n"))
+				writeFile(t, filepath.Join(mem, "fine.md"), native("fine", "lands beside it", "A different body entirely.\n"))
+				stray := filepath.Join(tt.dir(fx), "stray.md")
+				clash := filepath.Join(tt.dir(fx), "clashes.md")
+				writeFile(t, stray, damaged)
+				writeFile(t, clash, damaged)
+
+				res, lines := fx.runResult(t, dryRun)
+				wantLines(t, lines, []string{
+					"skipped " + stray + ": unreadable store fact: ",
+					"skipped " + clash + ": unreadable store fact: ",
+					"skipped " + sourcePath(filepath.Join(mem, "clashes.md")) + ": refused: it would overwrite the unreadable store fact " + clash,
+					landed + " personal ",
+				})
+				if res.Failed != 0 {
+					t.Errorf("Failed = %d, a refusal is not a failure", res.Failed)
+				}
+				for _, p := range []string{stray, clash} {
+					if got, err := os.ReadFile(p); err != nil || string(got) != damaged {
+						t.Errorf("%s = %q, %v; want it untouched", p, got, err)
+					}
+				}
+			})
+		}
 	}
 }

@@ -803,6 +803,29 @@ func TestImportDryRunThenImport(t *testing.T) {
 	wantContains(t, "re-run", again.stdout, "unchanged ~/.claude/projects/")
 }
 
+// TestImportExitsNonZeroOnlyForAFailure: a refused item is the write path's
+// decision and exits 0; an item that could not be written (here a directory
+// in its destination's place) is a failure a re-run may clear, and exits 1.
+func TestImportExitsNonZeroOnlyForAFailure(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	repo := sb.repo(personalRemote)
+	sb.record("sess-1")
+	project := regexp.MustCompile(`[^A-Za-z0-9]`).ReplaceAllString(repo, "-")
+	mem := filepath.Join(sb.dir, ".claude", "projects", project, "memory")
+	sb.writeFile(filepath.Join(mem, "leaky.md"), "---\nname: leaky\ndescription: a key\nmetadata:\n  type: project\n---\n\nthe key is "+"AK"+"IA"+"IOSFODNN7EXAMPLE\n")
+
+	refused := sb.run("", "import", "--session", "sess-1")
+	wantExit(t, refused, 0)
+	wantContains(t, "refusal", refused.stdout, "skipped ~/.claude/projects/", ": refused: ")
+
+	sb.writeFile(filepath.Join(mem, "store-format.md"), "---\nname: store-format\ndescription: how the store is laid out\nmetadata:\n  type: project\n---\n\nOne fact per file.\n")
+	sb.mkdir(filepath.Join(sb.personal, "demo", "store-format.md"))
+	failed := sb.run("", "import", "--session", "sess-1")
+	wantExit(t, failed, 1)
+	wantContains(t, "failure stdout", failed.stdout, ": failed: ")
+	wantContains(t, "failure stderr", failed.stderr, "1 items failed for reasons other than a refusal")
+}
+
 // TestSymlinkedStateDirIsOneDir: the marker handler and the write path both
 // land under the symlink's target.
 func TestSymlinkedStateDirIsOneDir(t *testing.T) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -78,6 +79,10 @@ func cmdImport(args []string, s streams) int {
 	}
 	if res.Warning != "" {
 		s.errln("warning:", res.Warning)
+	}
+	if res.Failed > 0 {
+		s.errln(fmt.Sprintf("%d items failed for reasons other than a refusal; running again may clear them", res.Failed))
+		return 1
 	}
 	return 0
 }
