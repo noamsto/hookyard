@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -19,6 +21,9 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"unicode"
+
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
@@ -41,6 +46,8 @@ const (
 	maxDepth = 16
 	// maxEntries bounds the attest entries read to match a hard link.
 	maxEntries = 4096
+	// maxPath bounds a string under an unknown key that is judged as a path.
+	maxPath = 4096
 )
 
 // kind is what a guarded root is.
@@ -65,6 +72,7 @@ var (
 	toolKinds = []kind{kindAttest, kindIndex, kindGit, kindState, kindConfig}
 	// readTools never write a file.
 	readTools = []string{
+		"lsp",
 		"read", "grep", "glob", "ls", "find", "view_image", "webfetch", "websearch", "web_fetch",
 		"web_search", "todowrite", "todoread", "task", "agent", "notebookread", "exitplanmode",
 		"enterplanmode", "bashoutput", "killshell", "toolsearch", "skill", "askuserquestion",
@@ -78,8 +86,24 @@ var (
 		"directory", "dir",
 	}
 	contentKeys = []string{"content", "contents", "codeedit", "newsource", "text", "newstring", "newtext"}
-	keyNorm     = strings.NewReplacer("_", "", "-", "")
-	quotes      = strings.NewReplacer(`"`, "", "'", "", `\`, "")
+	// editKeys are the keys an edit reads besides its new text, which is a
+	// content key.
+	editKeys = []string{"oldstring", "oldtext", "replaceall", "edits"}
+	keyNorm  = strings.NewReplacer("_", "", "-", "")
+	quotes   = strings.NewReplacer(`"`, "", "'", "", `\`, "")
+	// mcpReads are the last segments of an MCP tool's name that read, and
+	// writeVerbs the words that make one a write all the same.
+	mcpReads   = []string{"*get_file_contents", "*read_text_file", "*read_file", "*list_*", "*search*"}
+	writeVerbs = []string{
+		"replace", "write", "edit", "create", "delete", "remove", "move", "rename", "update", "set", "put",
+		"patch", "insert", "append", "upload", "push", "commit", "merge",
+	}
+	// fuzzy folds what pi's edit forgives when its old text is not found.
+	fuzzy = strings.NewReplacer(
+		"\u2018", "'", "\u2019", "'", "\u201a", "'", "\u201b", "'",
+		"\u201c", `"`, "\u201d", `"`, "\u201e", `"`, "\u201f", `"`,
+		"\u2010", "-", "\u2011", "-", "\u2012", "-", "\u2013", "-", "\u2014", "-", "\u2015", "-", "\u2212", "-",
+	)
 )
 
 // Store is one checkout the trust file pins.
@@ -204,10 +228,24 @@ func (g *Guard) Check(cwd, tool string, input json.RawMessage) string {
 			return r
 		}
 	}
-	if shell {
+	if shell || readsMCP(tool) {
 		return ""
 	}
 	return g.tool(cwd, tool, input)
+}
+
+// readsMCP reports an MCP tool named for a read: its last name segment
+// matches a read pattern and holds no write verb.
+func readsMCP(tool string) bool {
+	tool = strings.ToLower(tool)
+	if !strings.HasPrefix(tool, "mcp__") {
+		return false
+	}
+	seg := tool[strings.LastIndex(tool, "__")+2:]
+	if slices.ContainsFunc(writeVerbs, func(v string) bool { return strings.Contains(seg, v) }) {
+		return false
+	}
+	return slices.ContainsFunc(mcpReads, func(p string) bool { ok, _ := path.Match(p, seg); return ok })
 }
 
 // CallDir is the dir a call runs in: the envelope's, else the tool input's
@@ -331,7 +369,8 @@ func (g *Guard) tool(cwd, name string, input json.RawMessage) string {
 	}
 	in := &toolInput{}
 	in.walk(v, 0)
-	if len(in.paths) == 0 && len(in.patches) == 0 && !in.truncated {
+	paths := in.judged()
+	if len(paths) == 0 && len(in.patches) == 0 && !in.truncated {
 		return ""
 	}
 	switch {
@@ -339,9 +378,11 @@ func (g *Guard) tool(cwd, name string, input json.RawMessage) string {
 		return g.brokenReason()
 	case in.truncated:
 		return deny("the %s input is past what the guard reads", name)
+	case in.twice:
+		return deny("the %s input names an edit text more than once, and the guard cannot tell which the tool uses", name)
 	}
 	c := g.newCheck(cwd, nil)
-	for _, p := range in.paths {
+	for _, p := range paths {
 		if r := c.toolPath(name, p, in); r != "" {
 			return r
 		}
@@ -362,7 +403,7 @@ func (g *Guard) tool(cwd, name string, input json.RawMessage) string {
 // toolPath judges one path a file tool names, and the content in writes it
 // to a store file. in is nil for a patch, judged by patch.
 func (c *check) toolPath(name, p string, in *toolInput) string {
-	cands := c.candidates(p)
+	cands := c.toolCandidates(p)
 	for _, cand := range cands {
 		r := c.relate(cand, toolKinds)
 		switch r.rel {
@@ -392,6 +433,49 @@ func (c *check) toolPath(name, p string, in *toolInput) string {
 	return ""
 }
 
+// toolCandidates are the paths a file tool's path p may be: as given, and as
+// pi resolves it.
+func (c *check) toolCandidates(p string) []string {
+	cands := c.candidates(p)
+	if n := c.g.piPath(p); n != p {
+		cands = append(cands, c.candidates(n)...)
+	}
+	slices.Sort(cands)
+	return slices.Compact(cands)
+}
+
+// piPath is p as pi's file tools resolve it: Unicode spaces as spaces, one
+// leading @ dropped, ~ as the home, and a file:// URL as its path.
+func (g *Guard) piPath(p string) string {
+	p = strings.Map(func(r rune) rune {
+		if r == '\u00a0' || r >= '\u2000' && r <= '\u200a' || r == '\u202f' || r == '\u205f' || r == '\u3000' {
+			return ' '
+		}
+		return r
+	}, p)
+	p = strings.TrimPrefix(p, "@")
+	if home := g.host.Home; home != "" {
+		if rest, ok := strings.CutPrefix(p, "~/"); ok {
+			p = home + "/" + rest
+		} else if p == "~" {
+			p = home
+		}
+	}
+	if len(p) < len("file://") || !strings.EqualFold(p[:len("file://")], "file://") {
+		return p
+	}
+	host, rest, _ := strings.Cut(p[len("file://"):], "/")
+	if host != "" && host != "localhost" {
+		return p
+	}
+	rest, _, _ = strings.Cut(rest, "?")
+	rest, _, _ = strings.Cut(rest, "#")
+	if dec, err := url.PathUnescape(rest); err == nil {
+		rest = dec
+	}
+	return "/" + rest
+}
+
 // describe names what in r a path is.
 func describe(r root, p string) string {
 	if r.kind == kindIndex || r.path == p {
@@ -404,11 +488,14 @@ func describe(r root, p string) string {
 // reviewed: the full content, or the file as each edit would leave it.
 func (c *check) reviewed(name, p string, in *toolInput) string {
 	const claim = "%s would leave %s claiming confidence: reviewed, which only attestation writes"
-	if slices.ContainsFunc(in.contents, reviewedClaim) {
+	if slices.ContainsFunc(in.contents, reviewedClaim) || slices.ContainsFunc(in.other, reviewedClaim) {
 		return deny(claim, name, p)
 	}
 	if len(in.edits) == 0 {
 		return ""
+	}
+	if slices.ContainsFunc(in.edits, func(e edit) bool { return e.pi && yamlRisk(e.new, true) }) {
+		return deny("%s's new text may leave %s claiming confidence: reviewed, which only attestation writes", name, p)
 	}
 	base, err := readSmall(p)
 	if err != nil {
@@ -428,10 +515,57 @@ func (c *check) reviewed(name, p string, in *toolInput) string {
 			first = strings.ReplaceAll(first, e.old, e.new)
 		}
 	}
-	if reviewedClaim(first) || reviewedClaim(all) {
+	// pi applies every edit against the original file, on a normalised copy
+	// when an old text is not found as it is.
+	if reviewedClaim(first) || reviewedClaim(all) ||
+		reviewedClaim(splice(base, in.edits, func(s string) string { return s })) ||
+		reviewedClaim(splice(fuzzyText(base), in.edits, fuzzyText)) {
 		return deny(claim, name, p)
 	}
 	return ""
+}
+
+// splice is base with each edit applied at the first occurrence of its old
+// text in base, as read through fold; an edit whose text is missing or
+// overlaps an earlier one is skipped, and one without old text replaces the
+// whole file.
+func splice(base string, edits []edit, fold func(string) string) string {
+	type span struct {
+		from, to int
+		new      string
+	}
+	var spans []span
+	for _, e := range edits {
+		if e.old == "" {
+			return e.new
+		}
+		old := fold(e.old)
+		i := strings.Index(base, old)
+		if old == "" || i < 0 || slices.ContainsFunc(spans, func(s span) bool { return i < s.to && i+len(old) > s.from }) {
+			continue
+		}
+		spans = append(spans, span{i, i + len(old), e.new})
+	}
+	slices.SortFunc(spans, func(a, b span) int { return a.from - b.from })
+	var b strings.Builder
+	at := 0
+	for _, s := range spans {
+		b.WriteString(base[at:s.from])
+		b.WriteString(s.new)
+		at = s.to
+	}
+	b.WriteString(base[at:])
+	return b.String()
+}
+
+// fuzzyText is s as pi's edit compares it when an old text is not found:
+// NFKC, no trailing white space on a line, and quotes and dashes folded.
+func fuzzyText(s string) string {
+	lines := strings.Split(norm.NFKC.String(strings.ReplaceAll(s, "\r\n", "\n")), "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimRightFunc(l, func(r rune) bool { return unicode.IsSpace(r) || r == '\ufeff' })
+	}
+	return fuzzy.Replace(strings.Join(lines, "\n"))
 }
 
 // reviewedClaim reports a text that claims review as priors reads a fact, or,
@@ -449,7 +583,7 @@ func reviewedClaim(text string) bool {
 // tag or alias that could spell it, or a file that already holds any of them
 // (a deleted line can join what is left), is denied.
 func (c *check) patch(name, p string, pf patchFile) string {
-	cands := c.candidates(p)
+	cands := c.toolCandidates(p)
 	if !slices.ContainsFunc(cands, func(cand string) bool { return c.relate(cand, []kind{kindStore}).rel == inside }) {
 		return ""
 	}
@@ -832,17 +966,37 @@ func physical(p string) (string, bool) {
 // toolInput is what a file tool's input names: paths, full contents, edits
 // and patches.
 type toolInput struct {
-	paths     []string
-	contents  []string
-	edits     []edit
-	patches   []patchFile
-	nodes     int
+	paths    []string
+	contents []string
+	// other are the strings under keys the guard does not know: a path or
+	// content there is as good as one under a known key.
+	other   []string
+	edits   []edit
+	patches []patchFile
+	nodes   int
+	// twice reports an edit text a call names under two keys that normalise
+	// alike.
+	twice     bool
 	truncated bool
 }
 
 type edit struct {
 	old, new string
 	all      bool
+	// pi is an edit in pi's form, oldText and newText.
+	pi bool
+}
+
+// judged are the strings judged as paths: those under a path key, and the
+// single lines of other.
+func (in *toolInput) judged() []string {
+	out := slices.Clone(in.paths)
+	for _, s := range in.other {
+		if len(s) <= maxPath && !strings.ContainsAny(s, "\r\n") {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // patchFile is one file a Codex-style patch changes.
@@ -873,38 +1027,50 @@ func (in *toolInput) walk(v any, depth int) {
 }
 
 func (in *toolInput) object(m map[string]any, depth int) {
-	norm := make(map[string]any, len(m))
-	for k, v := range m {
-		norm[keyNorm.Replace(strings.ToLower(k))] = v
+	byKey := make(map[string][]any, len(m))
+	for _, k := range slices.Sorted(maps.Keys(m)) {
+		nk := keyNorm.Replace(strings.ToLower(k))
+		byKey[nk] = append(byKey[nk], m[k])
 	}
-	if e, ok := editOf(norm); ok {
-		in.edits = append(in.edits, e)
-	}
-	for k, v := range norm {
-		switch {
-		case slices.Contains(pathKeys, k):
-			in.strings(v, &in.paths)
-		case slices.Contains(contentKeys, k):
-			if _, edit := norm["old"+strings.TrimPrefix(k, "new")]; !edit || !strings.HasPrefix(k, "new") {
-				in.strings(v, &in.contents)
+	in.editsOf(byKey)
+	for _, k := range slices.Sorted(maps.Keys(byKey)) {
+		for _, v := range byKey[k] {
+			switch {
+			case slices.Contains(pathKeys, k):
+				in.strings(v, &in.paths)
+			case slices.Contains(contentKeys, k):
+				if _, edit := byKey["old"+strings.TrimPrefix(k, "new")]; !edit || !strings.HasPrefix(k, "new") {
+					in.strings(v, &in.contents)
+				}
+			case !slices.Contains(editKeys, k):
+				in.strings(v, &in.other)
 			}
+			in.walk(v, depth+1)
 		}
-		in.walk(v, depth+1)
 	}
 }
 
-// editOf reads an old/new replacement: Claude's old_string and new_string,
+// editsOf reads old/new replacements: Claude's old_string and new_string,
 // Pi's oldText and newText.
-func editOf(m map[string]any) (edit, bool) {
-	for _, pair := range [][2]string{{"oldstring", "newstring"}, {"oldtext", "newtext"}} {
-		old, ok1 := m[pair[0]].(string)
-		nw, ok2 := m[pair[1]].(string)
+func (in *toolInput) editsOf(m map[string][]any) {
+	for _, pair := range []struct {
+		old, new string
+		pi       bool
+	}{{"oldstring", "newstring", false}, {"oldtext", "newtext", true}} {
+		olds, news := m[pair.old], m[pair.new]
+		if len(olds) > 1 || len(news) > 1 {
+			in.twice = true
+			continue
+		}
+		if len(olds) == 0 || len(news) == 0 {
+			continue
+		}
+		old, ok1 := olds[0].(string)
+		nw, ok2 := news[0].(string)
 		if ok1 && ok2 {
-			all, _ := m["replaceall"].(bool)
-			return edit{old: old, new: nw, all: all}, true
+			in.edits = append(in.edits, edit{old: old, new: nw, all: slices.Contains(m["replaceall"], any(true)), pi: pair.pi})
 		}
 	}
-	return edit{}, false
 }
 
 func (in *toolInput) strings(v any, out *[]string) {

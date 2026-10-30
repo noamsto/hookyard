@@ -31,6 +31,8 @@ func newSandbox(t *testing.T) sandbox {
 		"notes/.git/config":          "[core]\n",
 		"notes/facts/a.md":           "---\nname: a\nmetadata:\n  confidence: rexxviewed\n---\nbody\n",
 		"notes/facts/b.md":           "---\nname: b\nmetadata:\n  confidence: unverified\n---\nbody\n",
+		"notes/facts/c.md":           "---\nname: c\nmetadata:\n  confidence: unverified\n---\nThe PR was reviewed.\n",
+		"notes/facts/f.md":           "---\nname: f\nmetadata:\n  confidence: re\u201cx\u201dviewed\n---\nbody\n",
 		"notes-old/MEMORY.md":        "",
 		".local/state/priors/x":      "",
 		".config/priors/config.toml": "",
@@ -302,6 +304,46 @@ func TestToolDenies(t *testing.T) {
 		{name: "patch joins", want: "/facts/a.md claiming confidence: reviewed", tool: "Write", input: sb.input(map[string]any{"input": "*** Begin Patch\n*** Update File: @H/notes/facts/a.md\n@@\n-  confidence: rexxviewed\n+  confidence: re\\\n*** End Patch"})},
 		{name: "patch move into attest", want: "/notes/.attest/a, inside an .attest dir", tool: "Write", input: sb.input(map[string]any{"input": "*** Begin Patch\n*** Update File: @H/work/a.md\n*** Move to: @H/notes/.attest/a\n*** End Patch"})},
 
+		// Tools and keys beyond Claude's own.
+		{name: "unknown path key", want: "/notes/MEMORY.md, the personal store's generated index", cwd: "notes", tool: "mcp__serena__create_text_file", input: sb.input(map[string]any{"relative_path": "MEMORY.md", "content": "x"})},
+		{name: "unknown path key camel", want: "/notes/MEMORY.md, the personal store's generated index", cwd: "notes", tool: "mcp__jetbrains__create_new_file", input: sb.input(map[string]any{"pathInProject": "MEMORY.md", "text": "x"})},
+		{name: "unknown path key in array", want: "/notes/MEMORY.md, the personal store's generated index", cwd: "notes", tool: "mcp__fs__create_many", input: sb.input(map[string]any{"names": []any{"MEMORY.md"}, "content": "x"})},
+		{name: "unknown content key", want: "/facts/n.md claiming confidence: reviewed", tool: "mcp__fs__write_file", input: sb.input(map[string]any{"path": "@H/notes/facts/n.md", "new_content": reviewed})},
+		{name: "unknown tool by name", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__fs__search_and_replace", input: sb.input(map[string]any{"path": "@H/notes/MEMORY.md"})},
+		{name: "cursor search replace", want: "/notes/MEMORY.md, the personal store's generated index", tool: "search_replace", input: sb.input(map[string]any{"file_path": "@H/notes/MEMORY.md", "old_string": "a", "new_string": "b"})},
+		{name: "edit text named twice", want: "names an edit text more than once", tool: "Edit", input: sb.input(map[string]any{"file_path": "@H/work/a.md", "old_string": "a", "oldString": "b", "new_string": "c"})},
+
+		// Pi's path forms.
+		{name: "pi tilde", want: "/notes/MEMORY.md, the personal store's generated index", tool: "write", input: sb.input(map[string]any{"path": "~/notes/MEMORY.md", "content": "x"})},
+		{name: "pi at", want: "/notes/MEMORY.md, the personal store's generated index", tool: "write", input: sb.input(map[string]any{"path": "@@H/notes/MEMORY.md", "content": "x"})},
+		{name: "pi file url", want: "/notes/MEMORY.md, the personal store's generated index", tool: "write", input: sb.input(map[string]any{"path": "file://@H/notes/MEMORY.md", "content": "x"})},
+		{name: "pi file url localhost", want: "/notes/MEMORY.md, the personal store's generated index", tool: "write", input: sb.input(map[string]any{"path": "file://localhost@H/notes/MEMORY.md", "content": "x"})},
+		{name: "pi file url escaped", want: "/notes/MEMORY.md, the personal store's generated index", tool: "write", input: sb.input(map[string]any{"path": "file://@H/notes/%4DEMORY.md", "content": "x"})},
+		{name: "pi file url attest", want: "/notes/.attest/e1, inside an .attest dir", tool: "write", input: sb.input(map[string]any{"path": "file://@H/notes/.attest/e1", "content": "x"})},
+		{name: "pi tilde reviewed fact", want: "/facts/n.md claiming confidence: reviewed", tool: "write", input: sb.input(map[string]any{"path": "~/notes/facts/n.md", "content": reviewed})},
+		{name: "pi at reviewed fact", want: "/facts/n.md claiming confidence: reviewed", tool: "write", input: sb.input(map[string]any{"path": "@@H/notes/facts/n.md", "content": reviewed})},
+
+		// Edits the tool applies against the original, or on a normalised copy.
+		{name: "pi edit fuzzy", want: "/facts/b.md claiming confidence: reviewed", tool: "edit", input: sb.input(map[string]any{"path": "@H/notes/facts/b.md", "edits": []any{
+			map[string]any{"oldText": "  confidence: unverified  ", "newText": "  confidence: reviewed"},
+		}})},
+		{name: "pi edit top level fuzzy", want: "/facts/b.md claiming confidence: reviewed", tool: "edit", input: sb.input(map[string]any{"path": "@H/notes/facts/b.md", "oldText": "  confidence: unverified  ", "newText": "  confidence: reviewed"})},
+		{name: "pi multi edit", want: "new text may leave", tool: "edit", input: sb.input(map[string]any{"path": "@H/notes/facts/c.md", "edits": []any{
+			map[string]any{"oldText": "unverified", "newText": "reviewed"},
+			map[string]any{"oldText": "reviewed", "newText": "checked"},
+		}})},
+		{name: "pi edit risky new text", want: "new text may leave", tool: "edit", input: sb.input(map[string]any{"path": "@H/notes/facts/b.md", "edits": []any{
+			map[string]any{"oldText": "body", "newText": "&a"},
+			map[string]any{"oldText": "name: b", "newText": "name: *a"},
+		}})},
+		{name: "multi edit at original positions", want: "/facts/c.md claiming confidence: reviewed", tool: "MultiEdit", input: sb.input(map[string]any{"file_path": "@H/notes/facts/c.md", "edits": []any{
+			map[string]any{"old_string": "unverified", "new_string": "reviewed"},
+			map[string]any{"old_string": "reviewed", "new_string": "checked"},
+		}})},
+		{name: "pi edit fuzzy join", want: "/facts/f.md claiming confidence: reviewed", tool: "edit", input: sb.input(map[string]any{"path": "@H/notes/facts/f.md", "edits": []any{
+			map[string]any{"oldText": "\"x\"", "newText": ""},
+		}})},
+
 		// Input the guard cannot read.
 		{name: "invalid json", want: "input cannot be read", tool: "Write", input: `{"file_path": `},
 		{name: "deeply nested input", want: "input is past what the guard reads", tool: "Write", input: strings.Repeat("[", 20) + strings.Repeat("]", 20)},
@@ -309,6 +351,16 @@ func TestToolDenies(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			wantDenied(t, c, sb.run(t, c))
 		})
+	}
+}
+
+// TestToolDuplicateKeys runs a call whose two path keys normalise alike many
+// times, since a map read picks one at random.
+func TestToolDuplicateKeys(t *testing.T) {
+	sb := newSandbox(t)
+	c := call{want: "/notes/.attest/e1, inside an .attest dir", tool: "mcp__filesystem__write_file", input: sb.input(map[string]any{"path": "@H/notes/.attest/e1", "Path": "/tmp/safe"})}
+	for range 20 {
+		wantDenied(t, c, sb.run(t, c))
 	}
 }
 
@@ -323,6 +375,23 @@ func TestToolAllows(t *testing.T) {
 		{name: "read attest", tool: "Read", input: sb.input(map[string]any{"file_path": "@H/notes/.attest/e1"})},
 		{name: "grep store", tool: "Grep", input: sb.input(map[string]any{"pattern": "x", "path": "@H/notes"})},
 		{name: "patch benign", tool: "Write", input: sb.input(map[string]any{"input": "*** Begin Patch\n*** Update File: @H/notes/facts/b.md\n@@\n-body\n+more body\n*** End Patch"})},
+		{name: "read tool by name", tool: "mcp__github__get_file_contents", input: sb.input(map[string]any{"path": "/"})},
+		{name: "lsp in store git", tool: "LSP", input: sb.input(map[string]any{"filePath": "@H/notes/.git/config"})},
+		{name: "mcp read in store git", tool: "mcp__filesystem__read_text_file", input: sb.input(map[string]any{"path": "@H/notes/.git/config"})},
+		{name: "mcp list", tool: "mcp__github__list_issues", input: sb.input(map[string]any{"owner": "o", "repo": "r"})},
+		{name: "mcp search", tool: "mcp__fs__search_files", input: sb.input(map[string]any{"path": "@H/notes/.attest", "pattern": "e"})},
+		{name: "unknown path key outside store", tool: "mcp__serena__create_text_file", input: sb.input(map[string]any{"relative_path": "a.md", "content": "x"})},
+		{name: "mcp strings outside store", tool: "mcp__github__create_issue", input: sb.input(map[string]any{"owner": "o", "repo": "r", "title": "t", "body": "a\nb"})},
+		{name: "pi tilde project", tool: "write", input: sb.input(map[string]any{"path": "~/work/a.md", "content": "x"})},
+		{name: "pi file url project", tool: "write", input: sb.input(map[string]any{"path": "file://@H/work/a.md", "content": "x"})},
+		{name: "pi benign edit", tool: "edit", input: sb.input(map[string]any{"path": "@H/notes/facts/b.md", "edits": []any{
+			map[string]any{"oldText": "body", "newText": "more body"},
+			map[string]any{"oldText": "name: b", "newText": "name: bb"},
+		}})},
+		{name: "multi edit benign", tool: "MultiEdit", input: sb.input(map[string]any{"file_path": "@H/notes/facts/c.md", "edits": []any{
+			map[string]any{"old_string": "The PR", "new_string": "A PR"},
+			map[string]any{"old_string": "A PR was", "new_string": "A PR was not"},
+		}})},
 		{name: "no path", tool: "WebFetch", input: sb.input(map[string]any{"url": "https://example.com"})},
 	} {
 		t.Run(c.name, func(t *testing.T) {
