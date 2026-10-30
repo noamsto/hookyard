@@ -244,7 +244,8 @@ line per item, then exits 0, or 1 if any item failed (below):
     is outside any git repo), a repo that is not a valid name, or a repo
     §4.2 routes to the work store or the quarantine. A project dir that does
     not decode to exactly one existing directory is unresolvable, so it
-    routes to the quarantine: `routes to the quarantine (...)`;
+    routes to the quarantine on a personal host
+    (`routes to the quarantine (...)`) and to the work store on a work host;
   - a name that cannot be slugified;
   - `refused: <why>`: the write path's policy said no (a secret match, a
     lint finding such as `wikilink-dangling`, a name already taken, a
