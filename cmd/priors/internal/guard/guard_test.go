@@ -284,6 +284,7 @@ func TestShellAllows(t *testing.T) {
 		{name: "no command", input: `{}`},
 		{name: "commit message heredoc", input: bash("git commit -m \"$(cat <<'EOF'\nfix MEMORY.md handling\nEOF\n)\"")},
 		{name: "commit message with store name", input: bash(`git commit -m "notes $(date)"`)},
+		{name: "pr body heredoc", input: bash("gh pr create --title t --body \"$(cat <<'EOF'\nfix MEMORY.md handling in notes\nEOF\n)\"")},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.tool == "" {
