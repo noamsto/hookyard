@@ -91,8 +91,8 @@ func Load(path string) (Config, error) {
 }
 
 // LoadPaths is Load without the check that the state dir lies off any git
-// work tree. The write guard needs only where the dirs are, and a .git an
-// agent plants above the state dir must not switch it off.
+// work tree, for a caller that needs only where the dirs are: a .git an agent
+// plants above the state dir must not hide them.
 func LoadPaths(path string) (Config, error) {
 	trustPath, fsys := trustSource()
 	return loadWith(path, trustPath, fsys, false)

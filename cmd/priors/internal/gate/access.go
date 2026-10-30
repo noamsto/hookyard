@@ -7,7 +7,7 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// Host is the environment the write guard renders a command's paths in. Gate
+// Host is the environment ShellAccess renders a command's paths in. Gate
 // 2's stand-ins keep a listed name's place; a path needs the real home and
 // variables.
 type Host struct {
@@ -27,7 +27,7 @@ func (h *Host) lookup(name string) (string, bool) {
 	return h.Env(name)
 }
 
-// Access is what a shell command may touch, as the write guard reads it.
+// Access is what a shell command may touch.
 type Access struct {
 	Words []Touch
 	// Writes reports a command that may write somewhere: one not known to only

@@ -165,7 +165,7 @@ type judge struct {
 	parsed int
 	seen   map[string]bool
 	vars   map[string]string
-	// host is the real environment the write guard renders paths in; nil for
+	// host is the real environment ShellAccess renders paths in; nil for
 	// gate 2, which judges names and never needs a real path.
 	host *Host
 }
@@ -184,7 +184,7 @@ const (
 	// value, and the rest as unset does.
 	assigned
 	// real is assigned with every other variable read from the host's
-	// environment; only the write guard renders in it.
+	// environment; only ShellAccess renders in it.
 	real
 )
 
@@ -347,8 +347,8 @@ func walkBounded(root syntax.Node, f func(syntax.Node) bool) {
 }
 
 // assign records values, joined by spaces, as name's, unless name already has
-// one. The values are rendered in the unset environment, or the host's for the
-// write guard, so one assignment never feeds another.
+// one. The values are rendered in the unset environment, or the host's for
+// ShellAccess, so one assignment never feeds another.
 func (j *judge) assign(name string, values ...*syntax.Word) {
 	if _, ok := j.vars[name]; ok || len(values) == 0 || values[0] == nil {
 		return
@@ -709,7 +709,7 @@ func unescape(v string, quoted bool) string {
 }
 
 // tilde expands a leading ~ or ~user. Gate 2 needs no real home, only one that
-// keeps the word's last element; the write guard takes the host's.
+// keeps the word's last element; ShellAccess takes the host's.
 func (r *render) tilde(v string) string {
 	user, rest, slash := strings.Cut(v[1:], "/")
 	if r.host == nil {
@@ -785,7 +785,7 @@ func (r *render) param(p *syntax.ParamExp, quoted bool) string {
 
 // value is a variable's stand-in: its first assigned value in the assigned
 // environment; the host's HOME, and in the real environment its other
-// variables, for the write guard; bash's defaults for HOME, IFS and PS4; and a
+// variables, for ShellAccess; bash's defaults for HOME, IFS and PS4; and a
 // neutral word for the special parameters, the variables bash always sets, and
 // in the placeholder environment every other one.
 func (r *render) value(name string) (string, bool) {
