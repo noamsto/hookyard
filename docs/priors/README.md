@@ -213,30 +213,65 @@ permission prompt): the marker is written before the decision.
 delimiter drawn per call.
 
 `import` copies Claude Code's native memories (the topic files under
-`~/.claude/projects/<project>/memory/`, or `--claude-dir`) into the personal
-store (§4.9), each through the same write path as `add`. The native files are
-never changed. Each copy keeps the native `name` (slugified when it is not a
-valid fact name), `description`, `type`, body and `modified`; the importer
-sets `confidence: proposed`, `scope: repo` with the repo decoded from the
-project dir, `verified: null`, `superseded_by: null`, `provenance` and a
-`source` block carrying the `sha256` of the native bytes. It prints one line
-per item:
+`<claude-dir>/projects/*/memory/`) into the personal store (§4.9), each
+through the same write path as `add`. `--claude-dir` replaces the whole
+`~/.claude`, not a memory dir: pointed at a memory dir it finds no
+`projects/` and prints nothing, exit 0. The native files are never changed.
+Each copy keeps the native `name` (slugified when it is not a valid fact
+name), `description`, `type`, body and `modified`; the importer sets
+`confidence: proposed`, `scope: repo` with the repo decoded from the project
+dir, `verified: null`, `superseded_by: null`, `provenance` and a `source`
+block carrying the `sha256` of the native bytes. It prints one line per
+item, then exits 0, or 1 if any item failed (below):
 
-- `published personal <path> <- <source>` or `flagged ...`, as for `add`.
+- `published personal <path> <- <source>`: it passed every gate and was
+  written into the checkout.
+- `flagged personal <path> <- <source>: <reasons>`: a gate flagged it, so it
+  waits, `proposed`, in the host-local layer.
 - `unchanged <source>: <path>`: this source was imported before, unchanged.
 - `duplicate <source>: <path>`: a fact already holds these exact bytes.
 - `propose <source> -> <path>: <why>`: a near-duplicate (same name, same
   folded description, body overlap) or a changed source. Nothing is written;
   the owner merges by hand.
-- `skipped <source>: <why>`: a secret match or other refusal, a name that
-  cannot be slugified, a symlink, no repo, or a repo §4.2 routes anywhere but
-  the personal store (the work store and the quarantine are not imported).
+- `skipped <source>: <why>`: the item is not imported. The reasons:
+  - not read: a symlink or other non-regular file, a file over 1 MiB, one
+    that cannot be opened, or a memory dir that cannot be read or is not a
+    directory;
+  - not a fact: no or invalid frontmatter;
+  - not routed to the personal store: no repo (the project dir does not
+    decode to exactly one existing directory), a repo that is not a valid
+    name, or a repo §4.2 routes to the work store or the quarantine;
+  - a name that cannot be slugified;
+  - `refused: <why>`: the write path's policy said no (a secret match, a
+    lint finding such as `wikilink-dangling`, a name already taken, a
+    destination it will not write through), or the destination is a store
+    file that cannot be parsed;
+  - `failed: <why>`: the machinery broke (scanner unavailable, lock, write),
+    not a decision. A re-run may clear it. After printing every line the
+    command exits 1 with a count on stderr.
+- `skipped <path>: unreadable store fact: <err>`: a store file that cannot be
+  parsed, so dedup cannot see it. It is reported on dry runs too, and an
+  item whose destination is that file is refused rather than overwriting it.
+
+A fact that would publish is refused (`wikilink-dangling`) when a wiki-link
+names a fact of the same run that will not reach the checkout, because it is
+refused or flagged into the local layer; otherwise the checkout would fail
+the commit gate. The dry run predicts the same. If a write fails after the
+plan held, a fact already written that links the failed one (directly or
+through another) is removed and reported `skipped <source>: failed: rolled
+back, ...`.
 
 `MEMORY.md` is not imported, since each store generates its own; a line in
-it that is not a link to a topic file in the same dir is reported. Run
-`priors import --dry-run` first: it runs every check, prints what would land
-and what is only proposed, and writes nothing. A real run commits what it
-published once, through the store's commit gate. Running it again is safe.
+it that is not a link to a topic file in the same dir is reported as
+`skipped <source>:<line>: <why>`. Run `priors import --dry-run` first: it
+runs every check and writes nothing. Where a real run would publish or flag
+it prints `would publish personal <path> <- <source>` or
+`would flag personal <path> <- <source>: <reasons>`, and the same `propose`
+and `skipped` lines. A real run holds the personal store's lock throughout,
+so no other writer commits a half-imported checkout, and commits what it
+published once, through the store's commit gate. It commits on every run, so
+a commit held back last time is retried; that is why running it again is
+safe.
 
 ## Wire it into hookyard
 
