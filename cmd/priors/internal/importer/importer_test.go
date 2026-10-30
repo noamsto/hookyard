@@ -169,8 +169,8 @@ func (fx fixture) run(t *testing.T, dryRun bool) []string {
 	return lines
 }
 
-// wantLines checks that each want is a prefix of exactly one line, and that
-// lines holds nothing else.
+// wantLines checks that each want is a prefix of some line, and that there
+// are as many lines as wants.
 func wantLines(t *testing.T, lines, want []string) {
 	t.Helper()
 	if len(lines) != len(want) {

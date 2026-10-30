@@ -32,8 +32,8 @@ import (
 // stays null, since a migrated fact is not freshly verified. Pending names
 // facts the same batch is about to write, which a wiki-link may name before
 // they land. DryRun runs every check and reports where the fact would land,
-// writing nothing. NoCommit leaves a published fact uncommitted for a human
-// to review.
+// writing nothing. NoCommit leaves a published fact uncommitted, for a caller
+// that commits a whole batch once.
 type Request struct {
 	Fact                    fact.Fact
 	Session                 route.Session
