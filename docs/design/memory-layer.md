@@ -1893,10 +1893,17 @@ is a human command, run off `session_start`.
 `priors`'s config and state dirs; the trust file, unwritable under the
 preconditions, needs no guard.
 It is a tripwire like §4.2's read guard — a small deterministic check of the
-call's paths and text that loads neither the rule set nor a store, sees only
-the tool calls hookyard sees, and fails open (R8). The key's non-usability
-plus an unwritable allowlist, and an entry bound to the fact's identity — not
-the guard — is what makes attestation hold.
+call's paths and text that loads neither the rule set nor a store and sees
+only the tool calls hookyard sees. Within that, it denies what it cannot
+tell, as gate 2 does: a shell command reuses gate 2's literaliser, and a
+write through a path built at run time, a command past its budget, a broken
+config or a guard past 750 ms all deny. A shell write anywhere in a store is
+denied, since its content cannot be judged; a file tool may write a fact
+that does not claim review. Only hookyard's own abstention, on a handler that
+crashes or outlasts its budget, fails open (R8). What it does not catch is
+listed in the [priors README](../priors/README.md#write-guard). The key's
+non-usability plus an unwritable allowlist, and an entry bound to the fact's
+identity — not the guard — is what makes attestation hold.
 
 **v0 builds no attestation**: no entry, no verdict job, no `priors verify`,
 no `priors attest`, no `priors trust check`. Its commit gate refuses every

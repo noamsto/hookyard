@@ -223,10 +223,48 @@ manifest; point every `exec` path at the installed binary (`nix build
 - `priors-record` on `post_tool` with no `match`, on the fire-and-forget
   lane. It still answers nothing. It makes every tool call reach hookyard's
   event record, which gate 2 reads, and writes gate 2's shell markers.
-- `priors-provenance` on `pre_tool`, matching `Bash`, on the verdict lane
-  with a 1 s budget. It answers nothing, so it never blocks a call; it writes
-  the shell markers before the command runs, which covers a call that fails
-  (and so never reaches `post_tool`) and one that runs `priors add` itself.
+- `priors-guard` on `pre_tool` with no `match`, on the verdict lane with a
+  1 s budget. It writes the shell markers before the command runs, which
+  covers a call that fails (and so never reaches `post_tool`) and one that
+  runs `priors add` itself. It is also the write guard (see below), and
+  denies a call that would write what only priors or attestation writes.
+
+### Write guard
+
+The `pre_tool` write guard is a tripwire against an agent editing what it
+must not: it denies a tool call that would write
+
+- a store's attest entries (`.attest/`, and any path with an `.attest`
+  element), its generated `MEMORY.md` index or its `.git` dir;
+- a store fact so that it claims `confidence: reviewed`, judged on the
+  content a Write sends and on the file as an Edit would leave it;
+- priors' state dir and its config (the config dir when it is named
+  `priors`, else the config file);
+- any dir holding one of these (`rm -rf ~`).
+
+The stores are the ones the trust file pins, so the guard covers every
+configured store. A shell command cannot have its content judged, so a shell
+write anywhere in a store is denied, and so is any write while the command
+names a store path, runs in a store, or changes into one. Paths resolve
+against the call's cwd and every dir the command changes into, with `..` and
+symlinks resolved as the kernel does, and hard links to the index, attest
+entries and config file are caught. A write through a path built at run time
+(`$(…)`, an unknown variable, xargs, a pipe into a writer) is denied when the
+command names a guarded path anywhere. A command past the parser's budget, a
+call whose input cannot be read, a guard that panics or runs past 750 ms, and
+a host whose trust file or config cannot be loaded all deny every call that
+may write.
+
+It is not a sandbox. It does not see a path computed at run time from
+nothing the command names (`base64 -d`, a file's content, a script file), a
+path an interpreter assembles from pieces, a command that shadows a reader's
+name on `PATH`, or code run from config an agent can write (git's global
+`core.hooksPath`, shell profiles, Makefiles). It does not see a call
+hookyard does not route, a call after hookyard abstains past its budget, or a
+race that swaps a path between the check and the write. It over-denies a
+shell command that reads a store path while it writes elsewhere, a shell
+write to a store fact, and a write that may name a dir holding a store
+(`cmake ..` from a dir directly under one).
 
 ## Store repositories
 

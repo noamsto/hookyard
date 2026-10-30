@@ -2113,6 +2113,55 @@ func TestPostToolMarkerFiles(t *testing.T) {
 	wantMarkerExts(t, sb.markerFiles(filepath.Join(sb.state, "provenance")), ".seen", ".ingest")
 }
 
+// TestPreToolWriteGuard: pre_tool denies a call that writes the store's index
+// or attest entries, still marks the session, and lets a write elsewhere run.
+func TestPreToolWriteGuard(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	sb.repo(personalRemote)
+	shell, _ := json.Marshal(map[string]string{"command": "echo x > " + filepath.Join(sb.personal, "MEMORY.md")})
+	write, _ := json.Marshal(map[string]string{"file_path": filepath.Join(sb.personal, ".attest", "e"), "content": "x"})
+	for _, tt := range []struct{ tool, input, want string }{
+		{"Bash", string(shell), "inside the personal store"},
+		{"Write", string(write), "inside an .attest dir"},
+	} {
+		res := sb.run(sb.toolEnvelope("pre_tool", "sess-1", tt.tool, tt.input, `null`))
+		wantExit(t, res, 0)
+		wantDeny(t, res.stdout, tt.want)
+	}
+	wantMarkerExts(t, sb.markerFiles(filepath.Join(sb.state, "provenance")), ".seen")
+
+	sb.toolCall("pre_tool", "sess-1", "Write", fmt.Sprintf(`{"file_path":%q,"content":"x"}`, filepath.Join(sb.dir, "notes.md")))
+}
+
+// TestPreToolWriteGuardBrokenConfig: a config the guard cannot load denies
+// every call that may write, and lets a read run.
+func TestPreToolWriteGuardBrokenConfig(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	sb.writeFile(sb.configPath, "no_such_key = 1\n")
+	res := sb.run(sb.toolEnvelope("pre_tool", "sess-1", "Write", fmt.Sprintf(`{"file_path":%q,"content":"x"}`, filepath.Join(sb.dir, "notes.md")), `null`))
+	wantExit(t, res, 0)
+	wantDeny(t, res.stdout, "cannot tell where priors' stores and dirs are", "no_such_key")
+
+	sb.toolCall("pre_tool", "sess-1", "Read", fmt.Sprintf(`{"file_path":%q}`, filepath.Join(sb.dir, "notes.md")))
+}
+
+func wantDeny(t *testing.T, stdout string, subs ...string) {
+	t.Helper()
+	var out struct {
+		HookSpecificOutput struct {
+			PermissionDecision       string `json:"permissionDecision"`
+			PermissionDecisionReason string `json:"permissionDecisionReason"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("stdout %q: %v", stdout, err)
+	}
+	if out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("stdout %q, want a deny", stdout)
+	}
+	wantContains(t, "deny reason", out.HookSpecificOutput.PermissionDecisionReason, subs...)
+}
+
 // TestPreToolMarksIngestion: pre_tool marks the session before the command
 // runs, so a call that fails, and never reaches post_tool, still flags it.
 func TestPreToolMarksIngestion(t *testing.T) {

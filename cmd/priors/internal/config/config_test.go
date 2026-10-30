@@ -487,7 +487,8 @@ func TestLoadRejectsAStateDirInAGitWorkTree(t *testing.T) {
 				body = fmt.Sprintf("state_dir = %q\n", stateDir)
 			}
 
-			_, err := loadStores(t, writeConfig(t, body), t.TempDir(), "")
+			path, personal := writeConfig(t, body), t.TempDir()
+			_, err := loadStores(t, path, personal, "")
 
 			if err == nil {
 				t.Fatal("Load accepted a state dir inside a git work tree")
@@ -496,6 +497,14 @@ func TestLoadRejectsAStateDirInAGitWorkTree(t *testing.T) {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("err = %v, want it to contain %q", err, want)
 				}
+			}
+			// The write guard still learns where the state dir is.
+			cfg, err := loadWith(path, trustWith(t, personal, ""), fakeRoot{}, false)
+			if err != nil {
+				t.Fatalf("loading the paths alone: %v", err)
+			}
+			if cfg.State() != state {
+				t.Errorf("State() = %s, want %s", cfg.State(), state)
 			}
 		})
 	}

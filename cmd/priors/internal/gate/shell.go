@@ -77,33 +77,51 @@ const (
 // shell call whose command is missing or unreadable counts as ingestion: gate
 // 2 fails closed on what it cannot see.
 func IngestsCall(toolName string, toolInput json.RawMessage) bool {
-	isShell := slices.Contains(shellTools, strings.ToLower(toolName))
+	texts, missing, ok := ShellTexts(toolInput)
+	switch {
+	case !ok:
+		return true
+	case missing:
+		return IsShellTool(toolName)
+	}
+	return ingestReason(texts...) != ""
+}
+
+// IsShellTool reports a tool that runs its input's command in a shell.
+func IsShellTool(toolName string) bool {
+	return slices.Contains(shellTools, strings.ToLower(toolName))
+}
+
+// ShellTexts returns the texts a tool input's command runs, to be judged as
+// one command. missing reports an input with no command; ok is false for one
+// whose command is neither a string nor an array of strings.
+func ShellTexts(toolInput json.RawMessage) (texts []string, missing, ok bool) {
 	var in struct {
 		Command json.RawMessage `json:"command"`
 	}
 	if json.Unmarshal(toolInput, &in) != nil || in.Command == nil || string(in.Command) == "null" {
-		return isShell
+		return nil, true, true
 	}
 	var s string
 	if json.Unmarshal(in.Command, &s) == nil {
-		return ingestReason(s) != ""
+		return []string{s}, false, true
 	}
 	var elems []any
 	if json.Unmarshal(in.Command, &elems) != nil {
-		return true
+		return nil, false, false
 	}
 	parts := make([]string, len(elems))
 	for i, e := range elems {
 		p, ok := e.(string)
 		if !ok {
-			return true
+			return nil, false, false
 		}
 		parts[i] = p
 	}
 	// Codex puts the script in one element (["bash", "-lc", "<script>"]),
 	// whose joined form starts with "bash" and would hide it. The joined form
 	// and every element share one budget.
-	return ingestReason(append([]string{strings.Join(parts, " ")}, parts...)...) != ""
+	return append([]string{strings.Join(parts, " ")}, parts...), false, true
 }
 
 // ingestReason names why text ingests, or returns "" when it does not. The
@@ -147,6 +165,9 @@ type judge struct {
 	parsed int
 	seen   map[string]bool
 	vars   map[string]string
+	// host is the real environment the write guard renders paths in; nil for
+	// gate 2, which judges names and never needs a real path.
+	host *Host
 }
 
 // env is a stand-in for the unknown environment a command runs in.
@@ -162,6 +183,9 @@ const (
 	// assigned sets each variable the command assigns to its first assigned
 	// value, and the rest as unset does.
 	assigned
+	// real is assigned with every other variable read from the host's
+	// environment; only the write guard renders in it.
+	real
 )
 
 var envs = []env{unset, placeholder, assigned}
@@ -323,13 +347,16 @@ func walkBounded(root syntax.Node, f func(syntax.Node) bool) {
 }
 
 // assign records values, joined by spaces, as name's, unless name already has
-// one. The values are rendered in the unset environment, so one assignment
-// never feeds another.
+// one. The values are rendered in the unset environment, or the host's for the
+// write guard, so one assignment never feeds another.
 func (j *judge) assign(name string, values ...*syntax.Word) {
 	if _, ok := j.vars[name]; ok || len(values) == 0 || values[0] == nil {
 		return
 	}
-	r := &render{spent: &j.parsed}
+	r := &render{spent: &j.parsed, host: j.host}
+	if j.host != nil {
+		r.env = real
+	}
 	rendered := make([]string, len(values))
 	for i, v := range values {
 		rendered[i] = r.operand(v, false)
@@ -431,7 +458,7 @@ func (j *judge) word(w *syntax.Word, text string, depth int) string {
 			scripts = append(scripts, after)
 		}
 		for _, s := range scripts {
-			for _, d := range decodings(s) {
+			for _, d := range Decodings(s) {
 				if r := j.script(d, depth+1); r != "" {
 					return r
 				}
@@ -446,8 +473,8 @@ func (j *judge) word(w *syntax.Word, text string, depth int) string {
 // is the one step whose output can outgrow a word's source, so its whole cost
 // is paid before any of it is built.
 func (j *judge) fields(e env, text string, words ...*syntax.Word) ([]string, string) {
-	r := &render{env: e, spent: &j.parsed}
-	if e == assigned {
+	r := &render{env: e, spent: &j.parsed, host: j.host}
+	if e == assigned || e == real {
 		r.vars = j.vars
 	}
 	for _, w := range words {
@@ -578,6 +605,7 @@ func braceAlts(parts []syntax.WordPart) [][]syntax.WordPart {
 type render struct {
 	env    env
 	vars   map[string]string
+	host   *Host
 	fields []string
 	cur    strings.Builder
 	// whole renders an operand, split into fields only where it is used.
@@ -626,8 +654,7 @@ func (r *render) parts(parts []syntax.WordPart, quoted bool) {
 		case *syntax.Lit:
 			v := p.Value
 			if i == 0 && !quoted && strings.HasPrefix(v, "~") {
-				_, rest, _ := strings.Cut(v, "/")
-				v = "/home/" + rest
+				v = r.tilde(v)
 			}
 			r.write(unescape(v, quoted))
 		case *syntax.SglQuoted:
@@ -681,13 +708,33 @@ func unescape(v string, quoted bool) string {
 	return b.String()
 }
 
+// tilde expands a leading ~ or ~user. Gate 2 needs no real home, only one that
+// keeps the word's last element; the write guard takes the host's.
+func (r *render) tilde(v string) string {
+	user, rest, slash := strings.Cut(v[1:], "/")
+	if r.host == nil {
+		return "/home/" + rest
+	}
+	home, ok := r.host.Home, user == ""
+	if !ok && r.host.Users != nil {
+		home, ok = r.host.Users(user)
+	}
+	switch {
+	case !ok:
+		return v
+	case slash:
+		return home + "/" + rest
+	}
+	return home
+}
+
 // operand renders w as one string, as an operand or assignment value is
 // expanded before it is split.
 func (r *render) operand(w *syntax.Word, quoted bool) string {
 	if w == nil {
 		return ""
 	}
-	sub := &render{env: r.env, vars: r.vars, whole: true, spent: r.spent}
+	sub := &render{env: r.env, vars: r.vars, host: r.host, whole: true, spent: r.spent}
 	sub.parts(w.Parts, quoted)
 	return sub.cur.String()
 }
@@ -737,12 +784,21 @@ func (r *render) param(p *syntax.ParamExp, quoted bool) string {
 }
 
 // value is a variable's stand-in: its first assigned value in the assigned
-// environment; bash's defaults for HOME, IFS and PS4; and a neutral word for
-// the special parameters, the variables bash always sets, and in the
-// placeholder environment every other one.
+// environment; the host's HOME, and in the real environment its other
+// variables, for the write guard; bash's defaults for HOME, IFS and PS4; and a
+// neutral word for the special parameters, the variables bash always sets, and
+// in the placeholder environment every other one.
 func (r *render) value(name string) (string, bool) {
 	if v, ok := r.vars[name]; ok {
 		return v, true
+	}
+	if h := r.host; h != nil {
+		if name == "HOME" {
+			return h.Home, true
+		}
+		if v, ok := h.lookup(name); ok && r.env == real {
+			return v, true
+		}
 	}
 	switch {
 	case name == "HOME":
@@ -773,10 +829,10 @@ func nesting(text string) int {
 	return deepest
 }
 
-// decodings returns s and, when it holds a backslash, s with printf and
+// Decodings returns s and, when it holds a backslash, s with printf and
 // echo -e escapes decoded, since a script printed into a shell runs decoded.
 // Format with no arguments decodes escapes only, in one pass.
-func decodings(s string) []string {
+func Decodings(s string) []string {
 	out := []string{s}
 	if !strings.Contains(s, `\`) {
 		return out
@@ -813,7 +869,7 @@ func fallback(text string) string {
 // both as a word break (`curl$IFS`) and as nothing (`g$""h`). The text is read
 // as it is and with printf escapes decoded.
 func overflagReason(text string) string {
-	for _, d := range decodings(text) {
+	for _, d := range Decodings(text) {
 		for _, p := range []string{d, paramOpens(d)} {
 			p = overflagQuotes.Replace(p)
 			if hasURL(p) {

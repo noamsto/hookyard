@@ -90,7 +90,19 @@ func Load(path string) (Config, error) {
 	return load(path, trustPath, fsys)
 }
 
+// LoadPaths is Load without the check that the state dir lies off any git
+// work tree. The write guard needs only where the dirs are, and a .git an
+// agent plants above the state dir must not switch it off.
+func LoadPaths(path string) (Config, error) {
+	trustPath, fsys := trustSource()
+	return loadWith(path, trustPath, fsys, false)
+}
+
 func load(path, trustPath string, fsys StatFS) (Config, error) {
+	return loadWith(path, trustPath, fsys, true)
+}
+
+func loadWith(path, trustPath string, fsys StatFS, workTree bool) (Config, error) {
 	t, err := readTrust(fsys, trustPath)
 	if err != nil {
 		return Config{}, fmt.Errorf("trust file %s: %w", trustPath, err)
@@ -136,7 +148,7 @@ func load(path, trustPath string, fsys StatFS) (Config, error) {
 	if err := c.resolveDirs(trustPath, path); err != nil {
 		return Config{}, err
 	}
-	if err := c.checkDirs(trustPath, path); err != nil {
+	if err := c.checkDirs(trustPath, path, workTree); err != nil {
 		return Config{}, err
 	}
 	return c, nil
@@ -211,9 +223,10 @@ func ResolveDir(p string) (string, error) {
 
 // checkDirs requires an absolute state path and keeps the stores and state dir
 // apart: a store nested in another, or in the state dir, would publish one
-// layer's files through another's checkout. An error is prefixed with the trust
-// file when it names only stores, else with the user config.
-func (c Config) checkDirs(trustPath, path string) error {
+// layer's files through another's checkout. With workTree, it also refuses a
+// state dir inside a git work tree. An error is prefixed with the trust file
+// when it names only stores, else with the user config.
+func (c Config) checkDirs(trustPath, path string, workTree bool) error {
 	type dir struct{ src, key, path string }
 	dirs := []dir{{trustPath, "stores.personal.path", c.PersonalStore}}
 	if c.WorkStore != "" {
@@ -237,6 +250,9 @@ func (c Config) checkDirs(trustPath, path string) error {
 				return fmt.Errorf("%s: %s (%s) and %s (%s) must not be the same or nested", src, a.key, a.path, b.key, b.path)
 			}
 		}
+	}
+	if !workTree {
+		return nil
 	}
 	if err := RefuseWorkTree(c.State()); err != nil {
 		return fmt.Errorf("%s: %s: %w", path, stateKey, err)
