@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -179,6 +180,11 @@ func add(ctx context.Context, cfg config.Config, req Request, d Deps, lock bool)
 		res.Outcome = "published"
 	}
 	if err := root.CheckWrite(filepath.Dir(res.Path)); err != nil {
+		// A filesystem error is the machinery failing, which a retry may clear;
+		// the rest are the store's policy messages.
+		if _, ok := errors.AsType[*fs.PathError](err); ok {
+			return Result{}, err
+		}
 		return Result{}, refusalError{msg: err.Error()}
 	}
 	if req.DryRun {

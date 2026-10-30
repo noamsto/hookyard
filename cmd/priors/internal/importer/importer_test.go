@@ -3,11 +3,13 @@ package importer
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -646,7 +648,7 @@ func TestAConcurrentWriterWaitsForTheImportsCommit(t *testing.T) {
 
 func TestAFailureThatIsNotARefusalFailsTheRun(t *testing.T) {
 	const body = "Facts are plain markdown files with frontmatter, one per file, in a store.\n"
-	t.Run("a write that fails rolls back the facts that link it", func(t *testing.T) {
+	t.Run("a write that fails leaves the facts that link it unwritten", func(t *testing.T) {
 		fx := setup(t, "personal")
 		mem := fx.memDir(repo(t, personalRemote))
 		writeFile(t, filepath.Join(mem, "a-linker.md"), native("a-linker", "links to the target", "See [[b-target]]. "+body))
@@ -667,10 +669,10 @@ func TestAFailureThatIsNotARefusalFailsTheRun(t *testing.T) {
 		}
 		wantLines(t, lines, []string{
 			"skipped " + target + ": failed: ",
-			"skipped " + linker + ": failed: rolled back, it links b-target",
+			"skipped " + linker + ": failed: it links b-target, which was not written",
 		})
 		if _, err := os.Stat(filepath.Join(fx.cfg.PersonalStore, "demo", "a-linker.md")); err == nil {
-			t.Error("the rolled-back linker is still in the checkout")
+			t.Error("the linker is in the checkout")
 		}
 		if res.Warning != "" {
 			t.Errorf("warning: %s", res.Warning)
@@ -680,6 +682,36 @@ func TestAFailureThatIsNotARefusalFailsTheRun(t *testing.T) {
 		}
 		fx.checkoutCommits(t)
 		wantLines(t, fx.run(t, false), []string{"published personal ", "published personal "})
+	})
+
+	t.Run("a write that fails rolls back the facts of its link cycle written before it", func(t *testing.T) {
+		fx := setup(t, "personal")
+		mem := fx.memDir(repo(t, personalRemote))
+		writeFile(t, filepath.Join(mem, "a-first.md"), native("a-first", "links to the second", "See [[b-second]]. "+body))
+		writeFile(t, filepath.Join(mem, "b-second.md"), native("b-second", "links to the first", "See [[a-first]]. "+body+"More words.\n"))
+		first := sourcePath(filepath.Join(mem, "a-first.md"))
+		if err := os.MkdirAll(filepath.Join(fx.cfg.PersonalStore, "demo", "b-second.md"), 0o755); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+
+		res, lines := fx.runResult(t, false)
+		if res.Failed != 2 {
+			t.Errorf("Failed = %d, want 2", res.Failed)
+		}
+		wantLines(t, lines, []string{
+			"skipped " + first + ": failed: rolled back, it links b-second",
+			"skipped " + sourcePath(filepath.Join(mem, "b-second.md")) + ": failed: ",
+		})
+		if _, err := os.Stat(filepath.Join(fx.cfg.PersonalStore, "demo", "a-first.md")); err == nil {
+			t.Error("the rolled-back fact is still in the checkout")
+		}
+		if res.Warning != "" {
+			t.Errorf("warning: %s", res.Warning)
+		}
+		if err := os.Remove(filepath.Join(fx.cfg.PersonalStore, "demo", "b-second.md")); err != nil {
+			t.Fatal(err)
+		}
+		fx.checkoutCommits(t)
 	})
 
 	t.Run("an unavailable scanner is a failure, not a refusal", func(t *testing.T) {
@@ -770,5 +802,106 @@ func TestAnUnreadableStoreFactIsReportedAndNeverOverwritten(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestAFactThatPublishesAfterPlanningFlaggedItDoesNotLinkAFlaggedSibling(t *testing.T) {
+	const body = "Facts are plain markdown files with frontmatter, one per file, in a store.\n"
+	fx := setup(t, "personal")
+	mem := fx.memDir(repo(t, personalRemote))
+	writeFile(t, filepath.Join(mem, "a-linker.md"), native("a-linker", "links to the sibling", "See [[b-sibling]]. "+body))
+	writeFile(t, filepath.Join(mem, "b-sibling.md"), native("b-sibling", "the sibling", "see https://example.com/doc for the layout of the store\n"))
+	linker := sourcePath(filepath.Join(mem, "a-linker.md"))
+
+	// The importing session has no tool record, so the plan flags both facts;
+	// the scanner records one on its trigger-th call, so the linker's write
+	// finds the session clean while the sibling stays flagged for its URL.
+	fx.opts.SessionID = "s2"
+	if err := gate.MarkSession(fx.cfg.ProvenanceDir(), "s2", false); err != nil {
+		t.Fatal(err)
+	}
+	sig := tempDir(t)
+	count, trigger := filepath.Join(sig, "count"), filepath.Join(sig, "trigger")
+	stream := filepath.Join(fx.cfg.EventRecord, "stream", time.Now().UTC().Format(time.DateOnly)+".jsonl")
+	fx.opts.Deps.Scanner = gate.Scanner{Bin: script(t, "n=$(cat '"+count+"' 2>/dev/null || echo 0)\nn=$((n+1))\nprintf '%s' \"$n\" > '"+count+"'\n"+
+		"if [ -f '"+trigger+"' ] && [ \"$n\" = \"$(cat '"+trigger+"')\" ]; then\n"+
+		"  printf '%s\\n' '{\"session_id\":\"s2\",\"canonical_event\":\"post_tool\",\"tool_name\":\"Bash\"}' >> '"+stream+"'\nfi\nprintf '[]'\n")}
+
+	_, lines := fx.runResult(t, true)
+	wantLines(t, lines, []string{"would flag personal ", "would flag personal "})
+	planCalls, err := os.ReadFile(count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan int
+	if _, err := fmt.Sscan(string(planCalls), &plan); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, count, "0")
+	writeFile(t, trigger, strconv.Itoa(plan+1))
+
+	res, lines := fx.runResult(t, false)
+	wantLines(t, lines, []string{
+		"skipped " + linker + ": failed: it links b-sibling",
+		"flagged personal ",
+	})
+	if res.Failed != 1 {
+		t.Errorf("Failed = %d, want 1", res.Failed)
+	}
+	if res.Warning != "" {
+		t.Errorf("warning: %s", res.Warning)
+	}
+	if _, err := os.Stat(filepath.Join(fx.cfg.PersonalStore, "demo", "a-linker.md")); err == nil {
+		t.Error("the linker reached the checkout")
+	}
+	fx.checkoutCommits(t)
+}
+
+func TestARefusedLinkTargetThatLaterPublishesDoesNotLeaveItsLinkerRefused(t *testing.T) {
+	const body = "Facts are plain markdown files with frontmatter, one per file, in a store.\n"
+	fx := setup(t, "personal")
+	mem := fx.memDir(repo(t, personalRemote))
+	// b-yankee is shadowed by a-zeta until a-zeta is refused, which only the
+	// second round learns; c-xray links it.
+	writeFile(t, filepath.Join(mem, "a-zeta.md"), native("a-zeta", "the same description", "the key is "+"AK"+"IA"+"IOSFODNN7EXAMPLE\n"))
+	writeFile(t, filepath.Join(mem, "b-yankee.md"), native("b-yankee", "the same description", "a different body\n"))
+	writeFile(t, filepath.Join(mem, "c-xray.md"), native("c-xray", "links to yankee", "See [[b-yankee]]. "+body))
+	for _, dryRun := range []bool{true, false} {
+		landed := "published personal "
+		if dryRun {
+			landed = "would publish personal "
+		}
+		_, lines := fx.runResult(t, dryRun)
+		wantLines(t, lines, []string{
+			"skipped " + sourcePath(filepath.Join(mem, "a-zeta.md")) + ": refused: ",
+			landed + filepath.Join(fx.cfg.PersonalStore, "demo", "b-yankee.md"),
+			landed + filepath.Join(fx.cfg.PersonalStore, "demo", "c-xray.md"),
+		})
+	}
+	fx.checkoutCommits(t)
+}
+
+func TestFactsAreWrittenAfterTheFactsTheyLink(t *testing.T) {
+	const body = "Facts are plain markdown files with frontmatter, one per file, in a store.\n"
+	fx := setup(t, "personal")
+	mem := fx.memDir(repo(t, personalRemote))
+	writeFile(t, filepath.Join(mem, "a-linker.md"), native("a-linker", "links to the target", "See [[z-target]]. "+body))
+	writeFile(t, filepath.Join(mem, "z-target.md"), native("z-target", "the target", "The target.\n"))
+	log := filepath.Join(tempDir(t), "scanned")
+	fx.opts.Deps.Scanner = gate.Scanner{Bin: script(t, "sed -n 's/^name: //p' >> '"+log+"'\nprintf '[]'\n")}
+
+	res, lines := fx.runResult(t, false)
+	if res.Failed != 0 || res.Warning != "" {
+		t.Fatalf("failed %d, warning %q", res.Failed, res.Warning)
+	}
+	wantLines(t, lines, []string{"published personal ", "published personal "})
+	b, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanned := strings.Fields(string(b))
+	// The plan scans every fact first; the writes are the last two scans.
+	if got, want := scanned[len(scanned)-2:], []string{"z-target", "a-linker"}; !slices.Equal(got, want) {
+		t.Errorf("write order = %v, want %v", got, want)
 	}
 }

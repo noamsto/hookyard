@@ -203,17 +203,30 @@ func request(p candidate, o Options, pending []string, dryRun bool) write.Reques
 // layer, leaves a published fact's link dangling and the commit gate refusing
 // the checkout. A fact that lands flagged is not under that gate, so it may
 // name any fact of the run still live. So each round dry-runs the items with
-// the names that published last round as the ones a published fact's link may
-// name, and repeats until nothing changes; an item the write path refuses is
-// dropped and the rest re-prepared, so a near duplicate no longer shadows
-// against a fact that will not land. Both sets only grow, so it ends.
+// the names that publish as the ones a published fact's link may name, and
+// repeats until nothing changes; an item the write path refuses is dropped
+// and the rest re-prepared, so a near duplicate no longer shadows against a
+// fact that will not land.
+//
+// A refusal that only an in-run link explains is not final, since the target
+// may be shadowed now and land once another item is dropped. Such an item
+// waits: it is dry-run again every round, and leaves the live and publishing
+// names while it is refused. One that waits a second time is dropped, so the
+// rounds stay bounded.
 func planRun(ctx context.Context, items []Item, o Options, base []existing, damaged []damagedFact) plan {
 	damagedPaths := map[string]bool{}
 	for _, d := range damaged {
 		damagedPaths[filepath.Clean(d.path)] = true
 	}
+	inCheckout := map[string]bool{}
+	for _, k := range base {
+		if k.inCheckout {
+			inCheckout[k.fact.Name] = true
+		}
+	}
 	dropped := map[int]excluded{}
 	unpublished := map[int]bool{}
+	waiting, waited := map[int]Report{}, map[int]bool{}
 	for {
 		known := slices.Clone(base)
 		var cands []candidate
@@ -240,6 +253,9 @@ func planRun(ctx context.Context, items []Item, o Options, base []existing, dama
 		pending, live := map[string]bool{}, map[string]bool{}
 		for j := range cands {
 			cands[j].fact.Body = relink(cands[j].fact.Body, names)
+			if _, ok := waiting[idxs[j]]; ok {
+				continue
+			}
 			live[cands[j].fact.Name] = true
 			if !unpublished[idxs[j]] {
 				pending[cands[j].fact.Name] = true
@@ -249,13 +265,26 @@ func planRun(ctx context.Context, items []Item, o Options, base []existing, dama
 
 		changed := false
 		var out []planned
+		stillWaiting := map[int]Report{}
 		for j, c := range cands {
 			targets := publishing
 			if unpublished[idxs[j]] {
 				targets = all
 			}
+			if _, ok := waiting[idxs[j]]; ok {
+				targets = append(slices.Clone(targets), c.fact.Name)
+			}
 			res, err := write.AddLocked(ctx, o.Config, request(c, o, targets, true), o.Deps)
 			switch {
+			case err != nil && errors.Is(err, write.ErrRefusal) && refusedOnlyForLinks(ctx, o, c, targets, inCheckout):
+				if _, was := waiting[idxs[j]]; !was && waited[idxs[j]] {
+					dropped[idxs[j]] = excluded{err: err, policy: true}
+					changed = true
+					continue
+				}
+				stillWaiting[idxs[j]] = droppedReport(c.item, excluded{err: err, policy: true})
+				waited[idxs[j]] = true
+				continue
 			case err != nil:
 				dropped[idxs[j]] = excluded{err: err, policy: errors.Is(err, write.ErrRefusal)}
 				changed = true
@@ -272,10 +301,17 @@ func planRun(ctx context.Context, items []Item, o Options, base []existing, dama
 			}
 			out = append(out, planned{candidate: c, idx: idxs[j], res: res, publishes: publishes})
 		}
+		if !maps.EqualFunc(waiting, stillWaiting, func(Report, Report) bool { return true }) {
+			changed = true
+		}
+		waiting = stillWaiting
 		if changed {
 			continue
 		}
 		pl := plan{items: out, notes: notes}
+		for _, i := range slices.Sorted(maps.Keys(waiting)) {
+			pl.notes = append(pl.notes, waiting[i])
+		}
 		for _, why := range dropped {
 			if !why.policy {
 				pl.failed++
@@ -283,6 +319,23 @@ func planRun(ctx context.Context, items []Item, o Options, base []existing, dama
 		}
 		return pl
 	}
+}
+
+// refusedOnlyForLinks reports whether c, refused with targets as the names its
+// links may name, links a fact of neither the checkout nor targets, and would
+// pass if it could name them.
+func refusedOnlyForLinks(ctx context.Context, o Options, c candidate, targets []string, inCheckout map[string]bool) bool {
+	var missing []string
+	for _, t := range linkTargets(c.fact.Body) {
+		if !inCheckout[t] && !slices.Contains(targets, t) {
+			missing = append(missing, t)
+		}
+	}
+	if len(missing) == 0 {
+		return false
+	}
+	_, err := write.AddLocked(ctx, o.Config, request(c, o, slices.Concat(targets, missing), true), o.Deps)
+	return err == nil
 }
 
 func droppedReport(it Item, why excluded) Report {
@@ -293,14 +346,19 @@ func droppedReport(it Item, why excluded) Report {
 	return Report{Outcome: Skipped, Source: it.Source, Detail: kind + why.err.Error()}
 }
 
-// writeAll writes the plan's items in order, appending their reports to out,
-// and returns how many it published. The plan holds, but a write can still
-// fail: then a link to that fact would dangle, so the facts already written
-// that link to it, and in turn those they link from, are taken back out, and
-// later ones no longer count it as a link target.
+// writeAll writes the plan's items, appending their reports to out in plan
+// order, and returns how many it published. An item is written after the facts
+// of the run it links, so a run killed half way leaves no published link
+// dangling. The plan holds, but a write can still fail, and a fact planned
+// flagged can publish once the session's record has caught up: then a link to
+// a fact that is not in the checkout would dangle, so a fact that links one is
+// not kept, the facts already written that link it, and in turn those they
+// link from, are taken back out, and later ones no longer count it as a link
+// target.
 func writeAll(ctx context.Context, o Options, checkout store.Root, pl plan, out *Result) (published int) {
-	pending, live := map[string]bool{}, map[string]bool{}
+	pending, live, inRun := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, p := range pl.items {
+		inRun[p.fact.Name] = true
 		live[p.fact.Name] = true
 		if p.publishes {
 			pending[p.fact.Name] = true
@@ -312,23 +370,48 @@ func writeAll(ctx context.Context, o Options, checkout store.Root, pl plan, out 
 	}
 	var landing []landed
 	rolledBack := false
-	for _, p := range pl.items {
+	first := len(out.Reports)
+	out.Reports = append(out.Reports, make([]Report, len(pl.items))...)
+	for _, i := range writeOrder(pl.items) {
+		p := pl.items[i]
+		report := first + i
 		targets := pending
 		if !p.publishes {
 			targets = live
 		}
-		res, err := write.AddLocked(ctx, o.Config, request(p.candidate, o, slices.Sorted(maps.Keys(targets)), false), o.Deps)
+		// Only a failure takes a name out of pending, so this holds across the
+		// write.
+		dangling := ""
+		for _, t := range linkTargets(p.fact.Body) {
+			if t != p.fact.Name && inRun[t] && !pending[t] {
+				dangling = t
+				break
+			}
+		}
+		var res write.Result
+		var err error
+		if p.publishes && dangling != "" {
+			err = fmt.Errorf("it links %s, which was not written", dangling)
+		} else {
+			res, err = write.AddLocked(ctx, o.Config, request(p.candidate, o, slices.Sorted(maps.Keys(targets)), false), o.Deps)
+		}
+		if err == nil && res.Outcome == "published" && dangling != "" {
+			if rmErr := os.Remove(res.Path); rmErr != nil {
+				out.Warning = joinWarnings(out.Warning, "rolling back "+p.item.Source+": "+rmErr.Error())
+			}
+			rolledBack = true
+			err = fmt.Errorf("it links %s, which was not written", dangling)
+		}
 		if err != nil {
 			delete(live, p.fact.Name)
-			rep := droppedReport(p.item, excluded{err: err, policy: errors.Is(err, write.ErrRefusal)})
-			out.Reports = append(out.Reports, rep)
+			out.Reports[report] = droppedReport(p.item, excluded{err: err, policy: errors.Is(err, write.ErrRefusal)})
 			if !errors.Is(err, write.ErrRefusal) {
 				out.Failed++
 			}
 		} else {
-			out.Reports = append(out.Reports, written(res, p.item.Source, false))
+			out.Reports[report] = written(res, p.item.Source, false)
 			if res.Outcome == "published" {
-				landing = append(landing, landed{p: planned{candidate: p.candidate, res: res}, report: len(out.Reports) - 1})
+				landing = append(landing, landed{p: planned{candidate: p.candidate, res: res}, report: report})
 			}
 		}
 		if !p.publishes || (err == nil && res.Outcome == "published") {
@@ -361,6 +444,46 @@ func writeAll(ctx context.Context, o Options, checkout store.Root, pl plan, out 
 		}
 	}
 	return len(landing)
+}
+
+// writeOrder lists the indices of items in the order to write them: each item
+// after the published facts of the run it links, otherwise in plan order.
+// Facts that link each other keep their plan order, since one must go first.
+func writeOrder(items []planned) []int {
+	publishing := map[string]int{}
+	for i, p := range items {
+		if p.publishes {
+			publishing[p.fact.Name] = i
+		}
+	}
+	deps := make([][]int, len(items))
+	for i, p := range items {
+		for _, t := range linkTargets(p.fact.Body) {
+			if j, ok := publishing[t]; ok && j != i {
+				deps[i] = append(deps[i], j)
+			}
+		}
+	}
+	done := make([]bool, len(items))
+	order := make([]int, 0, len(items))
+	for len(order) < len(items) {
+		next := -1
+		for i := range items {
+			if done[i] {
+				continue
+			}
+			if next < 0 {
+				next = i
+			}
+			if !slices.ContainsFunc(deps[i], func(j int) bool { return !done[j] }) {
+				next = i
+				break
+			}
+		}
+		done[next] = true
+		order = append(order, next)
+	}
+	return order
 }
 
 // linkTargets names the facts body links to.
@@ -399,12 +522,15 @@ func written(res write.Result, source string, dryRun bool) Report {
 
 // existing is a fact dedup compares against: one already in the store, or one
 // accepted earlier in this run. sum is its source.sha256, or "" for a fact
-// that was not imported; raw is the sha256 of its file's bytes.
+// that was not imported; raw is the sha256 of its file's bytes. inCheckout is
+// true for a fact in the checkout, the only place a published fact's wiki-link
+// can resolve to.
 type existing struct {
-	path string
-	fact fact.Fact
-	sum  string
-	raw  string
+	path       string
+	fact       fact.Fact
+	sum        string
+	raw        string
+	inCheckout bool
 }
 
 // damagedFact is a file in the store Walk could not read, which dedup cannot
@@ -427,7 +553,7 @@ func loadStore(ctx context.Context, cfg config.Config) (store.Root, []existing, 
 	for _, root := range []store.Root{checkout, store.LocalRoot(cfg, route.StorePersonal)} {
 		entries, walkErrs := root.Walk()
 		for _, e := range entries {
-			k := existing{path: filepath.Join(root.Path, filepath.FromSlash(e.Rel)), fact: e.Fact, raw: digest(e.Raw)}
+			k := existing{path: filepath.Join(root.Path, filepath.FromSlash(e.Rel)), fact: e.Fact, raw: digest(e.Raw), inCheckout: root.Path == checkout.Path}
 			if s := e.Fact.Metadata.Source; s != nil {
 				k.sum = s.SHA256
 			}

@@ -625,6 +625,34 @@ func TestRefusesSymlinkedDestination(t *testing.T) {
 	}
 }
 
+func TestAnUnreadableDestinationIsAFailureNotARefusal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads any directory")
+	}
+	fx := setup(t, "work")
+	local := store.LocalRoot(fx.cfg, route.StorePersonal).Path
+	if err := os.MkdirAll(filepath.Join(local, "hookyard"), 0o755); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+	if err := os.Chmod(local, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(local, 0o755) }) //nolint:gosec // restores the test fixture so TempDir can remove it
+
+	req := request("unreachable-fact", personalRepo)
+	req.External = true
+	_, err := Add(context.Background(), fx.cfg, req, fx.deps)
+	if err == nil {
+		t.Fatal("Add wrote into a directory it cannot read")
+	}
+	if errors.Is(err, ErrRefusal) {
+		t.Errorf("err = %v: an unreadable directory is a failure, not a refusal", err)
+	}
+	if _, ok := errors.AsType[*fs.PathError](err); !ok {
+		t.Errorf("err = %v, want the filesystem error to survive", err)
+	}
+}
+
 // head is HEAD's commit, or "" while HEAD is unborn.
 func head(t *testing.T, dir string) string {
 	t.Helper()
