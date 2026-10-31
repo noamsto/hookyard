@@ -948,14 +948,81 @@ func (c *check) hasPrefix(s, prefix string) bool {
 }
 
 // matches reports whether the glob element pattern may match name; a pattern
-// it cannot read matches. A class negated with `!` is read as `^`, which is
-// how path.Match negates one.
+// it cannot read matches.
 func (c *check) matches(pattern, name string) bool {
 	if c.g.fold {
 		pattern, name = strings.ToLower(pattern), strings.ToLower(name)
 	}
-	ok, err := path.Match(strings.ReplaceAll(convertExtglob(pattern), "[!", "[^"), name)
+	ok, err := path.Match(convertBrackets(convertExtglob(pattern)), name)
 	return ok || err != nil
+}
+
+// convertBrackets rewrites bash bracket classes into path.Match syntax. Bash
+// reads a `[` with no close as a literal and a `]` first in a class (after an
+// optional `!` or `^`) as a member, where path.Match errors on both and an
+// error would count as a match. A class negated with `!` becomes `^`.
+func convertBrackets(p string) string {
+	var b strings.Builder
+	for i := 0; i < len(p); i++ {
+		switch p[i] {
+		case '\\':
+			b.WriteByte('\\')
+			if i+1 < len(p) {
+				i++
+				b.WriteByte(p[i])
+			}
+			continue
+		case '[':
+		default:
+			b.WriteByte(p[i])
+			continue
+		}
+		j := i + 1
+		negated := j < len(p) && (p[j] == '!' || p[j] == '^')
+		if negated {
+			j++
+		}
+		leadingClose := j < len(p) && p[j] == ']'
+		if leadingClose {
+			j++
+		}
+		end := classEnd(p, j)
+		if end < 0 {
+			b.WriteString(`\[`)
+			continue
+		}
+		b.WriteByte('[')
+		if negated {
+			b.WriteByte('^')
+		}
+		if leadingClose {
+			b.WriteString(`\]`)
+		}
+		b.WriteString(p[j:end])
+		b.WriteByte(']')
+		i = end
+	}
+	return b.String()
+}
+
+// classEnd is the index of the `]` closing a bracket class whose members
+// start at p[from], reading `[:…:]`, `[.….]` and `[=…=]` as units, or -1.
+func classEnd(p string, from int) int {
+	for k := from; k < len(p); k++ {
+		switch p[k] {
+		case '\\':
+			k++
+		case '[':
+			if k+1 < len(p) && strings.IndexByte(":.=", p[k+1]) >= 0 {
+				if n := strings.Index(p[k+2:], string(p[k+1])+"]"); n >= 0 {
+					k += n + 3
+				}
+			}
+		case ']':
+			return k
+		}
+	}
+	return -1
 }
 
 // convertExtglob reads an extglob group (`@(x)`, `!(x)`) as `*`.

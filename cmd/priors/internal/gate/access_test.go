@@ -167,6 +167,53 @@ func TestShellAccess(t *testing.T) {
 	}
 }
 
+func TestSedScript(t *testing.T) {
+	for _, tt := range []struct {
+		script string
+		reads  bool
+	}{
+		{`s/refused: [^:]+: /refused: /`, true},
+		{`/e/p`, true},
+		{`s|e|x|g`, true},
+		{`1,/re/{s/e/x/;p}`, true},
+		{`:l;N;$!bl;s/\n/e/g`, true},
+		{`\,e,d`, true},
+		{`/e/I!d`, true},
+		{`0~3{/re/d}`, true},
+		{`s/[^:]+e/x/`, true},
+		{`w x`, false},
+		{`W x`, false},
+		{`1e x`, false},
+		{`s/a/b/w x`, false},
+		{`s/a/b/e`, false},
+		{`s/[/]/x/w f`, false},
+		{`s/[\]/x/w f` + "\n" + `#]/y/`, false},
+		{`s/[]/]/x/w f`, false},
+		{`:a;w f`, false},
+		{`:x w f`, false},
+		{`b x w f`, false},
+		{`1a e`, false},
+		{`y/e/x/`, false},
+		{`r e`, false},
+		{`swewxw`, false},
+		{`s/e/`, false},
+		{`s/[e/x/`, false},
+		{`s/e/x/\`, false},
+		{`:x;/\` + "\n" + `w f\` + "\n" + `/p`, false},
+		{`1#e`, false},
+		{`s/\x65/x/w f`, false},
+		{`s[e[x[`, false},
+		{`s]e]x]`, false},
+		{`s/[[:alpha:/x/e`, false},
+		{`s/[[.e/x/`, false},
+		{`s/[/e]/x/`, false},
+	} {
+		if got := sedScript(tt.script); got != tt.reads {
+			t.Errorf("sedScript(%q) = %v, want %v", tt.script, got, tt.reads)
+		}
+	}
+}
+
 func TestShellAccessUnreadable(t *testing.T) {
 	if acc := ShellAccess(nil, strings.Repeat("a", maxText+1)); acc.Unreadable != "budget" {
 		t.Errorf("Unreadable = %q, want budget", acc.Unreadable)

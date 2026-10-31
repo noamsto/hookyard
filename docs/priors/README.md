@@ -393,7 +393,16 @@ In a shell command:
   declaring a nameref, makes the command one that may write. While `IFS` may
   have changed, the words of an unquoted expansion cannot be told;
 - assigning any `GIT_*` or `LD_*` variable is a write, like assigning `PATH`;
-- bash `[!…]` globs are read as negated classes;
+- bash `[!…]` globs are read as negated classes, a `]` first in a class as a
+  member, and a `[` with no close as a literal (a jq filter `'.[] | …'` names
+  no `.attest` dir);
+- a sed script that holds `w`, `W` or `e` anywhere is read as a program: its
+  `w`, `W`, `e`, `r`, `R`, `a`, `i`, `c` and `y` commands, an `s` flag `w` or
+  `e`, a backslash-newline continuation, a bracket expression holding the
+  delimiter or a backslash, an escape such as `\x`, or anything else the
+  guard does not parse make sed a command that may write; a script without
+  those letters only reads, and those letters in a regex, a replacement or a
+  label do not (`sed 's/refused: //'` reads);
 - the message of `git commit` (`-m`, `--message`), and the `--body`,
   `--title`, `--message`, `--notes` and `--description` values (`-b`, `-t`,
   `-m`) of `gh` and `glab` `pr`, `issue`, `mr` or `release` with `create`,
@@ -461,7 +470,11 @@ It over-denies:
 
 - a shell command that reads a store path while it writes elsewhere, a shell
   write to a store fact, and a write that may name a dir holding a store
-  (`cmake ..` from a dir directly under one);
+  (`cmake ..` from a dir directly under one, `foo .` or `cp x .` from `~`),
+  including such a word inside an unknown program's argument that holds a
+  space, since the argument is read as a script: a `claude -p` prompt with a
+  lone `.` run from `~`, a `gh --jq` filter holding `//`, or a message holding
+  ` / `;
 - a reader run behind a flagged wrapper (`nice -n 5 git status`) in a store or
   naming one;
 - assigning or exporting `PATH`, `BASH_ENV`, `ENV`, `GIT_*` or `LD_*`, or
