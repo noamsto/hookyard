@@ -274,6 +274,9 @@ func TestShellDenies(t *testing.T) {
 		{name: "awk code on dot from home", want: "which holds", cwd: ".", input: bash(`awk 'BEGIN{system("rm -rf ./")}'`)},
 		{name: "php code on dot from home", want: "which holds", cwd: ".", input: bash(`php -r 'system("rm -rf ./");'`)},
 		{name: "known writer on root", want: "which holds", input: bash(`rm -rf /`)},
+		{name: "bracket with a leading close attest", want: "an .attest dir", input: bash(`rm -rf ~/work/.att[]e]st`)},
+		{name: "negated bracket with a leading close attest", want: "an .attest dir", input: bash(`rm -rf ~/work/.atte[!]x]t`)},
+		{name: "quoted glob piped to shell", want: "an .attest dir", input: bash(`echo 'rm -rf ~/work/.a*' | bash`)},
 
 		// sed scripts read as programs.
 		{name: "sed s w flag with e", want: "inside the personal store", input: bash(`sed 's/e/x/w @H/notes/facts/a.md' f`)},
@@ -336,6 +339,8 @@ func TestShellAllows(t *testing.T) {
 		{name: "message with an apostrophe and slash", input: bash(`crew reply x "it's a / b"`)},
 		{name: "unknown program on dot from home", cwd: ".", input: bash(`foo .`)},
 		{name: "unparsed string naming dot is not a path", cwd: ".", input: bash(`watch 'rm -rf . ('`)},
+		{name: "jq filter after an assignment", input: bash(`CREW_ID=x crew roster | jq -c '.[] | select(.state=="working" or .state=="blocked") | {name,branch,state,age_s}'`)},
+		{name: "jq alternative filter after an assignment", input: bash(`CREW_ID=x crew roster | jq -c '.[]? // .'`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.tool == "" {
