@@ -370,6 +370,12 @@ In a shell command:
   have changed, the words of an unquoted expansion cannot be told;
 - assigning any `GIT_*` or `LD_*` variable is a write, like assigning `PATH`;
 - bash `[!…]` globs are read as negated classes;
+- a sed script is read as a program: its `w`, `W`, `e`, `r`, `R`, `a`, `i`,
+  `c` and `y` commands, an `s` flag `w` or `e`, a backslash-newline
+  continuation, a bracket expression holding the delimiter or a backslash, an
+  escape such as `\x`, or anything else the guard does not parse make sed a
+  command that may write; those letters in a regex, a replacement or a label
+  do not (`sed 's/refused: //'` reads);
 - the message of `git commit` (`-m`, `--message`), and the `--body`,
   `--title`, `--message`, `--notes` and `--description` values (`-b`, `-t`,
   `-m`) of `gh` and `glab` `pr`, `issue`, `mr` or `release` with `create`,
@@ -431,13 +437,23 @@ It also does not see these open classes:
 - paths packed into one string: a comma- or newline-separated list, or a JSON
   document in a string;
 - a `file:` URI with a single slash;
-- a reviewed claim split across the elements of a line array.
+- a reviewed claim split across the elements of a line array;
+- a program the guard does not list as a writer (an unlisted delete tool or
+  interpreter) that writes its `.` operand from a dir holding a store, or its
+  `/` operand. A listed writer (`rm`, `cp`, `tar`, `find`, …), a listed shell
+  or interpreter, a path-invoked program, or an unknown wrapper that names a
+  listed writer (`watch rm -rf .`) is still denied, as is a write naming `..`,
+  `~` or another dir that holds a store.
 
 It over-denies:
 
 - a shell command that reads a store path while it writes elsewhere, a shell
   write to a store fact, and a write that may name a dir holding a store
-  (`cmake ..` from a dir directly under one);
+  (`cmake ..` from a dir directly under one, `cp x .` from `~`);
+- an unlisted program's `.` or `/` operand when its own words also name a
+  listed writer (a `claude -p` prompt run from `~` whose prose mentions `git`
+  or `make` beside a lone `.`), or behind a flagged wrapper (`env -u X prog
+  "a / b"`);
 - a reader run behind a flagged wrapper (`nice -n 5 git status`) in a store or
   naming one;
 - assigning or exporting `PATH`, `BASH_ENV`, `ENV`, `GIT_*` or `LD_*`, or
