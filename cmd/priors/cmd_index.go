@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/commit"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
+	"github.com/noamsto/hookyard/cmd/priors/internal/guard"
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
 	"github.com/noamsto/hookyard/cmd/priors/internal/tier1"
@@ -23,7 +25,10 @@ import (
 
 const (
 	hookDeadline = 800 * time.Millisecond
-	maxEnvelope  = 1 << 20
+	// guardDeadline leaves the write guard's answer room inside its 1 s
+	// handler budget.
+	guardDeadline = 750 * time.Millisecond
+	maxEnvelope   = 1 << 20
 )
 
 // envelope is the part of hookyard's exec-handler input priors reads.
@@ -39,11 +44,16 @@ type hookResult struct {
 	text    string
 	reports []string
 	call    *envelope
+	// callErr is why the call's envelope was not read in full.
+	callErr error
+	deny    string
 }
 
 type hookOutput struct {
 	HookSpecificOutput struct {
-		AdditionalContext string `json:"additionalContext"`
+		AdditionalContext        string `json:"additionalContext,omitempty"`
+		PermissionDecision       string `json:"permissionDecision,omitempty"`
+		PermissionDecisionReason string `json:"permissionDecisionReason,omitempty"`
 	} `json:"hookSpecificOutput"`
 }
 
@@ -75,27 +85,99 @@ func cmdIndex(args []string, s streams) int {
 
 // cmdBare is hookyard's exec handler: priors takes no arguments there, so the
 // envelope says what to do. session_start answers with the index; pre_tool
-// and post_tool answer nothing and leave gate 2's markers for the session.
+// and post_tool leave gate 2's markers for the session, and pre_tool denies a
+// call the write guard refuses.
 func cmdBare(s streams) int {
 	if !isPiped(s.in) {
 		s.errText(usage)
 		return 1
 	}
+	start := time.Now()
 	res := runHook(func(ctx context.Context) hookResult {
 		input, err := readEnvelope(s.in)
 		if input.CanonicalEvent == "pre_tool" || input.CanonicalEvent == "post_tool" {
-			return hookResult{call: &input}
+			return hookResult{call: &input, callErr: err}
 		}
 		if err != nil || input.CanonicalEvent != "session_start" {
 			return hookResult{}
 		}
 		return assembleIndex(ctx, "", input.CWD)
 	})
-	if res.call != nil {
+	if res.call != nil && res.call.CanonicalEvent == "pre_tool" {
+		res.deny = guardCall(*res.call, res.callErr, start, checkWrite, recordToolCall, s.err)
+	} else if res.call != nil {
 		recordToolCall(*res.call)
 	}
 	printHook(s, res, false)
 	return 0
+}
+
+// guardCall returns why check denies call, marking it with record meanwhile.
+// The clock runs from start: a check that panics or outlasts guardDeadline
+// denies, since hookyard abstains for a handler that answers past its budget.
+// A record still running at the deadline is abandoned and the verdict stands.
+// A panic's value goes in the reason and to errw.
+func guardCall(call envelope, readErr error, start time.Time, check func(envelope, error) string, record func(envelope), errw io.Writer) string {
+	deadline := time.NewTimer(guardDeadline - time.Since(start))
+	defer deadline.Stop()
+	verdict := make(chan string, 1)
+	go func() {
+		reason := "priors write guard: the guard failed, so the call is denied"
+		defer func() {
+			if r := recover(); r != nil {
+				reason = fmt.Sprintf("priors write guard: the guard failed (%v), so the call is denied", r)
+				_, _ = fmt.Fprintln(errw, "priors:", reason)
+			}
+			verdict <- reason
+		}()
+		reason = check(call, readErr)
+	}()
+	recorded := make(chan struct{})
+	go func() {
+		defer close(recorded)
+		record(call)
+	}()
+	var reason string
+	select {
+	case reason = <-verdict:
+	case <-deadline.C:
+		return "priors write guard: the guard ran out of time, so the call is denied"
+	}
+	select {
+	case <-recorded:
+	case <-deadline.C:
+	}
+	return reason
+}
+
+// checkWrite is the write guard's verdict on call, under the paths priors'
+// config pins on this host. A host without a trust file runs no priors stores,
+// so the guard is inert there.
+func checkWrite(call envelope, readErr error) string {
+	cfgPath := config.DefaultPath()
+	cfg, err := config.LoadPaths(cfgPath)
+	if errors.Is(err, config.ErrNoTrust) {
+		return ""
+	}
+	if readErr != nil && call.ToolInput == nil {
+		return fmt.Sprintf("priors write guard: the call's input could not be read, so it is denied: %v", readErr)
+	}
+	home, _ := os.UserHomeDir()
+	host := &gate.Host{Home: home, Env: os.LookupEnv, Users: userHome}
+	cwd := guard.CallDir(call.CWD, call.ToolInput)
+	if err != nil {
+		return guard.Broken(err, host).Check(cwd, call.ToolName, call.ToolInput)
+	}
+	return guard.New(guard.ForConfig(cfg, cfgPath), host).Check(cwd, call.ToolName, call.ToolInput)
+}
+
+// userHome is the home dir of the named user, for ~user.
+func userHome(name string) (string, bool) {
+	u, err := user.Lookup(name)
+	if err != nil || u.HomeDir == "" {
+		return "", false
+	}
+	return u.HomeDir, true
 }
 
 // recordToolCall marks the call's session as watched, and as having ingested
@@ -161,7 +243,7 @@ func printHook(s streams, res hookResult, raw bool) {
 	for _, r := range res.reports {
 		s.errln(r)
 	}
-	if res.text == "" {
+	if res.text == "" && res.deny == "" {
 		return
 	}
 	if raw {
@@ -170,6 +252,10 @@ func printHook(s streams, res hookResult, raw bool) {
 	}
 	var out hookOutput
 	out.HookSpecificOutput.AdditionalContext = res.text
+	if res.deny != "" {
+		out.HookSpecificOutput.PermissionDecision = "deny"
+		out.HookSpecificOutput.PermissionDecisionReason = res.deny
+	}
 	enc := json.NewEncoder(s.out)
 	enc.SetEscapeHTML(false)
 	_ = enc.Encode(out)

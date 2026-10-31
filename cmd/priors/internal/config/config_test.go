@@ -487,7 +487,8 @@ func TestLoadRejectsAStateDirInAGitWorkTree(t *testing.T) {
 				body = fmt.Sprintf("state_dir = %q\n", stateDir)
 			}
 
-			_, err := loadStores(t, writeConfig(t, body), t.TempDir(), "")
+			path, personal := writeConfig(t, body), t.TempDir()
+			_, err := loadStores(t, path, personal, "")
 
 			if err == nil {
 				t.Fatal("Load accepted a state dir inside a git work tree")
@@ -496,6 +497,14 @@ func TestLoadRejectsAStateDirInAGitWorkTree(t *testing.T) {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("err = %v, want it to contain %q", err, want)
 				}
+			}
+			// The write guard still learns where the state dir is.
+			cfg, err := loadWith(path, trustWith(t, personal, ""), fakeRoot{}, true)
+			if err != nil {
+				t.Fatalf("loading the paths alone: %v", err)
+			}
+			if cfg.State() != state {
+				t.Errorf("State() = %s, want %s", cfg.State(), state)
 			}
 		})
 	}
@@ -632,6 +641,50 @@ func TestLoadNamesTheTrustFile(t *testing.T) {
 	_, err = load(user, bad, fakeRoot{})
 	if err == nil || !strings.Contains(err.Error(), "trust file "+bad+": unknown keys: seam_probe") {
 		t.Errorf("err = %v, want an unknown-key error naming %s", err, bad)
+	}
+}
+
+func TestLoadPathsDefaultsAMissingUserConfig(t *testing.T) {
+	isolate(t)
+	xdg := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", xdg)
+	missing := filepath.Join(t.TempDir(), "absent.toml")
+	trust := trustWith(t, t.TempDir(), "")
+
+	c, err := loadWith(missing, trust, fakeRoot{}, true)
+	if err != nil {
+		t.Fatalf("paths-only load of a missing user config: %v", err)
+	}
+	if want := filepath.Join(realPath(t, xdg), "priors"); c.State() != want {
+		t.Errorf("State() = %q, want %q", c.State(), want)
+	}
+
+	if _, err := load(missing, trust, fakeRoot{}); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("full load of a missing user config: err = %v, want fs.ErrNotExist", err)
+	}
+}
+
+func TestLoadPathsKeepsRejectingAnUnparsableUserConfig(t *testing.T) {
+	isolate(t)
+	_, err := loadWith(writeConfig(t, "state_dir = \n"), trustWith(t, t.TempDir(), ""), fakeRoot{}, true)
+	if err == nil {
+		t.Error("paths-only load accepted an unparsable user config")
+	}
+}
+
+func TestLoadFlagsAMissingTrustFileOnly(t *testing.T) {
+	isolate(t)
+	user := writeConfig(t, "")
+	missing := filepath.Join(t.TempDir(), "trust.toml")
+	for _, pathsOnly := range []bool{false, true} {
+		if _, err := loadWith(user, missing, fakeRoot{}, pathsOnly); !errors.Is(err, ErrNoTrust) || !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("pathsOnly=%t, missing trust file: err = %v, want ErrNoTrust wrapping fs.ErrNotExist", pathsOnly, err)
+		}
+	}
+
+	bad := writeTrust(t, "profile = \n")
+	if _, err := load(user, bad, fakeRoot{}); err == nil || errors.Is(err, ErrNoTrust) {
+		t.Errorf("unparsable trust file: err = %v, want an error that is not ErrNoTrust", err)
 	}
 }
 

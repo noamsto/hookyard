@@ -300,10 +300,176 @@ manifest; point every `exec` path at the installed binary (`nix build
 - `priors-record` on `post_tool` with no `match`, on the fire-and-forget
   lane. It still answers nothing. It makes every tool call reach hookyard's
   event record, which gate 2 reads, and writes gate 2's shell markers.
-- `priors-provenance` on `pre_tool`, matching `Bash`, on the verdict lane
-  with a 1 s budget. It answers nothing, so it never blocks a call; it writes
-  the shell markers before the command runs, which covers a call that fails
-  (and so never reaches `post_tool`) and one that runs `priors add` itself.
+- `priors-guard` on `pre_tool` with no `match`, on the verdict lane with a
+  1 s budget. It writes the shell markers before the command runs, which
+  covers a call that fails (and so never reaches `post_tool`) and one that
+  runs `priors add` itself. It gives up at its 750 ms deadline, and a call
+  it gave up on is left unmarked: a lost mark fails as gate 2 describes. It
+  is also the write guard (see below), and denies a call that would write
+  what only priors or attestation writes.
+
+### Write guard
+
+The `pre_tool` write guard is a tripwire against an agent editing what it
+must not: it denies a tool call that would write
+
+- a store's attest entries (`.attest/`, and any path with an `.attest`
+  element), its generated `MEMORY.md` index or its `.git` dir;
+- a store fact so that it claims `confidence: reviewed`, judged on the
+  content a Write sends and on the file as an Edit would leave it;
+- priors' state dir and its config (the config dir when it is named
+  `priors`, else the config file);
+- any dir holding one of these (`rm -rf ~`).
+
+The stores are the ones the trust file pins, so the guard covers every
+configured store. A shell command cannot have its content judged, so a shell
+write anywhere in a store is denied, and so is any write while the command
+names a store path, runs in a store, or changes into one. Paths resolve
+against the call's cwd and every dir the command changes into, with `..` and
+symlinks resolved as the kernel does, and also with `..` cleaned first, as
+Claude Code and pi clean a file tool's path. A hard link elsewhere to any
+store file (a fact, `.git/config`, the index, an attest entry; the walk covers
+every store file, `.git/objects` included) or to the config file is caught: a
+file tool's write through a link to a fact is judged for a reviewed claim like
+a write to the fact itself, and a shell write through any such link is denied.
+The config file is guarded itself, so the target of a symlinked config is
+covered. A write through a path built at run time (`$(…)`, an unknown variable, xargs,
+a pipe into a writer) is denied when the command names a guarded path
+anywhere.
+
+Every tool that is not a read or a shell (an MCP server's tool, say, and the
+known file tools too) has the strings under keys the guard does not know
+judged, at any depth, as paths relative to the call's cwd, up to 4096 bytes,
+as given and trimmed. Those strings also count as content for the reviewed
+check. A string under a content key is judged as a path too when the input
+names no path under a path key. Keys that differ only in case, `_` or `-` all
+count. A leading `@`, `~` and `~/`,
+`file://` URIs and Unicode spaces in a path are read the way pi reads them.
+An edit through pi's `edit` whose new text holds `reviewed`, `\`, `!` or `*`
+in a store fact is denied, since pi matches fuzzily and applies every edit
+against the original file. The file as each edit would leave it is also
+judged, under Claude's sequential matching and under pi's all-at-once,
+fuzzy-normalized matching.
+
+In a shell command:
+
+- a wrapper flag's value is not trusted as a reader's name (`env -u cat rm …`);
+- `env -S` and `--split-string` read the split string as a command that may
+  write; `env -C` and `--chdir`, and `sudo -D` and `--chdir`, change dir;
+- git global options outside a known list, and abbreviated or bundled
+  sed, git and fd options (`sed --in-pl`, `git grep -O…`, `fd -Hx`), count as
+  writes; git's `--ext-diff` and `--textconv` count as running a program;
+- `CDPATH` assigned in the command makes a relative `cd` or `pushd` a dir the
+  guard cannot tell. With a `CDPATH` in the guard's own environment that
+  leads into a store dir, a relative `cd` under it with a write is denied when
+  the command names a guarded path;
+- `pushd` and `popd` with `+N` or `-N` name a dir the guard cannot tell;
+- naming `PATH`, `BASH_ENV`, `ENV`, `CDPATH` or `IFS` other than as an
+  expansion (or in `let`, `(( ))`, `read`, `mapfile` or `printf -v`), or
+  declaring a nameref, makes the command one that may write. While `IFS` may
+  have changed, the words of an unquoted expansion cannot be told;
+- assigning any `GIT_*` or `LD_*` variable is a write, like assigning `PATH`;
+- bash `[!…]` globs are read as negated classes;
+- the message of `git commit` (`-m`, `--message`), and the `--body`,
+  `--title`, `--message`, `--notes` and `--description` values (`-b`, `-t`,
+  `-m`) of `gh` and `glab` `pr`, `issue`, `mr` or `release` with `create`,
+  `edit`, `comment`, `review`, `merge`, `close`, `reopen` or `note`, hold
+  data, so their values are not judged as paths: a commit heredoc that
+  mentions `MEMORY.md` is allowed. Any other command's such option is judged,
+  and a command run inside such a message is still judged.
+
+`LSP` and an MCP tool are reads when the tool's last name segment starts with
+`search` or `list_`, or is `get_file_contents`, `read_file` or
+`read_text_file` or ends with one of them, and the segment holds no write verb
+anywhere in it (replace, write, edit, create, delete, move, save, add, set,
+start and the like). A read-shaped name that holds one, such as
+`list_commits` or `list_assets`, is judged as an unknown tool.
+
+What the guard does when it cannot load its inputs depends on what is
+missing. A host with no trust file (`/etc/priors/trust.toml`) is inert, and
+the guard allows every call. A missing user config loads the defaults, since
+an agent can delete the config and a missing file must not open the guard. A
+trust file that fails the ownership walk, or a trust file or user config
+that cannot be read, parsed or validated (unknown keys, trust-file keys in
+the user config, a bad state dir), denies every call that may write, naming
+the load error. So do a command past the parser's budget, a call whose tool
+input cannot be read, a guard that panics and a guard that runs past 750 ms.
+It fails open only where hookyard abstains (a call it does not route, a
+handler that crashes or runs past its budget) and on an envelope priors cannot
+read within 800 ms, which fails open like a handler past its budget. Load on
+the host can cause either.
+
+It is not a sandbox. It does not see a path computed at run time from
+nothing the command names (`base64 -d`, a file's content, a script file), a
+path an interpreter assembles from pieces, an archive or patch unpacked from
+a cwd that holds a store, a command that shadows a reader's name on `PATH`
+(including one set up by an earlier call of a persistent shell), a relative
+`cd` that `CDPATH` leads into a store when the command names no guarded path,
+and a `CDPATH` exported by an earlier call of a persistent shell, code run
+from config an agent can write (git's global `core.hooksPath`, Makefiles) or
+a variable a shell profile sets, `/proc/<pid>/cwd`, a bind mount, or macOS
+Unicode normalization. It does not see an MCP tool named like a read, with no
+write verb, that writes, nor an MCP tool that runs a command under a key
+other than `command` (a process-interaction tool's `input`). It does not see
+`git add`, `git commit`, `git fetch` or `git push` run in or on a store (git's
+own index, objects and refs count as git reading). It does not see a fact
+edited through a hard link created after the check. It does not see a call
+hookyard does not route, a call after hookyard abstains for a handler that
+crashes or runs past its budget, or a race that swaps a path between the check
+and the write.
+
+It also does not see these open classes:
+
+- a variable that changes how a word resolves or splits, or which program
+  runs (`PATH`, `IFS`, `CDPATH`, `GIT_*`, `LD_*`), set under a spelled name:
+  quoted, escaped or brace-expanded, through `eval`, a `{var}>` redirect, or a
+  nameref reached indirectly;
+- a wrapper's dir option in a spelling the guard does not parse (a
+  short-option cluster, an abbreviated long option, inside `env -S`, behind a
+  wrapper it does not list), and another runner's glued relative dir
+  (`unshare --wd=dir`, `--directory=dir`, `--prefix=dir`);
+- paths packed into one string: a comma- or newline-separated list, or a JSON
+  document in a string;
+- a `file:` URI with a single slash;
+- a reviewed claim split across the elements of a line array.
+
+It over-denies:
+
+- a shell command that reads a store path while it writes elsewhere, a shell
+  write to a store fact, and a write that may name a dir holding a store
+  (`cmake ..` from a dir directly under one);
+- a reader run behind a flagged wrapper (`nice -n 5 git status`) in a store or
+  naming one;
+- assigning or exporting `PATH`, `BASH_ENV`, `ENV`, `GIT_*` or `LD_*`, or
+  `printf -v`, in front of a reader in a store or naming one (`PATH=$PATH:/x
+  git status` in a store);
+- a command that mentions `PATH`, `IFS` and the like as a word (`echo "set
+  PATH"`) while it names a store or runs in one;
+- with `CDPATH` set on the host, a relative `cd` and relative write in a
+  command that mentions `MEMORY.md`, `.attest` or a store's name;
+- an unknown tool whose input holds `.`, `..`, `/`, or a word that names a
+  store or a dir holding one relative to the cwd (`{"repo":"notes"}` from
+  `~`);
+- a file tool writing a store fact whose other fields (an instructions or
+  description field) hold the word `reviewed`;
+- from a cwd inside a store, an unknown tool whose input holds the word
+  `reviewed` anywhere, since each short string resolves to a store file;
+- an MCP read tool outside the list that names a store's `.git`
+  (`read_multiple_files`);
+- a pi edit to a fact whose new text holds `reviewed`, `\`, `!` or `*`,
+  markdown emphasis included;
+- a commit message that names a guarded path in a command that also writes
+  through a path built at run time;
+- a `gh` or `glab` body built by a command (`--body "$(cat <<'EOF' …)"`)
+  that names an `.attest` element or a store path, since `gh` may write and
+  the command's own words are judged;
+- a git short-option cluster holding `O` (`git log -SOops`);
+- a git long option that is a prefix of one that runs a program (`git diff
+  --text`, a prefix of `--textconv`);
+- prose or patch bodies under an unknown or content key (a PR body, a chat
+  message) that hold a path with an `.attest` element, since each short string
+  is judged as a path;
+- an abbreviation of a harmless sed or fd long option.
 
 ## Store repositories
 

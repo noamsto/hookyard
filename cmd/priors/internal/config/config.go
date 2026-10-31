@@ -90,8 +90,26 @@ func Load(path string) (Config, error) {
 	return load(path, trustPath, fsys)
 }
 
+// ErrNoTrust marks a load that failed because the trust file does not exist.
+var ErrNoTrust = errors.New("absent")
+
+// LoadPaths is Load for a caller that needs only where the dirs are, so an
+// agent cannot hide them: a missing user config loads as the defaults, and a
+// .git planted above the state dir is not refused.
+func LoadPaths(path string) (Config, error) {
+	trustPath, fsys := trustSource()
+	return loadWith(path, trustPath, fsys, true)
+}
+
 func load(path, trustPath string, fsys StatFS) (Config, error) {
+	return loadWith(path, trustPath, fsys, false)
+}
+
+func loadWith(path, trustPath string, fsys StatFS, pathsOnly bool) (Config, error) {
 	t, err := readTrust(fsys, trustPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		err = fmt.Errorf("%w: %w", ErrNoTrust, err)
+	}
 	if err != nil {
 		return Config{}, fmt.Errorf("trust file %s: %w", trustPath, err)
 	}
@@ -100,6 +118,9 @@ func load(path, trustPath string, fsys StatFS) (Config, error) {
 		WorkNames []string `toml:"work_names"`
 	}
 	md, err := toml.DecodeFile(path, &u)
+	if pathsOnly && errors.Is(err, fs.ErrNotExist) {
+		md, err = toml.Decode("", &u)
+	}
 	if err != nil {
 		return Config{}, err
 	}
@@ -136,7 +157,7 @@ func load(path, trustPath string, fsys StatFS) (Config, error) {
 	if err := c.resolveDirs(trustPath, path); err != nil {
 		return Config{}, err
 	}
-	if err := c.checkDirs(trustPath, path); err != nil {
+	if err := c.checkDirs(trustPath, path, pathsOnly); err != nil {
 		return Config{}, err
 	}
 	return c, nil
@@ -211,9 +232,10 @@ func ResolveDir(p string) (string, error) {
 
 // checkDirs requires an absolute state path and keeps the stores and state dir
 // apart: a store nested in another, or in the state dir, would publish one
-// layer's files through another's checkout. An error is prefixed with the trust
-// file when it names only stores, else with the user config.
-func (c Config) checkDirs(trustPath, path string) error {
+// layer's files through another's checkout. Unless pathsOnly, it also refuses
+// a state dir inside a git work tree. An error is prefixed with the trust file
+// when it names only stores, else with the user config.
+func (c Config) checkDirs(trustPath, path string, pathsOnly bool) error {
 	type dir struct{ src, key, path string }
 	dirs := []dir{{trustPath, "stores.personal.path", c.PersonalStore}}
 	if c.WorkStore != "" {
@@ -237,6 +259,9 @@ func (c Config) checkDirs(trustPath, path string) error {
 				return fmt.Errorf("%s: %s (%s) and %s (%s) must not be the same or nested", src, a.key, a.path, b.key, b.path)
 			}
 		}
+	}
+	if pathsOnly {
+		return nil
 	}
 	if err := RefuseWorkTree(c.State()); err != nil {
 		return fmt.Errorf("%s: %s: %w", path, stateKey, err)

@@ -2165,6 +2165,102 @@ func TestPostToolMarkerFiles(t *testing.T) {
 	wantMarkerExts(t, sb.markerFiles(filepath.Join(sb.state, "provenance")), ".seen", ".ingest")
 }
 
+// TestPreToolWriteGuard: pre_tool denies a call that writes the store's index
+// or attest entries, still marks the session, and lets a write elsewhere run.
+func TestPreToolWriteGuard(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	sb.repo(personalRemote)
+	shell, _ := json.Marshal(map[string]string{"command": "echo x > " + filepath.Join(sb.personal, "MEMORY.md")})
+	write, _ := json.Marshal(map[string]string{"file_path": filepath.Join(sb.personal, ".attest", "e"), "content": "x"})
+	for _, tt := range []struct{ tool, input, want string }{
+		{"Bash", string(shell), "inside the personal store"},
+		{"Write", string(write), "inside an .attest dir"},
+	} {
+		res := sb.run(sb.toolEnvelope("pre_tool", "sess-1", tt.tool, tt.input, `null`))
+		wantExit(t, res, 0)
+		wantDeny(t, res.stdout, tt.want)
+	}
+	wantMarkerExts(t, sb.markerFiles(filepath.Join(sb.state, "provenance")), ".seen")
+
+	sb.toolCall("pre_tool", "sess-1", "Write", fmt.Sprintf(`{"file_path":%q,"content":"x"}`, filepath.Join(sb.dir, "notes.md")))
+}
+
+// TestPreToolWriteGuardBrokenConfig: a config the guard cannot load denies
+// every call that may write, and lets a read run.
+func TestPreToolWriteGuardBrokenConfig(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	sb.writeFile(sb.configPath, "no_such_key = 1\n")
+	res := sb.run(sb.toolEnvelope("pre_tool", "sess-1", "Write", fmt.Sprintf(`{"file_path":%q,"content":"x"}`, filepath.Join(sb.dir, "notes.md")), `null`))
+	wantExit(t, res, 0)
+	wantDeny(t, res.stdout, "cannot tell where priors' stores and dirs are", "no_such_key")
+
+	sb.toolCall("pre_tool", "sess-1", "Read", fmt.Sprintf(`{"file_path":%q}`, filepath.Join(sb.dir, "notes.md")))
+}
+
+// TestPreToolWriteGuardNoTrustFile: a host without a trust file runs no priors
+// stores, so the guard has nothing to protect and lets every call run.
+func TestPreToolWriteGuardNoTrustFile(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	if err := os.Remove(sb.trustPath); err != nil {
+		t.Fatal(err)
+	}
+	sb.toolCall("pre_tool", "sess-1", "Write", `{"file_path":"/tmp/x","content":"x"}`)
+	sb.toolCall("pre_tool", "sess-1", "Write", fmt.Sprintf(`{"file_path":%q,"content":"x"}`, filepath.Join(sb.personal, ".attest", "e")))
+}
+
+// TestPreToolWriteGuardNoUserConfig: an agent can delete the user config, so a
+// missing one loads the defaults and the guard still protects the stores.
+func TestPreToolWriteGuardNoUserConfig(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	if err := os.Remove(sb.configPath); err != nil {
+		t.Fatal(err)
+	}
+	attestWrite := fmt.Sprintf(`{"file_path":%q,"content":"x"}`, filepath.Join(sb.personal, ".attest", "e"))
+	res := sb.run(sb.toolEnvelope("pre_tool", "sess-1", "Write", attestWrite, `null`))
+	wantExit(t, res, 0)
+	wantDeny(t, res.stdout, "inside an .attest dir")
+
+	sb.toolCall("pre_tool", "sess-1", "Write", fmt.Sprintf(`{"file_path":%q,"content":"x"}`, filepath.Join(sb.dir, "notes.md")))
+}
+
+// TestPreToolWriteGuardBrokenTrustFile: a trust file that is present but
+// unreadable is not an absent one; the guard cannot tell where anything is and
+// denies.
+func TestPreToolWriteGuardBrokenTrustFile(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	sb.writeFile(sb.trustPath, "profile = \n")
+	res := sb.run(sb.toolEnvelope("pre_tool", "sess-1", "Write", fmt.Sprintf(`{"file_path":%q,"content":"x"}`, filepath.Join(sb.dir, "notes.md")), `null`))
+	wantExit(t, res, 0)
+	wantDeny(t, res.stdout, "cannot tell where priors' stores and dirs are")
+}
+
+// TestPreToolWriteGuardUnreadableInput: a pre_tool call whose input was cut by
+// the size cap is denied.
+func TestPreToolWriteGuardUnreadableInput(t *testing.T) {
+	sb := newSandbox(t, "personal")
+	big := strconv.Quote(strings.Repeat("x", 2<<20))
+	res := sb.run(sb.toolEnvelope("pre_tool", "sess-1", "Write", `{"file_path":"/tmp/x","content":`+big+`}`, `null`))
+	wantExit(t, res, 0)
+	wantDeny(t, res.stdout, "could not be read")
+}
+
+func wantDeny(t *testing.T, stdout string, subs ...string) {
+	t.Helper()
+	var out struct {
+		HookSpecificOutput struct {
+			PermissionDecision       string `json:"permissionDecision"`
+			PermissionDecisionReason string `json:"permissionDecisionReason"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("stdout %q: %v", stdout, err)
+	}
+	if out.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("stdout %q, want a deny", stdout)
+	}
+	wantContains(t, "deny reason", out.HookSpecificOutput.PermissionDecisionReason, subs...)
+}
+
 // TestPreToolMarksIngestion: pre_tool marks the session before the command
 // runs, so a call that fails, and never reaches post_tool, still flags it.
 func TestPreToolMarksIngestion(t *testing.T) {
