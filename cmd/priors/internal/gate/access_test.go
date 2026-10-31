@@ -16,6 +16,7 @@ func TestShellAccess(t *testing.T) {
 	m := func(text string) Touch { return Touch{Text: text} }
 	cd := func(text string) Touch { return Touch{Text: text, Chdir: true} }
 	opaque := Touch{Write: true, Opaque: true}
+	presumed := func(text string) Touch { return Touch{Text: text, Write: true, Presumed: true} }
 	for _, tt := range []struct {
 		name   string
 		cmd    string
@@ -144,6 +145,17 @@ func TestShellAccess(t *testing.T) {
 		{name: "git log ext-diff", cmd: "git -C /h/store log --ext-diff -p", writes: true},
 		{name: "git diff textconv", cmd: "git diff --textconv", writes: true},
 		{name: "git log no-ext-diff", cmd: "git -C /h/store log --no-ext-diff -p", want: []Touch{cd("/h/store")}},
+		{name: "unknown program on dot", cmd: "foo .", writes: true, want: []Touch{presumed(".")}, absent: []Touch{w(".")}},
+		{name: "known writer on dot", cmd: "cp x .", writes: true, want: []Touch{w(".")}, absent: []Touch{presumed(".")}},
+		{name: "wrapper naming a writer on dot", cmd: "watch rm -rf .", writes: true, want: []Touch{w(".")}, absent: []Touch{presumed(".")}},
+		{name: "unknown program on a path", cmd: "foo /h/x", writes: true, want: []Touch{w("/h/x")}, absent: []Touch{presumed("/h/x")}},
+		{
+			name:   "jq alternative is presumed",
+			cmd:    `gh pr view 752 -R noamsto/nix-config --json state,mergeCommit --jq '"\(.state) \(.mergeCommit.oid // "-")"'`,
+			writes: true,
+			want:   []Touch{presumed("//")},
+			absent: []Touch{w("//"), w("/")},
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			acc := ShellAccess(host, tt.cmd)

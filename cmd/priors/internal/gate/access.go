@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -52,6 +53,9 @@ type Touch struct {
 	Opaque bool
 	// Chdir marks a directory the command changes into.
 	Chdir bool
+	// Presumed marks a write that names just the cwd or root, written only
+	// because its program is neither a reader nor a listed writer.
+	Presumed bool
 }
 
 const (
@@ -78,6 +82,21 @@ var (
 		"status", "log", "show", "diff", "ls-files", "ls-tree", "rev-parse", "cat-file", "grep",
 		"blame", "shortlog", "describe", "rev-list", "show-ref", "for-each-ref", "merge-base",
 		"name-rev", "add", "commit", "fetch", "push",
+	}
+	// writers are known to write, or run, their operands. A write by any other
+	// program that names just the cwd or root is presumed: no program not
+	// listed is taken to write a dir it is handed whole.
+	writers = []string{
+		"rm", "rmdir", "unlink", "mv", "cp", "ln", "link", "install", "touch", "mkdir", "mkfifo",
+		"mknod", "chmod", "chown", "chgrp", "chattr", "truncate", "shred", "dd", "tee",
+		"tar", "cpio", "rsync", "rclone", "unzip", "zip", "7z", "gzip", "gunzip", "bzip2", "xz", "zstd",
+		"patch", "split", "csplit", "trash", "trash-put", "gtrash", "gio",
+		"find", "fd", "rg", "sed", "git", "make", "xargs",
+		"scp", "rcp", "sftp", "bsdtar", "ditto", "grm", "gcp", "gmv", "gln", "ginstall", "gtar",
+		"gsed", "gfind", "gxargs", "stow", "wget", "curl", "aria2c",
+		"bash", "sh", "zsh", "fish", "dash", "ksh", "python", "python3", "perl", "ruby", "node",
+		"awk", "gawk", "mawk", "nawk", "php", "lua", "luajit", "tclsh", "Rscript", "deno", "bun",
+		"pwsh", "nu", "osascript", "eval", "source", ".",
 	}
 	// findActions make find write or run a command.
 	findActions = []string{"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
@@ -126,7 +145,7 @@ func ShellAccess(host *Host, texts ...string) (acc Access) {
 		piped:   map[*syntax.Stmt]bool{},
 	}
 	for _, text := range texts {
-		a.script(text, 0)
+		a.script(text, 0, false)
 	}
 	return a.acc
 }
@@ -150,7 +169,9 @@ type accessor struct {
 	acc         Access
 }
 
-func (a *accessor) script(text string, depth int) {
+// script reads text as commands. presumed is the calling program's, kept
+// only for a text the parser cannot read: one that parses judges its own.
+func (a *accessor) script(text string, depth int, presumed bool) {
 	if a.j.seen[text] {
 		return
 	}
@@ -177,7 +198,7 @@ func (a *accessor) script(text string, depth int) {
 		a.stmt(stmt, text, depth)
 	}
 	if failed && a.acc.Unreadable == "" {
-		a.unparsed(text)
+		a.unparsed(text, presumed)
 	}
 }
 
@@ -259,10 +280,10 @@ func declaresNameref(n syntax.Node) bool {
 
 // unparsed reads text the parser cannot: whatever it runs is unknown, so it
 // is an opaque write, and its path-like tokens, quotes deleted, are writes.
-func (a *accessor) unparsed(text string) {
+func (a *accessor) unparsed(text string, presumed bool) {
 	a.acc.Writes = true
 	a.touch(Touch{Write: true, Opaque: true})
-	a.field(overflagQuotes.Replace(text), true)
+	a.field(overflagQuotes.Replace(text), true, presumed)
 }
 
 func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
@@ -296,7 +317,7 @@ func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
 		case *syntax.Word:
 			if !a.done[n] {
 				a.done[n] = true
-				a.word(n, text, depth, false, false)
+				a.word(n, text, depth, false, false, false)
 			}
 		}
 		if arithmetic(n) {
@@ -329,7 +350,7 @@ func (a *accessor) arithmetic(src string) {
 		a.acc.Writes = true
 		a.touch(Touch{Write: true, Opaque: true})
 	}
-	a.field(src, runs)
+	a.field(src, runs, false)
 }
 
 // command reads one statement's simple command and its redirects.
@@ -376,6 +397,10 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 			a.touch(Touch{Write: true, Opaque: true})
 		}
 	}
+	// A name with a slash is a path-invoked script, unless it holds a byte no
+	// program name the shell finds would: then it is re-read text.
+	presumed := writer && !afterFlag && !assigned && name != "" && !slices.Contains(writers, name) &&
+		!slices.ContainsFunc(argv, namesWriter) && (!strings.Contains(name, "/") || strings.ContainsAny(name, scriptBytes))
 	var messages []int
 	if cmdArg >= 0 && (name == "git" || name == "gh" || name == "glab") {
 		messages = messageArgs(name, args, heads)
@@ -385,7 +410,7 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 		if slices.Contains(messages, i-idx-1) {
 			continue
 		}
-		a.word(w, text, depth, writer && i != cmdArg, writer)
+		a.word(w, text, depth, writer && i != cmdArg, writer, presumed)
 	}
 	a.chdirs(name, c.Args, argv, idx, afterFlag, cmdArg, text)
 	return writer
@@ -1107,7 +1132,7 @@ func (a *accessor) redirect(r *syntax.Redirect, writer bool, text string, depth 
 	if write {
 		a.acc.Writes = true
 	}
-	a.word(r.Word, text, depth, write, false)
+	a.word(r.Word, text, depth, write, false, false)
 }
 
 // outputOp reports an operator that may write its word; one the parser adds
@@ -1140,16 +1165,16 @@ func (a *accessor) body(w *syntax.Word, text string, depth int, writer bool) {
 		return
 	}
 	body := strings.Join(fields, " ")
-	a.field(body, writer)
+	a.field(body, writer, false)
 	if writer {
-		a.script(body, depth+1)
+		a.script(body, depth+1, false)
 	}
 }
 
 // word records w's fields in each environment, or the prefix of an opaque
 // one, and reads a writer's field that still holds a shell metacharacter as
 // a script one level deeper.
-func (a *accessor) word(w *syntax.Word, text string, depth int, write, writer bool) {
+func (a *accessor) word(w *syntax.Word, text string, depth int, write, writer, presumed bool) {
 	if prefix, ok := a.opaquePrefix(w); ok {
 		a.touch(Touch{Text: prefix, Write: write, Opaque: true})
 	}
@@ -1160,9 +1185,9 @@ func (a *accessor) word(w *syntax.Word, text string, depth int, write, writer bo
 			return
 		}
 		for _, f := range fields {
-			a.field(f, write)
+			a.field(f, write, presumed)
 			if writer && strings.ContainsAny(f, scriptBytes) {
-				a.script(f, depth+1)
+				a.script(f, depth+1, presumed)
 			}
 		}
 	}
@@ -1176,13 +1201,24 @@ func (a *accessor) envs(w *syntax.Word) []env {
 }
 
 // field records f and the path-like tokens in it and its decodings.
-func (a *accessor) field(f string, write bool) {
-	a.touch(Touch{Text: f, Write: write})
+func (a *accessor) field(f string, write, presumed bool) {
+	a.touch(Touch{Text: f, Write: write, Presumed: write && presumed && cwdOrRoot(f)})
 	for _, d := range Decodings(f) {
 		for _, t := range a.subTokens(d) {
-			a.touch(Touch{Text: t, Write: write})
+			a.touch(Touch{Text: t, Write: write, Presumed: write && presumed && cwdOrRoot(t)})
 		}
 	}
+}
+
+func cwdOrRoot(t string) bool {
+	return t != "" && (strings.Trim(t, "/") == "" || !filepath.IsAbs(t) && filepath.Clean(t) == ".")
+}
+
+// namesWriter reports an operand naming a listed writer, as an unknown
+// wrapper may run it; `.`, source and eval are too common as words to count.
+func namesWriter(w string) bool {
+	name := wordName(w)
+	return name != "." && name != "source" && name != "eval" && slices.Contains(writers, name)
 }
 
 // subTokens returns the path-like tokens in s: runs between pathBreaks that
