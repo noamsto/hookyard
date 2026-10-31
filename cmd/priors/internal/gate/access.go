@@ -652,8 +652,9 @@ var sedLong = []string{
 }
 
 // sedReads reports a sed command that edits nothing in place, reads no script
-// file, and whose scripts hold no w, W or e, which write a file or run one.
-// The letters are refused anywhere in a script, regexes included. Options are
+// file, and whose scripts write no file and run nothing. A script without w, W
+// or e reads only; one holding them must parse as a program with no w, W, e,
+// r, R, a, i, c, y or other unknown command and no s flag w or e. Options are
 // read as GNU sed does: anywhere before --, a long one by any prefix of
 // --expression, a short cluster letter by letter, where e takes the rest of
 // the cluster as its script and l as a number.
@@ -729,7 +730,238 @@ func sedCluster(cluster string, next func() string) (script, ok bool) {
 	return false, true
 }
 
-func sedScript(s string) bool { return s != "" && !strings.ContainsAny(s, "wWe") }
+func sedScript(s string) bool {
+	return s != "" && (!strings.ContainsAny(s, "wWe") || sedProgramReads(s))
+}
+
+// sedProgramReads reports a script it fully parses whose commands neither
+// write a file nor run one. Anything it does not recognise counts as a writer,
+// and so do the forms GNU and BSD sed read differently (a backslash-newline, a
+// delimiter or backslash inside a bracket, escapes such as \x that can spell a
+// delimiter), so both seds see the commands it saw.
+func sedProgramReads(s string) bool {
+	for _, esc := range []string{"\\\n", "\\c", "\\d", "\\o", "\\x"} {
+		if strings.Contains(s, esc) {
+			return false
+		}
+	}
+	p := &sedProgram{s: s}
+	for {
+		p.skip(" \t\n;")
+		if p.done() {
+			return true
+		}
+		if !p.command() {
+			return false
+		}
+	}
+}
+
+// sedProgram is a cursor over a sed script.
+type sedProgram struct {
+	s string
+	i int
+}
+
+func (p *sedProgram) done() bool { return p.i >= len(p.s) }
+
+// peek is the next byte, or 0 at the end.
+func (p *sedProgram) peek() byte {
+	if p.done() {
+		return 0
+	}
+	return p.s[p.i]
+}
+
+func (p *sedProgram) next() byte {
+	c := p.s[p.i]
+	p.i++
+	return c
+}
+
+func (p *sedProgram) skip(set string) {
+	for !p.done() && strings.IndexByte(set, p.s[p.i]) >= 0 {
+		p.i++
+	}
+}
+
+func (p *sedProgram) digits() bool {
+	start := p.i
+	p.skip("0123456789")
+	return p.i > start
+}
+
+// command reads one command with its addresses, and reports whether it reads
+// only.
+func (p *sedProgram) command() bool {
+	addressed, ok := p.addresses()
+	if !ok || p.done() {
+		return false
+	}
+	switch c := p.next(); {
+	case c == '#' && !addressed:
+		if k := strings.IndexByte(p.s[p.i:], '\n'); k >= 0 {
+			p.i += k
+		} else {
+			p.i = len(p.s)
+		}
+		return true
+	case c == '{':
+		return true
+	case strings.IndexByte("}=dDgGhHnNpPxzF", c) >= 0:
+		return p.end()
+	case strings.IndexByte("lqQ", c) >= 0:
+		p.skip(" \t")
+		p.digits()
+		return p.end()
+	case strings.IndexByte("btT", c) >= 0:
+		p.label()
+		return true
+	case c == ':':
+		return !addressed && p.label() != ""
+	case c == 's':
+		return p.substitute()
+	}
+	return false
+}
+
+// label reads a label as GNU sed does, up to whitespace, ; or }, so what
+// follows on the line is parsed as further commands.
+func (p *sedProgram) label() string {
+	p.skip(" \t")
+	start := p.i
+	for !p.done() && strings.IndexByte(" \t\n;}", p.s[p.i]) < 0 {
+		p.i++
+	}
+	return p.s[start:p.i]
+}
+
+// end reports a command followed only by blanks before its terminator.
+func (p *sedProgram) end() bool {
+	p.skip(" \t")
+	return p.done() || strings.IndexByte(";\n}#", p.s[p.i]) >= 0
+}
+
+// addresses reads a command's addresses and the ! and blanks after them.
+func (p *sedProgram) addresses() (addressed, ok bool) {
+	found, ok := p.address()
+	if !found || !ok {
+		return found, ok
+	}
+	if p.peek() == ',' {
+		p.i++
+		if c := p.peek(); c == '+' || c == '~' {
+			p.i++
+			ok = p.digits()
+		} else {
+			found, ok = p.address()
+			ok = found && ok
+		}
+		if !ok {
+			return true, false
+		}
+	}
+	p.skip("! \t")
+	return true, true
+}
+
+// address reads one address, if one starts here.
+func (p *sedProgram) address() (found, ok bool) {
+	switch c := p.peek(); {
+	case c == '$':
+		p.i++
+		return true, true
+	case c >= '0' && c <= '9':
+		p.digits()
+		if p.peek() == '~' {
+			p.i++
+			return true, p.digits()
+		}
+		return true, true
+	case c == '/' || c == '\\':
+		p.i++
+		if c == '\\' {
+			c = p.peek()
+			p.i++
+		}
+		if !sedDelim(c) || !p.regex(c, true) {
+			return true, false
+		}
+		p.skip("IM")
+		return true, true
+	}
+	return false, true
+}
+
+// substitute reads an s command after its s.
+func (p *sedProgram) substitute() bool {
+	delim := p.peek()
+	p.i++
+	if !sedDelim(delim) || !p.regex(delim, true) || !p.regex(delim, false) {
+		return false
+	}
+	p.skip("gpiImM0123456789")
+	return p.end()
+}
+
+// regex reads up to and past an unescaped delim. Only a regex has bracket
+// expressions; a replacement does not.
+func (p *sedProgram) regex(delim byte, brackets bool) bool {
+	for !p.done() {
+		switch c := p.next(); {
+		case c == delim:
+			return true
+		case c == '\n':
+			return false
+		case c == '\\':
+			if p.done() {
+				return false
+			}
+			p.i++
+		case c == '[' && brackets:
+			if !p.bracket(delim) {
+				return false
+			}
+		}
+	}
+	return false
+}
+
+// bracket reads a bracket expression after its [. One holding the delimiter
+// or a backslash is refused: GNU and BSD sed disagree on where it ends.
+func (p *sedProgram) bracket(delim byte) bool {
+	if p.peek() == '^' {
+		p.i++
+	}
+	if p.peek() == ']' {
+		p.i++
+	}
+	refused := "\\\n" + string(delim)
+	for !p.done() {
+		c := p.next()
+		switch {
+		case c == ']':
+			return true
+		case strings.IndexByte(refused, c) >= 0:
+			return false
+		case c == '[' && strings.IndexByte(":.=", p.peek()) >= 0:
+			closer := string(p.next()) + "]"
+			k := strings.Index(p.s[p.i:], closer)
+			if k < 0 || strings.ContainsAny(p.s[p.i:p.i+k], refused) {
+				return false
+			}
+			p.i += k + len(closer)
+		}
+	}
+	return false
+}
+
+// sedDelim reports a delimiter both seds read alike and that cannot be taken
+// for part of a command.
+func sedDelim(c byte) bool {
+	alnum := c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+	return c > ' ' && c < 0x7f && !alnum && strings.IndexByte("\\[]", c) < 0
+}
 
 // chdirs records the dirs a command changes into: cd's and pushd's operand
 // (home without one), the -C dir of git, make and tar, and the chdir option of
