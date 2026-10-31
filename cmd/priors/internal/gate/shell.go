@@ -1043,16 +1043,11 @@ func nonFlags(words []string) []int {
 // commandWord returns the index of the command word, skipping assignments,
 // wrappers, flags and numeric arguments; the index is len(words) when there is
 // none. afterFlag reports that a flag was skipped, so the word found may be
-// that flag's value. The name env's -u unsets is skipped with it.
+// that flag's value.
 func commandWord(words []string) (idx int, afterFlag bool) {
-	env := false
-	for i := 0; i < len(words); i++ {
-		w := words[i]
+	for i, w := range words {
 		switch {
 		case slices.Contains(wrappers, wordName(w)):
-			env = wordName(w) == "env"
-		case env && (w == "-u" || w == "--unset"):
-			i++
 		case strings.HasPrefix(w, "-"):
 			afterFlag = true
 		case assignment(w), number(w):

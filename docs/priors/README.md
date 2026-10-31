@@ -383,13 +383,9 @@ In a shell command:
   `--title`, `--message`, `--notes` and `--description` values (`-b`, `-t`,
   `-m`) of `gh` and `glab` `pr`, `issue`, `mr` or `release` with `create`,
   `edit`, `comment`, `review`, `merge`, `close`, `reopen` or `note`, hold
-  data, and so do the `--jq`, `-q` and `--template` values of any `gh` or
-  `glab` command, a `claude` argument that holds whitespace (its prompt, outside
-  `claude mcp` and after no `--`; a bare `.` or `/` holds none), and the text of `crew reply` and `crew msg`
-  after the recipient when it holds whitespace. Their values are not judged
-  as paths: a commit heredoc that mentions `MEMORY.md` is allowed. Any other
-  command's such option is judged, and a command run inside such a message
-  is still judged.
+  data, so their values are not judged as paths: a commit heredoc that
+  mentions `MEMORY.md` is allowed. Any other command's such option is judged,
+  and a command run inside such a message is still judged.
 
 `LSP` and an MCP tool are reads when the tool's last name segment starts with
 `search` or `list_`, or is `get_file_contents`, `read_file` or
@@ -416,9 +412,7 @@ It is not a sandbox. It does not see a path computed at run time from
 nothing the command names (`base64 -d`, a file's content, a script file), a
 path an interpreter assembles from pieces, an archive or patch unpacked from
 a cwd that holds a store, a command that shadows a reader's name on `PATH`
-(including one set up by an earlier call of a persistent shell), a `claude`,
-`gh`, `glab` or `crew` that an earlier call replaced or shadowed, whose data
-words the guard skips and which then run them as code, a relative
+(including one set up by an earlier call of a persistent shell), a relative
 `cd` that `CDPATH` leads into a store when the command names no guarded path,
 and a `CDPATH` exported by an earlier call of a persistent shell, code run
 from config an agent can write (git's global `core.hooksPath`, Makefiles) or
@@ -452,7 +446,11 @@ It over-denies:
 
 - a shell command that reads a store path while it writes elsewhere, a shell
   write to a store fact, and a write that may name a dir holding a store
-  (`cmake ..` from a dir directly under one, `foo .` or `cp x .` from `~`);
+  (`cmake ..` from a dir directly under one, `foo .` or `cp x .` from `~`),
+  including such a word inside an unknown program's argument that holds a
+  space, since the argument is read as a script: a `claude -p` prompt with a
+  lone `.` run from `~`, a `gh --jq` filter holding `//`, or a message holding
+  ` / `;
 - a reader run behind a flagged wrapper (`nice -n 5 git status`) in a store or
   naming one;
 - assigning or exporting `PATH`, `BASH_ENV`, `ENV`, `GIT_*` or `LD_*`, or

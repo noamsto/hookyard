@@ -377,7 +377,7 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 		}
 	}
 	var messages []int
-	if cmdArg >= 0 && slices.Contains(dataTakers, name) {
+	if cmdArg >= 0 && (name == "git" || name == "gh" || name == "glab") {
 		messages = messageArgs(name, args, heads)
 	}
 	for i, w := range c.Args {
@@ -501,12 +501,6 @@ var (
 	forgeGlueOpts      = []string{"--body=", "--title=", "--message=", "--notes=", "--description="}
 	forgeMessageGroups = []string{"pr", "issue", "mr", "release"}
 	forgeMessageVerbs  = []string{"create", "edit", "comment", "review", "merge", "close", "reopen", "note"}
-	// forgeDataOpts take a jq filter or a template as their value, in any
-	// forge command.
-	forgeDataOpts = []string{"--jq", "-q", "--template"}
-	forgeDataGlue = []string{"--jq=", "--template="}
-	// dataTakers are the programs whose data words messageArgs finds.
-	dataTakers = []string{"git", "gh", "glab", "claude", "crew"}
 )
 
 // gitSub returns the index of git's subcommand in args, len(args) when there
@@ -568,12 +562,9 @@ func gitRuns(w string) bool {
 	return strings.HasPrefix(w, "-") && strings.Contains(w, "O")
 }
 
-// messageArgs returns the indexes in args of the words that are text, not a
-// path: a git commit's or a forge command's message, a forge command's jq
-// filter or template, claude's prompt, or a crew message's body. claude's and
-// crew's are told by the whitespace they hold, which a bare . or / does not;
-// claude's only when it runs no command (no -- argument, not claude mcp).
-// heads holds each word's text, or the start of an opaque one.
+// messageArgs returns the indexes in args of the words that are a git
+// commit's or a forge command's message, which is text, not a path. heads
+// holds each word's text, or the start of an opaque one.
 func messageArgs(name string, args, heads []string) []int {
 	switch name {
 	case "git":
@@ -583,48 +574,12 @@ func messageArgs(name string, args, heads []string) []int {
 		}
 		return messageWords(args, heads, sub+1, []string{"-m", "--message"}, []string{"--message="}, true)
 	case "gh", "glab":
-		out := messageWords(args, heads, 0, forgeDataOpts, forgeDataGlue, false)
 		if !forgeMessages(args) {
-			return out
-		}
-		return append(out, messageWords(args, heads, 0, forgeMessageOpts, forgeGlueOpts, false)...)
-	case "claude":
-		if slices.Contains(args, "--") || firstNonFlag(args) == "mcp" {
 			return nil
 		}
-		return spacedWords(args, 0)
-	case "crew":
-		// The body follows reply's recipient, and msg's sender and recipient.
-		switch {
-		case len(args) > 0 && args[0] == "reply":
-			return spacedWords(args, 2)
-		case len(args) > 0 && args[0] == "msg":
-			return spacedWords(args, 3)
-		}
+		return messageWords(args, heads, 0, forgeMessageOpts, forgeGlueOpts, false)
 	}
 	return nil
-}
-
-// firstNonFlag returns the first of args that is not a flag, or "".
-func firstNonFlag(args []string) string {
-	for _, a := range args {
-		if !strings.HasPrefix(a, "-") {
-			return a
-		}
-	}
-	return ""
-}
-
-// spacedWords returns the indexes of the words in args[from:] that hold
-// whitespace.
-func spacedWords(args []string, from int) []int {
-	var out []int
-	for i := from; i < len(args); i++ {
-		if strings.ContainsAny(args[i], " \t\n") {
-			out = append(out, i)
-		}
-	}
-	return out
 }
 
 // forgeMessages reports a forge command whose first two words that are not
