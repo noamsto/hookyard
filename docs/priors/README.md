@@ -383,9 +383,13 @@ In a shell command:
   `--title`, `--message`, `--notes` and `--description` values (`-b`, `-t`,
   `-m`) of `gh` and `glab` `pr`, `issue`, `mr` or `release` with `create`,
   `edit`, `comment`, `review`, `merge`, `close`, `reopen` or `note`, hold
-  data, so their values are not judged as paths: a commit heredoc that
-  mentions `MEMORY.md` is allowed. Any other command's such option is judged,
-  and a command run inside such a message is still judged.
+  data, and so do the `--jq`, `-q` and `--template` values of any `gh` or
+  `glab` command, a `claude` argument that holds whitespace (its prompt, outside
+  `claude mcp` and after no `--`; a bare `.` or `/` holds none), and the text of `crew reply` and `crew msg`
+  after the recipient when it holds whitespace. Their values are not judged
+  as paths: a commit heredoc that mentions `MEMORY.md` is allowed. Any other
+  command's such option is judged, and a command run inside such a message
+  is still judged.
 
 `LSP` and an MCP tool are reads when the tool's last name segment starts with
 `search` or `list_`, or is `get_file_contents`, `read_file` or
@@ -412,7 +416,9 @@ It is not a sandbox. It does not see a path computed at run time from
 nothing the command names (`base64 -d`, a file's content, a script file), a
 path an interpreter assembles from pieces, an archive or patch unpacked from
 a cwd that holds a store, a command that shadows a reader's name on `PATH`
-(including one set up by an earlier call of a persistent shell), a relative
+(including one set up by an earlier call of a persistent shell), a `claude`,
+`gh`, `glab` or `crew` that an earlier call replaced or shadowed, whose data
+words the guard skips and which then run them as code, a relative
 `cd` that `CDPATH` leads into a store when the command names no guarded path,
 and a `CDPATH` exported by an earlier call of a persistent shell, code run
 from config an agent can write (git's global `core.hooksPath`, Makefiles) or
@@ -440,31 +446,13 @@ It also does not see these open classes:
 - paths packed into one string: a comma- or newline-separated list, or a JSON
   document in a string;
 - a `file:` URI with a single slash;
-- a reviewed claim split across the elements of a line array;
-- a program the guard does not list as a writer (an unlisted delete tool or
-  interpreter) that writes its `.` operand from a dir holding a store, or its
-  `/` operand, and a function or alias that an earlier call of a persistent
-  shell defined to run a writer. A listed writer (`rm`, `cp`, `tar`, `find`,
-  …), a listed shell, interpreter or runner (`ssh`, `tmux`, `busybox`), a
-  path-invoked program, or an unknown wrapper that names a listed writer
-  (`watch rm -rf .`) is still denied, as is a write naming `..`, `~` or
-  another dir that holds a store. A listed name matches with a version
-  suffix (`python3.12`), and as the program itself in any case (`RM`, but
-  not `foo RM` behind an unknown wrapper), and a command that defines a
-  function, alias or hash entry, or runs `source`, `.` or `eval`, presumes
-  nothing.
+- a reviewed claim split across the elements of a line array.
 
 It over-denies:
 
 - a shell command that reads a store path while it writes elsewhere, a shell
   write to a store fact, and a write that may name a dir holding a store
-  (`cmake ..` from a dir directly under one, `cp x .` from `~`);
-- an unlisted program's `.` or `/` operand when its own words also name a
-  listed writer (a `claude -p` prompt run from `~` whose prose mentions `git`
-  or `make` beside a lone `.`), behind a flagged wrapper (`env -u X prog
-  "a / b"`), after an assignment (`X=1 prog .`), beside a word built at run
-  time, or in a command that defines a function, alias or hash entry, or runs
-  `source`, `.` or `eval`, anywhere in it;
+  (`cmake ..` from a dir directly under one, `foo .` or `cp x .` from `~`);
 - a reader run behind a flagged wrapper (`nice -n 5 git status`) in a store or
   naming one;
 - assigning or exporting `PATH`, `BASH_ENV`, `ENV`, `GIT_*` or `LD_*`, or

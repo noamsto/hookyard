@@ -329,7 +329,7 @@ func (c *check) shellTouch(t gate.Touch, writes, involved bool) string {
 			return deny("the command writes %s, %s", p, describe(r.root, p))
 		case r.rel == inside && writes:
 			return deny("the command names %s, %s, and may write", p, describe(r.root, p))
-		case r.rel == ancestor && t.Write && !t.Presumed:
+		case r.rel == ancestor && t.Write:
 			return deny("the command may write %s, which holds %s", p, r.root.label)
 		}
 	}

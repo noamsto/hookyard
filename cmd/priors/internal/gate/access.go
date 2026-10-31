@@ -1,7 +1,6 @@
 package gate
 
 import (
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -53,9 +52,6 @@ type Touch struct {
 	Opaque bool
 	// Chdir marks a directory the command changes into.
 	Chdir bool
-	// Presumed marks a write that names just the cwd or root, written only
-	// because its program is neither a reader nor a listed writer.
-	Presumed bool
 }
 
 const (
@@ -83,26 +79,6 @@ var (
 		"blame", "shortlog", "describe", "rev-list", "show-ref", "for-each-ref", "merge-base",
 		"name-rev", "add", "commit", "fetch", "push",
 	}
-	// writers, and shells, are known to write, or run, their operands. A write
-	// by any other program that names just the cwd or root is presumed: no
-	// program not listed is taken to write a dir it is handed whole.
-	writers = []string{
-		"rm", "rmdir", "unlink", "mv", "cp", "ln", "link", "install", "touch", "mkdir", "mkfifo",
-		"mknod", "chmod", "chown", "chgrp", "chattr", "truncate", "shred", "dd", "tee",
-		"tar", "cpio", "rsync", "rclone", "unzip", "zip", "7z", "gzip", "gunzip", "bzip2", "xz", "zstd",
-		"patch", "split", "csplit", "trash", "trash-put", "gtrash", "gio",
-		"find", "fd", "rg", "sed", "git", "make", "xargs",
-		"scp", "rcp", "sftp", "bsdtar", "ditto", "grm", "gcp", "gmv", "gln", "ginstall", "gtar",
-		"gsed", "gfind", "gxargs", "stow", "wget", "curl", "aria2c",
-		"bash", "sh", "zsh", "fish", "dash", "ksh", "python", "python3", "perl", "ruby", "node",
-		"awk", "gawk", "mawk", "nawk", "php", "lua", "luajit", "tclsh", "Rscript", "deno", "bun",
-		"pwsh", "nu", "osascript", "eval", "source", ".",
-		"busybox", "tmux", "screen", "watch", "su", "runuser", "flock", "parallel", "script", "entr",
-	}
-	// redefiners can make a name run a writer the call does not show: alias,
-	// hash and enable rename one, and source and eval may define a function
-	// from text the guard does not read.
-	redefiners = []string{"alias", "hash", "enable", "source", ".", "eval"}
 	// findActions make find write or run a command.
 	findActions = []string{"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
 	// programVars change which program a command name, or a shell, runs; so
@@ -150,15 +126,7 @@ func ShellAccess(host *Host, texts ...string) (acc Access) {
 		piped:   map[*syntax.Stmt]bool{},
 	}
 	for _, text := range texts {
-		a.script(text, 0, false)
-	}
-	// A function, alias or hash entry defined anywhere in the command may
-	// rename a writer, even one a trap or a function body calls before the
-	// definition is read, so nothing it holds is presumed.
-	if a.redefines {
-		for i := range a.acc.Words {
-			a.acc.Words[i].Presumed = false
-		}
+		a.script(text, 0)
 	}
 	return a.acc
 }
@@ -179,15 +147,10 @@ type accessor struct {
 	// While ifs holds a word's split cannot be told, so an unquoted expansion
 	// is opaque.
 	cdpath, ifs bool
-	// redefines reports a script that declares a function or calls one of
-	// redefiners, or a command whose name cannot be told.
-	redefines bool
-	acc       Access
+	acc         Access
 }
 
-// script reads text as commands. presumed is the calling program's, kept
-// only for a text the parser cannot read: one that parses judges its own.
-func (a *accessor) script(text string, depth int, presumed bool) {
+func (a *accessor) script(text string, depth int) {
 	if a.j.seen[text] {
 		return
 	}
@@ -214,7 +177,7 @@ func (a *accessor) script(text string, depth int, presumed bool) {
 		a.stmt(stmt, text, depth)
 	}
 	if failed && a.acc.Unreadable == "" {
-		a.unparsed(text, presumed)
+		a.unparsed(text)
 	}
 }
 
@@ -296,10 +259,10 @@ func declaresNameref(n syntax.Node) bool {
 
 // unparsed reads text the parser cannot: whatever it runs is unknown, so it
 // is an opaque write, and its path-like tokens, quotes deleted, are writes.
-func (a *accessor) unparsed(text string, presumed bool) {
+func (a *accessor) unparsed(text string) {
 	a.acc.Writes = true
 	a.touch(Touch{Write: true, Opaque: true})
-	a.field(overflagQuotes.Replace(text), true, presumed && !namesWriter(text))
+	a.field(overflagQuotes.Replace(text), true)
 }
 
 func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
@@ -328,14 +291,12 @@ func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
 			if n.Op == syntax.Pipe || n.Op == syntax.PipeAll {
 				a.piped[n.Y] = true
 			}
-		case *syntax.FuncDecl:
-			a.redefines = true
 		case *syntax.Stmt:
 			a.command(n, text, depth)
 		case *syntax.Word:
 			if !a.done[n] {
 				a.done[n] = true
-				a.word(n, text, depth, false, false, false)
+				a.word(n, text, depth, false, false)
 			}
 		}
 		if arithmetic(n) {
@@ -368,7 +329,7 @@ func (a *accessor) arithmetic(src string) {
 		a.acc.Writes = true
 		a.touch(Touch{Write: true, Opaque: true})
 	}
-	a.field(src, runs, false)
+	a.field(src, runs)
 }
 
 // command reads one statement's simple command and its redirects.
@@ -415,17 +376,8 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 			a.touch(Touch{Write: true, Opaque: true})
 		}
 	}
-	if idx < len(argv) && (name == "" || slices.Contains(redefiners, name)) {
-		a.redefines = true
-	}
-	// A name with a slash is a path-invoked script, unless it holds a byte no
-	// program name the shell finds would: then it is re-read text. An opaque
-	// word may be a writer's name.
-	presumed := writer && !afterFlag && !assigned && name != "" && !listedWriter(name, true) &&
-		!slices.Contains(argv, "") && !slices.ContainsFunc(argv, namesWriter) &&
-		(!strings.Contains(name, "/") || strings.ContainsAny(name, scriptBytes))
 	var messages []int
-	if cmdArg >= 0 && (name == "git" || name == "gh" || name == "glab") {
+	if cmdArg >= 0 && slices.Contains(dataTakers, name) {
 		messages = messageArgs(name, args, heads)
 	}
 	for i, w := range c.Args {
@@ -433,7 +385,7 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 		if slices.Contains(messages, i-idx-1) {
 			continue
 		}
-		a.word(w, text, depth, writer && i != cmdArg, writer, presumed)
+		a.word(w, text, depth, writer && i != cmdArg, writer)
 	}
 	a.chdirs(name, c.Args, argv, idx, afterFlag, cmdArg, text)
 	return writer
@@ -549,6 +501,12 @@ var (
 	forgeGlueOpts      = []string{"--body=", "--title=", "--message=", "--notes=", "--description="}
 	forgeMessageGroups = []string{"pr", "issue", "mr", "release"}
 	forgeMessageVerbs  = []string{"create", "edit", "comment", "review", "merge", "close", "reopen", "note"}
+	// forgeDataOpts take a jq filter or a template as their value, in any
+	// forge command.
+	forgeDataOpts = []string{"--jq", "-q", "--template"}
+	forgeDataGlue = []string{"--jq=", "--template="}
+	// dataTakers are the programs whose data words messageArgs finds.
+	dataTakers = []string{"git", "gh", "glab", "claude", "crew"}
 )
 
 // gitSub returns the index of git's subcommand in args, len(args) when there
@@ -610,9 +568,12 @@ func gitRuns(w string) bool {
 	return strings.HasPrefix(w, "-") && strings.Contains(w, "O")
 }
 
-// messageArgs returns the indexes in args of the words that are a git
-// commit's or a forge command's message, which is text, not a path. heads
-// holds each word's text, or the start of an opaque one.
+// messageArgs returns the indexes in args of the words that are text, not a
+// path: a git commit's or a forge command's message, a forge command's jq
+// filter or template, claude's prompt, or a crew message's body. claude's and
+// crew's are told by the whitespace they hold, which a bare . or / does not;
+// claude's only when it runs no command (no -- argument, not claude mcp).
+// heads holds each word's text, or the start of an opaque one.
 func messageArgs(name string, args, heads []string) []int {
 	switch name {
 	case "git":
@@ -622,12 +583,48 @@ func messageArgs(name string, args, heads []string) []int {
 		}
 		return messageWords(args, heads, sub+1, []string{"-m", "--message"}, []string{"--message="}, true)
 	case "gh", "glab":
+		out := messageWords(args, heads, 0, forgeDataOpts, forgeDataGlue, false)
 		if !forgeMessages(args) {
+			return out
+		}
+		return append(out, messageWords(args, heads, 0, forgeMessageOpts, forgeGlueOpts, false)...)
+	case "claude":
+		if slices.Contains(args, "--") || firstNonFlag(args) == "mcp" {
 			return nil
 		}
-		return messageWords(args, heads, 0, forgeMessageOpts, forgeGlueOpts, false)
+		return spacedWords(args, 0)
+	case "crew":
+		// The body follows reply's recipient, and msg's sender and recipient.
+		switch {
+		case len(args) > 0 && args[0] == "reply":
+			return spacedWords(args, 2)
+		case len(args) > 0 && args[0] == "msg":
+			return spacedWords(args, 3)
+		}
 	}
 	return nil
+}
+
+// firstNonFlag returns the first of args that is not a flag, or "".
+func firstNonFlag(args []string) string {
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			return a
+		}
+	}
+	return ""
+}
+
+// spacedWords returns the indexes of the words in args[from:] that hold
+// whitespace.
+func spacedWords(args []string, from int) []int {
+	var out []int
+	for i := from; i < len(args); i++ {
+		if strings.ContainsAny(args[i], " \t\n") {
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
 // forgeMessages reports a forge command whose first two words that are not
@@ -1155,7 +1152,7 @@ func (a *accessor) redirect(r *syntax.Redirect, writer bool, text string, depth 
 	if write {
 		a.acc.Writes = true
 	}
-	a.word(r.Word, text, depth, write, false, false)
+	a.word(r.Word, text, depth, write, false)
 }
 
 // outputOp reports an operator that may write its word; one the parser adds
@@ -1188,16 +1185,16 @@ func (a *accessor) body(w *syntax.Word, text string, depth int, writer bool) {
 		return
 	}
 	body := strings.Join(fields, " ")
-	a.field(body, writer, false)
+	a.field(body, writer)
 	if writer {
-		a.script(body, depth+1, false)
+		a.script(body, depth+1)
 	}
 }
 
 // word records w's fields in each environment, or the prefix of an opaque
 // one, and reads a writer's field that still holds a shell metacharacter as
 // a script one level deeper.
-func (a *accessor) word(w *syntax.Word, text string, depth int, write, writer, presumed bool) {
+func (a *accessor) word(w *syntax.Word, text string, depth int, write, writer bool) {
 	if prefix, ok := a.opaquePrefix(w); ok {
 		a.touch(Touch{Text: prefix, Write: write, Opaque: true})
 	}
@@ -1208,9 +1205,9 @@ func (a *accessor) word(w *syntax.Word, text string, depth int, write, writer, p
 			return
 		}
 		for _, f := range fields {
-			a.field(f, write, presumed)
+			a.field(f, write)
 			if writer && strings.ContainsAny(f, scriptBytes) {
-				a.script(f, depth+1, presumed)
+				a.script(f, depth+1)
 			}
 		}
 	}
@@ -1224,49 +1221,13 @@ func (a *accessor) envs(w *syntax.Word) []env {
 }
 
 // field records f and the path-like tokens in it and its decodings.
-func (a *accessor) field(f string, write, presumed bool) {
-	a.touch(Touch{Text: f, Write: write, Presumed: write && presumed && cwdOrRoot(f)})
+func (a *accessor) field(f string, write bool) {
+	a.touch(Touch{Text: f, Write: write})
 	for _, d := range Decodings(f) {
 		for _, t := range a.subTokens(d) {
-			a.touch(Touch{Text: t, Write: write, Presumed: write && presumed && cwdOrRoot(t)})
+			a.touch(Touch{Text: t, Write: write})
 		}
 	}
-}
-
-func cwdOrRoot(t string) bool {
-	return t != "" && (strings.Trim(t, "/") == "" || !filepath.IsAbs(t) && filepath.Clean(t) == ".")
-}
-
-// namesWriter reports a word holding a listed writer's name as one of its
-// fields split at shell metacharacters, as an unknown wrapper may run it, or
-// run the word as a script (`tmux new-window 'find ./ -delete'`). Case
-// counts here: prose a word carries (`claude -p 'Run one Bash command'`) is
-// too often capitalised. `.`, source and eval are too common as words to
-// count.
-func namesWriter(w string) bool {
-	for _, f := range strings.FieldsFunc(w, func(r rune) bool { return strings.ContainsRune(scriptBytes, r) }) {
-		name := wordName(f)
-		if name != "." && name != "source" && name != "eval" && listedWriter(name, false) {
-			return true
-		}
-	}
-	return false
-}
-
-// listedWriter reports a program name that is a listed writer or shell, with
-// any version suffix (`python3.12`, `lua5.4`), and in any case when fold
-// holds, as a case-insensitive file system finds `RM`.
-func listedWriter(name string, fold bool) bool {
-	listed := func(n string) bool {
-		return slices.ContainsFunc(slices.Concat(writers, shells), func(w string) bool {
-			return w == n || fold && strings.EqualFold(w, n)
-		})
-	}
-	if listed(name) {
-		return true
-	}
-	base := strings.TrimRight(name, "0123456789.-")
-	return base != "" && base != name && listed(base)
 }
 
 // subTokens returns the path-like tokens in s: runs between pathBreaks that
