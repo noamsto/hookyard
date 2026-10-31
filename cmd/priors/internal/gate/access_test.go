@@ -156,6 +156,10 @@ func TestShellAccess(t *testing.T) {
 			want:   []Touch{presumed("//")},
 			absent: []Touch{w("//"), w("/")},
 		},
+		{name: "function renaming a writer on dot", cmd: `z() { rm -rf "$1"; }; z .`, writes: true, want: []Touch{w(".")}, absent: []Touch{presumed(".")}},
+		{name: "upper-case writer on dot", cmd: "RM -rf .", writes: true, want: []Touch{w(".")}, absent: []Touch{presumed(".")}},
+		{name: "versioned interpreter on dot", cmd: "python3.12 x.py .", writes: true, want: []Touch{w(".")}, absent: []Touch{presumed(".")}},
+		{name: "unknown program naming a writer in a string", cmd: "foo 'find ./ -delete'", writes: true, absent: []Touch{presumed("./")}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			acc := ShellAccess(host, tt.cmd)

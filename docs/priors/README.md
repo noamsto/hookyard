@@ -372,12 +372,13 @@ In a shell command:
 - bash `[!…]` globs are read as negated classes, a `]` first in a class as a
   member, and a `[` with no close as a literal (a jq filter `'.[] | …'` names
   no `.attest` dir);
-- a sed script is read as a program: its `w`, `W`, `e`, `r`, `R`, `a`, `i`,
-  `c` and `y` commands, an `s` flag `w` or `e`, a backslash-newline
-  continuation, a bracket expression holding the delimiter or a backslash, an
-  escape such as `\x`, or anything else the guard does not parse make sed a
-  command that may write; those letters in a regex, a replacement or a label
-  do not (`sed 's/refused: //'` reads);
+- a sed script that holds `w`, `W` or `e` anywhere is read as a program: its
+  `w`, `W`, `e`, `r`, `R`, `a`, `i`, `c` and `y` commands, an `s` flag `w` or
+  `e`, a backslash-newline continuation, a bracket expression holding the
+  delimiter or a backslash, an escape such as `\x`, or anything else the
+  guard does not parse make sed a command that may write; a script without
+  those letters only reads, and those letters in a regex, a replacement or a
+  label do not (`sed 's/refused: //'` reads);
 - the message of `git commit` (`-m`, `--message`), and the `--body`,
   `--title`, `--message`, `--notes` and `--description` values (`-b`, `-t`,
   `-m`) of `gh` and `glab` `pr`, `issue`, `mr` or `release` with `create`,
@@ -442,10 +443,16 @@ It also does not see these open classes:
 - a reviewed claim split across the elements of a line array;
 - a program the guard does not list as a writer (an unlisted delete tool or
   interpreter) that writes its `.` operand from a dir holding a store, or its
-  `/` operand. A listed writer (`rm`, `cp`, `tar`, `find`, …), a listed shell
-  or interpreter, a path-invoked program, or an unknown wrapper that names a
-  listed writer (`watch rm -rf .`) is still denied, as is a write naming `..`,
-  `~` or another dir that holds a store.
+  `/` operand, and a function or alias that an earlier call of a persistent
+  shell defined to run a writer. A listed writer (`rm`, `cp`, `tar`, `find`,
+  …), a listed shell, interpreter or runner (`ssh`, `tmux`, `busybox`), a
+  path-invoked program, or an unknown wrapper that names a listed writer
+  (`watch rm -rf .`) is still denied, as is a write naming `..`, `~` or
+  another dir that holds a store. A listed name matches with a version
+  suffix (`python3.12`), and as the program itself in any case (`RM`, but
+  not `foo RM` behind an unknown wrapper), and a command that defines a
+  function, alias or hash entry, or runs `source`, `.` or `eval`, presumes
+  nothing.
 
 It over-denies:
 
@@ -454,8 +461,10 @@ It over-denies:
   (`cmake ..` from a dir directly under one, `cp x .` from `~`);
 - an unlisted program's `.` or `/` operand when its own words also name a
   listed writer (a `claude -p` prompt run from `~` whose prose mentions `git`
-  or `make` beside a lone `.`), or behind a flagged wrapper (`env -u X prog
-  "a / b"`);
+  or `make` beside a lone `.`), behind a flagged wrapper (`env -u X prog
+  "a / b"`), after an assignment (`X=1 prog .`), beside a word built at run
+  time, or in a command that defines a function, alias or hash entry, or runs
+  `source`, `.` or `eval`, anywhere in it;
 - a reader run behind a flagged wrapper (`nice -n 5 git status`) in a store or
   naming one;
 - assigning or exporting `PATH`, `BASH_ENV`, `ENV`, `GIT_*` or `LD_*`, or

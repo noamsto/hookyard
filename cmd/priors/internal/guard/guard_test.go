@@ -277,6 +277,17 @@ func TestShellDenies(t *testing.T) {
 		{name: "bracket with a leading close attest", want: "an .attest dir", input: bash(`rm -rf ~/work/.att[]e]st`)},
 		{name: "negated bracket with a leading close attest", want: "an .attest dir", input: bash(`rm -rf ~/work/.atte[!]x]t`)},
 		{name: "quoted glob piped to shell", want: "an .attest dir", input: bash(`echo 'rm -rf ~/work/.a*' | bash`)},
+		{name: "function renaming a writer", want: "which holds the personal store", cwd: ".", input: bash(`z() { rm -rf "$1"; }; z .`)},
+		{name: "function defined after its use", want: "which holds the personal store", cwd: ".", input: bash(`trap 'z .' EXIT; z() { rm -rf "$1"; }`)},
+		{name: "alias renaming a writer", want: "which holds the personal store", cwd: ".", input: bash("shopt -s expand_aliases\nalias z=rm\nz -rf .")},
+		{name: "hash renaming a writer", want: "which holds the personal store", cwd: ".", input: bash(`hash -p /bin/rm z; z -rf .`)},
+		{name: "opaque writer name", want: "which holds the personal store", cwd: ".", input: bash(`busybox $(printf rm) -rf .`)},
+		{name: "opaque command word", want: "which holds the personal store", cwd: ".", input: bash(`$(printf rm) -rf .`)},
+		{name: "upper-case writer", want: "which holds the personal store", cwd: ".", input: bash(`RM -rf .`)},
+		{name: "versioned interpreter", want: "which holds the personal store", cwd: ".", input: bash(`python3.12 x.py .`)},
+		{name: "unparsable string naming a writer", want: "which holds the personal store", cwd: ".", input: bash(`tmux new-window 'find ./ -delete (true)'`)},
+		{name: "unparsable remote string naming a writer", want: "which holds the personal store", cwd: ".", input: bash(`ssh localhost 'chmod -R 000 ./ (true)'`)},
+		{name: "unparsable watch string", want: "which holds the personal store", cwd: ".", input: bash(`watch 'rm -rf ./ ('`)},
 
 		// sed scripts read as programs.
 		{name: "sed s w flag with e", want: "inside the personal store", input: bash(`sed 's/e/x/w @H/notes/facts/a.md' f`)},

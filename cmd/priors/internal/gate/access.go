@@ -83,9 +83,9 @@ var (
 		"blame", "shortlog", "describe", "rev-list", "show-ref", "for-each-ref", "merge-base",
 		"name-rev", "add", "commit", "fetch", "push",
 	}
-	// writers are known to write, or run, their operands. A write by any other
-	// program that names just the cwd or root is presumed: no program not
-	// listed is taken to write a dir it is handed whole.
+	// writers, and shells, are known to write, or run, their operands. A write
+	// by any other program that names just the cwd or root is presumed: no
+	// program not listed is taken to write a dir it is handed whole.
 	writers = []string{
 		"rm", "rmdir", "unlink", "mv", "cp", "ln", "link", "install", "touch", "mkdir", "mkfifo",
 		"mknod", "chmod", "chown", "chgrp", "chattr", "truncate", "shred", "dd", "tee",
@@ -97,7 +97,12 @@ var (
 		"bash", "sh", "zsh", "fish", "dash", "ksh", "python", "python3", "perl", "ruby", "node",
 		"awk", "gawk", "mawk", "nawk", "php", "lua", "luajit", "tclsh", "Rscript", "deno", "bun",
 		"pwsh", "nu", "osascript", "eval", "source", ".",
+		"busybox", "tmux", "screen", "watch", "su", "runuser", "flock", "parallel", "script", "entr",
 	}
+	// redefiners can make a name run a writer the call does not show: alias,
+	// hash and enable rename one, and source and eval may define a function
+	// from text the guard does not read.
+	redefiners = []string{"alias", "hash", "enable", "source", ".", "eval"}
 	// findActions make find write or run a command.
 	findActions = []string{"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
 	// programVars change which program a command name, or a shell, runs; so
@@ -147,6 +152,14 @@ func ShellAccess(host *Host, texts ...string) (acc Access) {
 	for _, text := range texts {
 		a.script(text, 0, false)
 	}
+	// A function, alias or hash entry defined anywhere in the command may
+	// rename a writer, even one a trap or a function body calls before the
+	// definition is read, so nothing it holds is presumed.
+	if a.redefines {
+		for i := range a.acc.Words {
+			a.acc.Words[i].Presumed = false
+		}
+	}
 	return a.acc
 }
 
@@ -166,7 +179,10 @@ type accessor struct {
 	// While ifs holds a word's split cannot be told, so an unquoted expansion
 	// is opaque.
 	cdpath, ifs bool
-	acc         Access
+	// redefines reports a script that declares a function or calls one of
+	// redefiners, or a command whose name cannot be told.
+	redefines bool
+	acc       Access
 }
 
 // script reads text as commands. presumed is the calling program's, kept
@@ -283,7 +299,7 @@ func declaresNameref(n syntax.Node) bool {
 func (a *accessor) unparsed(text string, presumed bool) {
 	a.acc.Writes = true
 	a.touch(Touch{Write: true, Opaque: true})
-	a.field(overflagQuotes.Replace(text), true, presumed)
+	a.field(overflagQuotes.Replace(text), true, presumed && !namesWriter(text))
 }
 
 func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
@@ -312,6 +328,8 @@ func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
 			if n.Op == syntax.Pipe || n.Op == syntax.PipeAll {
 				a.piped[n.Y] = true
 			}
+		case *syntax.FuncDecl:
+			a.redefines = true
 		case *syntax.Stmt:
 			a.command(n, text, depth)
 		case *syntax.Word:
@@ -397,10 +415,15 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 			a.touch(Touch{Write: true, Opaque: true})
 		}
 	}
+	if idx < len(argv) && (name == "" || slices.Contains(redefiners, name)) {
+		a.redefines = true
+	}
 	// A name with a slash is a path-invoked script, unless it holds a byte no
-	// program name the shell finds would: then it is re-read text.
-	presumed := writer && !afterFlag && !assigned && name != "" && !slices.Contains(writers, name) &&
-		!slices.ContainsFunc(argv, namesWriter) && (!strings.Contains(name, "/") || strings.ContainsAny(name, scriptBytes))
+	// program name the shell finds would: then it is re-read text. An opaque
+	// word may be a writer's name.
+	presumed := writer && !afterFlag && !assigned && name != "" && !listedWriter(name, true) &&
+		!slices.Contains(argv, "") && !slices.ContainsFunc(argv, namesWriter) &&
+		(!strings.Contains(name, "/") || strings.ContainsAny(name, scriptBytes))
 	var messages []int
 	if cmdArg >= 0 && (name == "git" || name == "gh" || name == "glab") {
 		messages = messageArgs(name, args, heads)
@@ -1214,11 +1237,36 @@ func cwdOrRoot(t string) bool {
 	return t != "" && (strings.Trim(t, "/") == "" || !filepath.IsAbs(t) && filepath.Clean(t) == ".")
 }
 
-// namesWriter reports an operand naming a listed writer, as an unknown
-// wrapper may run it; `.`, source and eval are too common as words to count.
+// namesWriter reports a word holding a listed writer's name as one of its
+// fields split at shell metacharacters, as an unknown wrapper may run it, or
+// run the word as a script (`tmux new-window 'find ./ -delete'`). Case
+// counts here: prose a word carries (`claude -p 'Run one Bash command'`) is
+// too often capitalised. `.`, source and eval are too common as words to
+// count.
 func namesWriter(w string) bool {
-	name := wordName(w)
-	return name != "." && name != "source" && name != "eval" && slices.Contains(writers, name)
+	for _, f := range strings.FieldsFunc(w, func(r rune) bool { return strings.ContainsRune(scriptBytes, r) }) {
+		name := wordName(f)
+		if name != "." && name != "source" && name != "eval" && listedWriter(name, false) {
+			return true
+		}
+	}
+	return false
+}
+
+// listedWriter reports a program name that is a listed writer or shell, with
+// any version suffix (`python3.12`, `lua5.4`), and in any case when fold
+// holds, as a case-insensitive file system finds `RM`.
+func listedWriter(name string, fold bool) bool {
+	listed := func(n string) bool {
+		return slices.ContainsFunc(slices.Concat(writers, shells), func(w string) bool {
+			return w == n || fold && strings.EqualFold(w, n)
+		})
+	}
+	if listed(name) {
+		return true
+	}
+	base := strings.TrimRight(name, "0123456789.-")
+	return base != "" && base != name && listed(base)
 }
 
 // subTokens returns the path-like tokens in s: runs between pathBreaks that
