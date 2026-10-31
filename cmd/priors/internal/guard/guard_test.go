@@ -264,6 +264,29 @@ func TestShellDenies(t *testing.T) {
 		// Config behind a symlink.
 		{name: "config symlink target", want: "/dotfiles/priors.toml, priors' config file", input: bash("rm ~/dotfiles/priors.toml")},
 
+		// Writes the guard must keep presuming.
+		{name: "known writer on dot from home", want: "which holds the personal store", cwd: ".", input: bash(`cp x .`)},
+		{name: "unknown wrapper naming a writer", want: "which holds", cwd: ".", input: bash(`watch /bin/rm -rf .`)},
+		{name: "g-prefixed rm on dot from home", want: "which holds", cwd: ".", input: bash(`grm -rf .`)},
+		{name: "unknown program on home", want: "which holds", input: bash(`foo ~`)},
+		{name: "unknown program on parent", want: "which holds", cwd: "notes-old", input: bash(`foo ..`)},
+		{name: "interpreter on dot from home", want: "which holds", cwd: ".", input: bash(`python3 x.py .`)},
+		{name: "awk code on dot from home", want: "which holds", cwd: ".", input: bash(`awk 'BEGIN{system("rm -rf ./")}'`)},
+		{name: "php code on dot from home", want: "which holds", cwd: ".", input: bash(`php -r 'system("rm -rf ./");'`)},
+		{name: "known writer on root", want: "which holds", input: bash(`rm -rf /`)},
+
+		// sed scripts read as programs.
+		{name: "sed s w flag with e", want: "inside the personal store", input: bash(`sed 's/e/x/w @H/notes/facts/a.md' f`)},
+		{name: "sed e command", want: "runs in", cwd: "notes", input: bash(`sed '1e touch x' f`)},
+		{name: "sed bracket hides delimiter then w", want: "inside the personal store", input: bash(`sed 's/[/]/x/w @H/notes/x' f`)},
+		{name: "sed bracket backslash then w", want: "inside the personal store", input: bash(`sed 's/[\]/x/w @H/notes/x` + "\n" + `#]/y/' f`)},
+		{name: "sed bracket close first then w", want: "inside the personal store", input: bash(`sed 's/[]/]/x/w @H/notes/x' f`)},
+		{name: "sed label then w", want: "inside the personal store", input: bash(`sed ':a;w @H/notes/x' f`)},
+		{name: "sed label space then w", want: "inside the personal store", input: bash(`sed ':x w @H/notes/x' f`)},
+		{name: "sed branch space then w", want: "inside the personal store", input: bash(`sed 'b x w @H/notes/x` + "\n" + `:x' f`)},
+		{name: "sed label hides continued w on bsd", want: "an .attest dir", input: bash(`sed ':x;/\` + "\n" + `w @H/notes/.attest/e\` + "\n" + `/p' f`)},
+		{name: "sed append text", want: "/notes/MEMORY.md, inside the personal store", input: bash(`sed '1a eww' ~/notes/MEMORY.md`)},
+
 		// Input the guard cannot read.
 		{name: "malformed command", want: "neither a string nor a list of strings", input: `{"command":5}`},
 		{name: "oversized command", want: "past what the guard reads", input: bash("echo x > ~/work/" + strings.Repeat("a", 1<<18))},
@@ -306,6 +329,13 @@ func TestShellAllows(t *testing.T) {
 		{name: "commit message heredoc", input: bash("git commit -m \"$(cat <<'EOF'\nfix MEMORY.md handling\nEOF\n)\"")},
 		{name: "commit message with store name", input: bash(`git commit -m "notes $(date)"`)},
 		{name: "pr body heredoc", input: bash("gh pr create --title t --body \"$(cat <<'EOF'\nfix MEMORY.md handling in notes\nEOF\n)\"")},
+		{name: "claude prompt from home", cwd: ".", input: bash(`cd ~ && env -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID claude -p "Run exactly one Bash command and nothing else: priors import --dry-run . Then reply with its complete output verbatim inside a code block, plus its exit code. Do not run any other command." --model claude-haiku-5-5 --strict-mcp-config --tools=Bash "--allowedTools=Bash(priors import --dry-run)" > /tmp/x/out.md 2>&1; echo rc=$status; wc -l /tmp/x/out.md`)},
+		{name: "sed script with e letters", input: bash(`cd /tmp/x && grep -oE '^(published|flagged|would [a-z]+ [a-z]+|would [a-z]+|unchanged|duplicate|propose|skipped)' import-dry-run.md | sort | uniq -c; grep -c 'work-name' import-dry-run.md; grep -c 'wikilink-dangling' import-dry-run.md; grep -oE ': (refused: [^:]+: [a-z-]+|routes to the quarantine|not a fact file)' import-dry-run.md | sed -E 's/refused: [^:]+: /refused: /' | sort | uniq -c; sed -n 95,131p import-dry-run.md | cut -c1-220`)},
+		{name: "gh jq alternative", input: bash(`gh pr view 752 -R noamsto/nix-config --json state,mergeCommit --jq '"\(.state) \(.mergeCommit.oid // "-")"'`)},
+		{name: "message with a slash", input: bash(`crew reply x "use a / b"`)},
+		{name: "message with an apostrophe and slash", input: bash(`crew reply x "it's a / b"`)},
+		{name: "unknown program on dot from home", cwd: ".", input: bash(`foo .`)},
+		{name: "unparsed string naming dot is not a path", cwd: ".", input: bash(`watch 'rm -rf . ('`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.tool == "" {
