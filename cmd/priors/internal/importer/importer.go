@@ -5,6 +5,7 @@
 package importer
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -168,17 +169,29 @@ type planned struct {
 	publishes bool
 }
 
+// plan is the run's fate for every item. setAside holds the names of the items
+// set aside for a held-back link, which a fact planned flagged may still link.
+// unlanded holds every name a link may name that is not in the checkout, so a
+// published fact linking one of them, and not written before it, dangles.
 type plan struct {
-	items  []planned
-	notes  []Report
-	failed int
+	items    []planned
+	notes    []Report
+	failed   int
+	setAside map[string]bool
+	unlanded map[string]bool
 }
 
 // excluded is why an item left the plan. policy is true for a decision (the
 // write path's refusal, a damaged file in the way), false for a failure.
+// waitsFor, when set, makes it a set-aside item instead: it was refused only
+// for its link to the held-back fact waitsFor, found at waitsAt. blockers are
+// all the held-back facts it links.
 type excluded struct {
-	err    error
-	policy bool
+	err      error
+	policy   bool
+	waitsFor string
+	waitsAt  string
+	blockers []string
 }
 
 func request(p candidate, o Options, pending []string, dryRun bool) write.Request {
@@ -202,53 +215,99 @@ func request(p candidate, o Options, pending []string, dryRun bool) write.Reques
 // checkout: a target that is refused, or that lands flagged in the local
 // layer, leaves a published fact's link dangling and the commit gate refusing
 // the checkout. A fact that lands flagged is not under that gate, so it may
-// name any fact of the run still live. So each round dry-runs the items with
-// the names that publish as the ones a published fact's link may name, and
-// repeats until nothing changes; an item the write path refuses is dropped
-// and the rest re-prepared, so a near duplicate no longer shadows against a
-// fact that will not land.
+// name any fact of the run still live, held or set aside. So each round
+// dry-runs the items with the names that publish as the ones a published
+// fact's link may name, and repeats until nothing changes; an item the write
+// path refuses is dropped and the rest re-prepared, so a near duplicate no
+// longer shadows against a fact that will not land.
 //
-// A refusal that only a link to another item of the run explains is not
-// final, since that item may be shadowed now and land once another is
-// dropped. Within a round such an item is held: it leaves the names others
-// may link, and the round dry-runs the rest again until nothing more is held.
-// Held only grows, so that settles. A drop or a newly flagged item changes
-// the next round, so the held items are dry-run afresh in it; only once
-// planning settles with items still held are they dropped, so they stop
-// shadowing their near duplicates. Dropped only grows, so the rounds stay
-// bounded.
+// A link may name any personal-bound item of the run (runNames), whatever its
+// fate, so facts that link each other resolve. A refusal that only a link to a
+// held-back name explains is not final, since that item may be shadowed now
+// and land once another is dropped. Within a round such an item is held: it
+// leaves the names others may link, and the round dry-runs the rest again
+// until nothing more is held. Held only grows, so that settles. A drop or a
+// newly flagged item changes the next round, so the held items are dry-run
+// afresh in it.
+//
+// Once planning settles with items still held, they are set aside a generation
+// at a time, so they stop shadowing their near duplicates. A held item waits,
+// and is kept for the next round, when a link it is held for names a fact that
+// a near duplicate in the run hides (it may surface once that duplicate is set
+// aside) or another waiting item; waiting is propagated to a fixpoint. Only the
+// items not waiting are set aside, or all of them when every item waits. Dropped
+// only grows, so the rounds stay bounded.
+//
+// A later item whose bytes, repo and engine an earlier item of the run has is
+// reported a duplicate of it, whatever the earlier item's fate. That is decided
+// once up front, so a copy set aside or refused never lets the other copy stand
+// in for it. A copy of a fact in the store is reported against the store first.
 func planRun(ctx context.Context, items []Item, o Options, base []existing, damaged []damagedFact) plan {
 	damagedPaths := map[string]bool{}
 	for _, d := range damaged {
 		damagedPaths[filepath.Clean(d.path)] = true
 	}
-	inCheckout := map[string]bool{}
+	inCheckout, localOnly := map[string]bool{}, map[string]string{}
 	for _, k := range base {
 		if k.inCheckout {
 			inCheckout[k.fact.Name] = true
+		} else {
+			localOnly[k.fact.Name] = k.path
+		}
+	}
+	type copyKey struct{ sum, repo, engine string }
+	runNames, resolved := map[string]string{}, make([]string, len(items))
+	sums, firstCopy, copyOf := make([]string, len(items)), map[copyKey]int{}, map[int]int{}
+	for i, it := range items {
+		sums[i] = digest(it.Raw)
+		k := copyKey{sums[i], it.Session.Repo, it.Engine}
+		if j, ok := firstCopy[k]; ok {
+			copyOf[i] = j
+		}
+		if _, name, why := personalBound(it, o); why == "" {
+			resolved[i] = name
+			if _, ok := runNames[name]; !ok {
+				runNames[name] = it.Source
+			}
+			if _, ok := firstCopy[k]; !ok {
+				firstCopy[k] = i
+			}
+		}
+	}
+	unlanded := map[string]bool{}
+	for _, names := range []map[string]string{runNames, localOnly} {
+		for n := range names {
+			unlanded[n] = !inCheckout[n]
 		}
 	}
 	dropped := map[int]excluded{}
 	unpublished := map[int]bool{}
+	setAside := map[string]bool{}
 	for {
 		known := slices.Clone(base)
 		var cands []candidate
 		idxs := make([]int, 0, len(items))
 		var notes []Report
-		inRun := map[string]bool{}
+		hidden := map[string]bool{}
 		for i, it := range items {
 			if why, ok := dropped[i]; ok {
 				notes = append(notes, droppedReport(it, why))
 				continue
 			}
-			n := it.Native.Name
-			if !fact.NameRE.MatchString(n) {
-				n = slug(n)
+			if j, ok := copyOf[i]; ok {
+				rep, ok := sameBytes(it, sums[i], base)
+				if !ok {
+					rep = Report{Outcome: Duplicate, Source: it.Source, Path: items[j].Source + " (this run)", Detail: "same source bytes"}
+				}
+				notes = append(notes, rep)
+				continue
 			}
-			inRun[n] = true
 			c, rep, ok := prepare(it, o, known)
 			if !ok {
 				notes = append(notes, rep)
+				if rep.Outcome == Proposed && strings.HasSuffix(rep.Path, " (this run)") && resolved[i] != "" {
+					hidden[resolved[i]] = true
+				}
 				continue
 			}
 			known = append(known, existing{path: it.Source + " (this run)", fact: c.fact, sum: c.fact.Metadata.Source.SHA256})
@@ -258,6 +317,9 @@ func planRun(ctx context.Context, items []Item, o Options, base []existing, dama
 		names := map[string]bool{}
 		for _, k := range known {
 			names[k.fact.Name] = true
+		}
+		for n := range runNames {
+			names[n] = true
 		}
 		for j := range cands {
 			cands[j].fact.Body = relink(cands[j].fact.Body, names)
@@ -269,31 +331,32 @@ func planRun(ctx context.Context, items []Item, o Options, base []existing, dama
 		for grew && !changed {
 			grew = false
 			out = nil
-			pending, live := map[string]bool{}, map[string]bool{}
+			pending, flaggedMay := map[string]bool{}, maps.Clone(setAside)
 			for j := range cands {
-				if _, ok := held[idxs[j]]; ok {
+				flaggedMay[cands[j].fact.Name] = true
+				if _, ok := held[idxs[j]]; ok || unpublished[idxs[j]] {
 					continue
 				}
-				live[cands[j].fact.Name] = true
-				if !unpublished[idxs[j]] {
-					pending[cands[j].fact.Name] = true
-				}
+				pending[cands[j].fact.Name] = true
 			}
-			publishing, all := slices.Sorted(maps.Keys(pending)), slices.Sorted(maps.Keys(live))
+			publishing, flagging := slices.Sorted(maps.Keys(pending)), slices.Sorted(maps.Keys(flaggedMay))
 			for j, c := range cands {
 				if _, ok := held[idxs[j]]; ok {
 					continue
 				}
 				targets := publishing
 				if unpublished[idxs[j]] {
-					targets = all
+					targets = flagging
 				}
 				res, err := write.AddLocked(ctx, o.Config, request(c, o, targets, true), o.Deps)
+				if err != nil && errors.Is(err, write.ErrRefusal) {
+					if missing := heldBackTargets(ctx, o, c, targets, unlanded); len(missing) > 0 {
+						held[idxs[j]] = excluded{err: err, policy: true, waitsFor: missing[0], blockers: missing}
+						grew = true
+						continue
+					}
+				}
 				switch {
-				case err != nil && errors.Is(err, write.ErrRefusal) && refusedOnlyForLinks(ctx, o, c, targets, inCheckout, inRun):
-					held[idxs[j]] = excluded{err: err, policy: true}
-					grew = true
-					continue
 				case err != nil:
 					dropped[idxs[j]] = excluded{err: err, policy: errors.Is(err, write.ErrRefusal)}
 					changed = true
@@ -315,10 +378,46 @@ func planRun(ctx context.Context, items []Item, o Options, base []existing, dama
 			continue
 		}
 		if len(held) > 0 {
-			maps.Copy(dropped, held)
+			at := map[string]string{}
+			for _, p := range out {
+				at[p.fact.Name] = p.res.Path
+			}
+			heldAt := map[string]int{}
+			for idx := range held {
+				heldAt[resolved[idx]] = idx
+			}
+			waiting := map[int]bool{}
+			for grew := true; grew; {
+				grew = false
+				for idx, why := range held {
+					if waiting[idx] || !slices.ContainsFunc(why.blockers, func(t string) bool {
+						j, isHeld := heldAt[t]
+						return hidden[t] || (isHeld && waiting[j])
+					}) {
+						continue
+					}
+					waiting[idx] = true
+					grew = true
+				}
+			}
+			aside := maps.Clone(held)
+			for idx := range waiting {
+				delete(aside, idx)
+			}
+			if len(aside) == 0 {
+				aside = held
+			}
+			for idx, why := range aside {
+				if _, ok := at[why.waitsFor]; !ok {
+					at[why.waitsFor] = cmp.Or(localOnly[why.waitsFor], runNames[why.waitsFor])
+				}
+				why.waitsAt = at[why.waitsFor]
+				dropped[idx] = why
+				setAside[resolved[idx]] = true
+			}
 			continue
 		}
-		pl := plan{items: out, notes: notes}
+		pl := plan{items: out, notes: notes, setAside: setAside, unlanded: unlanded}
 		for _, why := range dropped {
 			if !why.policy {
 				pl.failed++
@@ -328,25 +427,31 @@ func planRun(ctx context.Context, items []Item, o Options, base []existing, dama
 	}
 }
 
-// refusedOnlyForLinks reports whether c, refused with targets as the names its
-// links may name, links an item of the run (inRun) that is in neither the
-// checkout nor targets, and would pass if it could name those. A link to a
-// name outside the run cannot come to resolve, so it never qualifies.
-func refusedOnlyForLinks(ctx context.Context, o Options, c candidate, targets []string, inCheckout, inRun map[string]bool) bool {
+// heldBackTargets are the names c, refused with targets as the names its links
+// may name, links that are held back (unlanded: in the run or the local layer,
+// not in the checkout) and are not in targets, provided c would pass if it
+// could name them. A link to a name nowhere cannot come to resolve, so c stays
+// refused, as it does when something else also refuses it.
+func heldBackTargets(ctx context.Context, o Options, c candidate, targets []string, unlanded map[string]bool) []string {
 	var missing []string
 	for _, t := range linkTargets(c.fact.Body) {
-		if inRun[t] && !inCheckout[t] && !slices.Contains(targets, t) {
+		if unlanded[t] && !slices.Contains(targets, t) {
 			missing = append(missing, t)
 		}
 	}
 	if len(missing) == 0 {
-		return false
+		return nil
 	}
-	_, err := write.AddLocked(ctx, o.Config, request(c, o, slices.Concat(targets, missing), true), o.Deps)
-	return err == nil
+	if _, err := write.AddLocked(ctx, o.Config, request(c, o, slices.Concat(targets, missing), true), o.Deps); err != nil {
+		return nil
+	}
+	return missing
 }
 
 func droppedReport(it Item, why excluded) Report {
+	if why.waitsFor != "" {
+		return Report{Outcome: Proposed, Source: it.Source, Path: why.waitsAt, Detail: "waits for [[" + why.waitsFor + "]], which is held back (flagged, refused or set aside)"}
+	}
 	kind := "failed: "
 	if why.policy {
 		kind = "refused: "
@@ -363,9 +468,8 @@ func droppedReport(it Item, why excluded) Report {
 // are the facts already written that link it, directly or through another,
 // and later facts no longer count it as a link target.
 func writeAll(ctx context.Context, o Options, checkout store.Root, pl plan, out *Result) (published int) {
-	pending, live, inRun := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	pending, live := map[string]bool{}, maps.Clone(pl.setAside)
 	for _, p := range pl.items {
-		inRun[p.fact.Name] = true
 		live[p.fact.Name] = true
 		if p.publishes {
 			pending[p.fact.Name] = true
@@ -388,7 +492,7 @@ func writeAll(ctx context.Context, o Options, checkout store.Root, pl plan, out 
 		}
 		dangling := ""
 		for _, t := range linkTargets(p.fact.Body) {
-			if t != p.fact.Name && inRun[t] && !pending[t] {
+			if t != p.fact.Name && pl.unlanded[t] && !pending[t] {
 				dangling = t
 				break
 			}
@@ -572,47 +676,59 @@ func loadStore(ctx context.Context, cfg config.Config) (store.Root, []existing, 
 	return checkout, out, damaged, nil
 }
 
-// prepare routes, names, normalises and dedups one item. ok is false when
-// the item stops here, with rep saying why.
-func prepare(it Item, o Options, known []existing) (c candidate, rep Report, ok bool) {
-	rep = Report{Outcome: Skipped, Source: it.Source}
-	sum := digest(it.Raw)
+// sameBytes is the Unchanged or Duplicate report for an item whose bytes a
+// known fact already holds.
+func sameBytes(it Item, sum string, known []existing) (Report, bool) {
 	for _, k := range known {
 		if k.sum != sum && k.raw != sum {
 			continue
 		}
 		if s := k.fact.Metadata.Source; s != nil && s.Engine == it.Engine && s.Path == it.Source {
-			return c, Report{Outcome: Unchanged, Source: it.Source, Path: k.path}, false
+			return Report{Outcome: Unchanged, Source: it.Source, Path: k.path}, true
 		}
-		return c, Report{Outcome: Duplicate, Source: it.Source, Path: k.path, Detail: "same source bytes"}, false
+		return Report{Outcome: Duplicate, Source: it.Source, Path: k.path, Detail: "same source bytes"}, true
 	}
+	return Report{}, false
+}
 
-	// Only the personal store is in scope: a fact §4.2 sends to the work store
-	// or the quarantine is reported and written nowhere.
+// personalBound is the repo and fact name an item would land under in the
+// personal store. Only the personal store is in scope: a fact §4.2 sends to
+// the work store or the quarantine is reported and written nowhere, and why
+// says what stopped an item that cannot land there.
+func personalBound(it Item, o Options) (repo, name, why string) {
 	switch dest := route.WriteDest(it.Session, o.Config); {
 	case dest.Quarantine:
-		rep.Detail = "routes to the quarantine (" + dest.Why + "); only the personal store is imported"
-		return c, rep, false
+		return "", "", "routes to the quarantine (" + dest.Why + "); only the personal store is imported"
 	case dest.Store != route.StorePersonal:
-		rep.Detail = "routes to the " + string(dest.Store) + " store; only the personal store is imported"
-		return c, rep, false
+		return "", "", "routes to the " + string(dest.Store) + " store; only the personal store is imported"
 	}
-	repo := it.Session.Repo
+	repo = it.Session.Repo
 	if repo == "" {
-		rep.Detail = "no repo to scope the fact to"
-		return c, rep, false
+		return "", "", "no repo to scope the fact to"
 	}
 	if !fact.NameRE.MatchString(repo) {
-		rep.Detail = fmt.Sprintf("repo %q is not a valid name", repo)
-		return c, rep, false
+		return "", "", fmt.Sprintf("repo %q is not a valid name", repo)
 	}
-	name := it.Native.Name
+	name = it.Native.Name
 	if !fact.NameRE.MatchString(name) {
 		name = slug(name)
 	}
 	if name == "" {
-		rep.Detail = fmt.Sprintf("name %q cannot be made a valid name", it.Native.Name)
+		return "", "", fmt.Sprintf("name %q cannot be made a valid name", it.Native.Name)
+	}
+	return repo, name, ""
+}
+
+// prepare routes, names, normalises and dedups one item. ok is false when
+// the item stops here, with rep saying why.
+func prepare(it Item, o Options, known []existing) (c candidate, rep Report, ok bool) {
+	sum := digest(it.Raw)
+	if rep, ok := sameBytes(it, sum, known); ok {
 		return c, rep, false
+	}
+	repo, name, why := personalBound(it, o)
+	if why != "" {
+		return c, Report{Outcome: Skipped, Source: it.Source, Detail: why}, false
 	}
 
 	f := normalise(it, name, repo, o.Host, sum)
@@ -626,7 +742,7 @@ func prepare(it Item, o Options, known []existing) (c candidate, rep Report, ok 
 			return c, Report{Outcome: Proposed, Source: it.Source, Path: k.path, Detail: why}, false
 		}
 	}
-	return candidate{item: it, fact: f}, rep, true
+	return candidate{item: it, fact: f}, Report{}, true
 }
 
 // normalise builds the canonical copy: the native name (validated),

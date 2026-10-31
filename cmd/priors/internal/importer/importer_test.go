@@ -536,9 +536,10 @@ func TestLinkToATargetThatDoesNotPublishIsNotPublished(t *testing.T) {
 					t.Fatalf("dry=%v: lines = %v", dryRun, got)
 				}
 				if !slices.ContainsFunc(got, func(l string) bool {
-					return strings.HasPrefix(l, "skipped "+linker+": refused: ") && strings.Contains(l, "wikilink-dangling")
+					w := waits(linker, "b-target")
+					return strings.HasPrefix(l, w.prefix) && strings.Contains(l, w.has[0])
 				}) {
-					t.Errorf("dry=%v: the linker is not refused for its dangling link:\n%s", dryRun, strings.Join(got, "\n"))
+					t.Errorf("dry=%v: the linker is not set aside for its held-back target:\n%s", dryRun, strings.Join(got, "\n"))
 				}
 				if want := tt.want(dryRun, targetSource); !slices.ContainsFunc(got, func(l string) bool { return strings.HasPrefix(l, want) }) {
 					t.Errorf("dry=%v: no line starts %q in:\n%s", dryRun, want, strings.Join(got, "\n"))
@@ -959,16 +960,17 @@ func TestLinkersOfFactsAShadowHidUntilItWasRefusedPublish(t *testing.T) {
 	}
 }
 
-func TestALinkerRefusedForItsLinkDoesNotShadowItsNearDuplicate(t *testing.T) {
+func TestALinkerSetAsideOrRefusedForItsLinkDoesNotShadowItsNearDuplicate(t *testing.T) {
 	const body = "Facts are plain markdown files with frontmatter, one per file, in a store.\n"
 	tests := []struct {
-		name   string
-		link   string
-		target string
-		want   func(dryRun bool) []string
+		name     string
+		link     string
+		target   string
+		setAside bool
+		want     func(dryRun bool) []string
 	}{
-		{"link names no fact", "ghost", "", func(bool) []string { return nil }},
-		{"link target lands flagged", "c-flag", "see https://example.com/doc for the layout of the store\n", func(dryRun bool) []string {
+		{"link names no fact", "ghost", "", false, func(bool) []string { return nil }},
+		{"link target lands flagged", "c-flag", "see https://example.com/doc for the layout of the store\n", true, func(dryRun bool) []string {
 			if dryRun {
 				return []string{"would flag personal "}
 			}
@@ -991,14 +993,18 @@ func TestALinkerRefusedForItsLinkDoesNotShadowItsNearDuplicate(t *testing.T) {
 					landed = "would publish personal "
 				}
 				got := fx.run(t, dryRun)
+				linkerLine, detail := "skipped "+linker+": refused: ", "wikilink-dangling"
+				if tt.setAside {
+					linkerLine, detail = "propose "+linker+" -> ", ": waits for [["+tt.link+"]], which is held back"
+				}
 				wantLines(t, got, append(tt.want(dryRun),
-					"skipped "+linker+": refused: ",
+					linkerLine,
 					landed+filepath.Join(fx.cfg.PersonalStore, "demo", "b-dup.md"),
 				))
 				if !slices.ContainsFunc(got, func(l string) bool {
-					return strings.HasPrefix(l, "skipped "+linker+": refused: ") && strings.Contains(l, "wikilink-dangling")
+					return strings.HasPrefix(l, linkerLine) && strings.Contains(l, detail)
 				}) {
-					t.Errorf("dry=%v: the linker is not refused for its dangling link:\n%s", dryRun, strings.Join(got, "\n"))
+					t.Errorf("dry=%v: the linker is not reported with %q:\n%s", dryRun, detail, strings.Join(got, "\n"))
 				}
 			}
 			fx.checkoutCommits(t)
@@ -1051,5 +1057,386 @@ func TestFactsThatPublishAfterPlanningFlaggedThemMayLinkEachOther(t *testing.T) 
 	if res.Warning != "" {
 		t.Errorf("warning: %s", res.Warning)
 	}
+	fx.checkoutCommits(t)
+}
+
+const (
+	inRunBody   = "Facts are plain markdown files with frontmatter, one per file, in a store.\n"
+	inRunSecret = "the key is " + "AK" + "IA" + "IOSFODNN7EXAMPLE\n"
+	inRunURL    = "see https://example.com/doc for the layout of the store\n"
+)
+
+// report is what one output line must be: it starts with prefix and holds
+// every string of has.
+type report struct {
+	prefix string
+	has    []string
+}
+
+// from narrows a published or flagged report to the item it came from.
+func (r report) from(src string) report {
+	r.has = append(slices.Clone(r.has), "<- "+src)
+	return r
+}
+
+func source(mem, name string) string {
+	return sourcePath(filepath.Join(mem, name+".md"))
+}
+
+func (fx fixture) storePath(name string) string {
+	return filepath.Join(fx.cfg.PersonalStore, "demo", name+".md")
+}
+
+func (fx fixture) localPath(name string) string {
+	return filepath.Join(store.LocalRoot(fx.cfg, route.StorePersonal).Path, "demo", name+".md")
+}
+
+func (fx fixture) published(name string) report {
+	return report{prefix: "published personal " + fx.storePath(name) + " <- "}
+}
+
+func (fx fixture) flagged(name string) report {
+	return report{prefix: "flagged personal " + fx.localPath(name) + " <- "}
+}
+
+func duplicate(src string) report {
+	return report{prefix: "duplicate " + src + ": "}
+}
+
+func refused(src string, has ...string) report {
+	return report{prefix: "skipped " + src + ": refused: ", has: has}
+}
+
+// waits is a linker set aside for a link to the held-back target.
+func waits(src, target string) report {
+	return report{prefix: "propose " + src + " -> ", has: []string{": waits for [[" + target + "]], which is held back"}}
+}
+
+// waitsAt is waits, naming the path of the held-back target.
+func waitsAt(src, path, target string) report {
+	r := waits(src, target)
+	r.prefix += path + ": "
+	return r
+}
+
+func wantReports(t *testing.T, lines []string, want ...report) {
+	t.Helper()
+	if len(lines) != len(want) {
+		t.Fatalf("got %d lines, want %d:\n%s", len(lines), len(want), strings.Join(lines, "\n"))
+	}
+	for _, w := range want {
+		if !slices.ContainsFunc(lines, func(l string) bool {
+			return strings.HasPrefix(l, w.prefix) && !slices.ContainsFunc(w.has, func(h string) bool { return !strings.Contains(l, h) })
+		}) {
+			t.Errorf("no line starts %q and holds %q in:\n%s", w.prefix, w.has, strings.Join(lines, "\n"))
+		}
+	}
+}
+
+// runBoth runs the import dry and then for real, and fails when the dry run
+// reported anything but what the real run did. It returns the real run's lines.
+func (fx fixture) runBoth(t *testing.T) []string {
+	t.Helper()
+	_, dry := fx.runResult(t, true)
+	res, got := fx.runResult(t, false)
+	for i, l := range dry {
+		if rest, ok := strings.CutPrefix(l, "would publish "); ok {
+			dry[i] = "published " + rest
+		} else if rest, ok := strings.CutPrefix(l, "would flag "); ok {
+			dry[i] = "flagged " + rest
+		}
+	}
+	if !slices.Equal(dry, got) {
+		t.Errorf("the dry run differs from the real run:\ndry:\n%s\nreal:\n%s", strings.Join(dry, "\n"), strings.Join(got, "\n"))
+	}
+	if res.Failed != 0 || res.Warning != "" {
+		t.Errorf("failed %d, warning %q", res.Failed, res.Warning)
+	}
+	return got
+}
+
+func (fx fixture) wantNotInCheckout(t *testing.T, names ...string) {
+	t.Helper()
+	for _, n := range names {
+		if _, err := os.Stat(fx.storePath(n)); err == nil {
+			t.Errorf("%s reached the checkout", n)
+		}
+	}
+}
+
+func TestInRunLinksResolve(t *testing.T) {
+	tests := []struct {
+		name    string
+		arrange func(t *testing.T, fx fixture, mem, mem2 string) []report
+	}{
+		{"2-cycle", func(t *testing.T, fx fixture, mem, _ string) []report {
+			writeFile(t, filepath.Join(mem, "a-one.md"), native("a-one", "one", "See [[b-two]]. one words here alpha\n"))
+			writeFile(t, filepath.Join(mem, "b-two.md"), native("b-two", "two", "See [[a-one]]. two words here beta\n"))
+			return []report{fx.published("a-one"), fx.published("b-two")}
+		}},
+		{"3-cycle", func(t *testing.T, fx fixture, mem, _ string) []report {
+			writeFile(t, filepath.Join(mem, "a-one.md"), native("a-one", "one", "See [[b-two]]. one words here alpha\n"))
+			writeFile(t, filepath.Join(mem, "b-two.md"), native("b-two", "two", "See [[c-three]]. two words here beta\n"))
+			writeFile(t, filepath.Join(mem, "c-three.md"), native("c-three", "three", "See [[a-one]]. three words here gamma\n"))
+			return []report{fx.published("a-one"), fx.published("b-two"), fx.published("c-three")}
+		}},
+		{"non-canonical link to a landing target", func(t *testing.T, fx fixture, mem, _ string) []report {
+			writeFile(t, filepath.Join(mem, "a-linker.md"), native("a-linker", "links to bravo", "See [[C_Bravo]]. "+inRunBody))
+			writeFile(t, filepath.Join(mem, "C_Bravo.md"), native("C_Bravo", "bravo", "bravo body words\n"))
+			return []report{fx.published("a-linker"), fx.published("c-bravo")}
+		}},
+		{"non-canonical link to a target a refused near-duplicate hid", func(t *testing.T, fx fixture, mem, _ string) []report {
+			// c-bravo is shadowed by a-secret until a-secret is refused.
+			writeFile(t, filepath.Join(mem, "a-linker.md"), native("a-linker", "links to bravo", "See [[C_Bravo]]. "+inRunBody))
+			writeFile(t, filepath.Join(mem, "a-secret.md"), native("a-secret", "the same description", inRunSecret))
+			writeFile(t, filepath.Join(mem, "b-bravo.md"), native("C_Bravo", "the same description", "a different body\n"))
+			return []report{refused(source(mem, "a-secret")), fx.published("a-linker"), fx.published("c-bravo")}
+		}},
+		{"2-cycle in two dirs", func(t *testing.T, fx fixture, mem, mem2 string) []report {
+			for _, m := range []string{mem, mem2} {
+				writeFile(t, filepath.Join(m, "a-one.md"), native("a-one", "one", "See [[b-two]]. one words here alpha\n"))
+				writeFile(t, filepath.Join(m, "b-two.md"), native("b-two", "two", "See [[a-one]]. two words here beta\n"))
+			}
+			return []report{
+				fx.published("a-one").from(source(mem, "a-one")), fx.published("b-two").from(source(mem, "b-two")),
+				duplicate(source(mem2, "a-one")), duplicate(source(mem2, "b-two")),
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := setup(t, "personal")
+			mem, mem2 := fx.memDir(repo(t, personalRemote)), fx.memDir(repo(t, personalRemote))
+			want := tt.arrange(t, fx, mem, mem2)
+			wantReports(t, fx.runBoth(t), want...)
+			fx.checkoutCommits(t)
+		})
+	}
+}
+
+// writeFlaggedCycle writes a-one -> b-two -> c-three -> a-one, where b-two's
+// URL flags it, into mem.
+func writeFlaggedCycle(t *testing.T, mem string) {
+	t.Helper()
+	writeFile(t, filepath.Join(mem, "a-one.md"), native("a-one", "one", "See [[b-two]]. one words here alpha\n"))
+	writeFile(t, filepath.Join(mem, "b-two.md"), native("b-two", "two", "See [[c-three]]. https://example.com/x two words here beta\n"))
+	writeFile(t, filepath.Join(mem, "c-three.md"), native("c-three", "three", "See [[a-one]]. three words here gamma\n"))
+}
+
+func TestInRunFlaggedCycleMember(t *testing.T) {
+	fx := setup(t, "personal")
+	mem := fx.memDir(repo(t, personalRemote))
+	writeFlaggedCycle(t, mem)
+
+	wantReports(t, fx.runBoth(t),
+		fx.flagged("b-two"),
+		waitsAt(source(mem, "a-one"), fx.localPath("b-two"), "b-two"),
+		waits(source(mem, "c-three"), "a-one"),
+	)
+	fx.wantNotInCheckout(t, "a-one", "b-two", "c-three")
+	fx.checkoutCommits(t)
+}
+
+func TestInRunFlaggedCycleMemberTwoDirs(t *testing.T) {
+	fx := setup(t, "personal")
+	mem, mem2 := fx.memDir(repo(t, personalRemote)), fx.memDir(repo(t, personalRemote))
+	writeFlaggedCycle(t, mem)
+	writeFlaggedCycle(t, mem2)
+
+	wantReports(t, fx.runBoth(t),
+		fx.flagged("b-two").from(source(mem, "b-two")),
+		waitsAt(source(mem, "a-one"), fx.localPath("b-two"), "b-two"),
+		waits(source(mem, "c-three"), "a-one"),
+		duplicate(source(mem2, "a-one")), duplicate(source(mem2, "b-two")), duplicate(source(mem2, "c-three")),
+	)
+	fx.wantNotInCheckout(t, "a-one", "b-two", "c-three")
+	fx.checkoutCommits(t)
+}
+
+func TestInRunLinkerOfHeldBackTargetIsSetAside(t *testing.T) {
+	tests := []struct {
+		name    string
+		arrange func(t *testing.T, fx fixture, mem, work string) []report
+	}{
+		{"flagged target", func(t *testing.T, fx fixture, mem, _ string) []report {
+			writeFile(t, filepath.Join(mem, "a-linker.md"), native("a-linker", "links to the target", "See [[b-flag]]. "+inRunBody))
+			writeFile(t, filepath.Join(mem, "b-flag.md"), native("b-flag", "the target", inRunURL))
+			return []report{fx.flagged("b-flag"), waitsAt(source(mem, "a-linker"), fx.localPath("b-flag"), "b-flag")}
+		}},
+		{"refused target", func(t *testing.T, fx fixture, mem, _ string) []report {
+			writeFile(t, filepath.Join(mem, "a-linker.md"), native("a-linker", "links to the target", "See [[b-target]]. "+inRunBody))
+			writeFile(t, filepath.Join(mem, "b-target.md"), native("b-target", "the target", inRunSecret))
+			return []report{refused(source(mem, "b-target")), waits(source(mem, "a-linker"), "b-target")}
+		}},
+		{"target only in the local layer", func(t *testing.T, fx fixture, mem, _ string) []report {
+			// A previous run flagged b-flag into the local layer.
+			writeFile(t, filepath.Join(mem, "b-flag.md"), native("b-flag", "the target", inRunURL))
+			wantReports(t, fx.run(t, false), fx.flagged("b-flag"))
+			writeFile(t, filepath.Join(mem, "a-linker.md"), native("a-linker", "links to the target", "See [[b-flag]]. "+inRunBody))
+			return []report{
+				{prefix: "unchanged " + source(mem, "b-flag") + ": " + fx.localPath("b-flag")},
+				waitsAt(source(mem, "a-linker"), fx.localPath("b-flag"), "b-flag"),
+			}
+		}},
+		{"target routed to the work store", func(t *testing.T, fx fixture, mem, work string) []report {
+			writeFile(t, filepath.Join(mem, "a-linker.md"), native("a-linker", "links to the target", "See [[b-work]]. "+inRunBody))
+			writeFile(t, filepath.Join(work, "b-work.md"), native("b-work", "the target", "a work note\n"))
+			return []report{
+				{prefix: "skipped " + source(work, "b-work") + ": routes to the quarantine"},
+				refused(source(mem, "a-linker"), "wikilink-dangling"),
+			}
+		}},
+		{"link names no fact", func(t *testing.T, fx fixture, mem, _ string) []report {
+			writeFile(t, filepath.Join(mem, "a-linker.md"), native("a-linker", "links to nothing", "See [[ghost]]. "+inRunBody))
+			return []report{refused(source(mem, "a-linker"), "wikilink-dangling")}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := setup(t, "personal")
+			mem, work := fx.memDir(repo(t, personalRemote)), fx.memDir(repo(t, workRemote))
+			want := tt.arrange(t, fx, mem, work)
+			wantReports(t, fx.runBoth(t), want...)
+			fx.wantNotInCheckout(t, "a-linker")
+			fx.checkoutCommits(t)
+		})
+	}
+
+	t.Run("lands once the target is in the store", func(t *testing.T) {
+		fx := setup(t, "personal")
+		mem := fx.memDir(repo(t, personalRemote))
+		target := filepath.Join(mem, "b-flag.md")
+		targetText := native("b-flag", "the target", inRunURL)
+		writeFile(t, filepath.Join(mem, "a-linker.md"), native("a-linker", "links to the target", "See [[b-flag]]. "+inRunBody))
+		writeFile(t, target, targetText)
+		wantReports(t, fx.runBoth(t), fx.flagged("b-flag"), waitsAt(source(mem, "a-linker"), fx.localPath("b-flag"), "b-flag"))
+
+		// Review: the flagged copy leaves the local layer, and a clean copy of
+		// the same source is committed to the store.
+		if err := os.Remove(fx.localPath("b-flag")); err != nil {
+			t.Fatal(err)
+		}
+		reviewed := storedFact("b-flag", "the target", "The target, reviewed.\n")
+		reviewed.Metadata.Source = &fact.Source{Engine: "claude", Path: sourcePath(target), SHA256: digest([]byte(targetText))}
+		putFact(t, fx.storePath("b-flag"), reviewed)
+		git(t, fx.cfg.PersonalStore, "add", "-A")
+		git(t, fx.cfg.PersonalStore, "commit", "-q", "-m", "review b-flag")
+
+		wantReports(t, fx.runBoth(t),
+			report{prefix: "unchanged " + source(mem, "b-flag") + ": " + fx.storePath("b-flag")},
+			fx.published("a-linker"),
+		)
+		fx.checkoutCommits(t)
+	})
+}
+
+func TestInRunHeldFactWaitingOnAShadowedTargetIsNotDropped(t *testing.T) {
+	tests := []struct {
+		name    string
+		arrange func(t *testing.T, fx fixture, mem string) []report
+	}{
+		// c-held links the flagged z-flag, so it is set aside, and d-target is
+		// its near-duplicate: hidden until c-held is dropped. e-linker links
+		// d-target, so it must wait for d-target, not be dropped with c-held.
+		{"linker of the shadowed target", func(t *testing.T, fx fixture, mem string) []report {
+			writeFile(t, filepath.Join(mem, "e-linker.md"), native("e-linker", "links to the target", "See [[d-target]]. "+inRunBody))
+			return []report{fx.published("e-linker")}
+		}},
+		{"linker of a linker of the shadowed target", func(t *testing.T, fx fixture, mem string) []report {
+			writeFile(t, filepath.Join(mem, "b-mid.md"), native("b-mid", "points on to the target", "See [[d-target]]. A middle note that points on to the target.\n"))
+			writeFile(t, filepath.Join(mem, "e-linker.md"), native("e-linker", "links to the middle", "See [[b-mid]]. "+inRunBody))
+			return []report{fx.published("b-mid"), fx.published("e-linker")}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := setup(t, "personal")
+			mem := fx.memDir(repo(t, personalRemote))
+			writeFile(t, filepath.Join(mem, "c-held.md"), native("c-held", "the same description", "See [[z-flag]]. Held back until the flagged note is reviewed by hand.\n"))
+			writeFile(t, filepath.Join(mem, "d-target.md"), native("d-target", "the same description", "The target fact body.\n"))
+			writeFile(t, filepath.Join(mem, "z-flag.md"), native("z-flag", "the flagged note", inRunURL))
+			want := append(tt.arrange(t, fx, mem),
+				fx.flagged("z-flag"),
+				waitsAt(source(mem, "c-held"), fx.localPath("z-flag"), "z-flag"),
+				fx.published("d-target"),
+			)
+			wantReports(t, fx.runBoth(t), want...)
+			fx.checkoutCommits(t)
+		})
+	}
+}
+
+func TestInRunFlaggedFactThatPublishesLaterDoesNotLinkASetAsideSibling(t *testing.T) {
+	fx := setup(t, "personal")
+	mem := fx.memDir(repo(t, personalRemote))
+	// b-sibling links c-secret, which is refused, so b-sibling is set aside;
+	// a-linker links b-sibling and is planned flagged, which may name it.
+	writeFile(t, filepath.Join(mem, "a-linker.md"), native("a-linker", "links to the sibling", "See [[b-sibling]]. "+inRunBody))
+	writeFile(t, filepath.Join(mem, "b-sibling.md"), native("b-sibling", "the sibling", "See [[c-secret]]. The sibling points at a note that never lands.\n"))
+	writeFile(t, filepath.Join(mem, "c-secret.md"), native("c-secret", "the secret", inRunSecret))
+	linker := source(mem, "a-linker")
+
+	// The importing session has no tool record, so the plan flags every
+	// candidate; the scanner records one on its trigger-th call, so the
+	// linker's write finds the session clean.
+	fx.opts.SessionID = "s2"
+	if err := gate.MarkSession(fx.cfg.ProvenanceDir(), "s2", false); err != nil {
+		t.Fatal(err)
+	}
+	sig := tempDir(t)
+	count, trigger := filepath.Join(sig, "count"), filepath.Join(sig, "trigger")
+	stream := filepath.Join(fx.cfg.EventRecord, "stream", time.Now().UTC().Format(time.DateOnly)+".jsonl")
+	fx.opts.Deps.Scanner = gate.Scanner{Bin: script(t, "n=$(cat '"+count+"' 2>/dev/null || echo 0)\nn=$((n+1))\nprintf '%s' \"$n\" > '"+count+"'\n"+
+		"if [ -f '"+trigger+"' ] && [ \"$n\" = \"$(cat '"+trigger+"')\" ]; then\n"+
+		"  printf '%s\\n' '{\"session_id\":\"s2\",\"canonical_event\":\"post_tool\",\"tool_name\":\"Bash\"}' >> '"+stream+"'\nfi\nprintf '[]'\n")}
+
+	_, lines := fx.runResult(t, true)
+	wantReports(t, lines,
+		refused(source(mem, "c-secret")),
+		waits(source(mem, "b-sibling"), "c-secret"),
+		report{prefix: "would flag personal " + fx.localPath("a-linker") + " <- "},
+	)
+	planCalls, err := os.ReadFile(count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan int
+	if _, err := fmt.Sscan(string(planCalls), &plan); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, count, "0")
+	writeFile(t, trigger, strconv.Itoa(plan+1))
+
+	res, lines := fx.runResult(t, false)
+	wantReports(t, lines,
+		refused(source(mem, "c-secret")),
+		waits(source(mem, "b-sibling"), "c-secret"),
+		report{prefix: "skipped " + linker + ": failed: it links b-sibling"},
+	)
+	if res.Failed != 1 {
+		t.Errorf("Failed = %d, want 1", res.Failed)
+	}
+	if res.Warning != "" {
+		t.Errorf("warning: %s", res.Warning)
+	}
+	fx.wantNotInCheckout(t, "a-linker", "b-sibling")
+	fx.checkoutCommits(t)
+}
+
+func TestInRunByteDuplicateOrder(t *testing.T) {
+	fx := setup(t, "personal")
+	mem, mem2 := fx.memDir(repo(t, personalRemote)), fx.memDir(repo(t, personalRemote))
+	text := native("a-one", "one", "One words here alpha, in a fact both dirs hold.\n")
+
+	// The store already holds the copy from the second dir.
+	writeFile(t, filepath.Join(mem2, "a-one.md"), text)
+	wantReports(t, fx.run(t, false), fx.published("a-one").from(source(mem2, "a-one")))
+
+	// The first dir's copy comes first in the run, but the store's copy decides.
+	writeFile(t, filepath.Join(mem, "a-one.md"), text)
+	wantReports(t, fx.runBoth(t),
+		report{prefix: "duplicate " + source(mem, "a-one") + ": " + fx.storePath("a-one") + ": same source bytes"},
+		report{prefix: "unchanged " + source(mem2, "a-one") + ": " + fx.storePath("a-one")},
+	)
 	fx.checkoutCommits(t)
 }
