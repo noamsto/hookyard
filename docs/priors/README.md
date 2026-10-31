@@ -425,12 +425,14 @@ In a shell command:
   `--debug-file`, a flag's value), `claude mcp`, a `gh` or `glab` subcommand
   off that list (an alias or an extension), and anything after `--`;
 - those positions apply only when the program is found through bare wrapper
-  names alone (`env`, `timeout 5`, `env -u X`, `env -C dir`, a leading
-  `NAME=value`, a `NAME=value` after `env` or `sudo`). A path-invoked wrapper
-  (`./nice`, `/x/env`), a skipped wrapper flag (`exec -a name`, `sudo -u
-  user`, `env -S`) and a bare number or `NAME=value` word after any other
-  wrapper (`env 5 claude …`) make the resolution unclean, and the command is
-  judged like an unknown program;
+  names alone (`env`, `timeout 5`, `env -u X`, `env -C dir`, an unquoted
+  `NAME=value` prefix the parser strips before the command word, or a
+  `NAME=value` after `env` or `sudo`). A path-invoked wrapper (`./nice`,
+  `/x/env`), a skipped wrapper flag (`exec -a name`, `sudo -u user`, `env -S`),
+  a leading quoted `"NAME=value"` (a program the shell runs under that literal
+  name), and a bare number or `NAME=value` word after any other wrapper (`env 5
+  claude …`) make the resolution unclean, and the command is judged like an
+  unknown program;
 - a command that can redefine how a name resolves loses every data position,
   wherever in the command the redefinition sits, since a `trap`, a loop or a
   function can run it before or after: a function, `alias`, `hash`, `enable`,

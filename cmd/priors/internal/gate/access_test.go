@@ -146,10 +146,10 @@ func TestShellAccess(t *testing.T) {
 		{name: "git log no-ext-diff", cmd: "git -C /h/store log --no-ext-diff -p", want: []Touch{cd("/h/store")}},
 
 		// Data positions of a cleanly resolved known program.
-		{name: "gh jq filter is data", cmd: `gh pr view 1 --jq '.a // .b'`, writes: true, absent: []Touch{w("/")}},
-		{name: "glab jq filter is data", cmd: `glab mr view 3 --jq '.a // .b'`, writes: true, absent: []Touch{w("/")}},
-		{name: "gh q filter is data", cmd: `gh api x -q '.a // .b'`, writes: true, absent: []Touch{w("/")}},
-		{name: "claude prompt is data", cmd: `claude -p "check the build ."`, writes: true, absent: []Touch{w(".")}},
+		{name: "gh jq filter is data", cmd: `gh pr view 1 --jq '.a // .b'`, writes: true, absent: []Touch{w("//")}},
+		{name: "glab jq filter is data", cmd: `glab mr view 3 --jq '.a // .b'`, writes: true, absent: []Touch{w("//")}},
+		{name: "gh q filter is data", cmd: `gh api x -q '.a // .b'`, writes: true, absent: []Touch{w("//")}},
+		{name: "claude prompt is data", cmd: `claude -p "check the build ."`, writes: true, absent: []Touch{w("check the build ."), w(".")}},
 		{name: "claude bare dot is a write", cmd: `claude .`, writes: true, want: []Touch{w(".")}},
 		{name: "claude prompt after env unset is data", cmd: `env -u X claude -p /h/store/M`, writes: true, absent: []Touch{w("/h/store/M")}},
 		{name: "claude prompt substitution is read", cmd: `claude -p "$(rm /h/store/M)"`, writes: true, want: []Touch{w("/h/store/M")}},

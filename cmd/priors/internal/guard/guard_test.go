@@ -399,8 +399,7 @@ func TestShellAllows(t *testing.T) {
 		{name: "jq filter after an assignment", input: bash(`CREW_ID=x crew roster | jq -c '.[] | select(.state=="working" or .state=="blocked") | {name,branch,state,age_s}'`)},
 		{name: "jq alternative filter after an assignment", input: bash(`CREW_ID=x crew roster | jq -c '.[]? // .'`)},
 
-		// Data positions of a cleanly resolved known program are text, not a
-		// path (the #264 repros and the per-property allows).
+		// Data positions of a cleanly resolved known program are text, not a path.
 		{name: "claude prompt with a dot", cwd: ".", input: bash(`claude -p "check the build ." --tools=Bash`)},
 		{name: "gh jq with a slash alternative", input: bash(`gh pr view 1 --json state,mergeCommit --jq '"\(.state) \(.mergeCommit.oid // "-")"'`)},
 		{name: "crew body with a spaced slash", cwd: ".", input: bash(`crew reply worker:x "a / b"`)},
