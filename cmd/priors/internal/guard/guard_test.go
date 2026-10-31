@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -111,6 +112,9 @@ type call struct {
 	cwd   string
 	tool  string
 	input string
+	// linuxOnly skips a case that needs a path only Linux resolves, such as
+	// /proc/self/root.
+	linuxOnly bool
 }
 
 // wantDenied fails t unless reason is a denial holding c.want.
@@ -156,7 +160,7 @@ func TestShellDenies(t *testing.T) {
 		{name: "dotdot relative", want: "/notes/facts/n.md, inside the personal store", input: bash("echo x > ../notes/facts/n.md")},
 		{name: "dotdot past symlink", want: "/notes/MEMORY.md, inside the personal store", input: bash("echo x > ~/work/rel/../MEMORY.md")},
 		{name: "relative dotdot past symlink", want: "/notes/MEMORY.md, inside the personal store", input: bash("echo x > rel/../MEMORY.md")},
-		{name: "proc root", want: "/notes/MEMORY.md, inside the personal store", input: bash("echo x > /proc/self/root@H/notes/MEMORY.md")},
+		{name: "proc root", linuxOnly: true, want: "/notes/MEMORY.md, inside the personal store", input: bash("echo x > /proc/self/root@H/notes/MEMORY.md")},
 		{name: "dotdot cleaned before symlink", want: "/notes/MEMORY.md, inside the personal store", input: bash("echo x > ~/work/lk/../lk/notes/MEMORY.md")},
 
 		// Symlinked dirs.
@@ -265,6 +269,9 @@ func TestShellDenies(t *testing.T) {
 		{name: "oversized command", want: "past what the guard reads", input: bash("echo x > ~/work/" + strings.Repeat("a", 1<<18))},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			if c.linuxOnly && runtime.GOOS != "linux" {
+				t.Skipf("%s has no such path", runtime.GOOS)
+			}
 			if c.tool == "" {
 				c.tool = "Bash"
 			}
