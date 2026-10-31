@@ -291,6 +291,12 @@ func ingestsCallTests() []ingestsCallTest {
 		{"default group before syntax error", "Bash", commandInput(`gh ${X:-issue} create ${x~~}`), true},
 
 		// not ingestion
+		// env's -u value is a flag+value unit, so the command word resolves past
+		// it: to grep (inert, so the whole command is inert), and when the value
+		// is itself a listed name the ingest command word is still the word after
+		// it, not the value.
+		{"env unset before inert grep", "Bash", `{"command":"env -u X grep gh issue view 1"}`, false},
+		{"env unset value is a listed name", "Bash", `{"command":"env -u gh issue view 1"}`, false},
 		{"git log", "Bash", `{"command":"git log"}`, false},
 		{"git log oneline", "Bash", `{"command":"git log --oneline"}`, false},
 		{"time rg", "Bash", `{"command":"time rg curl src/"}`, false},
