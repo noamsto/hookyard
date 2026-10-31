@@ -1366,6 +1366,22 @@ func TestInRunHeldFactWaitingOnAShadowedTargetIsNotDropped(t *testing.T) {
 	}
 }
 
+// d-target is shadowed by a-pub for good, and e-linker, the only held fact,
+// waits on it, so nothing else could be set aside first.
+func TestInRunEveryHeldFactWaitingIsStillSetAside(t *testing.T) {
+	fx := setup(t, "personal")
+	mem := fx.memDir(repo(t, personalRemote))
+	writeFile(t, filepath.Join(mem, "a-pub.md"), native("a-pub", "the same description", "A published fact body here.\n"))
+	writeFile(t, filepath.Join(mem, "d-target.md"), native("d-target", "the same description", "The target fact body.\n"))
+	writeFile(t, filepath.Join(mem, "e-linker.md"), native("e-linker", "links to the target", "See [[d-target]]. "+inRunBody))
+	wantReports(t, fx.runBoth(t),
+		fx.published("a-pub"),
+		report{prefix: "propose " + source(mem, "d-target") + " -> " + source(mem, "a-pub") + " (this run): same description"},
+		waitsAt(source(mem, "e-linker"), source(mem, "d-target"), "d-target"),
+	)
+	fx.checkoutCommits(t)
+}
+
 func TestInRunFlaggedFactThatPublishesLaterDoesNotLinkASetAsideSibling(t *testing.T) {
 	fx := setup(t, "personal")
 	mem := fx.memDir(repo(t, personalRemote))

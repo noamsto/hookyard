@@ -233,7 +233,8 @@ line per item, then exits 0, or 1 if any item failed (below):
 - `duplicate <source>: <path>: same source bytes`: a fact already holds these
   exact bytes. Byte-identical copies from two source dirs routing to one repo
   import once: the later copy reports `duplicate` against the earlier
-  (`<path>` is `<source> (this run)`), whatever the earlier copy's fate, and a
+  (`<path>` is the earlier copy's source followed by ` (this run)`), whatever
+  the earlier copy's fate, and a
   copy of a store fact is reported against the store first.
 - `propose <source> -> <path>: <why>`: a near-duplicate (same name, same
   folded description, body overlap) or a changed source. Nothing is written;
@@ -241,9 +242,10 @@ line per item, then exits 0, or 1 if any item failed (below):
 - `propose <source> -> <path>: waits for [[t]], which is held back (flagged,
   refused or set aside)`: the fact links `t`, a fact held back (flagged,
   refused, set aside, or in the local layer awaiting review), so it is set
-  aside rather than published with a dangling link. `<path>` is where `t`
-  is or would be. Nothing is written; it lands on a later run once `t` is in
-  the checkout. A link to an in-run item that will never land (a byte
+  aside rather than published with a dangling link. `<path>` is `t`'s file in
+  the local layer (or where it would land flagged), or, for a target refused
+  or set aside in this run, its source file. Nothing is written; it lands on a
+  later run once `t` is in the checkout. A link to an in-run item that will never land (a byte
   duplicate of a store fact under another name) is set aside every run. A
   link to a name that exists nowhere, or to an item routed outside the
   personal store, is still refused as `wikilink-dangling`.
@@ -284,10 +286,11 @@ so the dry run and the real run agree (barring a flag that clears mid-run,
 below). Facts that link each other (a cycle) publish in one run when each
 passes its gates. When one member of a cycle is flagged, it lands in the
 local layer for review and the members that would publish and link it are set
-aside, so nothing of the cycle reaches the checkout. `priors lint` on the
-local layer may report `wikilink-dangling` for the flagged fact until its
-set-aside siblings land. Once the flagged fact is in the checkout, re-running
-`priors import` lands the linkers and commits the cycle together. Facts are
+aside, so nothing of the cycle reaches the checkout. `priors lint` reports
+`wikilink-dangling` for the flagged fact while it waits in the local layer
+(lint resolves links within one root), and in the checkout once it is moved
+there, until a re-run of `priors import` lands its linkers; re-run it right
+after the move, since the checkout's commit gate refuses until then. Facts are
 written link targets first. If a fact planned to publish is not published
 (its write failed, or it landed flagged), a fact that links it (directly or
 through another) is not kept: it is reported
