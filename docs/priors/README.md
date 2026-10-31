@@ -369,7 +369,9 @@ In a shell command:
   declaring a nameref, makes the command one that may write. While `IFS` may
   have changed, the words of an unquoted expansion cannot be told;
 - assigning any `GIT_*` or `LD_*` variable is a write, like assigning `PATH`;
-- bash `[!…]` globs are read as negated classes;
+- bash `[!…]` globs are read as negated classes, a `]` first in a class as a
+  member, and a `[` with no close as a literal (a jq filter `'.[] | …'` names
+  no `.attest` dir);
 - a sed script is read as a program: its `w`, `W`, `e`, `r`, `R`, `a`, `i`,
   `c` and `y` commands, an `s` flag `w` or `e`, a backslash-newline
   continuation, a bracket expression holding the delimiter or a backslash, an
