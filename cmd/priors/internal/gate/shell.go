@@ -1043,11 +1043,21 @@ func nonFlags(words []string) []int {
 // commandWord returns the index of the command word, skipping assignments,
 // wrappers, flags and numeric arguments; the index is len(words) when there is
 // none. afterFlag reports that a flag was skipped, so the word found may be
-// that flag's value.
+// that flag's value. A bare literal env's -u/--unset and -C/--chdir take a
+// value, so they are skipped as a flag+value unit (-S keeps the plain flag
+// path, since its value is the program env runs); a path-invoked env is not
+// trusted to be the real one, so it gets no flag modeling.
 func commandWord(words []string) (idx int, afterFlag bool) {
-	for i, w := range words {
+	env := false
+	for i := 0; i < len(words); i++ {
+		w := words[i]
 		switch {
+		case env && envValueFlag(w):
+			if envSeparateFlag(w) {
+				i++
+			}
 		case slices.Contains(wrappers, wordName(w)):
+			env = w == "env"
 		case strings.HasPrefix(w, "-"):
 			afterFlag = true
 		case assignment(w), number(w):
@@ -1056,6 +1066,28 @@ func commandWord(words []string) (idx int, afterFlag bool) {
 		}
 	}
 	return len(words), afterFlag
+}
+
+// envValueFlag reports a bare env's -u/--unset or -C/--chdir in any form: the
+// separate word (-u), the glued value (-uNAME, -CDIR) or the = form
+// (--unset=NAME, --chdir=DIR).
+func envValueFlag(w string) bool {
+	switch w {
+	case "-u", "--unset", "-C", "--chdir":
+		return true
+	}
+	return len(w) > 2 && (w[:2] == "-u" || w[:2] == "-C") ||
+		strings.HasPrefix(w, "--unset=") || strings.HasPrefix(w, "--chdir=")
+}
+
+// envSeparateFlag reports the two-word form of envValueFlag, whose value is the
+// next word.
+func envSeparateFlag(w string) bool {
+	switch w {
+	case "-u", "--unset", "-C", "--chdir":
+		return true
+	}
+	return false
 }
 
 // assignment reports a NAME=value word. It and number are matched by hand,

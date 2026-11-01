@@ -409,7 +409,40 @@ In a shell command:
   `edit`, `comment`, `review`, `merge`, `close`, `reopen` or `note`, hold
   data, so their values are not judged as paths: a commit heredoc that
   mentions `MEMORY.md` is allowed. Any other command's such option is judged,
-  and a command run inside such a message is still judged.
+  and a command run inside such a message is still judged;
+- some values are data, so a lone `.` or a `/` in one is not read as a path or
+  as shell text: the `--jq` and `--template` values of `gh` and `glab` (and
+  `-q` for `gh` only) on a JSON-output subcommand (`api`, `pr`, `issue`, `mr`,
+  `repo`, `run`, `release`, `search`, `workflow`, `gist`, `cache`, `label`,
+  `project`, `ruleset`, `secret`, `variable`, `status`, `org`, `ssh-key`,
+  `gpg-key`, `codespace`); the `claude` prompt, the word after a
+  `-p` or `--print` that is its first argument; and the body of `crew reply`
+  and `crew msg` (the word after the recipient, or after sender and
+  recipient, a bare `.` or `/` included, with `--crew <id>` not counted
+  wherever it sits). A command substitution in one is still judged. Every
+  other position is judged: any other `claude` argument (`--settings`,
+  `--mcp-config`, `--append-system-prompt`, `--agents`, `--add-dir`,
+  `--debug-file`, a flag's value), `claude mcp`, a `gh` or `glab` subcommand
+  off that list (an alias or an extension), and anything after `--`;
+- those positions apply only when the program is found through bare wrapper
+  names alone (`env`, `timeout 5`, `env -u X`, `env -C dir`, an unquoted
+  `NAME=value` prefix the parser strips before the command word, or a
+  `NAME=value` after `env` or `sudo`). A path-invoked wrapper (`./nice`,
+  `/x/env`), a skipped wrapper flag (`exec -a name`, `sudo -u user`, `env -S`),
+  a leading quoted `"NAME=value"` (a program the shell runs under that literal
+  name), and a bare number or `NAME=value` word after any other wrapper (`env 5
+  claude …`) make the resolution unclean, and the command is judged like an
+  unknown program;
+- a command that can redefine how a name resolves loses every data position,
+  wherever in the command the redefinition sits, since a `trap`, a loop or a
+  function can run it before or after: a function, `alias`, `hash`, `enable`,
+  `source`, `.`, `eval` or `trap`; naming `BASH_CMDS`, `BASH_ALIASES`, `PATH`,
+  `BASH_ENV` or `ENV` other than as an expansion, even quote-split or
+  ANSI-C-quoted; an opaque command word, or an opaque word in a write
+  position; and a word, redirect target or path named `claude`, `gh`, `glab`
+  or `crew` that is not a call's own command word (`ln -s /bin/rm ~/bin/crew`,
+  `cat /bin/rm > ~/bin/gh`). A renamed data taker cannot hide a write: its
+  words are judged as an unknown program's.
 
 `LSP` and an MCP tool are reads when the tool's last name segment starts with
 `search` or `list_`, or is `get_file_contents`, `read_file` or
@@ -436,7 +469,10 @@ It is not a sandbox. It does not see a path computed at run time from
 nothing the command names (`base64 -d`, a file's content, a script file), a
 path an interpreter assembles from pieces, an archive or patch unpacked from
 a cwd that holds a store, a command that shadows a reader's name on `PATH`
-(including one set up by an earlier call of a persistent shell), a relative
+(including one set up by an earlier call of a persistent shell), a `claude`,
+`gh`, `glab` or `crew` that an earlier call of a persistent shell replaced or
+shadowed, with nothing in this command showing it (its data positions are
+skipped, and the program may run those words as code), a relative
 `cd` that `CDPATH` leads into a store when the command names no guarded path,
 and a `CDPATH` exported by an earlier call of a persistent shell, code run
 from config an agent can write (git's global `core.hooksPath`, Makefiles) or
@@ -472,9 +508,13 @@ It over-denies:
   write to a store fact, and a write that may name a dir holding a store
   (`cmake ..` from a dir directly under one, `foo .` or `cp x .` from `~`),
   including such a word inside an unknown program's argument that holds a
-  space, since the argument is read as a script: a `claude -p` prompt with a
-  lone `.` run from `~`, a `gh --jq` filter holding `//`, or a message holding
-  ` / `;
+  space, since the argument is read as a script (`some-tool "check ."` from
+  `~`);
+- a `claude` prompt, a `gh` or `glab` jq filter or template, or a `crew`
+  message holding a lone `.` or ` / ` whose data position is withdrawn: behind
+  an unclean wrapper (`sudo -u bob claude -p .`), or in a command that also
+  redefines a name or mentions a word named `claude`, `gh`, `glab` or `crew`
+  that is no call's command word (`echo gh`);
 - a reader run behind a flagged wrapper (`nice -n 5 git status`) in a store or
   naming one;
 - assigning or exporting `PATH`, `BASH_ENV`, `ENV`, `GIT_*` or `LD_*`, or

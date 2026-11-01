@@ -144,6 +144,26 @@ func TestShellAccess(t *testing.T) {
 		{name: "git log ext-diff", cmd: "git -C /h/store log --ext-diff -p", writes: true},
 		{name: "git diff textconv", cmd: "git diff --textconv", writes: true},
 		{name: "git log no-ext-diff", cmd: "git -C /h/store log --no-ext-diff -p", want: []Touch{cd("/h/store")}},
+
+		// Data positions of a cleanly resolved known program.
+		{name: "gh jq filter is data", cmd: `gh pr view 1 --jq '.a // .b'`, writes: true, absent: []Touch{w("//")}},
+		{name: "glab jq filter is data", cmd: `glab mr view 3 --jq '.a // .b'`, writes: true, absent: []Touch{w("//")}},
+		{name: "gh q filter is data", cmd: `gh api x -q '.a // .b'`, writes: true, absent: []Touch{w("//")}},
+		{name: "claude prompt is data", cmd: `claude -p "check the build ."`, writes: true, absent: []Touch{w("check the build ."), w(".")}},
+		{name: "claude bare dot is a write", cmd: `claude .`, writes: true, want: []Touch{w(".")}},
+		{name: "claude prompt after env unset is data", cmd: `env -u X claude -p /h/store/M`, writes: true, absent: []Touch{w("/h/store/M")}},
+		{name: "claude prompt substitution is read", cmd: `claude -p "$(rm /h/store/M)"`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "crew reply body is data", cmd: `crew reply x /h/store/M`, writes: true, absent: []Touch{w("/h/store/M")}},
+		{name: "crew reply bare dot is data", cmd: `crew reply x .`, writes: true, absent: []Touch{w(".")}},
+		{name: "crew body after a crew id is data", cmd: `crew --crew c reply x "a / b"`, writes: true, absent: []Touch{w("/")}},
+
+		// Resolution the command keeps its writer semantics for.
+		{name: "env unset name is not the command", cmd: `env -u claude rm -rf /h/store`, writes: true, want: []Touch{w("/h/store")}},
+		{name: "exec name is unclean for claude", cmd: `exec -a claude rm -rf /h/store`, writes: true, want: []Touch{w("/h/store")}},
+		{name: "env split string resolves no data", cmd: `env -S 'crew reply x /h/store/M'`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "redefinition withdraws claude prompt", cmd: `alias claude=rm; claude -p /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "manufactured gh name withdraws filter", cmd: `cp /bin/rm /h/bin/gh; gh api x -q /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "per-call command word is exempt", cmd: `gh pr view 1 --jq . && crew reply x /h/store/M`, writes: true, absent: []Touch{w("/h/store/M")}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			acc := ShellAccess(host, tt.cmd)
