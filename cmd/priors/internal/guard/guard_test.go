@@ -425,6 +425,23 @@ func TestShellDenies(t *testing.T) {
 		{name: "BASH_CMDS renaming a reader", want: "inside the personal store, and may write", input: bash(`BASH_CMDS[ls]=/bin/rm; ls ~/notes/MEMORY.md`)},
 		{name: "read before a data position", want: "which holds the personal store", cwd: ".", input: bash(`n=1; { read n; cp /tmp/evil "$n"; } < f; gh pr view 1 --jq .`)},
 
+		// Setters read after the words they change, and arithmetic.
+		{name: "function body before a quote-split IFS", want: "builds at run time", input: bash(`d=/tmpQ$HOME/notes; f(){ rm -rf $d; }; declare 'I'FS=Q; f`)},
+		{name: "trap body before a quote-split IFS", want: "builds at run time", input: bash(`d=/tmpQ$HOME/notes; trap 'rm -rf $d' EXIT; declare 'I'FS=Q`)},
+		{name: "function body before a quote-split CDPATH", want: "from a dir it changes into at run time", input: bash(`f(){ cd notes && touch MEMORY.md; }; export "CD"PATH=~; f`)},
+		{name: "function body before a default CDPATH", want: "from a dir it changes into at run time", input: bash(`f(){ cd notes && touch MEMORY.md; }; : ${CDPATH:=~}; f`)},
+		{name: "function body before an eval IFS", want: "builds at run time", input: bash(`d=/tmpQ$HOME/notes; f(){ rm -rf $d; }; eval I\FS=Q; f`)},
+		{name: "function body before a source", want: "builds at run time", input: bash(`d=/tmpQ$HOME/notes; f(){ rm -rf $d; }; source /tmp/x; f`)},
+		{name: "arithmetic target built IFS", want: "builds at run time", input: bash(`v=IF; (( ${v}S = 5 )); d=/tmp5$HOME/notes; rm -rf $d`)},
+		{name: "let quote-split IFS", want: "builds at run time", input: bash(`let "I""FS=5"; d=/tmp5$HOME/notes; rm -rf $d`)},
+		{name: "arithmetic value sets IFS", want: "builds at run time", input: bash(`x='I'"FS=5"; (( x )); d=/tmp5$HOME/notes; rm -rf $d`)},
+		{name: "integer value sets IFS", want: "builds at run time", input: bash(`declare -i n; n='I'FS=5; d=/tmp5$HOME/notes; rm -rf $d`)},
+		{name: "opaque arithmetic target", want: "builds at run time", input: bash(`n=$(echo I""FS); (( $n = 5 )); d=/tmp5$HOME/notes; rm -rf $d`)},
+		{name: "arithmetic value substitution", want: "/notes, the personal store", input: bash(`x='a[$(rm -rf ~/notes)]'; (( x ))`)},
+		{name: "read subscript substitution", want: "which holds the personal store", cwd: ".", input: bash(`read 'a[$(rm -rf .)]'`)},
+		{name: "arithmetic substitution", want: "which holds the personal store", cwd: ".", input: bash(`(( $(rm -rf .) ))`)},
+		{name: "arithmetic expansion value substitution", want: "which holds the personal store", cwd: ".", input: bash(`x='a[$(rm -rf .)]'; echo $(( x ))`)},
+
 		// POSIX classes in a glob.
 		{name: "posix class rm", want: "inside the personal store", input: bash("rm -rf ~/note[[:alpha:]]")},
 		{name: "posix class attest", want: "an .attest dir", input: bash("touch /srv/other/.[[:alpha:]]ttest/e")},
@@ -507,6 +524,11 @@ func TestShellAllows(t *testing.T) {
 		{name: "read a line then echo it", input: bash(`read -r line < /tmp/f; echo "$line"`)},
 		{name: "printf -v then echo it", input: bash(`printf -v x '%s' a; echo "$x"`)},
 		{name: "exported and local values written from home", cwd: ".", input: bash(`export d=/tmp/x; local f=/tmp/y; rm -rf "$d" "$f"`)},
+
+		// Arithmetic that sets no protected name.
+		{name: "c-style loop then ls of a store", input: bash(`for ((i=0; i<3; i++)); do echo $i; done; ls ~/notes`)},
+		{name: "arithmetic expansion then cat of a store", input: bash(`n=3; echo $(( n + 1 )); cat ~/notes/MEMORY.md`)},
+		{name: "integer test then rg of a store", input: bash(`[[ 1 -lt 2 ]] && rg x ~/notes`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.tool == "" {

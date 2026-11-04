@@ -1,9 +1,11 @@
 package gate
 
 import (
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestShellAccess(t *testing.T) {
@@ -345,6 +347,55 @@ func TestShellAccessUnreadable(t *testing.T) {
 	}
 	if acc := ShellAccess(nil, script); acc.Unreadable != "budget" {
 		t.Errorf("deep nesting: Unreadable = %q, want budget", acc.Unreadable)
+	}
+}
+
+// TestShellAccessBounded feeds ShellAccess commands built to make it read
+// them more than once. Each must come back read in full or past the budget,
+// within the stack and time bounds TestIngestReasonBounded holds gate 2 to.
+// A command read again allocates up to twice what one read does, so its
+// allocation bound is twice gate 2's.
+func TestShellAccessBounded(t *testing.T) {
+	limitStack(t)
+	timeLimit := time.Second
+	if raceEnabled {
+		timeLimit *= 10
+	}
+	trigger := `d=/a; f(){ rm -rf $d; }; declare 'I'FS=Q; f`
+	for _, tt := range []struct {
+		name string
+		size int
+	}{
+		{"setter after a function body, padded to the text bound", maxText},
+		{"setter after a function body, padded so both reads finish", maxText * 5 / 8},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := strings.Repeat(": a; ", (tt.size-len(trigger))/5) + trigger
+			done := make(chan string, 1)
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			start := time.Now()
+			go func() { done <- ShellAccess(&Host{Home: "/h"}, cmd).Unreadable }()
+			var reason string
+			select {
+			case reason = <-done:
+			case <-time.After(hangGuard):
+				t.Fatalf("reading %d bytes took over %v", len(cmd), hangGuard)
+			}
+			elapsed := time.Since(start)
+			runtime.ReadMemStats(&after)
+			alloc := after.TotalAlloc - before.TotalAlloc
+			t.Logf("%d bytes read in %v, %d KiB allocated", len(cmd), elapsed, alloc>>10)
+			if reason != "" && reason != "budget" {
+				t.Errorf("Unreadable = %q, want none or budget", reason)
+			}
+			if elapsed > timeLimit {
+				t.Errorf("reading %d bytes took %v, over %v", len(cmd), elapsed, timeLimit)
+			}
+			if alloc > 2*boundAlloc {
+				t.Errorf("reading %d bytes allocated %d MiB", len(cmd), alloc>>20)
+			}
+		})
 	}
 }
 

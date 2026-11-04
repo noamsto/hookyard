@@ -143,19 +143,13 @@ func ShellAccess(host *Host, texts ...string) (acc Access) {
 	if host == nil {
 		host = &Host{}
 	}
-	a := &accessor{
-		j:         &judge{seen: map[string]bool{}, vars: map[string]string{}, host: host},
-		tainted:   map[string]bool{},
-		done:      map[*syntax.Word]bool{},
-		touched:   map[Touch]bool{},
-		piped:     map[*syntax.Stmt]bool{},
-		loops:     map[string][]string{},
-		assigns:   map[string]int{},
-		mentioned: map[string]bool{},
-		exempted:  map[string]bool{},
-	}
-	for _, text := range texts {
-		a.script(text, 0)
+	a := read(host, texts, 0, false, false)
+	// Words read cdpath and ifs as they render, so a setter read after a word
+	// it changes (in a function body or trap text read before it) is missed
+	// there: the command is read again from scratch with both preset, on the
+	// budget the first read left.
+	if a.acc.Unreadable == "" && (a.cdpath && !a.baseline.cdpath || a.ifs && !a.baseline.ifs) {
+		a = read(host, texts, a.j.parsed, a.cdpath, a.ifs)
 	}
 	// A loop variable's listed values hold every value it is read with only
 	// if nothing else sets it, which the whole command must be read to tell:
@@ -176,6 +170,29 @@ func ShellAccess(host *Host, texts ...string) (acc Access) {
 	return a.acc
 }
 
+// read reads texts as one command with cdpath and ifs preset, its budget
+// starting at parsed.
+func read(host *Host, texts []string, parsed int, cdpath, ifs bool) *accessor {
+	a := &accessor{
+		j:         &judge{parsed: parsed, seen: map[string]bool{}, vars: map[string]string{}, host: host},
+		tainted:   map[string]bool{},
+		done:      map[*syntax.Word]bool{},
+		touched:   map[Touch]bool{},
+		piped:     map[*syntax.Stmt]bool{},
+		loops:     map[string][]string{},
+		assigns:   map[string]int{},
+		mentioned: map[string]bool{},
+		exempted:  map[string]bool{},
+		cdpath:    cdpath,
+		ifs:       ifs,
+	}
+	for _, text := range texts {
+		a.script(text, 0)
+	}
+	a.evaluated()
+	return a
+}
+
 // accessor collects one command's Access, sharing gate 2's budget.
 type accessor struct {
 	j *judge
@@ -192,6 +209,12 @@ type accessor struct {
 	// While ifs holds a word's split cannot be told, so an unquoted expansion
 	// is opaque.
 	cdpath, ifs bool
+	// baseline is cdpath and ifs once the first text's scan has run, before
+	// any word renders: a flag set past it may come after a word it changes.
+	baseline struct{ set, cdpath, ifs bool }
+	// evaluates reports anything bash evaluates as arithmetic, which may read
+	// any assigned value as an expression.
+	evaluates bool
 	// redefines reports a command that can redefine what a name runs (shell
 	// state, a function, a redefiner call, an opaque or manufactured name). It
 	// withdraws every data position, so deferred data words are judged after the
@@ -261,6 +284,9 @@ func (a *accessor) script(text string, depth int) {
 		stmts = append(stmts, stmt)
 	}
 	a.scan(text, stmts)
+	if depth == 0 && !a.baseline.set {
+		a.baseline.set, a.baseline.cdpath, a.baseline.ifs = true, a.cdpath, a.ifs
+	}
 	for _, stmt := range stmts {
 		if a.acc.Unreadable != "" {
 			break
@@ -302,6 +328,7 @@ func (a *accessor) scan(text string, stmts []*syntax.Stmt) {
 			// arithmetic, which writes nothing by itself.
 			if declares(n, "i") {
 				a.wild = true
+				a.evaluates = true
 			}
 			if _, ok := n.(*syntax.FuncDecl); ok {
 				a.redefines = true
@@ -447,12 +474,12 @@ func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
 				a.assign(n.Param.Value, n.Exp.Word)
 			}
 		case *syntax.DeclClause:
-			a.declClause(n, text)
+			a.declClause(n, text, depth)
 		case *syntax.CallExpr:
-			a.setterCall(n, text)
+			a.setterCall(n, text, depth)
 		case *syntax.Redirect:
 			if n.N != nil && !digits(n.N.Value) {
-				a.setNames(strings.Trim(n.N.Value, "{}"))
+				a.setNames(depth, strings.Trim(n.N.Value, "{}"))
 			}
 		case *syntax.ForClause:
 			if wi, ok := n.Loop.(*syntax.WordIter); ok && !n.Select {
@@ -508,13 +535,102 @@ func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
 		}
 		if subscripts(n) {
 			a.wild = true
+			a.evaluates = true
 		}
 		if arithmetic(n) {
-			a.arithmetic(source(text, n))
+			a.arithmetic(source(text, n), depth)
+			a.targets(n, text)
 			return false
 		}
 		return a.acc.Unreadable == "" && a.j.parsed <= maxParsed
 	})
+}
+
+// targets reads the words of an arithmetic node, which sets any name its
+// rendered text spells (`v=IF; let "${v}S=1"`). Its tree nests one level per
+// operator, so each node is charged to the budget.
+func (a *accessor) targets(n syntax.Node, text string) {
+	walkBounded(n, func(n syntax.Node) bool {
+		if a.j.parsed++; a.j.parsed > maxParsed {
+			a.acc.Unreadable = "budget"
+			return false
+		}
+		switch n := n.(type) {
+		// A substitution's text is read as a script, which renders its words.
+		case *syntax.CmdSubst, *syntax.ProcSubst:
+			return false
+		case *syntax.Word:
+			fields, r := a.j.fields(real, text, n)
+			if r != "" {
+				a.acc.Unreadable = r
+				return false
+			}
+			for _, f := range fields {
+				for _, d := range Decodings(f) {
+					a.protects(d)
+				}
+			}
+		}
+		return a.acc.Unreadable == ""
+	})
+}
+
+// protects applies protected to every name s spells that is not an
+// expansion, as arithmetic evaluating s may set any of them.
+func (a *accessor) protects(s string) {
+	if a.j.parsed += len(s); a.j.parsed > maxParsed {
+		a.acc.Unreadable = "budget"
+		return
+	}
+	for i := 0; i < len(s); {
+		if !nameByte(s[i]) {
+			i++
+			continue
+		}
+		end := i
+		for end < len(s) && nameByte(s[end]) {
+			end++
+		}
+		if i == 0 || s[i-1] != '$' && s[i-1] != '{' {
+			a.protected(s[i:end])
+		}
+		i = end
+	}
+}
+
+// evaluated reads, once anything evaluates arithmetic, every value the
+// command assigns as an expression: a name's value can name another name,
+// so all are read, and one a substitution read assigns too.
+func (a *accessor) evaluated() {
+	if !a.evaluates {
+		return
+	}
+	checked := map[string]bool{}
+	for a.acc.Unreadable == "" {
+		var names []string
+		for name := range a.j.vars {
+			if !checked[name] {
+				names = append(names, name)
+			}
+		}
+		if len(names) == 0 {
+			return
+		}
+		slices.Sort(names)
+		for _, name := range names {
+			checked[name] = true
+			v := a.j.vars[name]
+			if substitutes(v) {
+				a.arithmetic(v, 1)
+			}
+			a.protects(v)
+		}
+	}
+}
+
+// substitutes reports s holding a substitution's opener.
+func substitutes(s string) bool {
+	return strings.Contains(s, "$(") || strings.Contains(s, "`") || strings.Contains(s, "<(") || strings.Contains(s, ">(")
 }
 
 // assign records name's value as gate 2 does, and taints it when a word may
@@ -564,8 +680,8 @@ func (a *accessor) unknownSetter() {
 
 // setNames records name positions: words a builtin reads as the name of a
 // variable it sets, whose value no word can then tell. "" is an opaque one,
-// which may name any, and a subscript is arithmetic.
-func (a *accessor) setNames(names ...string) {
+// which may name any, and a subscript is arithmetic in the script at depth.
+func (a *accessor) setNames(depth int, names ...string) {
 	for _, s := range names {
 		if s == "" {
 			a.unknownSetter()
@@ -573,7 +689,7 @@ func (a *accessor) setNames(names ...string) {
 		}
 		name, sub, indexed := strings.Cut(s, "[")
 		if indexed {
-			a.arithmetic(strings.TrimSuffix(sub, "]"))
+			a.arithmetic(strings.TrimSuffix(sub, "]"), depth)
 		}
 		a.protected(name)
 		a.tainted[name] = true
@@ -584,7 +700,7 @@ func (a *accessor) setNames(names ...string) {
 // setterCall reads the name positions of a call to one of setters, after any
 // wrappers. Only a call whose first word is a setter, a wrapper or not literal
 // is rendered here, as every call is rendered again when it is read.
-func (a *accessor) setterCall(c *syntax.CallExpr, text string) {
+func (a *accessor) setterCall(c *syntax.CallExpr, text string, depth int) {
 	if len(c.Args) == 0 {
 		return
 	}
@@ -599,7 +715,7 @@ func (a *accessor) setterCall(c *syntax.CallExpr, text string) {
 	}
 	argv := a.words(c.Args, text)
 	if idx, _ := commandWord(argv); idx < len(argv) {
-		a.setter(argv[idx], argv[idx+1:])
+		a.setter(argv[idx], argv[idx+1:], depth)
 	}
 }
 
@@ -627,7 +743,7 @@ func (a *accessor) words(ws []*syntax.Word, text string) []string {
 // setter reads the name positions of a call to name with args. An opaque
 // command word, source, an eval of an opaque arg and a mapfile callback run
 // code that may set any variable.
-func (a *accessor) setter(name string, args []string) {
+func (a *accessor) setter(name string, args []string, depth int) {
 	switch name {
 	case "", "source", ".":
 		a.unknownSetter()
@@ -636,25 +752,25 @@ func (a *accessor) setter(name string, args []string) {
 			a.unknownSetter()
 		}
 	case "declare", "typeset", "local", "export", "readonly":
-		a.declare(args)
+		a.declare(args, depth)
 	case "read":
 		_, operands, values := getopt(args, "utpNnida")
-		a.setNames(operands...)
-		a.setNames(values['a']...)
+		a.setNames(depth, operands...)
+		a.setNames(depth, values['a']...)
 	case "mapfile", "readarray":
 		_, operands, values := getopt(args, "dnOsuCc")
 		if len(values['C']) > 0 {
 			a.unknownSetter()
 		}
 		if len(operands) > 0 {
-			a.setNames(operands[0])
+			a.setNames(depth, operands[0])
 		}
 	case "printf":
 		_, _, values := getopt(args, "v")
-		a.setNames(values['v']...)
+		a.setNames(depth, values['v']...)
 	case "wait":
 		_, _, values := getopt(args, "p")
-		a.setNames(values['p']...)
+		a.setNames(depth, values['p']...)
 	case "getopts":
 		// An opaque option string may be any number of words, so the name may be
 		// any of them.
@@ -662,11 +778,11 @@ func (a *accessor) setter(name string, args []string) {
 		case len(operands) > 0 && operands[0] == "":
 			a.unknownSetter()
 		case len(operands) > 1:
-			a.setNames(operands[1])
+			a.setNames(depth, operands[1])
 		}
 	case "unset":
 		_, operands, _ := getopt(args, "")
-		a.setNames(operands...)
+		a.setNames(depth, operands...)
 	}
 }
 
@@ -674,7 +790,7 @@ func (a *accessor) setter(name string, args []string) {
 // literal NAME=value parses as an assignment, which assign records, so it is
 // a name position only after an option that changes how its value reads; its
 // value is rendered only under -n, where it names a variable too.
-func (a *accessor) declClause(d *syntax.DeclClause, text string) {
+func (a *accessor) declClause(d *syntax.DeclClause, text string, depth int) {
 	var args []string
 	nameref, transforms := false, false
 	for _, as := range d.Args {
@@ -692,13 +808,13 @@ func (a *accessor) declClause(d *syntax.DeclClause, text string) {
 			args = append(args, as.Name.Value)
 		}
 	}
-	a.declare(args)
+	a.declare(args, depth)
 }
 
 // declare reads a declare-family builtin's rendered args: options, then NAME
 // or NAME=value operands. Under -n a value names the variable the reference
 // sets, and the reference may name any later, as scan's nameref rule reads.
-func (a *accessor) declare(args []string) {
+func (a *accessor) declare(args []string, depth int) {
 	opts, operands, _ := getopt(args, "")
 	nameref := slices.ContainsFunc(opts, namerefOption)
 	if nameref {
@@ -707,9 +823,9 @@ func (a *accessor) declare(args []string) {
 	}
 	for _, f := range operands {
 		name, value, ok := operand(f)
-		a.setNames(name)
+		a.setNames(depth, name)
 		if nameref && ok {
-			a.setNames(value)
+			a.setNames(depth, value)
 		}
 	}
 }
@@ -851,17 +967,66 @@ func expansions(words []*syntax.Word) int {
 	return n
 }
 
-// arithmetic reads an arithmetic expression, which is never walked: a
-// substitution in it runs a command that cannot be seen. Any name in it may
-// hold an expression that sets a loop variable (`x='n=7'; (( x ))`).
-func (a *accessor) arithmetic(src string) {
-	runs := strings.Contains(src, "$(") || strings.Contains(src, "`") || strings.Contains(src, "<(") || strings.Contains(src, ">(")
+// arithmetic reads an arithmetic expression in the script at depth, which is
+// never walked: a substitution in it runs a command whose output cannot be
+// seen, and whose text is read as a script one level deeper. Any name in it
+// may hold an expression that sets a loop variable (`x='n=7'; (( x ))`).
+func (a *accessor) arithmetic(src string, depth int) {
+	spans := substitutions(src)
+	runs := len(spans) > 0 || strings.Contains(src, "<(") || strings.Contains(src, ">(")
 	if runs {
 		a.acc.Writes = true
 		a.touch(Touch{Write: true, Opaque: true})
 	}
 	a.wild = true
+	a.evaluates = true
 	a.field(src, runs, false)
+	for _, s := range spans {
+		a.script(s, depth+1)
+	}
+}
+
+// substitutions returns the inner text of each $(…) and `…` span in src, read
+// as text: parens balanced, quotes not read, and an unclosed span running to
+// the end. A $((…)) whose inner parens close together is an arithmetic
+// expansion, whose own spans are read.
+func substitutions(src string) []string {
+	// closes[k] is where the paren opened at k closes, or len(src).
+	closes := make([]int, len(src))
+	var open []int
+	for k := range len(src) {
+		switch src[k] {
+		case '(':
+			open = append(open, k)
+			closes[k] = len(src)
+		case ')':
+			if len(open) > 0 {
+				closes[open[len(open)-1]] = k
+				open = open[:len(open)-1]
+			}
+		}
+	}
+	var spans []string
+	for i := 0; i < len(src); i++ {
+		switch {
+		case src[i] == '`':
+			end := strings.IndexByte(src[i+1:], '`')
+			if end < 0 {
+				return append(spans, src[i+1:])
+			}
+			spans = append(spans, src[i+1:i+1+end])
+			i += end + 1
+		case strings.HasPrefix(src[i:], "$("):
+			end := closes[i+1]
+			if i+2 < len(src) && src[i+2] == '(' && closes[i+2] == end-1 {
+				i++
+				continue
+			}
+			spans = append(spans, src[i+2:end])
+			i = end
+		}
+	}
+	return spans
 }
 
 // subscripts reports a node bash evaluates as arithmetic outside an
@@ -938,6 +1103,7 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 	}
 	if nameSubscript(name, v.args) {
 		a.wild = true
+		a.evaluates = true
 	}
 	// A wrapper before the command word (command read, builtin mapfile) is
 	// outside nonSetters too. A nested script runs, if at all, in a child of a
