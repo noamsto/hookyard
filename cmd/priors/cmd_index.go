@@ -29,10 +29,13 @@ const (
 	// handler budget.
 	guardDeadline = 750 * time.Millisecond
 	maxEnvelope   = 1 << 20
+	// claudeEngine is how hookyard's envelope names Claude Code.
+	claudeEngine = "claude-code"
 )
 
 // envelope is the part of hookyard's exec-handler input priors reads.
 type envelope struct {
+	Engine         string          `json:"engine"`
 	CanonicalEvent string          `json:"canonical_event"`
 	CWD            string          `json:"cwd"`
 	SessionID      string          `json:"session_id"`
@@ -63,6 +66,7 @@ func cmdIndex(args []string, s streams) int {
 	write := fs.Bool("write", false, "regenerate every MEMORY.md instead of printing the tier-1 block")
 	text := fs.Bool("text", false, "print the fenced block instead of JSON")
 	cwd := fs.String("cwd", "", "working directory (default: the envelope's, else the process's)")
+	engine := fs.String("engine", "", "engine to lay the block out for (default: the envelope's, else the running engine's)")
 	if _, code, ok := parseFlags(fs, args); !ok {
 		return code
 	}
@@ -77,7 +81,7 @@ func cmdIndex(args []string, s streams) int {
 				return hookResult{}
 			}
 		}
-		return assembleIndex(ctx, *cfgPath, cmp.Or(*cwd, input.CWD))
+		return assembleIndex(ctx, *cfgPath, cmp.Or(*cwd, input.CWD), cmp.Or(*engine, input.Engine, runningEngine()))
 	})
 	printHook(s, res, *text)
 	return 0
@@ -101,7 +105,7 @@ func cmdBare(s streams) int {
 		if err != nil || input.CanonicalEvent != "session_start" {
 			return hookResult{}
 		}
-		return assembleIndex(ctx, "", input.CWD)
+		return assembleIndex(ctx, "", input.CWD, input.Engine)
 	})
 	if res.call != nil && res.call.CanonicalEvent == "pre_tool" {
 		res.deny = guardCall(*res.call, res.callErr, start, checkWrite, recordToolCall, s.err)
@@ -222,7 +226,15 @@ func runHook(job func(ctx context.Context) hookResult) hookResult {
 	}
 }
 
-func assembleIndex(ctx context.Context, cfgPath, cwd string) hookResult {
+// runningEngine is the envelope name of the engine priors runs inside, or "".
+func runningEngine() string {
+	if engine, _ := engineIdentity(); engine == "claude" {
+		return claudeEngine
+	}
+	return ""
+}
+
+func assembleIndex(ctx context.Context, cfgPath, cwd, engine string) hookResult {
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
 		return hookResult{reports: []string{"priors: " + err.Error()}}
@@ -235,7 +247,11 @@ func assembleIndex(ctx context.Context, cfgPath, cwd string) hookResult {
 	if err != nil {
 		return hookResult{}
 	}
-	text, reports := tier1.Assemble(ctx, sessionAt(ctx, id.cwd, cfg), cfg, rules, attest.ForHost(cfg))
+	opts := tier1.Options{Claude: engine == claudeEngine}
+	if home, err := os.UserHomeDir(); err == nil && opts.Claude {
+		opts.NativeMemDir = nativeMemDir(ctx, id.cwd, home)
+	}
+	text, reports := tier1.Assemble(ctx, sessionAt(ctx, id.cwd, cfg), cfg, rules, attest.ForHost(cfg), opts)
 	return hookResult{text: text, reports: reports}
 }
 
@@ -292,6 +308,8 @@ func readEnvelope(r io.Reader) (envelope, error) {
 			return input, err
 		}
 		switch key {
+		case "engine":
+			err = dec.Decode(&input.Engine)
 		case "canonical_event":
 			err = dec.Decode(&input.CanonicalEvent)
 		case "cwd":

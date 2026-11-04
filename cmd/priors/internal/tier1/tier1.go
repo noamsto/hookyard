@@ -28,22 +28,41 @@ const Budget = 4000
 
 const flaggedPrefix = "(flagged, unreviewed) "
 
+// Options tunes the index for the engine reading it. The zero value is the
+// plain flat index every engine without a native memory index gets.
+type Options struct {
+	// Claude groups the index by type and leaves out the facts that Claude's
+	// own memory dir, NativeMemDir, already loads into the session.
+	Claude       bool
+	NativeMemDir string
+}
+
 // Assemble is the tier-1 injection for session s, and what it skipped (never
 // the skipped text itself), then v's attestation reports. It returns "" when
 // there is nothing to inject or ctx is done.
-func Assemble(ctx context.Context, s route.Session, cfg config.Config, rules gate.Rules, v *attest.Verifier) (text string, reports []string) {
+func Assemble(ctx context.Context, s route.Session, cfg config.Config, rules gate.Rules, v *attest.Verifier, opts Options) (text string, reports []string) {
+	return assemble(ctx, s, cfg, rules, v, opts, Budget)
+}
+
+func assemble(ctx context.Context, s route.Session, cfg config.Config, rules gate.Rules, v *attest.Verifier, opts Options, budget int) (text string, reports []string) {
 	a := assembler{ctx: ctx, session: s, rules: rules, verifier: v}
-	avail := Budget
+	grouped := opts.Claude && opts.NativeMemDir != ""
+	if grouped {
+		a.native = nativeIndex(ctx, opts.NativeMemDir)
+	}
+	avail := budget
 	var blocks []string
 	for _, id := range route.ReadStores(s, cfg) {
-		lines := a.storeLines(id, cfg)
+		entries := a.storeEntries(id, cfg)
 		if ctx.Err() != nil {
 			return "", a.allReports()
 		}
-		if len(lines) == 0 {
-			continue
+		var lines []string
+		if grouped {
+			lines = groupedLines(entries, avail)
+		} else {
+			lines = fit(flatLines(entries), avail)
 		}
-		lines = fit(lines, avail)
 		if len(lines) == 0 {
 			continue
 		}
@@ -54,6 +73,16 @@ func Assemble(ctx context.Context, s route.Session, cfg config.Config, rules gat
 	return strings.Join(blocks, "\n"), a.allReports()
 }
 
+// entry is one indexed fact: its index line and what the grouped layout sorts
+// it by.
+type entry struct {
+	line    string
+	typ     string
+	flagged bool
+	// native is set for a fact Claude's own memory dir already holds.
+	native bool
+}
+
 type assembler struct {
 	ctx     context.Context
 	session route.Session
@@ -62,6 +91,7 @@ type assembler struct {
 	// verifier judges each indexed fact that claims review; the index shows no
 	// verdict, so only its reports reach the output.
 	verifier *attest.Verifier
+	native   native
 }
 
 func (a *assembler) allReports() []string {
@@ -72,17 +102,17 @@ func (a *assembler) reportf(format string, args ...any) {
 	a.reports = append(a.reports, fmt.Sprintf(format, args...))
 }
 
-// storeLines is one store's index lines: the checkout, then the local layer
-// minus any name the checkout already has.
-func (a *assembler) storeLines(id route.StoreID, cfg config.Config) []string {
+// storeEntries is one store's index entries: the checkout, then the local
+// layer minus any name the checkout already has.
+func (a *assembler) storeEntries(id route.StoreID, cfg config.Config) []entry {
 	seen := map[string]bool{}
-	var lines []string
+	var entries []entry
 	if checkout, err := store.CheckoutRoot(a.ctx, cfg, id); err != nil {
 		a.reportf("%v", err)
 	} else {
-		lines = a.rootLines(checkout, a.appliesInCheckout, false, seen)
+		entries = a.rootEntries(checkout, a.appliesInCheckout, false, seen)
 	}
-	return append(lines, a.rootLines(store.LocalRoot(cfg, id), a.appliesInLocal, true, seen)...)
+	return append(entries, a.rootEntries(store.LocalRoot(cfg, id), a.appliesInLocal, true, seen)...)
 }
 
 func (a *assembler) appliesInCheckout(_ string, f fact.Fact) bool {
@@ -103,7 +133,7 @@ func (a *assembler) appliesInLocal(rel string, _ fact.Fact) bool {
 	return first == want
 }
 
-func (a *assembler) rootLines(root store.Root, applies func(rel string, f fact.Fact) bool, flagged bool, seen map[string]bool) []string {
+func (a *assembler) rootEntries(root store.Root, applies func(rel string, f fact.Fact) bool, flagged bool, seen map[string]bool) []entry {
 	if root.Path == "" {
 		return nil
 	}
@@ -116,7 +146,7 @@ func (a *assembler) rootLines(root store.Root, applies func(rel string, f fact.F
 		return nil
 	}
 
-	var out []string
+	var out []entry
 	for _, line := range index {
 		if a.ctx.Err() != nil {
 			return nil
@@ -139,7 +169,7 @@ func (a *assembler) rootLines(root store.Root, applies func(rel string, f fact.F
 			continue
 		}
 		seen[name] = true
-		out = append(out, flag(rendered[0], flagged))
+		out = append(out, entry{line: rendered[0], typ: f.Metadata.Type, flagged: flagged, native: a.native.has(f)})
 	}
 	return out
 }
@@ -182,6 +212,14 @@ func flag(line string, flagged bool) string {
 	return "- " + flaggedPrefix + strings.TrimPrefix(line, "- ")
 }
 
+func flatLines(entries []entry) []string {
+	lines := make([]string, len(entries))
+	for i, e := range entries {
+		lines[i] = flag(e.line, e.flagged)
+	}
+	return lines
+}
+
 func cost(lines []string) int {
 	n := 0
 	for _, l := range lines {
@@ -198,10 +236,26 @@ func marker(dropped int) string {
 // that do, around a marker counting the middle. The newest entries lead the
 // index and the oldest trail it, so both ends are worth keeping.
 func fit(lines []string, avail int) []string {
-	if cost(lines) <= avail {
+	lo, hi := fitRange(lines, avail)
+	switch {
+	case lo == hi:
 		return lines
+	case hi-lo == len(lines):
+		return nil
 	}
-	lo, hi := 0, len(lines) // lines[:lo] and lines[hi:] are kept
+	out := slices.Clone(lines[:lo])
+	out = append(out, marker(hi-lo))
+	return append(out, lines[hi:]...)
+}
+
+// fitRange is the part of lines that fits in avail runes: lines[:lo] and
+// lines[hi:] are kept, with room left for a marker over the rest. lo == hi
+// means everything fits.
+func fitRange(lines []string, avail int) (lo, hi int) {
+	if cost(lines) <= avail {
+		return len(lines), len(lines)
+	}
+	hi = len(lines)
 	used := 0
 	for fromHead := true; lo < hi; fromHead = !fromHead {
 		next := lines[lo]
@@ -220,10 +274,5 @@ func fit(lines []string, avail int) []string {
 			hi--
 		}
 	}
-	if lo == 0 && hi == len(lines) {
-		return nil
-	}
-	out := slices.Clone(lines[:lo])
-	out = append(out, marker(hi-lo))
-	return append(out, lines[hi:]...)
+	return lo, hi
 }

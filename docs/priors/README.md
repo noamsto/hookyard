@@ -129,7 +129,7 @@ priors list [--repo R] [--type T] [--store S] [--stale] [--flagged] [--all]
 priors show <name>
 priors search <terms...> [--repo R] [--any-repo] [--type T] [--scope S] [--all]
 priors lint [--store S] [--move-flagged] | priors lint --dir D --kind K [--work-org O ...]
-priors index [--text]        # session_start output (envelope on stdin)
+priors index [--text] [--engine claude-code]   # session_start output (envelope on stdin)
 priors index --write         # regenerate every MEMORY.md
 ```
 
@@ -311,6 +311,60 @@ half-imported checkout, and commits what it published once, through the
 store's commit gate. It commits on every run, so a commit held back last time
 (`warning: ...` on stderr, exit still 0) is retried. Running it again is safe:
 an imported source reports `unchanged`, by the sha256 of its bytes.
+
+### Reading the session-start block
+
+On Claude Code the block groups facts by type (`feedback`, `project`,
+`reference`, `user`, `other`) under a one-line pointer to `priors search`,
+`priors show <name>` and `priors list --flagged`. Codex and Pi get the flat
+list, unchanged. The layout follows `--engine` if given, else the hook
+envelope's `engine`, else whether `priors` runs inside Claude Code
+(`CLAUDECODE`); a plain-terminal `priors index --text` shows the
+flat list.
+
+A fact whose topic file the project's native `MEMORY.md` links is left out of
+the block. A fact imported from Claude memory matches only by its recorded
+source path; any other fact matches by `name`. In both cases the native
+topic's description must equal the fact's description, and the topic must be
+linked from the first 200 lines / 25 KB of `MEMORY.md`, since that is all
+Claude loads; a same-named file nothing links, or one with a different
+description, does not hide a fact. The source-path match uses `~/…` paths, so
+across hosts it holds only if the repo's absolute path is the same under
+`HOME`.
+
+Markers in the injected block:
+
+- `## flagged, unreviewed`: the local layer's facts, `proposed`, because a gate
+  flagged them. Nobody has cleared them. They come last.
+- `N facts also in MEMORY.md`: how many facts the dedup left out.
+- `… N entries omitted (group, group) …`: a cut to the budget, on its own line
+  right after the pointer line, before the groups, naming the groups that lost entries.
+
+Markers only in `priors list` rows:
+
+- `flags:`: why a gate flagged the fact.
+- `verified never`: `verified` is null, as an import leaves it. `priors add`
+  stamps today's date.
+- `reviewed · `: the fact is attested.
+- stale: `priors list --stale` shows facts never verified or not verified for
+  90 days.
+
+To check that priors works, run `priors list --flagged`, `priors list --stale`
+and `priors lint`; the first two print nothing when there is nothing to show,
+and `priors lint` prints a finding per line and exits 1, or nothing and exits
+0. Run `priors list --flagged` inside the repo: it shows only local-layer
+facts learned in the current repo (`_norepo` outside one), whatever `--repo`
+says, so empty output elsewhere does not mean nothing waits.
+
+`priors` has no review subcommand and no promote step. Read a flagged fact
+with `priors show <name>`; its `list --flagged` row ends in its `flags:`. To
+drop it, `gtrash put` its file under the local layer
+(`$XDG_STATE_HOME/priors/local/<store>/<repo>/`). To keep it, there is no
+supported publish-after-review path: a fresh `priors add` runs every gate
+again and publishes only if they pass, and a fact claims `reviewed` only
+through attestation (`trust_root = "separate"`), which the write guard keeps
+agents from writing. `priors lint --move-flagged` goes the other way: it
+moves checkout facts that trip a content or size gate into the local layer.
 
 ## Wire it into hookyard
 

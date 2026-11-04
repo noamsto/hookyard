@@ -68,7 +68,12 @@ func newEnv(t *testing.T) env {
 }
 
 func (e env) assemble(s route.Session) (string, []string) {
-	return Assemble(context.Background(), s, e.cfg, e.rules, attest.ForHost(e.cfg))
+	return Assemble(context.Background(), s, e.cfg, e.rules, attest.ForHost(e.cfg), Options{})
+}
+
+func (e env) assembleClaude(s route.Session, nativeDir string, budget int) string {
+	out, _ := assemble(context.Background(), s, e.cfg, e.rules, attest.ForHost(e.cfg), Options{Claude: true, NativeMemDir: nativeDir}, budget)
+	return out
 }
 
 func mk(name, desc, scope string, repos ...string) fact.Fact {
@@ -600,7 +605,7 @@ func TestCancelledContext(t *testing.T) {
 	seedStores(t, e)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if out, _ := Assemble(ctx, workSession, e.cfg, e.rules, attest.ForHost(e.cfg)); out != "" {
+	if out, _ := Assemble(ctx, workSession, e.cfg, e.rules, attest.ForHost(e.cfg), Options{}); out != "" {
 		t.Errorf("out = %q, want empty", out)
 	}
 }
