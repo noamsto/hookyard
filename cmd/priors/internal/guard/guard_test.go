@@ -60,6 +60,7 @@ func newSandbox(t *testing.T) sandbox {
 		"work/chain": filepath.Join(home, "link"),
 		"work/dang":  filepath.Join(sb.store, ".attest", "new"),
 		"work/lk":    home,
+		"work/P":     filepath.Join(sb.store, "MEMORY.md"),
 
 		".config/priors/config.toml": filepath.Join(home, "dotfiles/priors.toml"),
 	} {
@@ -355,6 +356,40 @@ func TestShellDenies(t *testing.T) {
 		// Input the guard cannot read.
 		{name: "malformed command", want: "neither a string nor a list of strings", input: `{"command":5}`},
 		{name: "oversized command", want: "past what the guard reads", input: bash("echo x > ~/work/" + strings.Repeat("a", 1<<18))},
+
+		// Base-denied commands stay denied.
+		{name: "sed e command root", want: "which holds", cwd: ".", input: bash(`sed -n '1e rm -rf /' f`)},
+		{name: "lua execute root", want: "which holds", cwd: ".", input: bash(`lua -e 'os.execute("rm -rf /")'`)},
+		{name: "node execSync root", want: "which holds", cwd: ".", input: bash(`node -e 'require("child_process").execSync("rm -rf /")'`)},
+		{name: "python rmtree root", want: "which holds", cwd: ".", input: bash(`python3 -c 'import shutil; shutil.rmtree("/", ignore_errors=True)'`)},
+		{name: "sed e command relative store name", want: "personal store", cwd: ".", input: bash(`sed -n '1e rm -rf notes' f`)},
+		{name: "sed e cd relative store name", want: "which holds", cwd: "work", input: bash(`sed -n '1e cd .. && rm -rf notes' f`)},
+		{name: "python shutil relative store name", want: "builds at run time", cwd: ".", input: bash(`python3 -c 'import shutil; shutil.rmtree("notes")'`)},
+		{name: "node rmSync relative store name", want: "builds at run time", cwd: ".", input: bash(`node -e 'require("fs").rmSync("notes",{recursive:true})'`)},
+		{name: "sed w hardlink operand", want: "a hard link to", cwd: "work", input: bash(`sed -n 'w hard' f`)},
+		{name: "sed w symlink attest operand", want: "an .attest dir", cwd: "work", input: bash(`sed -n 'w rel' f`)},
+		{name: "python glued out root", want: "which holds", cwd: ".", input: bash(`python3 tool.py --out=/`)},
+		{name: "python short glued out root", want: "which holds", cwd: ".", input: bash(`python3 tool.py -o/`)},
+		{name: "subtoken renamed interpreter heredoc", want: "which holds", cwd: ".", input: bash("python3 -c 'import shutil,os;shutil.copy(\"/bin/sh\",os.getenv(\"HOME\")+\"/bin/python3\")'; env python3 <<EOF\nrm -rf .\nEOF")},
+		{name: "env-built store path in awk", want: "builds at run time", cwd: ".", input: bash(`awk 'BEGIN{system("rm -rf " ENVIRON["HOME"] "/notes")}'`)},
+		{name: "env-built store path in python", want: "builds at run time", cwd: ".", input: bash(`python3 -c 'import os; os.system("rm -rf " + os.environ["HOME"] + "/notes")'`)},
+		{name: "awk program system root wipe", want: "which holds", cwd: ".", input: bash(`awk 'BEGIN{system("rm -rf /")}'`)},
+		{name: "ssh remote script root wipe", want: "which holds", cwd: ".", input: bash(`ssh localhost 'rm -rf / (true)'`)},
+		{name: "nested interpreter heredoc on dot", want: "which holds", cwd: ".", input: bash("cp /bin/sh ~/bin/python3; python3 <<EOF\npython3 <<EOF2\nrm -rf .\nEOF2\nEOF")},
+		{name: "tar glued chdir root", want: "which holds", cwd: ".", input: bash(`tar -C/ -xf a.tar`)},
+		{name: "tar long directory root", want: "which holds", cwd: ".", input: bash(`tar --directory=/ -xf a.tar`)},
+		{name: "cp glued target root", want: "which holds", cwd: ".", input: bash(`cp -rt/ x`)},
+		{name: "cp long target-directory root", want: "which holds", cwd: ".", input: bash(`cp --target-directory=/ x`)},
+		{name: "python cleans to root", want: "which holds", cwd: ".", input: bash(`python3 -c 'open("/home/..","w")'`)},
+		{name: "awk address program", want: "which holds", input: bash(`awk '/^foo$/{print $1}' f`)},
+		{name: "awk division program", want: "which holds", input: bash(`awk '{print $1 / $2}' f`)},
+		{name: "awk glued field separator", want: "which holds", input: bash(`awk -F/ '{print $NF}' f`)},
+		{name: "python inline spaced slash", want: "which holds", input: bash(`python3 -c 'x = "a / b"'`)},
+		{name: "python heredoc slash string", want: "which holds", input: bash("python3 - <<EOF\nsep = \"/\"\nEOF")},
+		{name: "deferred sed script redefines", want: "inside the personal store", input: bash(`git commit -m '~/notes/MEMORY.md' && sed -i '#/crew' f`)},
+		{name: "sed in-place script trailing slash regex", want: "which holds", input: bash(`sed -i 's/^        monthlyTarget = 100;$/        monthlyTarget = 30;/' home/ai/claude-code/default.nix`)},
+		{name: "posix order sed file operand", want: "inside the personal store", cwd: "work", input: bash(`POSIXLY_CORRECT=1 sed -i --follow-symlinks s/a/b/ -e P`)},
+		{name: "env posix order sed file operand", want: "inside the personal store", cwd: "work", input: bash(`env POSIXLY_CORRECT=1 sed -i --follow-symlinks s/a/b/ -e P`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.linuxOnly && runtime.GOOS != "linux" {
@@ -413,6 +448,12 @@ func TestShellAllows(t *testing.T) {
 		// A crew message body is data: a bare . or / body is a message, not a path.
 		{name: "crew reply bare dot", cwd: ".", input: bash(`crew reply x .`)},
 		{name: "crew reply bare slash", input: bash(`crew reply x /`)},
+
+		// A known data position (a search pattern, a commit or forge message) is text, not a path.
+		{name: "rg regex with slashes", input: bash(`rg '"github.com/charmbracelet/[a-z/]*"'`)},
+		{name: "grep pattern with a slash", input: bash(`grep -r 'notes/x' .`)},
+		{name: "git commit message with store name", input: bash(`git commit -m "fix notes handling"`)},
+		{name: "gh pr body with store name", input: bash(`gh pr create --title t --body "fix notes handling"`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.tool == "" {

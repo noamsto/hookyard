@@ -306,6 +306,19 @@ func (g *Guard) shell(cwd string, texts []string) string {
 	return ""
 }
 
+// argument names the argument a write was judged from, so a denial tells a
+// false positive's reader which argument was read as the target.
+func argument(t gate.Touch, p string) string {
+	arg := t.From
+	if arg == "" {
+		arg = t.Text
+	}
+	if arg == "" || arg == p {
+		return ""
+	}
+	return fmt.Sprintf(" (from the argument %q)", arg)
+}
+
 // shellTouch judges one word of a command that writes when writes is set.
 func (c *check) shellTouch(t gate.Touch, writes, involved bool) string {
 	if t.Opaque {
@@ -326,11 +339,11 @@ func (c *check) shellTouch(t gate.Touch, writes, involved bool) string {
 		r := c.relate(p, shellKinds)
 		switch {
 		case r.rel == inside && t.Write:
-			return deny("the command writes %s, %s", p, describe(r.root, p))
+			return deny("the command writes %s, %s%s", p, describe(r.root, p), argument(t, p))
 		case r.rel == inside && writes:
-			return deny("the command names %s, %s, and may write", p, describe(r.root, p))
+			return deny("the command names %s, %s, and may write%s", p, describe(r.root, p), argument(t, p))
 		case r.rel == ancestor && t.Write:
-			return deny("the command may write %s, which holds %s", p, r.root.label)
+			return deny("the command may write %s, which holds %s%s", p, r.root.label, argument(t, p))
 		}
 	}
 	if !t.Write {
@@ -340,9 +353,9 @@ func (c *check) shellTouch(t gate.Touch, writes, involved bool) string {
 		to, unknown := c.linked(p)
 		switch {
 		case unknown:
-			return deny("the command writes %s, which has hard links the guard cannot match to a store file", p)
+			return deny("the command writes %s, which has hard links the guard cannot match to a store file%s", p, argument(t, p))
 		case len(to) > 0:
-			return deny("the command writes %s, a hard link to %s", p, to[0])
+			return deny("the command writes %s, a hard link to %s%s", p, to[0], argument(t, p))
 		}
 	}
 	return ""

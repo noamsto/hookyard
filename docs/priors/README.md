@@ -403,6 +403,13 @@ In a shell command:
   guard does not parse make sed a command that may write; a script without
   those letters only reads, and those letters in a regex, a replacement or a
   label do not (`sed 's/refused: //'` reads);
+- a sed script is still judged through its operand, so `sed -i 's/^  x = 100;$/  x = 30;/' f`
+  is refused: the guard reads the script's `/` fragments as a possible write to
+  `/`, even though the script cannot write a path. This is a known residual
+  (#268): use the editor tool or a script file (`sed -f`) instead. A sed script
+  with a `w`, `W` or `e` command, and any other writer, is refused as before.
+  A write denial names the argument it judged, e.g. `... inside the personal
+  store (from the argument "-C/")`.
 - the message of `git commit` (`-m`, `--message`), and the `--body`,
   `--title`, `--message`, `--notes` and `--description` values (`-b`, `-t`,
   `-m`) of `gh` and `glab` `pr`, `issue`, `mr` or `release` with `create`,

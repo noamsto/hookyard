@@ -15,6 +15,10 @@ func TestShellAccess(t *testing.T) {
 	w := func(text string) Touch { return Touch{Text: text, Write: true} }
 	m := func(text string) Touch { return Touch{Text: text} }
 	cd := func(text string) Touch { return Touch{Text: text, Chdir: true} }
+	containsTouch := func(words []Touch, want Touch) bool {
+		want.From = ""
+		return slices.ContainsFunc(words, func(t Touch) bool { t.From = ""; return t == want })
+	}
 	opaque := Touch{Write: true, Opaque: true}
 	for _, tt := range []struct {
 		name   string
@@ -174,17 +178,30 @@ func TestShellAccess(t *testing.T) {
 				t.Errorf("Writes = %v, want %v", acc.Writes, tt.writes)
 			}
 			for _, want := range tt.want {
-				if !slices.Contains(acc.Words, want) {
+				if !containsTouch(acc.Words, want) {
 					t.Errorf("missing %+v in %+v", want, acc.Words)
 				}
 			}
 			for _, absent := range tt.absent {
-				if slices.Contains(acc.Words, absent) {
+				if containsTouch(acc.Words, absent) {
 					t.Errorf("unexpected %+v in %+v", absent, acc.Words)
 				}
 			}
 		})
 	}
+}
+
+func TestSubtokenFrom(t *testing.T) {
+	acc := ShellAccess(nil, `python3 -c "open('/h/a','w')"`)
+	for _, touch := range acc.Words {
+		if touch.Text == "/h/a" {
+			if touch.From != `open('/h/a','w')` {
+				t.Errorf("From = %q, want %q", touch.From, `open('/h/a','w')`)
+			}
+			return
+		}
+	}
+	t.Errorf("no /h/a touch in %+v", acc.Words)
 }
 
 func TestSedScript(t *testing.T) {
