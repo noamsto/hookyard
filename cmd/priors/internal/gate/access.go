@@ -52,6 +52,9 @@ type Touch struct {
 	Opaque bool
 	// Chdir marks a directory the command changes into.
 	Chdir bool
+	// From is the argument a derived subtoken was read from, empty for a
+	// whole word.
+	From string
 }
 
 const (
@@ -1376,7 +1379,7 @@ func (a *accessor) field(f string, write, cmd bool) {
 	for _, d := range Decodings(f) {
 		a.redefiner(d, cmd)
 		for _, t := range a.subTokens(d) {
-			a.touch(Touch{Text: t, Write: write})
+			a.touch(Touch{Text: t, Write: write, From: f})
 			if !cmd && slices.Contains(dataTakers, wordName(t)) {
 				a.redefines = true
 			}
