@@ -1842,7 +1842,11 @@ func (a *accessor) finiteOnly(w *syntax.Word) ([]string, bool) {
 	}
 	first := make([]string, len(names))
 	for i, name := range names {
-		first[i] = a.loops[name][0]
+		vals := a.loops[name]
+		if len(vals) == 0 {
+			return nil, false
+		}
+		first[i] = vals[0]
 	}
 	restore := a.pin(names, first)
 	defer restore()
@@ -1881,24 +1885,29 @@ func (a *accessor) pin(names, values []string) (restore func()) {
 // names, in order, with them pinned; it reports false, calling none, when
 // there are more than maxLoopRuns combinations.
 func (a *accessor) runs(names []string, f func()) bool {
+	lists := make([][]string, len(names))
 	total := 1
-	for _, name := range names {
-		if total *= len(a.loops[name]); total > maxLoopRuns {
+	for i, name := range names {
+		lists[i] = a.loops[name]
+		if total *= len(lists[i]); total > maxLoopRuns {
 			return false
 		}
+	}
+	if total == 0 {
+		return false
 	}
 	at := make([]int, len(names))
 	values := make([]string, len(names))
 	for {
-		for i, name := range names {
-			values[i] = a.loops[name][at[i]]
+		for i, list := range lists {
+			values[i] = list[at[i]]
 		}
 		restore := a.pin(names, values)
 		f()
 		restore()
 		i := len(names) - 1
 		for ; i >= 0; i-- {
-			if at[i]++; at[i] < len(a.loops[names[i]]) {
+			if at[i]++; at[i] < len(lists[i]) {
 				break
 			}
 			at[i] = 0

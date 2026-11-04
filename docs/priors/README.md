@@ -446,10 +446,21 @@ In a shell command:
   `source`, `.`, `eval` or `trap`; naming `BASH_CMDS`, `BASH_ALIASES`, `PATH`,
   `BASH_ENV` or `ENV` other than as an expansion, even quote-split or
   ANSI-C-quoted; an opaque command word, or an opaque word in a write
-  position; and a word, redirect target or path named `claude`, `gh`, `glab`
-  or `crew` that is not a call's own command word (`ln -s /bin/rm ~/bin/crew`,
-  `cat /bin/rm > ~/bin/gh`). A renamed data taker cannot hide a write: its
-  words are judged as an unknown program's.
+  position, except one opaque only through the variable of a `for` loop (not
+  `select`) whose name starts with a lowercase letter, over listed plain
+  values (literal or quoted text with no glob, no expansion and no empty
+  value, at most 64 values counting brace expansion, at most 64 combinations
+  per word): that word is judged once per value, and every value must leave
+  the call's data positions in place (`for n in 1 2; do gh issue view $n --jq '.a // .b'; done`),
+  unless the command also sets the variable (any other assignment, `read`,
+  `mapfile`, `printf -v`, arithmetic, a `{name}` redirect) or mentions it in
+  any other word, declares a nameref, expands a loop variable in arithmetic,
+  or holds any other word whose value the text does not tell; and a word,
+  redirect target or path named `claude`, `gh`, `glab` or `crew` that is not
+  a call's own command word (`ln -s /bin/rm ~/bin/crew`, `cat /bin/rm >
+  ~/bin/gh`). A renamed data taker cannot hide a write: its words are judged
+  as an unknown program's. A `for` variable over a single item that expands
+  (a glob or a brace) is read as unknown, not as that item's text.
 
 `LSP` and an MCP tool are reads when the tool's last name segment starts with
 `search` or `list_`, or is `get_file_contents`, `read_file` or
@@ -522,6 +533,11 @@ It over-denies:
   an unclean wrapper (`sudo -u bob claude -p .`), or in a command that also
   redefines a name or mentions a word named `claude`, `gh`, `glab` or `crew`
   that is no call's command word (`echo gh`);
+- such a data position in a command whose write word is opaque through a
+  `for` variable, when the variable is mentioned elsewhere in the command
+  (`echo "n=$n"`, a jq filter `.n` read by `jq`), a `$(…)` or unknown
+  variable sits beside the loop, or the loop runs over more than 64 values or
+  a glob;
 - a reader run behind a flagged wrapper (`nice -n 5 git status`) in a store or
   naming one;
 - assigning or exporting `PATH`, `BASH_ENV`, `ENV`, `GIT_*` or `LD_*`, or
