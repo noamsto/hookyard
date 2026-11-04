@@ -472,6 +472,14 @@ func TestShellDenies(t *testing.T) {
 		{name: "sudo cluster separate chdir", want: "the personal store", cwd: ".", input: bash(`sudo -iD notes touch MEMORY.md`)},
 		{name: "sudo separate chdir", want: "the personal store", cwd: ".", input: bash(`sudo -D notes touch MEMORY.md`)},
 		{name: "env separate split string", want: "which holds the personal store", cwd: ".", input: bash(`env -u X --split-string 'rm -rf .'`)},
+
+		// Heredoc bodies, glob names and redirect targets read at run time.
+		{name: "loop heredoc to a shell per value", want: "/notes, the personal store", input: bash("for d in work notes; do bash <<EOF\nrm -rf ~/$d\nEOF\ndone")},
+		{name: "opaque here-string to a shell", want: "builds at run time", input: bash(`bash <<< "$(cat /tmp/s)"; echo notes`)},
+		{name: "glob-named data taker", want: "which holds the personal store", cwd: ".", input: bash(`cp /bin/rm ~/bin/g?; gh pr view 1 --jq .`)},
+		{name: "bracket-named data taker", want: "which holds the personal store", cwd: ".", input: bash(`cp /bin/rm ~/bin/[g]h; gh pr view 1 --jq .`)},
+		{name: "extglob-named data taker", want: "which holds the personal store", cwd: ".", input: bash(`cp /bin/rm ~/bin/!(x); gh pr view 1 --jq .`)},
+		{name: "redirect to an opaque target", want: "which holds the personal store", cwd: ".", input: bash(`cat /bin/rm > ~/bin/g$(echo h); gh pr view 1 --jq .`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.linuxOnly && runtime.GOOS != "linux" {
@@ -570,6 +578,17 @@ func TestShellAllows(t *testing.T) {
 		{name: "git commit message", input: bash(`git commit -m "x"`)},
 		{name: "nix develop go vet", input: bash(`nix develop -c go vet ./...`)},
 		{name: "claude prompt with a model from home", cwd: ".", input: bash(`claude -p "fix ." --model opus`)},
+
+		// Heredoc bodies, globs and redirect targets that name no data taker.
+		{name: "object glob before a gh filter", input: bash(`rm -f *.o; gh pr view 1 --jq .`)},
+		{name: "object glob before a gh filter from home", cwd: ".", input: bash(`rm -f *.o; gh pr view 1 --jq .`)},
+		{name: "source glob listing before a gh filter from home", cwd: ".", input: bash(`ls *.go; gh pr view 1 --jq .`)},
+		{name: "loop redirect before a gh filter from home", cwd: ".", input: bash(`for n in a b; do echo x > ~/work/$n.log; done; gh pr view 1 --jq .`)},
+		{name: "loop heredoc to a shell before a gh filter from home", cwd: ".", input: bash("for f in a b; do sh <<EOF\necho $f\nEOF\ndone; gh pr view 1 --jq .")},
+		{name: "heredoc with a variable to a file from home", cwd: ".", input: bash("cat <<EOF > /tmp/x\nhello $USER\nEOF")},
+		{name: "loop commit with a here-string", input: bash(`for f in a b; do git commit -m "$f" <<< x; done`)},
+		{name: "commit message heredoc with a substitution", input: bash("git commit -F - <<EOF\n$(git log -1 --format=%s)\nEOF")},
+		{name: "python heredoc with a substitution", input: bash("python3 - <<EOF\nprint(\"$(date)\")\nEOF")},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.tool == "" {

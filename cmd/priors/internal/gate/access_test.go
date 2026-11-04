@@ -263,6 +263,15 @@ func TestShellAccess(t *testing.T) {
 		{name: "xtrace prompt default withdraws loop", cmd: `read -r x < /h/f; false && for n in a b; do :; done; PS4='${!x:=h}'; set -x; :; set +x; cp /bin/rm /h/bin/g$n; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
 		{name: "wait -p subscript withdraws loop", cmd: `read -r y < /h/f; x='a[${!y:=h}]'; false && for n in a b; do :; done; sleep 0 & wait -p "b[x]" -n; cp /bin/rm /h/bin/g$n; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
 		{name: "quoted glob loop item withdraws", cmd: `for n in 'g?' x; do cp /bin/rm /h/bin/$n; done; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "glob-named data taker withdraws", cmd: `cp /bin/rm /h/bin/g?; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "bracket-named data taker withdraws", cmd: `cp /bin/rm /h/bin/[g]h; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "negated extglob data taker withdraws", cmd: `cp /bin/rm /h/bin/!(x); gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "glob that cannot name a data taker keeps the filter", cmd: `rm -f *.o; gh pr view 1 --jq /h/store/M`, writes: true, absent: []Touch{w("/h/store/M")}},
+		{name: "opaque redirect target withdraws", cmd: `cat /bin/rm > /h/bin/g$(echo h); gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "loop redirect target keeps the filter", cmd: `for n in a b; do echo x > /h/log/$n; done; gh pr view 1 --jq /h/store/M`, writes: true, absent: []Touch{w("/h/store/M")}},
+		{name: "opaque here-string to a writer", cmd: `bash <<< "$(cat /h/f)"`, writes: true, want: []Touch{opaque}},
+		{name: "loop heredoc to a writer per value", cmd: "for d in a b; do bash <<EOF\nrm /h/$d\nEOF\ndone", writes: true, want: []Touch{w("/h/a"), w("/h/b")}},
+		{name: "loop heredoc to a writer keeps the filter", cmd: "for d in a b; do sh <<EOF\necho $d\nEOF\ndone; gh pr view 1 --jq /h/store/M", writes: true, absent: []Touch{w("/h/store/M")}},
 		// A false positive: test sets no variable but is outside the closed list.
 		{name: "test beside a loop withdraws", cmd: `for n in 1 2; do test -n "$n"; gh issue view $n --jq /h/store/M; done`, writes: true, want: []Touch{w("/h/store/M")}},
 	} {

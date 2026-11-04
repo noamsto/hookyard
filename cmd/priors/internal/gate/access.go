@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"path"
 	"slices"
 	"strings"
 
@@ -2217,6 +2218,13 @@ func (a *accessor) redirect(r *syntax.Redirect, writer bool, text string, depth 
 	write := outputOp(r.Op) && !a.sink(r)
 	if write {
 		a.acc.Writes = true
+		// A file it builds at run time may be a data-taker it replaces, as an
+		// opaque write word may.
+		if a.opaque(r.Word) {
+			if _, ok := a.finiteOnly(r.Word); !ok {
+				a.redefines = true
+			}
+		}
 	}
 	a.word(r.Word, text, depth, write, false, false)
 }
@@ -2243,21 +2251,48 @@ func (a *accessor) sink(r *syntax.Redirect) bool {
 }
 
 // body reads a heredoc or here-string: as a script when a writer reads it,
-// since a shell runs it, else as data.
+// since a shell runs it, else as data. A writer's opaque body runs text the
+// command does not show, as an opaque word names a path it does not: one
+// opaque only through finite loop variables is also read once per
+// combination of their values.
 func (a *accessor) body(w *syntax.Word, text string, depth int, writer bool) {
-	if a.opaque(w) {
+	switch {
+	case !a.opaque(w):
+	case !writer:
 		a.wild = true
+	default:
+		// Recorded last, so a denial names a write the body does show first.
+		defer a.touch(Touch{Write: true, Opaque: true})
+		names, finite := a.finiteOnly(w)
+		if !finite || !a.runs(names, func() { a.bodyScript(w, text, depth) }) {
+			a.wild = true
+		}
 	}
-	fields, r := a.j.fields(real, text, w)
-	if r != "" {
-		a.acc.Unreadable = r
+	body, ok := a.joined(w, text)
+	if !ok {
 		return
 	}
-	body := strings.Join(fields, " ")
 	a.field(body, writer, false)
 	if writer {
 		a.script(body, depth+1)
 	}
+}
+
+// bodyScript reads w rendered as a script one level deeper.
+func (a *accessor) bodyScript(w *syntax.Word, text string, depth int) {
+	if body, ok := a.joined(w, text); ok {
+		a.script(body, depth+1)
+	}
+}
+
+// joined returns w's fields joined by spaces, as a body reads.
+func (a *accessor) joined(w *syntax.Word, text string) (string, bool) {
+	fields, r := a.j.fields(real, text, w)
+	if r != "" {
+		a.acc.Unreadable = r
+		return "", false
+	}
+	return strings.Join(fields, " "), true
 }
 
 // word records w's fields in each environment, or the prefix of an opaque
@@ -2320,7 +2355,7 @@ func (a *accessor) field(f string, write, cmd bool) {
 		a.redefiner(d, cmd)
 		for _, t := range a.subTokens(d) {
 			a.touch(Touch{Text: t, Write: write, From: f})
-			if !cmd && slices.Contains(dataTakers, wordName(t)) {
+			if !cmd && dataTaker(t) {
 				a.redefines = true
 			}
 		}
@@ -2332,7 +2367,7 @@ func (a *accessor) field(f string, write, cmd bool) {
 // shellVars. It also records the loop variables s mentions.
 func (a *accessor) redefiner(s string, cmd bool) {
 	a.mention(s)
-	if !cmd && slices.Contains(dataTakers, wordName(s)) {
+	if !cmd && dataTaker(s) {
 		a.redefines = true
 	}
 	for _, name := range shellVars {
@@ -2346,6 +2381,103 @@ func (a *accessor) redefiner(s string, cmd bool) {
 			return
 		}
 	}
+}
+
+// dataTaker reports s whose basename names a data-taker, or is a glob that
+// may expand to one: a write through it may replace that program. The glob is
+// read loosely, each bracket expression as `?` and each extglob group as `*`,
+// and one path.Match cannot read counts. Both the raw basename and wordName's
+// are tried, since wordName trims the `!` of an extglob.
+func dataTaker(s string) bool {
+	name := wordName(s)
+	if slices.Contains(dataTakers, name) {
+		return true
+	}
+	return globTaker(s[strings.LastIndex(s, "/")+1:]) || globTaker(name)
+}
+
+func globTaker(base string) bool {
+	if !strings.ContainsAny(base, "*?[") && !strings.Contains(base, "@(") && !strings.Contains(base, "!(") && !strings.Contains(base, "+(") {
+		return false
+	}
+	p := loosePattern(base)
+	return slices.ContainsFunc(dataTakers, func(t string) bool {
+		ok, err := path.Match(p, t)
+		return ok || err != nil
+	})
+}
+
+// loosePattern rewrites a bash glob into a path.Match pattern that matches at
+// least what it does: an extglob group becomes `*`, a bracket expression `?`,
+// and a `[` bash reads as a literal (no closing `]`) stays one.
+func loosePattern(g string) string {
+	var b strings.Builder
+	for i := 0; i < len(g); i++ {
+		c := g[i]
+		switch {
+		case c == '\\' && i+1 < len(g):
+			b.WriteString(g[i : i+2])
+			i++
+		case i+1 < len(g) && g[i+1] == '(' && strings.IndexByte("@!?*+", c) >= 0:
+			b.WriteByte('*')
+			i = groupEnd(g, i+1)
+		case c == '[':
+			if end := bracketEnd(g, i); end >= 0 {
+				b.WriteByte('?')
+				i = end
+			} else {
+				b.WriteString(`\[`)
+			}
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// groupEnd is the index of the `)` closing the group opened at g[open], or
+// the last index when none does.
+func groupEnd(g string, open int) int {
+	depth := 0
+	for k := open; k < len(g); k++ {
+		switch g[k] {
+		case '(':
+			depth++
+		case ')':
+			if depth--; depth == 0 {
+				return k
+			}
+		}
+	}
+	return len(g) - 1
+}
+
+// bracketEnd is the index of the `]` closing the bracket expression opened at
+// g[open], or -1: a `]` first (after `!` or `^`) is a member, and `[:…:]`,
+// `[.….]` and `[=…=]` are units.
+func bracketEnd(g string, open int) int {
+	k := open + 1
+	if k < len(g) && (g[k] == '!' || g[k] == '^') {
+		k++
+	}
+	if k < len(g) && g[k] == ']' {
+		k++
+	}
+	for ; k < len(g); k++ {
+		switch g[k] {
+		case '\\':
+			k++
+		case '[':
+			if k+1 < len(g) && strings.IndexByte(":.=", g[k+1]) >= 0 {
+				if n := strings.Index(g[k+2:], string(g[k+1])+"]"); n >= 0 {
+					k += n + 3
+				}
+			}
+		case ']':
+			return k
+		}
+	}
+	return -1
 }
 
 // subTokens returns PathTokens of s with $HOME and ~ expanded.
