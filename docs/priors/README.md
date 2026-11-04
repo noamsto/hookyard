@@ -450,7 +450,7 @@ In a shell command:
   `select`) whose name starts with a lowercase letter, over listed plain
   values (literal or quoted text with no glob, no expansion and no empty
   value, at most 64 values counting brace expansion, at most 64 combinations
-  per word): that word is judged once per value, and every value must leave
+  per call): that word is judged once per value, and every value must leave
   the call's data positions in place (`for n in 1 2; do gh issue view $n --jq '.a // .b'; done`),
   unless the command also sets the variable (any other assignment, `read`,
   `mapfile`, `printf -v`, arithmetic, a `{name}` redirect) or mentions it in

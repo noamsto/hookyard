@@ -139,9 +139,10 @@ func ShellAccess(host *Host, texts ...string) (acc Access) {
 		a.script(text, 0)
 	}
 	// A loop variable's listed values hold every value it is read with only
-	// if nothing else sets it, which the whole command must be read to tell.
+	// if nothing else sets it, which the whole command must be read to tell:
+	// a setter read before its loop is registered counts too.
 	for name := range a.exempted {
-		if a.wild || a.nameref || a.assigns[name] != 1 || a.mentioned[name] {
+		if a.wild || a.nameref || a.assigns[name] != 1 || a.mentioned[name] || a.named(name) {
 			a.redefines = true
 		}
 	}
@@ -188,6 +189,12 @@ type accessor struct {
 	// mentioned are the loop names a rendered field, an arithmetic source or a
 	// redirect's {varname} names, any of which may set them again.
 	mentioned map[string]bool
+	// mentions are every string mention saw and sums every arithmetic source,
+	// in or out of a loop's reach, checked against the exempted names once the
+	// walk finishes.
+	mentions, sums []string
+	// pins are the loop variables pinned to one value each, innermost last.
+	pins []pinning
 	// nameref reports a declared nameref, which may set any loop variable.
 	nameref bool
 	// wild reports an opaque word not opaque only through finite loop
@@ -213,6 +220,9 @@ func (a *accessor) script(text string, depth int) {
 		return
 	}
 	a.j.seen[text] = true
+	// A script is read once whatever value renders it, so none of its loop
+	// reads may take a pinned value as the only one.
+	defer a.unpin()()
 	a.j.parsed += parseBase + parseCost*len(text)
 	if depth > maxDepth || a.j.parsed > maxParsed || len(text) > maxText || nesting(text) > maxNesting {
 		a.acc.Unreadable = "budget"
@@ -543,6 +553,7 @@ func (a *accessor) arithmetic(src string) {
 		a.acc.Writes = true
 		a.touch(Touch{Write: true, Opaque: true})
 	}
+	a.sums = append(a.sums, src)
 	for name := range a.loops {
 		if expandsName(src, name) {
 			a.wild = true
@@ -612,6 +623,9 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 		a.done[w] = true
 		write := writer && i != v.cmdArg
 		if slices.Contains(v.data, i) {
+			if a.opaque(w) {
+				a.wild = true
+			}
 			a.deferred = append(a.deferred, deferral{w, text, depth, write, writer})
 			continue
 		}
@@ -1573,6 +1587,9 @@ func (a *accessor) sink(r *syntax.Redirect) bool {
 // body reads a heredoc or here-string: as a script when a writer reads it,
 // since a shell runs it, else as data.
 func (a *accessor) body(w *syntax.Word, text string, depth int, writer bool) {
+	if a.opaque(w) {
+		a.wild = true
+	}
 	fields, r := a.j.fields(real, text, w)
 	if r != "" {
 		a.acc.Unreadable = r
@@ -1791,9 +1808,14 @@ func (a *accessor) known(name string) bool {
 	return ok
 }
 
-// mention records the registered loop variables s names in a way that may set
-// them, charging the scan to the judge's budget.
+// mention records s and the registered loop variables it names in a way that
+// may set them, charging both to the judge's budget.
 func (a *accessor) mention(s string) {
+	if a.j.parsed += len(s); a.j.parsed > maxParsed {
+		a.acc.Unreadable = "budget"
+		return
+	}
+	a.mentions = append(a.mentions, s)
 	for name := range a.loops {
 		if a.j.parsed += len(s); a.j.parsed > maxParsed {
 			a.acc.Unreadable = "budget"
@@ -1803,6 +1825,21 @@ func (a *accessor) mention(s string) {
 			a.mentioned[name] = true
 		}
 	}
+}
+
+// named reports name in a string mention saw or expanded in an arithmetic
+// source, charging the scan to the judge's budget.
+func (a *accessor) named(name string) bool {
+	for _, s := range a.mentions {
+		if a.j.parsed += len(s); a.j.parsed > maxParsed {
+			a.acc.Unreadable = "budget"
+			return true
+		}
+		if countName(s, name) > 0 {
+			return true
+		}
+	}
+	return slices.ContainsFunc(a.sums, func(src string) bool { return expandsName(src, name) })
 }
 
 // loopReads returns the sorted registered loop variables w expands outside a
@@ -1853,30 +1890,66 @@ func (a *accessor) finiteOnly(w *syntax.Word) ([]string, bool) {
 	return names, !a.opaque(w)
 }
 
+// pinning is one pin: the names it sets, their values, and what they held
+// before.
+type pinning struct {
+	names, values []string
+	old           []saved
+}
+
+type saved struct {
+	value        string
+	set, tainted bool
+}
+
 // pin sets each of names to its value in values, known, and returns what
 // restores both as they were.
 func (a *accessor) pin(names, values []string) (restore func()) {
-	type saved struct {
-		value        string
-		set, tainted bool
-	}
-	old := make([]saved, len(names))
+	p := pinning{names: names, values: values, old: make([]saved, len(names))}
 	for i, name := range names {
-		old[i].value, old[i].set = a.j.vars[name]
-		old[i].tainted = a.tainted[name]
-		a.j.vars[name] = values[i]
+		p.old[i].value, p.old[i].set = a.j.vars[name]
+		p.old[i].tainted = a.tainted[name]
+	}
+	a.apply(p)
+	a.pins = append(a.pins, p)
+	return func() {
+		a.pins = a.pins[:len(a.pins)-1]
+		a.lift(p)
+	}
+}
+
+// unpin lifts every active pin, innermost first, and returns what applies
+// them again.
+func (a *accessor) unpin() (repin func()) {
+	pins := a.pins
+	for _, p := range slices.Backward(pins) {
+		a.lift(p)
+	}
+	a.pins = nil
+	return func() {
+		for _, p := range pins {
+			a.apply(p)
+		}
+		a.pins = pins
+	}
+}
+
+func (a *accessor) apply(p pinning) {
+	for i, name := range p.names {
+		a.j.vars[name] = p.values[i]
 		delete(a.tainted, name)
 	}
-	return func() {
-		for i, name := range names {
-			delete(a.j.vars, name)
-			if old[i].set {
-				a.j.vars[name] = old[i].value
-			}
-			delete(a.tainted, name)
-			if old[i].tainted {
-				a.tainted[name] = true
-			}
+}
+
+func (a *accessor) lift(p pinning) {
+	for i, name := range p.names {
+		delete(a.j.vars, name)
+		if p.old[i].set {
+			a.j.vars[name] = p.old[i].value
+		}
+		delete(a.tainted, name)
+		if p.old[i].tainted {
+			a.tainted[name] = true
 		}
 	}
 }

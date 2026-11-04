@@ -344,6 +344,7 @@ func TestShellDenies(t *testing.T) {
 		// Finite for-loop variables.
 		{name: "loop value as a write target", want: "an .attest dir", cwd: ".", input: bash(`for f in a .attest/x; do touch "$f"; done`)},
 		{name: "loop value as the command word", want: "inside the personal store", input: bash(`for c in rm cat; do $c ~/notes/MEMORY.md; done`)},
+		{name: "printf -v before a subshell loop", want: "which holds the personal store", cwd: ".", input: bash(`printf -v n %s%s cr ew; (for n in 1 2; do :; done); cp /bin/rm ~/bin/$n; crew reply x .`)},
 
 		// sed scripts read as programs.
 		{name: "sed s w flag with e", want: "inside the personal store", input: bash(`sed 's/e/x/w @H/notes/facts/a.md' f`)},
