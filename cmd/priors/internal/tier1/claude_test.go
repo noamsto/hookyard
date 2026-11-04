@@ -35,8 +35,8 @@ func seedDuplicates(t *testing.T, e env, dir string) {
 	t.Helper()
 	// a was renamed in the store after import; only its source path still
 	// matches the native file.
-	writeNative(t, dir, "a-old.md", mk("a-renamed-since", "d", "global"))
-	writeNative(t, dir, "b-same.md", mk("b-same", "d", "global"))
+	writeNative(t, dir, "a-old.md", mk("a-renamed-since", "about a", "global"))
+	writeNative(t, dir, "b-same.md", mk("b-same", "about b-same", "global"))
 	put(t, e.personal, "_global/a.md", importedFrom(typed("a", "feedback", "2026-09-08T00:00:00Z"), "claude", nativeSource+"a-old.md"))
 	put(t, e.personal, "_global/b-same.md", typed("b-same", "project", "2026-09-07T00:00:00Z"))
 	put(t, e.personal, "_global/c.md", typed("c", "project", "2026-09-06T00:00:00Z"))
@@ -63,7 +63,7 @@ func TestClaudeSessionDropsFactsAlsoInNativeMemory(t *testing.T) {
 func TestClaudeSourcePathOnlyMatchesClaudeImports(t *testing.T) {
 	e := newEnv(t)
 	dir := nativeDir(t)
-	writeNative(t, dir, "a-old.md", mk("a-renamed-since", "d", "global"))
+	writeNative(t, dir, "a-old.md", mk("a-renamed-since", "about a", "global"))
 	put(t, e.personal, "_global/a.md", importedFrom(typed("a", "feedback", "2026-09-08T00:00:00Z"), "codex", nativeSource+"a-old.md"))
 	index(t, e.personal)
 
@@ -76,7 +76,7 @@ func TestClaudeSourcePathOnlyMatchesClaudeImports(t *testing.T) {
 func TestClaudeSourcePathDecidesForClaudeImports(t *testing.T) {
 	e := newEnv(t)
 	dir := nativeDir(t)
-	writeNative(t, dir, "a.md", mk("a", "d", "global"))
+	writeNative(t, dir, "a.md", mk("a", "about a", "global"))
 	put(t, e.personal, "_global/a.md", importedFrom(typed("a", "feedback", "2026-09-08T00:00:00Z"), "claude", "~/.claude/projects/other/memory/a.md"))
 	index(t, e.personal)
 
@@ -89,7 +89,7 @@ func TestClaudeSourcePathDecidesForClaudeImports(t *testing.T) {
 func TestClaudeUnlinkedNativeFileDoesNotHideFact(t *testing.T) {
 	e := newEnv(t)
 	dir := nativeDir(t)
-	writeNativeUnlinked(t, dir, "c.md", mk("c", "d", "global"))
+	writeNativeUnlinked(t, dir, "c.md", mk("c", "about c", "global"))
 	put(t, e.personal, "_global/c.md", typed("c", "project", "2026-09-06T00:00:00Z"))
 	index(t, e.personal)
 
@@ -102,7 +102,7 @@ func TestClaudeUnlinkedNativeFileDoesNotHideFact(t *testing.T) {
 func TestClaudeSingularCount(t *testing.T) {
 	e := newEnv(t)
 	dir := nativeDir(t)
-	writeNative(t, dir, "b-same.md", mk("b-same", "d", "global"))
+	writeNative(t, dir, "b-same.md", mk("b-same", "about b-same", "global"))
 	put(t, e.personal, "_global/b-same.md", typed("b-same", "project", "2026-09-07T00:00:00Z"))
 	put(t, e.personal, "_global/c.md", typed("c", "project", "2026-09-06T00:00:00Z"))
 	index(t, e.personal)
@@ -117,7 +117,7 @@ func TestClaudeAllDuplicatedStillEmitsCount(t *testing.T) {
 	dir := nativeDir(t)
 	for i := range 12 {
 		name := fmt.Sprintf("dup-%02d", i)
-		writeNative(t, dir, name+".md", mk(name, "d", "global"))
+		writeNative(t, dir, name+".md", mk(name, "about "+name, "global"))
 		put(t, e.personal, "_global/"+name+".md", typed(name, "project", "2026-09-07T00:00:00Z"))
 	}
 	index(t, e.personal)
@@ -162,7 +162,7 @@ func TestClaudeGroupedLayout(t *testing.T) {
 	e := newEnv(t)
 	dir := nativeDir(t)
 	seedTyped(t, e)
-	writeNative(t, dir, "fb-two.md", mk("fb-two", "d", "global"))
+	writeNative(t, dir, "fb-two.md", mk("fb-two", "about fb-two", "global"))
 
 	blocks := parseBlocks(t, e.assembleClaude(personalSession, dir, Budget))
 	if len(blocks) != 1 {
@@ -191,7 +191,7 @@ func TestClaudeBudgetTruncates(t *testing.T) {
 	dir := nativeDir(t)
 	const n = 30
 	bulkFacts(t, e.personal, "f", n, 100)
-	writeNative(t, dir, "f01.md", mk("f01", "d", "global"))
+	writeNative(t, dir, "f01.md", mk("f01", strings.Repeat("x", 100), "global"))
 
 	const budget = 1200
 	blocks := parseBlocks(t, e.assembleClaude(personalSession, dir, budget))
@@ -236,7 +236,7 @@ func TestClaudeBudgetKeepsCountWhenNoEntryFits(t *testing.T) {
 	e := newEnv(t)
 	dir := nativeDir(t)
 	bulkFacts(t, e.personal, "f", 5, 200)
-	writeNative(t, dir, "f01.md", mk("f01", "d", "global"))
+	writeNative(t, dir, "f01.md", mk("f01", strings.Repeat("x", 200), "global"))
 
 	blocks := parseBlocks(t, e.assembleClaude(personalSession, dir, 160))
 	if len(blocks) != 1 {
@@ -252,7 +252,7 @@ func TestClaudeMarkerNamesDroppedGroups(t *testing.T) {
 	e := newEnv(t)
 	dir := nativeDir(t)
 	seedTyped(t, e)
-	writeNative(t, dir, "ref-one.md", mk("ref-one", "d", "global"))
+	writeNative(t, dir, "ref-one.md", mk("ref-one", "about ref-one", "global"))
 
 	out := e.assembleClaude(personalSession, dir, 440)
 	for l := range strings.SplitSeq(out, "\n") {
@@ -273,6 +273,6 @@ func TestClaudeGroupedFlaggedTruncatedGolden(t *testing.T) {
 	e := newEnv(t)
 	dir := nativeDir(t)
 	seedTyped(t, e)
-	writeNative(t, dir, "ref-one.md", mk("ref-one", "d", "global"))
+	writeNative(t, dir, "ref-one.md", mk("ref-one", "about ref-one", "global"))
 	checkGolden(t, "claude_grouped_flagged_truncated.golden", e.assembleClaude(personalSession, dir, 440))
 }

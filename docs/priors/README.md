@@ -323,11 +323,14 @@ envelope's `engine`, else whether `priors` runs inside Claude Code
 flat list.
 
 A fact whose topic file the project's native `MEMORY.md` links is left out of
-the block, matched by `name` or by the path an import recorded as its source.
-Only links in the first 200 lines / 25 KB count, since that is all Claude
-loads; a same-named file nothing links does not hide a fact. The source-path
-match uses `~/…` paths, so across hosts it holds only if the repo's absolute
-path is the same under `HOME`; otherwise the match is by name only.
+the block. A fact imported from Claude memory matches only by its recorded
+source path; any other fact matches by `name`. In both cases the native
+topic's description must equal the fact's description, and the topic must be
+linked from the first 200 lines / 25 KB of `MEMORY.md`, since that is all
+Claude loads; a same-named file nothing links, or one with a different
+description, does not hide a fact. The source-path match uses `~/…` paths, so
+across hosts it holds only if the repo's absolute path is the same under
+`HOME`.
 
 Markers in the injected block:
 
@@ -335,7 +338,7 @@ Markers in the injected block:
   flagged them. Nobody has cleared them. They come last.
 - `N facts also in MEMORY.md`: how many facts the dedup left out.
 - `… N entries omitted (group, group) …`: a cut to the budget, on its own line
-  after the groups, naming the groups that lost entries.
+  right after the pointer line, before the groups, naming the groups that lost entries.
 
 Markers only in `priors list` rows:
 

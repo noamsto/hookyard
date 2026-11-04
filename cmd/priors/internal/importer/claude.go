@@ -114,6 +114,19 @@ func claudeProject(memDir string) (items []Item, notes []Report) {
 // ReadRegular reads path only if it is a regular file: O_NOFOLLOW refuses a
 // symlink, and O_NONBLOCK keeps a FIFO from hanging the open.
 func ReadRegular(path string) ([]byte, error) {
+	raw, err := ReadRegularPrefix(path, maxSource+1)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxSource {
+		return nil, fmt.Errorf("larger than %d bytes", maxSource)
+	}
+	return raw, nil
+}
+
+// ReadRegularPrefix is ReadRegular for the first limit bytes of the file, which
+// may be all of it.
+func ReadRegularPrefix(path string, limit int64) ([]byte, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0) //nolint:gosec // path is an entry of the memory dir being imported
 	if errors.Is(err, syscall.ELOOP) {
 		return nil, errors.New("a symlink, not a regular file")
@@ -129,14 +142,7 @@ func ReadRegular(path string) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, errors.New("not a regular file")
 	}
-	raw, err := io.ReadAll(io.LimitReader(f, maxSource+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(raw) > maxSource {
-		return nil, fmt.Errorf("larger than %d bytes", maxSource)
-	}
-	return raw, nil
+	return io.ReadAll(io.LimitReader(f, limit))
 }
 
 var indexLinkRE = regexp.MustCompile(`^- \[[^\]]*\]\(([^)]*)\)`)

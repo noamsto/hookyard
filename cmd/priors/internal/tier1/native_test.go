@@ -2,14 +2,15 @@ package tier1
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
+	"github.com/noamsto/hookyard/cmd/priors/internal/importer"
 )
 
 // writeNative writes a topic file and links it from the dir's MEMORY.md, the
@@ -68,10 +69,10 @@ func TestNativeIndexReadsTopicFilesOnly(t *testing.T) {
 	appendIndex(t, dir, "- [l](link.md)\n- [p](pipe.md)\n- [esc](../outside.md)\n")
 
 	n := nativeIndex(context.Background(), dir)
-	if len(n.names) != 1 || !n.names["good-name"] {
+	if _, ok := n.names["good-name"]; len(n.names) != 1 || !ok {
 		t.Errorf("names = %v, want only good-name", n.names)
 	}
-	if len(n.sources) != 1 || !n.sources["~/.claude/projects/p/memory/good.md"] {
+	if _, ok := n.sources["~/.claude/projects/p/memory/good.md"]; len(n.sources) != 1 || !ok {
 		t.Errorf("sources = %v, want only ~/.claude/projects/p/memory/good.md", n.sources)
 	}
 }
@@ -89,7 +90,7 @@ func TestNativeIndexIgnoresUnlinkedTopics(t *testing.T) {
 	writeNative(t, dir, "linked.md", mk("linked", "d", "global"))
 
 	n := nativeIndex(context.Background(), dir)
-	if n.names["loose"] || !n.names["linked"] {
+	if _, loose := n.names["loose"]; loose || len(n.names) != 1 {
 		t.Errorf("names = %v, want linked only", n.names)
 	}
 }
@@ -106,7 +107,7 @@ func TestNativeIndexIgnoresLinksPastLoadedHead(t *testing.T) {
 	dir := nativeDir(t)
 	writeNativeUnlinked(t, dir, "late.md", mk("late", "d", "global"))
 	appendIndex(t, dir, strings.Repeat("filler\n", 200)+"- [l](late.md)\n")
-	if n := nativeIndex(context.Background(), dir); n.names["late"] {
+	if n := nativeIndex(context.Background(), dir); len(n.names) != 0 {
 		t.Errorf("a link past line 200 counted: %v", n.names)
 	}
 }
@@ -121,15 +122,46 @@ func TestNativeIndexStopsWhenContextDone(t *testing.T) {
 	}
 }
 
-func TestNativeIndexCapsTopicReads(t *testing.T) {
+func TestNativeIndexSkipsHugeFrontmatter(t *testing.T) {
 	dir := nativeDir(t)
-	for i := range maxNativeTopics + 5 {
-		file := fmt.Sprintf("t%03d.md", i)
-		writeNativeUnlinked(t, dir, file, mk(fmt.Sprintf("t%03d", i), "d", "global"))
-		appendIndex(t, dir, "- [t]("+file+")\n")
+	writeNative(t, dir, "ok.md", mk("ok", "d", "global"))
+	huge := "---\nname: big\ndescription: d\n" + strings.Repeat("k: v\n", 1<<18) + "---\nbody\n"
+	if err := os.WriteFile(filepath.Join(dir, "big.md"), []byte(huge), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	// Past line 200 these are ignored anyway; the cap bounds reads on top.
-	if n := nativeIndex(context.Background(), dir); len(n.names) > maxNativeTopics {
-		t.Errorf("read %d topics, cap %d", len(n.names), maxNativeTopics)
+	appendIndex(t, dir, "- [b](big.md)\n")
+
+	start := time.Now()
+	n := nativeIndex(context.Background(), dir)
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("nativeIndex took %v", d)
+	}
+	if _, ok := n.names["big"]; ok {
+		t.Errorf("a frontmatter past the read head counted: %v", n.names)
+	}
+	if _, ok := n.names["ok"]; !ok {
+		t.Errorf("names = %v, want ok", n.names)
+	}
+}
+
+func TestNativeHasNeedsMatchingDescription(t *testing.T) {
+	dir := nativeDir(t)
+	writeNative(t, dir, "a.md", mk("a", "same", "global"))
+	n := nativeIndex(context.Background(), dir)
+
+	if !n.has(mk("a", " same ", "global")) {
+		t.Error("same name and description not native")
+	}
+	if n.has(mk("a", "different", "global")) {
+		t.Error("same name, different description counted as native")
+	}
+	claude := mk("a", "edited", "global")
+	claude.Metadata.Source = &fact.Source{Engine: "claude", Path: importer.SourcePath(filepath.Join(dir, "a.md"))}
+	if n.has(claude) {
+		t.Error("an import whose native file was edited counted as native")
+	}
+	claude.Description = "same"
+	if !n.has(claude) {
+		t.Error("a genuine import did not count as native")
 	}
 }
