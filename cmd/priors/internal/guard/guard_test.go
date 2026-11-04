@@ -341,6 +341,15 @@ func TestShellDenies(t *testing.T) {
 		{name: "opaque rename target for crew", want: "which holds the personal store", cwd: ".", input: bash(`cp /bin/rm ~/bin/"$(printf crew)"; crew reply x .`)},
 		{name: "trap body runs a renamed crew", want: "which holds the personal store", cwd: ".", input: bash(`trap 'crew reply x .' EXIT; alias crew=rm`)},
 
+		// Finite for-loop variables.
+		{name: "loop value as a write target", want: "an .attest dir", cwd: ".", input: bash(`for f in a .attest/x; do touch "$f"; done`)},
+		{name: "loop value as the command word", want: "inside the personal store", input: bash(`for c in rm cat; do $c ~/notes/MEMORY.md; done`)},
+		{name: "printf -v before a subshell loop", want: "which holds the personal store", cwd: ".", input: bash(`printf -v n %s%s cr ew; (for n in 1 2; do :; done); cp /bin/rm ~/bin/$n; crew reply x .`)},
+		{name: "indirect arithmetic default after a skipped loop", want: "which holds the personal store", cwd: ".", input: bash(`read -r x < f; false && for n in a b; do :; done; (( ${!x:=rew} )); cp /bin/rm ~/bin/c$n; crew reply x .`)},
+		{name: "assignment index after a skipped loop", want: "which holds the personal store", cwd: ".", input: bash(`read -r x < f; false && for n in a b; do :; done; a[x]=1; cp /bin/rm ~/bin/c$n; crew reply x .`)},
+		{name: "read of a glob-named variable after a skipped loop", want: "which holds the personal store", cwd: ".", input: bash(`false && for n in a b; do :; done; read ? < f; cp /bin/rm ~/bin/c$n; crew reply x .`)},
+		{name: "xtrace prompt default after a skipped loop", want: "which holds the personal store", cwd: ".", input: bash(`read -r x < f; false && for n in a b; do :; done; PS4='${!x:=rew}'; set -x; :; set +x; cp /bin/rm ~/bin/c$n; crew reply x .`)},
+
 		// sed scripts read as programs.
 		{name: "sed s w flag with e", want: "inside the personal store", input: bash(`sed 's/e/x/w @H/notes/facts/a.md' f`)},
 		{name: "sed e command", want: "runs in", cwd: "notes", input: bash(`sed '1e touch x' f`)},
@@ -454,6 +463,10 @@ func TestShellAllows(t *testing.T) {
 		{name: "grep pattern with a slash", input: bash(`grep -r 'notes/x' .`)},
 		{name: "git commit message with store name", input: bash(`git commit -m "fix notes handling"`)},
 		{name: "gh pr body with store name", input: bash(`gh pr create --title t --body "fix notes handling"`)},
+
+		// Finite for-loop variables.
+		{name: "loop over issue numbers with a jq alternative", input: bash(`for n in 254 221; do gh issue view $n --json title --jq '.title, (.comments[-1].body // "" | .[0:600])'; done`)},
+		{name: "loop over crew replies", cwd: ".", input: bash(`for w in a b; do crew reply $w "a / b"; done`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.tool == "" {
