@@ -128,6 +128,24 @@ func TestShellAccess(t *testing.T) {
 		{name: "PATH expansion reads", cmd: `echo $PATH ${PATH} "$PATH" ${PATH:-x} $IFS $GOPATH`},
 		{name: "GOPATH export is no writer", cmd: "export GOPATH=/x PATHS=y"},
 		{name: "declare without nameref stays", cmd: "declare -x r=1; cd store", absent: []Touch{{Opaque: true, Chdir: true}}},
+		{name: "export -n is no nameref", cmd: "export -n FOO; cd store", absent: []Touch{{Opaque: true, Chdir: true}}},
+		{name: "builtin export -n is no nameref", cmd: "builtin export -n FOO; cd store", writes: true, absent: []Touch{{Opaque: true, Chdir: true}}},
+		{name: "readonly -n is no nameref", cmd: "readonly -n FOO; cd store", absent: []Touch{{Opaque: true, Chdir: true}}},
+		{name: "opaque arithmetic word without an assignment", cmd: "n=$1; (( i < $n )); d=/h/a; rm $d", writes: true, want: []Touch{w("/h/a")}},
+		{name: "let of an opaque word holding an assignment", cmd: `v=i; let "${v^^}FS=0"; d=/h/a; rm $d`, writes: true, want: []Touch{opaque}},
+		{name: "unparsable arithmetic value may set any name", cmd: "x='$(rm /h/store/M) b'; (( x )); d=/h/a; rm $d", writes: true, want: []Touch{opaque, w("/h/store/M")}},
+		{name: "default assignment inside arithmetic", cmd: "(( ${IFS:=5} )); d=/h/a; rm $d", writes: true, want: []Touch{opaque}},
+		{name: "every assigned value is read as arithmetic", cmd: "x=0; x='a[$(rm /h/store/M)]'; (( x ))", writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "appended value is read as arithmetic", cmd: "x='a[$(rm /h/st'; x+='ore/M)]'; (( x ))", writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "printf -v value is read as arithmetic", cmd: "printf -v x %s 'a[$(rm /h/store/M)]'; (( x ))", writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "printf -v escaped value is read as arithmetic", cmd: `printf -v x 'a[\x24(rm /h/store/M)]'; (( x ))`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "read here-string value is read as arithmetic", cmd: "read x <<< 'a[$(rm /h/store/M)]'; (( x ))", writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "expansion index is arithmetic", cmd: "a=(1); x='a[$(rm /h/store/M)]'; echo ${a[x]}", writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "expansion slice is arithmetic", cmd: "s=abc; x='a[$(rm /h/store/M)]'; echo ${s:x}", writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "expansion length index is arithmetic", cmd: "a=(1); x='a[$(rm /h/store/M)]'; echo ${#a[x]}", writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "all-elements index is no arithmetic", cmd: `for n in 1 2; do gh issue view $n --jq /h/store/M; done; echo ${#a[@]}`, writes: true, absent: []Touch{w("/h/store/M")}},
+		{name: "quoted paren beside an arithmetic substitution", cmd: `(( $(echo "(") + $(rm /h/store/M) ))`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "quoted paren beside a value substitution", cmd: `x='a[$(echo "(") + $(rm /h/store/M)]'; (( x ))`, writes: true, want: []Touch{w("/h/store/M")}},
 		{name: "IFS unchanged splits", cmd: "d='/h/store /h/x'; echo $d", want: []Touch{m("/h/store"), m("/h/x")}},
 		{name: "quote-split declared IFS splits opaquely", cmd: "d=/h/a; declare 'I'FS=Q; rm $d", writes: true, want: []Touch{opaque}},
 		{name: "case-changing declare value is opaque", cmd: "declare -l d=/h/A; rm $d", writes: true, want: []Touch{opaque}},
@@ -156,11 +174,14 @@ func TestShellAccess(t *testing.T) {
 
 		// A writer's option values.
 		{name: "long option value is a write and a dir", cmd: "unshare --wd=store touch M", writes: true, want: []Touch{w("store"), cd("store")}},
-		{name: "single-dash name=value has one value", cmd: "go test -count=1", writes: true, want: []Touch{cd("1")}, absent: []Touch{cd("ount=1"), w("t=1")}},
+		{name: "single-dash name=value is a cluster too", cmd: "go test -count=1", writes: true, want: []Touch{cd("1"), cd("ount=1"), w("t=1")}},
+		{name: "single-dash name=value cluster suffixes", cmd: "unshare -wa=b touch M", writes: true, want: []Touch{cd("a=b"), cd("=b"), cd("b")}},
 		{name: "cluster suffix is a dir", cmd: "env -vCstore touch M", writes: true, want: []Touch{cd("store")}},
+		{name: "cluster past the bound is unreadable", cmd: "env -vvvvvvvvvvvvvvvvvvvvCstore rm -rf M", writes: true, want: []Touch{cd("store"), opaque, {Opaque: true, Chdir: true}}},
 		{name: "word after an abbreviated option is a dir", cmd: "env --ch store touch M", writes: true, want: []Touch{cd("store")}},
 		{name: "glued shell text is a script", cmd: "foo -c'rm -rf /h/store'", writes: true, want: []Touch{w("/h/store")}},
-		{name: "option dirs past the cap", cmd: "rm -a 1 -b 2 -c 3 -d 4 -e 5 -f 6 -g 7 -h 8 -i 9 x", writes: true, want: []Touch{{Opaque: true, Chdir: true}}},
+		{name: "option dirs past the bound", cmd: "rm" + strings.Repeat(" -a 1", maxSubTokens+1) + " x", writes: true, want: []Touch{{Opaque: true, Chdir: true}}},
+		{name: "many option dirs stay known", cmd: "rm -a 1 -b 2 -c 3 -d 4 -e 5 -f 6 -g 7 -h 8 -i 9 x", writes: true, want: []Touch{cd("9")}, absent: []Touch{{Opaque: true, Chdir: true}}},
 		{name: "data word is no option value", cmd: "claude -p /h/store --model opus", writes: true, absent: []Touch{cd("/h/store"), w("/h/store")}},
 		{name: "reader option value is no dir", cmd: "cat -A /h/store", absent: []Touch{cd("/h/store")}},
 
@@ -405,6 +426,10 @@ func TestShellAccessBounded(t *testing.T) {
 		// No suffix of a cluster parses, so each is tried.
 		{"option clusters holding shell text", repeated(func(i int) string { return "'-abcdefghijklmnop;;" + strconv.Itoa(i) + "'" })},
 		{"option values past the dir cap", repeated(func(i int) string { return "--o" + strconv.Itoa(i) + "=d" + strconv.Itoa(i) })},
+		{"unclosed brackets in a glob", "echo '" + strings.Repeat("[)", 40<<10) + "'"},
+		{"unclosed class openers in a glob", "echo '" + strings.Repeat("[:)", 2<<10) + "'"},
+		{"unclosed class openers before a close", "echo '" + strings.Repeat("[:)", 2<<10) + "]'"},
+		{"unclosed brackets before an escaped close", "echo '" + strings.Repeat("[)", 40<<10) + `\]'`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cmd := tt.cmd

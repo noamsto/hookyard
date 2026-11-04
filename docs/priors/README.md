@@ -443,18 +443,24 @@ In a shell command:
   the command names a guarded path;
 - `pushd` and `popd` with `+N` or `-N` name a dir the guard cannot tell;
 - naming `PATH`, `BASH_ENV`, `ENV`, `CDPATH`, `IFS`, `BASH_CMDS` or
-  `BASH_ALIASES` other than as an expansion, or declaring a nameref, makes the
-  command one that may write; assigning any `GIT_*` or `LD_*` variable is a
+  `BASH_ALIASES` other than as an expansion, or declaring a nameref (`-n` of
+  `declare`, `typeset` or `local`; `export -n` unexports, and `readonly -n`
+  declares none), makes the command one that may write; assigning any `GIT_*` or `LD_*` variable is a
   write, like assigning `PATH`. The name counts in any spelling (quoted,
   escaped, brace-expanded, ANSI-C-quoted, or built at run time) in a setter's
   name position (`declare`, `typeset`, `local`, `export` and `readonly`,
   naked names and a `-n` target included; `read`, `mapfile` and `readarray`,
   `printf -v`, `getopts`, `wait -p`, `unset`, and a `{var}` redirect), in a
   rendered word (`PATH`, `BASH_ENV`, `ENV`, `CDPATH` and `IFS` only), and
-  inside arithmetic (`(( ))`, `let`, an index). Once
-  arithmetic is evaluated anywhere in the command, it also counts in any
-  value the command assigns (`x='I'"FS=5"; (( x ))`). While `IFS` may have
-  changed, the words of an unquoted expansion cannot be told;
+  inside arithmetic (`(( ))`, `let`, an index, an expansion's index or slice:
+  `${a[i]}`, `${s:i}`, `${#a[i]}`). Once arithmetic is evaluated anywhere in
+  the command, it also counts in every value the command assigns, not only a
+  name's first (`x='I'"FS=5"; (( x ))`): each assignment, an append joined to
+  the name's last value, a `declare`-family `NAME=value`, what `printf -v`
+  prints, and the heredoc or here-string `read` reads. An opaque word inside
+  arithmetic whose text holds `=`, `++` or `--` (`let "${v^^}FS=0"`) may set
+  any name. While `IFS` may have changed, the words of an unquoted expansion
+  cannot be told;
 - `eval` always reads its arguments as a script, and so does a `sh -c`-style
   string (`bash`, `sh`, `zsh`, `dash`, `ksh` or `ash` with `-c`). `source`, `.`,
   an opaque command word and an opaque setter name (`read -r "$name"`) are a
@@ -464,12 +470,14 @@ In a shell command:
   value-changing option: `-n`, `-l`, `-u`, `-c`, `-i`, `-a` or `-A`);
 - a command whose `IFS` or `CDPATH` changes anywhere in it is read as if it
   had changed from the start, so a function body or a trap that runs a word
-  after the setter is read under it. The command is read twice within the
-  same parse budget;
-- the value of a writer's option is an operand: `--name=value`,
-  `-name=value` (one value), the suffixes of a short-option cluster, and the
-  word after an option (`env -vC dir`, `sudo -iD dir`, `env --ch dir`) are
-  judged like the writer's other operands. A value holding shell text is read
+  after the setter is read under it. The command is read again until neither
+  changes (at most three reads), within the same parse budget;
+- the value of a writer's option is an operand: `--name=value`, the suffixes
+  of a short-option cluster (a `-name=value` is one, and its `value` counts
+  too), and the word after an option (`env -vC dir`, `sudo -iD dir`, `env --ch
+  dir`) are judged like the writer's other operands. A cluster of more than
+  16 letters is read by the suffixes after its first and last 16, and is also
+  an opaque write and a dir that cannot be told. A value holding shell text is read
   as a script (`env -u X --split-string='rm -rf .'`, `foo -c'rm -rf .'`), and
   a value is a dir that the command's relative writes resolve against, from
   the cwd and every dir the command changes into; only relative writes are
@@ -484,9 +492,12 @@ In a shell command:
   unknown key are also joined for the `reviewed` check, so a claim split
   across them is seen;
 - a POSIX bracket class (`[[:alpha:]]`) in a glob matches any one character;
-- arithmetic substitutions inside arithmetic are read as scripts, and so is an
-  assigned value holding `$(` or a backtick once arithmetic is evaluated. A
-  `$(( … ))` is arithmetic, not a substitution;
+- a substitution inside arithmetic is read as the statements it runs, like
+  any other. A setter's subscript, and once arithmetic is evaluated an
+  assigned value holding `$(`, `${` or a backtick, is parsed as an arithmetic
+  expression and read the same way; one that does not parse may set any name,
+  is an opaque write, and the substitutions a scan of its text finds are read
+  as scripts. A `$(( … ))` is arithmetic, not a substitution;
 - a heredoc or here-string to a writer is read per value when it holds a loop
   variable; the names `claude`, `gh`, `glab` and `crew` as data takers are
   matched as globs (`~/bin/g?` may be `gh`); an output redirect to a run-time
@@ -612,7 +623,8 @@ and the write.
 It also does not see these open classes:
 
 - arithmetic on run-time data (`read x; (( x ))`, `(( $n ))` with `n`
-  unknown), which can name a protected variable;
+  unknown, an opaque word whose own text holds no `=`, `++` or `--`), which
+  can name a protected variable;
 - a runner that takes its dir as a positional word (`chroot sub rm ../notes`),
   and a dir that comes from a config or env file;
 - an opaque option value (`--wd=$X`): it is an opaque write word, not a dir;
@@ -643,7 +655,7 @@ It over-denies:
   `for` variable, when the variable is mentioned elsewhere in the command
   (`echo "n=$n"`, a jq filter `.n` read by `jq`), a `$(…)` or unknown
   variable sits beside the loop, the command uses arithmetic anywhere
-  (`$((…))`, `[[ $n -gt 1 ]]`), the loop runs over more than 64 values or
+  (`$((…))`, `[[ $n -gt 1 ]]`, `${a[i]}`), the loop runs over more than 64 values or
   a glob, or the loop sits beside any other command or assignment (`test`,
   `read`, `x=1`);
 - a reader run behind a flagged wrapper (`nice -n 5 git status`) in a store or
@@ -662,11 +674,13 @@ It over-denies:
   expansions and relative `cd`s are unknown;
 - a writer's option value or glued short-option suffix that names a store, `.`
   or a dir holding one relative to the cwd (`rsync --exclude=notes`, `foo -o.`
-  from `~`), or that holds shell text, which is read as a script; past 8
-  option values per call, 256 dirs from option values or 32 dirs the command
+  from `~`), or that holds shell text, which is read as a script; past 256
+  dirs from option values (in one call or in all) or 32 dirs the command
   changes into, the relative writes of a command that names a guarded path
   are unknown, and so is a glued value long enough to pass the parse budget;
-  option dirs never push a later `cd` out;
+  option dirs never push a later `cd` out; a writer's short-option cluster
+  of more than 16 letters (`-DVERYLONGMACRONAME`) is an opaque write and a
+  dir that cannot be told;
 - a write tool's text under an unknown key (or a content key when the input
   has no path key) that holds a path token naming a store, a dir holding one
   or an `.attest` element (an issue comment body naming `~/notes/MEMORY.md`),
@@ -677,8 +691,12 @@ It over-denies:
   to a run-time target withdraw data positions; a writer's heredoc or
   here-string holding a substitution or an unknown variable is an opaque
   write;
-- arithmetic anywhere in a command that assigns a value holding `$(` or a
-  backtick;
+- arithmetic anywhere in a command that assigns a value holding `$(`, `${`
+  or a backtick, which may then write, and may set any name when the value
+  does not parse as arithmetic (`x='echo ${y}'`); a setter's subscript that
+  does not parse as arithmetic (`unset 'm[a b]'`), which may set any name;
+- an opaque word inside arithmetic whose text holds `=`, `++` or `--`
+  (`let "i=$1+1"`), which may set any name;
 - a POSIX class in a glob that names a guarded path matches any one
   character;
 - with `CDPATH` set on the host, a relative `cd` and relative write in a

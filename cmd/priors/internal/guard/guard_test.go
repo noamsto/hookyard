@@ -455,6 +455,17 @@ func TestShellDenies(t *testing.T) {
 		{name: "read subscript substitution", want: "which holds the personal store", cwd: ".", input: bash(`read 'a[$(rm -rf .)]'`)},
 		{name: "arithmetic substitution", want: "which holds the personal store", cwd: ".", input: bash(`(( $(rm -rf .) ))`)},
 		{name: "arithmetic expansion value substitution", want: "which holds the personal store", cwd: ".", input: bash(`x='a[$(rm -rf .)]'; echo $(( x ))`)},
+		{name: "CDPATH set only under the re-read IFS", want: "from a dir it changes into at run time", input: bash(`c=exportQCDPATH=$HOME; f(){ cd notes && touch zz; }; g(){ $c; }; read I\FS <<< Q; g; f`)},
+		{name: "arithmetic reads a later assigned value", want: "inside the personal store", input: bash(`x=0; x='a[$(rm -rf ../notes/facts)]'; (( x ))`)},
+		{name: "arithmetic reads a printf -v value", want: "the personal store", input: bash(`printf -v x %s 'a[$(cd ..; rm -rf no*s)]'; (( x ))`)},
+		{name: "expansion index value substitution", want: "inside the personal store", input: bash(`a=(1); x='a[$(rm -rf ../notes/facts)]'; echo ${a[x]}`)},
+		{name: "expansion slice value substitution", want: "inside the personal store", input: bash(`s=abc; x='a[$(rm -rf ../notes/facts)]'; echo ${s:x}`)},
+		{name: "expansion length index value substitution", want: "inside the personal store", input: bash(`a=(1); x='a[$(rm -rf ../notes/facts)]'; echo ${#a[x]}`)},
+		{name: "quoted paren beside an arithmetic substitution", want: "the personal store", input: bash(`(( $(echo "(") + $(cd ..; rm -rf no*s) ))`)},
+		{name: "quoted paren beside a value substitution", want: "the personal store", input: bash(`x='a[$(echo "(") + $(cd ..; rm -rf no*s)]'; (( x ))`)},
+		{name: "let of a case-changed IFS", want: "builds at run time", input: bash(`v=i; let "${v^^}FS=0"; y=/nonexist0../notes; rm -rf $y`)},
+		{name: "default IFS inside arithmetic", want: "builds at run time", input: bash(`(( ${IFS:=0} )); y=/nonexist0../notes; rm -rf $y`)},
+		{name: "let of an indirect IFS", want: "builds at run time", input: bash(`v=I; r=v; let "${!r}FS=0"; y=/nonexist0../notes; rm -rf $y`)},
 
 		// POSIX classes in a glob.
 		{name: "posix class rm", want: "inside the personal store", input: bash("rm -rf ~/note[[:alpha:]]")},
@@ -480,6 +491,8 @@ func TestShellDenies(t *testing.T) {
 		{name: "writer option before a relative store path names it", want: `(from the argument "notes/x")`, cwd: ".", input: bash(`rm -rf notes/x`)},
 		{name: "env glued split string", want: "which holds the personal store", cwd: ".", input: bash(`env -u X --split-string='rm -rf .'`)},
 		{name: "glued c script", want: "which holds the personal store", cwd: ".", input: bash(`foo -c'rm -rf .'`)},
+		{name: "cluster past the suffix bound", want: "the personal store", cwd: ".", input: bash(`env -vvvvvvvvvvvvvvvvvvvvCnotes rm -rf facts`)},
+		{name: "cluster past the suffix bound after cd", want: "the personal store", input: bash(`cd .. && env -vvvvvvvvvvvvvvvvvvvvCnotes rm -rf facts`)},
 		// A dir or script in a word of its own is read already.
 		{name: "env abbreviated separate chdir", want: "the personal store", cwd: ".", input: bash(`env --ch notes touch MEMORY.md`)},
 		{name: "env cluster separate chdir", want: "the personal store", cwd: ".", input: bash(`env -vC notes touch MEMORY.md`)},
@@ -579,11 +592,16 @@ func TestShellAllows(t *testing.T) {
 		{name: "c-style loop then ls of a store", input: bash(`for ((i=0; i<3; i++)); do echo $i; done; ls ~/notes`)},
 		{name: "arithmetic expansion then cat of a store", input: bash(`n=3; echo $(( n + 1 )); cat ~/notes/MEMORY.md`)},
 		{name: "integer test then rg of a store", input: bash(`[[ 1 -lt 2 ]] && rg x ~/notes`)},
+		{name: "c-style loop to an unknown bound then cat of a store", input: bash(`n=$1; for ((i=0; i<$n; i++)); do echo $i; done; cat ~/notes/MEMORY.md`)},
+		{name: "export -n then cat of a store", input: bash(`export -n FOO; cat ~/notes/facts/a.md`)},
 
 		// Writers with option values that name no store.
 		{name: "go test with options", input: bash(`go test ./... -run TestX -count=1 -v`)},
 		{name: "go test of a notes package", input: bash(`go test ./internal/notes/ -run TestX -count=1 -v`)},
 		{name: "go test vet and build", input: bash(`go test ./... -run TestX -count=1 -timeout 30s -v && go vet ./... && go build -o bin/x ./cmd/x`)},
+		{name: "go test of a notes package with a timeout", input: bash(`go test ./internal/notes/ -run TestX -count=1 -timeout 30s -v`)},
+		{name: "go test race of notes packages", input: bash(`go test -race -timeout 60s ./internal/notes/...`)},
+		{name: "gh pr create with many options and a store path in the body", input: bash(`gh pr create --title t --body "see ~/notes/facts/a.md" --base main --head b --assignee me --label a --label b --label c --reviewer r1 --reviewer r2 --milestone m`)},
 		{name: "crew await with a timeout", input: bash(`crew await X --timeout 300`)},
 		{name: "crew status with a flag", input: bash(`crew status X working --restamp`)},
 		{name: "gh pr create with a body file", input: bash(`gh pr create --title t --body-file /tmp/b`)},
