@@ -399,6 +399,10 @@ func TestShellDenies(t *testing.T) {
 		{name: "sed in-place script trailing slash regex", want: "which holds", input: bash(`sed -i 's/^        monthlyTarget = 100;$/        monthlyTarget = 30;/' home/ai/claude-code/default.nix`)},
 		{name: "posix order sed file operand", want: "inside the personal store", cwd: "work", input: bash(`POSIXLY_CORRECT=1 sed -i --follow-symlinks s/a/b/ -e P`)},
 		{name: "env posix order sed file operand", want: "inside the personal store", cwd: "work", input: bash(`env POSIXLY_CORRECT=1 sed -i --follow-symlinks s/a/b/ -e P`)},
+
+		// POSIX classes in a glob.
+		{name: "posix class rm", want: "inside the personal store", input: bash("rm -rf ~/note[[:alpha:]]")},
+		{name: "posix class attest", want: "an .attest dir", input: bash("touch /srv/other/.[[:alpha:]]ttest/e")},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.linuxOnly && runtime.GOOS != "linux" {
@@ -418,6 +422,7 @@ func TestShellAllows(t *testing.T) {
 		{name: "project write", input: bash("echo x > ~/work/notes.md")},
 		{name: "sibling store name", input: bash("echo x > ~/notes-old/MEMORY.md")},
 		{name: "store name prefix", input: bash("mkdir -p ~/notesx && echo x > ~/notesx/f")},
+		{name: "posix class glob in project", input: bash("rm -f ~/work/[[:alpha:]]*.o")},
 		{name: "attest prefix name", input: bash("touch ~/work/sub/.attestation/y")},
 		{name: "index name elsewhere", input: bash("echo x > MEMORY.md")},
 		{name: "cat store", input: bash("cat ~/notes/MEMORY.md")},
@@ -586,6 +591,21 @@ func TestToolDenies(t *testing.T) {
 			map[string]any{"oldText": "\"x\"", "newText": ""},
 		}})},
 
+		// Paths packed in one string, JSON in a string, other file forms.
+		{name: "packed paths comma", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__do", input: sb.input(map[string]any{"paths": "@H/work/a,@H/notes/MEMORY.md"})},
+		{name: "packed paths newline", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__do", input: sb.input(map[string]any{"paths": "@H/work/a\n@H/notes/MEMORY.md"})},
+		{name: "packed paths semicolon", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__do", input: sb.input(map[string]any{"paths": "@H/work/a;@H/notes/MEMORY.md"})},
+		{name: "packed paths colon", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__do", input: sb.input(map[string]any{"paths": "@H/work/a:@H/notes/MEMORY.md"})},
+		{name: "packed paths space", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__do", input: sb.input(map[string]any{"paths": "@H/work/a @H/notes/MEMORY.md"})},
+		{name: "packed relative name", want: "which holds the personal store", cwd: ".", tool: "mcp__x__do", input: sb.input(map[string]any{"paths": "a,notes"})},
+		{name: "assignment in args", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__do", input: sb.input(map[string]any{"args": "path=@H/notes/MEMORY.md"})},
+		{name: "long option in args", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__do", input: sb.input(map[string]any{"args": "--out=@H/notes/MEMORY.md"})},
+		{name: "json in a string", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__do", input: sb.input(map[string]any{"args": `{"path":"@H/notes/MEMORY.md"}`})},
+		{name: "file url with one slash", want: "/notes/MEMORY.md, the personal store's generated index", tool: "Write", input: sb.input(map[string]any{"file_path": "file:@H/notes/MEMORY.md", "content": "x"})},
+		{name: "file url with one slash in a uri", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__do", input: sb.input(map[string]any{"uri": "file:@H/notes/MEMORY.md"})},
+		{name: "claim split across lines", want: "/facts/b.md claiming confidence: reviewed", tool: "mcp__x__write", input: sb.input(map[string]any{"path": "@H/notes/facts/b.md", "lines": []any{"---", "name: b", "metadata:", "  confidence: \"re\\", "viewed\"", "---", "body"}})},
+		{name: "posix class write", want: "/MEMORY.md, the personal store's generated index", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/note[[:alpha:]]/MEMORY.md", "content": "x"})},
+
 		// Input the guard cannot read.
 		{name: "invalid json", want: "input cannot be read", tool: "Write", input: `{"file_path": `},
 		{name: "deeply nested input", want: "input is past what the guard reads", tool: "Write", input: strings.Repeat("[", 20) + strings.Repeat("]", 20)},
@@ -639,6 +659,8 @@ func TestToolAllows(t *testing.T) {
 		}})},
 		{name: "content naming a store path", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/b.md", "content": "@H/notes/.attest/e"})},
 		{name: "edit texts naming a store path", tool: "Edit", input: sb.input(map[string]any{"file_path": "@H/work/a.md", "old_string": "@H/notes/MEMORY.md", "new_string": "@H/notes/.attest/e"})},
+		{name: "mcp prose naming no store", tool: "mcp__x__write", input: sb.input(map[string]any{"body": "see a, b and c/d"})},
+		{name: "packed project paths", tool: "mcp__x__do", input: sb.input(map[string]any{"paths": "@H/work/a,@H/work/b"})},
 		{name: "no path", tool: "WebFetch", input: sb.input(map[string]any{"url": "https://example.com"})},
 	} {
 		t.Run(c.name, func(t *testing.T) {

@@ -479,7 +479,8 @@ func (c *check) toolCandidates(p string) []string {
 }
 
 // piPath is p as pi's file tools resolve it: Unicode spaces as spaces, one
-// leading @ dropped, ~ as the home, and a file:// URL as its path.
+// leading @ dropped, ~ as the home, and a file: URL, with or without the
+// slashes of an authority, as its path.
 func (g *Guard) piPath(p string) string {
 	p = strings.Map(func(r rune) rune {
 		if r == '\u00a0' || r >= '\u2000' && r <= '\u200a' || r == '\u202f' || r == '\u205f' || r == '\u3000' {
@@ -495,11 +496,17 @@ func (g *Guard) piPath(p string) string {
 			p = home
 		}
 	}
-	if len(p) < len("file://") || !strings.EqualFold(p[:len("file://")], "file://") {
-		return p
-	}
-	host, rest, _ := strings.Cut(p[len("file://"):], "/")
-	if host != "" && host != "localhost" {
+	var rest string
+	switch {
+	case len(p) >= len("file://") && strings.EqualFold(p[:len("file://")], "file://"):
+		var host string
+		host, rest, _ = strings.Cut(p[len("file://"):], "/")
+		if host != "" && host != "localhost" {
+			return p
+		}
+	case len(p) > len("file:/") && strings.EqualFold(p[:len("file:/")], "file:/"):
+		rest = p[len("file:/"):]
+	default:
 		return p
 	}
 	rest, _, _ = strings.Cut(rest, "?")
@@ -973,7 +980,9 @@ func (c *check) matches(pattern, name string) bool {
 // convertBrackets rewrites bash bracket classes into path.Match syntax. Bash
 // reads a `[` with no close as a literal and a `]` first in a class (after an
 // optional `!` or `^`) as a member, where path.Match errors on both and an
-// error would count as a match. A class negated with `!` becomes `^`.
+// error would count as a match. A class negated with `!` becomes `^`. A class
+// holding a POSIX unit, which path.Match cannot read, becomes `?`, a superset
+// of it.
 func convertBrackets(p string) string {
 	var b strings.Builder
 	for i := 0; i < len(p); i++ {
@@ -999,9 +1008,14 @@ func convertBrackets(p string) string {
 		if leadingClose {
 			j++
 		}
-		end := classEnd(p, j)
+		end, unit := classEnd(p, j)
 		if end < 0 {
 			b.WriteString(`\[`)
+			continue
+		}
+		if unit {
+			b.WriteByte('?')
+			i = end
 			continue
 		}
 		b.WriteByte('[')
@@ -1019,8 +1033,9 @@ func convertBrackets(p string) string {
 }
 
 // classEnd is the index of the `]` closing a bracket class whose members
-// start at p[from], reading `[:…:]`, `[.….]` and `[=…=]` as units, or -1.
-func classEnd(p string, from int) int {
+// start at p[from], reading `[:…:]`, `[.….]` and `[=…=]` as units, or -1. It
+// also reports whether the members hold such a unit.
+func classEnd(p string, from int) (end int, unit bool) {
 	for k := from; k < len(p); k++ {
 		switch p[k] {
 		case '\\':
@@ -1029,13 +1044,14 @@ func classEnd(p string, from int) int {
 			if k+1 < len(p) && strings.IndexByte(":.=", p[k+1]) >= 0 {
 				if n := strings.Index(p[k+2:], string(p[k+1])+"]"); n >= 0 {
 					k += n + 3
+					unit = true
 				}
 			}
 		case ']':
-			return k
+			return k, unit
 		}
 	}
-	return -1
+	return -1, false
 }
 
 // convertExtglob reads an extglob group (`@(x)`, `!(x)`) as `*`.
@@ -1123,19 +1139,27 @@ type edit struct {
 	pi bool
 }
 
-// judged are the strings judged as paths, as they are and trimmed: those
-// under a path key, and the short ones of other. A call that names no path
-// is judged by its content too.
+// judged are the strings judged as paths, as they are and trimmed, with the
+// path tokens each holds: those under a path key, and the short ones of
+// other. A call that names no path is judged by its content too. A string
+// under a path key also yields each of its fields, since it may pack a list.
 func (in *toolInput) judged() []string {
 	var out []string
-	add := func(s string) {
+	add := func(s string, packed bool) {
 		out = append(out, s)
 		if t := strings.TrimSpace(s); t != s {
 			out = append(out, t)
 		}
+		if len(s) > maxPath {
+			return
+		}
+		out = append(out, gate.PathTokens(s)...)
+		if packed {
+			out = append(out, gate.PathFields(s)...)
+		}
 	}
 	for _, s := range in.paths {
-		add(s)
+		add(s, true)
 	}
 	short := in.other
 	if len(in.paths) == 0 {
@@ -1143,7 +1167,7 @@ func (in *toolInput) judged() []string {
 	}
 	for _, s := range short {
 		if len(s) <= maxPath {
-			add(s)
+			add(s, false)
 		}
 	}
 	return out
@@ -1172,6 +1196,12 @@ func (in *toolInput) walk(v any, depth int) {
 	case string:
 		if strings.Contains(v, "*** Begin Patch") {
 			in.patches = append(in.patches, parsePatch(v)...)
+		}
+		if t := strings.TrimSpace(v); t != "" && (t[0] == '{' || t[0] == '[') && json.Valid([]byte(t)) {
+			var inner any
+			if json.Unmarshal([]byte(t), &inner) == nil {
+				in.walk(inner, depth+1)
+			}
 		}
 	}
 }
@@ -1225,7 +1255,9 @@ func (in *toolInput) editsOf(m map[string][]any) (taken []string) {
 	return taken
 }
 
-// strings adds the strings in v, in arrays nested to any depth, to out.
+// strings adds the strings in v, in arrays nested to any depth, to out. An
+// array of several strings under a content or unknown key is also added
+// joined, since a claim can be split across its elements.
 func (in *toolInput) strings(v any, out *[]string, depth int) {
 	switch v := v.(type) {
 	case string:
@@ -1235,8 +1267,15 @@ func (in *toolInput) strings(v any, out *[]string, depth int) {
 			in.truncated = true
 			return
 		}
+		var elems []string
 		for _, e := range v {
 			in.strings(e, out, depth+1)
+			if s, ok := e.(string); ok {
+				elems = append(elems, s)
+			}
+		}
+		if len(elems) >= 2 && out != &in.paths {
+			*out = append(*out, strings.Join(elems, "\n"), strings.Join(elems, ""))
 		}
 	}
 }
