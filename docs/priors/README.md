@@ -454,8 +454,9 @@ In a shell command:
   the call's data positions in place (`for n in 1 2; do gh issue view $n --jq '.a // .b'; done`),
   unless the command also sets the variable (any other assignment, `read`,
   `mapfile`, `printf -v`, arithmetic, a `{name}` redirect) or mentions it in
-  any other word, declares a nameref, expands a loop variable in arithmetic,
-  or holds any other word whose value the text does not tell; and a word,
+  any other word, declares a nameref, uses arithmetic, an array subscript, an
+  integer test or `declare -i` anywhere, or holds any other word whose value
+  the text does not tell; and a word,
   redirect target or path named `claude`, `gh`, `glab` or `crew` that is not
   a call's own command word (`ln -s /bin/rm ~/bin/crew`, `cat /bin/rm >
   ~/bin/gh`). A renamed data taker cannot hide a write: its words are judged
@@ -536,7 +537,8 @@ It over-denies:
 - such a data position in a command whose write word is opaque through a
   `for` variable, when the variable is mentioned elsewhere in the command
   (`echo "n=$n"`, a jq filter `.n` read by `jq`), a `$(…)` or unknown
-  variable sits beside the loop, or the loop runs over more than 64 values or
+  variable sits beside the loop, the command uses arithmetic anywhere
+  (`$((…))`, `[[ $n -gt 1 ]]`), or the loop runs over more than 64 values or
   a glob;
 - a reader run behind a flagged wrapper (`nice -n 5 git status`) in a store or
   naming one;

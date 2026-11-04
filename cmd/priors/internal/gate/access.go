@@ -189,17 +189,17 @@ type accessor struct {
 	// mentioned are the loop names a rendered field, an arithmetic source or a
 	// redirect's {varname} names, any of which may set them again.
 	mentioned map[string]bool
-	// mentions are every string mention saw and sums every arithmetic source,
-	// in or out of a loop's reach, checked against the exempted names once the
-	// walk finishes.
-	mentions, sums []string
+	// mentions are every string mention saw, in or out of a loop's reach,
+	// checked against the exempted names once the walk finishes.
+	mentions []string
 	// pins are the loop variables pinned to one value each, innermost last.
 	pins []pinning
 	// nameref reports a declared nameref, which may set any loop variable.
 	nameref bool
 	// wild reports an opaque word not opaque only through finite loop
-	// variables, or arithmetic expanding one, either of which may compute a
-	// loop variable's name.
+	// variables, or anything bash evaluates as arithmetic, which reads a
+	// variable's value as an expression: either may compute a loop variable's
+	// name.
 	wild bool
 	// exempted are the loop names a call's per-value check let through.
 	exempted map[string]bool
@@ -267,9 +267,14 @@ func (a *accessor) scan(text string, stmts []*syntax.Stmt) {
 	}
 	for _, s := range stmts {
 		walkBounded(s, func(n syntax.Node) bool {
-			if declaresNameref(n) {
+			if declares(n, "n") {
 				a.changes(true, true)
 				a.nameref = true
+			}
+			// An integer variable evaluates every value assigned to it as
+			// arithmetic, which writes nothing by itself.
+			if declares(n, "i") {
+				a.wild = true
 			}
 			if _, ok := n.(*syntax.FuncDecl); ok {
 				a.redefines = true
@@ -358,9 +363,9 @@ func loneDash(s string, i int) bool {
 	return i >= 0 && s[i] == '-' && (i == 0 || s[i-1] != '-' && !nameByte(s[i-1]))
 }
 
-// declaresNameref reports a declare, typeset or local with an option cluster
-// holding n; a word that is not literal may be one.
-func declaresNameref(n syntax.Node) bool {
+// declares reports a declare, typeset or local with an option cluster holding
+// flag; a word that is not literal may be one.
+func declares(n syntax.Node, flag string) bool {
 	var opts []string
 	switch n := n.(type) {
 	case *syntax.DeclClause:
@@ -384,7 +389,7 @@ func declaresNameref(n syntax.Node) bool {
 		opts = words[idx+1:]
 	}
 	return slices.ContainsFunc(opts, func(w string) bool {
-		return w == "" || len(w) > 1 && w[0] == '-' && w[1] != '-' && strings.Contains(w, "n")
+		return w == "" || len(w) > 1 && w[0] == '-' && w[1] != '-' && strings.Contains(w, flag)
 	})
 }
 
@@ -446,6 +451,14 @@ func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
 				a.done[n] = true
 				a.word(n, text, depth, false, false, false)
 			}
+		case *syntax.DeclClause:
+			// A quoted operand (`declare 'a[x]=1'`) parses with no index.
+			if strings.Contains(source(text, n), "[") {
+				a.wild = true
+			}
+		}
+		if subscripts(n) {
+			a.wild = true
 		}
 		if arithmetic(n) {
 			a.arithmetic(source(text, n))
@@ -545,37 +558,48 @@ func expansions(words []*syntax.Word) int {
 }
 
 // arithmetic reads an arithmetic expression, which is never walked: a
-// substitution in it runs a command that cannot be seen. An expansion of a
-// loop variable may compute a name that cannot be rendered per value.
+// substitution in it runs a command that cannot be seen. Any name in it may
+// hold an expression that sets a loop variable (`x='n=7'; (( x ))`).
 func (a *accessor) arithmetic(src string) {
 	runs := strings.Contains(src, "$(") || strings.Contains(src, "`") || strings.Contains(src, "<(") || strings.Contains(src, ">(")
 	if runs {
 		a.acc.Writes = true
 		a.touch(Touch{Write: true, Opaque: true})
 	}
-	a.sums = append(a.sums, src)
-	for name := range a.loops {
-		if expandsName(src, name) {
-			a.wild = true
-		}
-	}
+	a.wild = true
 	a.field(src, runs, false)
 }
 
-// expandsName reports s holding $name or ${name as a whole name.
-func expandsName(s, name string) bool {
-	for _, p := range []string{"$" + name, "${" + name} {
-		for from := 0; ; {
-			k := strings.Index(s[from:], p)
-			if k < 0 {
-				break
-			}
-			end := from + k + len(p)
-			from = end
-			if end == len(s) || !nameByte(s[end]) {
-				return true
-			}
-		}
+// subscripts reports a node bash evaluates as arithmetic outside an
+// arithmetic node: an index, a C-style loop, an integer test, or a -v or -R
+// test, whose operand may be subscripted.
+func subscripts(n syntax.Node) bool {
+	switch n := n.(type) {
+	case *syntax.Assign:
+		return n.Index != nil
+	case *syntax.ArrayElem:
+		return n.Index != nil
+	case *syntax.CStyleLoop:
+		return true
+	case *syntax.BinaryTest:
+		return n.Op >= syntax.TsEql && n.Op <= syntax.TsGtr
+	case *syntax.UnaryTest:
+		return n.Op == syntax.TsVarSet || n.Op == syntax.TsRefVar
+	}
+	return false
+}
+
+// nameSubscript reports a builtin whose variable-name operand may be
+// subscripted, which bash evaluates as arithmetic.
+func nameSubscript(name string, args []string) bool {
+	bracket := slices.ContainsFunc(args, func(w string) bool { return strings.Contains(w, "[") })
+	switch name {
+	case "read", "unset", "declare", "typeset", "local", "readonly", "export":
+		return bracket
+	case "printf":
+		return bracket && printfAssigns(args)
+	case "test", "[":
+		return slices.Contains(args, "-v") || slices.Contains(args, "-R")
 	}
 	return false
 }
@@ -617,6 +641,9 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 	// function or a trap, forfeits every data position.
 	if idx < len(argv) && name == "" || slices.Contains(redefiners, name) {
 		a.redefines = true
+	}
+	if nameSubscript(name, v.args) {
+		a.wild = true
 	}
 	var loops []string
 	for i, w := range c.Args {
@@ -1530,9 +1557,13 @@ func (a *accessor) chdir(w *syntax.Word, field, text string) {
 // here-string is read as a script when a writer reads it, and as data
 // otherwise.
 func (a *accessor) redirect(r *syntax.Redirect, writer bool, text string, depth int) {
-	// A {varname} sets that variable to the fd it opens.
+	// A {varname} sets that variable to the fd it opens; a subscript in it is
+	// arithmetic.
 	if r.N != nil && !digits(r.N.Value) {
 		a.mention(r.N.Value)
+		if strings.Contains(r.N.Value, "[") {
+			a.wild = true
+		}
 	}
 	switch r.Op {
 	case syntax.Hdoc, syntax.DashHdoc:
@@ -1827,8 +1858,8 @@ func (a *accessor) mention(s string) {
 	}
 }
 
-// named reports name in a string mention saw or expanded in an arithmetic
-// source, charging the scan to the judge's budget.
+// named reports name in a string mention saw, charging the scan to the
+// judge's budget.
 func (a *accessor) named(name string) bool {
 	for _, s := range a.mentions {
 		if a.j.parsed += len(s); a.j.parsed > maxParsed {
@@ -1839,7 +1870,7 @@ func (a *accessor) named(name string) bool {
 			return true
 		}
 	}
-	return slices.ContainsFunc(a.sums, func(src string) bool { return expandsName(src, name) })
+	return false
 }
 
 // loopReads returns the sorted registered loop variables w expands outside a
