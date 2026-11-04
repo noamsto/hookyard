@@ -217,8 +217,9 @@ func TestShellAccess(t *testing.T) {
 		{name: "read before a nested script loop withdraws", cmd: `read n <<< g; bash -c 'for n in a b; do :; done'; cp /bin/rm /h/bin/${n}h; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
 		{name: "printf -v before a piped loop withdraws", cmd: `printf -v n %s g; for n in a b; do :; done | cat; cp /bin/rm /h/bin/${n}h; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
 		{name: "opaque data word withdraws loop", cmd: `for n in 1 2; do gh issue view $n --jq "$(date)"; done; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
-		{name: "opaque indirect data word withdraws loop", cmd: `x=n; false && for n in a b; do :; done; gh issue view 1 --jq "${!x:=g}"; cp /bin/rm /h/bin/${n}h; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "indirect setter's name mentioned withdraws loop", cmd: `x=n; false && for n in a b; do :; done; gh issue view 1 --jq "${!x:=g}"; cp /bin/rm /h/bin/${n}h; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
 		{name: "opaque here-string withdraws loop", cmd: `for n in 1 2; do gh issue view $n --jq /h/store/M; done; cat <<< "$(date)"`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "loop variable expanded in arithmetic before its loop withdraws", cmd: `(( $n )); for n in a b; do gh issue view $n --jq /h/store/M; done`, writes: true, want: []Touch{w("/h/store/M")}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			acc := ShellAccess(host, tt.cmd)
