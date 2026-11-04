@@ -212,11 +212,9 @@ type accessor struct {
 	// variable's value as an expression: either may compute a loop variable's
 	// name.
 	wild bool
-	// unsafe reports a call outside nonSetters or behind a wrapper, text the
-	// parser cannot read, an assignment or ${x:=} default, a declaration, a
-	// test or arithmetic clause, a coproc, a function, a C-style or select
-	// loop, or a {varname} redirect: only commands that cannot set a shell
-	// variable leave a loop's listed values the only ones it holds.
+	// unsafe reports anything that may set a shell variable by a name the text
+	// does not spell: only commands that cannot set one leave a loop's listed
+	// values the only ones it holds.
 	unsafe bool
 	// exempted are the loop names a call's per-value check let through.
 	exempted map[string]bool
