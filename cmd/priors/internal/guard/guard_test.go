@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -91,6 +92,19 @@ func newSandbox(t *testing.T) sandbox {
 		Config: filepath.Join(home, ".config/priors/config.toml"),
 	}, host)
 	return sb
+}
+
+// optionWrites is five writer calls of eight option values each, all distinct.
+func optionWrites() string {
+	var calls []string
+	for i := range 5 {
+		call := "w"
+		for j := range 8 {
+			call += " --o=u" + strconv.Itoa(i*8+j+1)
+		}
+		calls = append(calls, call)
+	}
+	return strings.Join(calls, "; ")
 }
 
 func bash(cmd string) string {
@@ -461,6 +475,7 @@ func TestShellDenies(t *testing.T) {
 		{name: "relative write through an option dir", want: "/notes/MEMORY.md, inside the personal store", cwd: ".", input: bash(`unshare --wd=work rm ../notes/MEMORY.md`)},
 		{name: "option dir resolves against cwd", want: "/notes/MEMORY.md, inside the personal store", cwd: ".", input: bash(`env -vCwork -C work2 rm ../notes/MEMORY.md`)},
 		{name: "option dir resolves against a cd dir", want: "/notes/MEMORY.md, inside the personal store", cwd: ".", input: bash(`cd work && env --ch=sub rm ../../notes/MEMORY.md`)},
+		{name: "cd after many option dirs", want: "and runs in", input: bash(optionWrites() + "; cd .. && cd link && make")},
 		{name: "writer option before a store path names it", want: "the command writes", input: bash(`rm -rf ~/notes/x`)},
 		{name: "writer option before a relative store path names it", want: `(from the argument "notes/x")`, cwd: ".", input: bash(`rm -rf notes/x`)},
 		{name: "env glued split string", want: "which holds the personal store", cwd: ".", input: bash(`env -u X --split-string='rm -rf .'`)},
@@ -578,6 +593,7 @@ func TestShellAllows(t *testing.T) {
 		{name: "git commit message", input: bash(`git commit -m "x"`)},
 		{name: "nix develop go vet", input: bash(`nix develop -c go vet ./...`)},
 		{name: "claude prompt with a model from home", cwd: ".", input: bash(`claude -p "fix ." --model opus`)},
+		{name: "writers with many option values", input: bash(optionWrites())},
 
 		// Heredoc bodies, globs and redirect targets that name no data taker.
 		{name: "object glob before a gh filter", input: bash(`rm -f *.o; gh pr view 1 --jq .`)},
@@ -718,6 +734,8 @@ func TestToolDenies(t *testing.T) {
 		{name: "assignment in args", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__do", input: sb.input(map[string]any{"args": "path=@H/notes/MEMORY.md"})},
 		{name: "long option in args", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__do", input: sb.input(map[string]any{"args": "--out=@H/notes/MEMORY.md"})},
 		{name: "json in a string", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__do", input: sb.input(map[string]any{"args": `{"path":"@H/notes/MEMORY.md"}`})},
+		{name: "oversize json in a string", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__do", input: sb.input(map[string]any{"args": "[" + strings.Repeat("1,", 17000) + `"@H/notes/MEMORY.md"]`})},
+		{name: "deep json in a string", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__do", input: sb.input(map[string]any{"args": strings.Repeat("[", 20) + `"@H/notes/MEMORY.md"` + strings.Repeat("]", 20)})},
 		{name: "file url with one slash", want: "/notes/MEMORY.md, the personal store's generated index", tool: "Write", input: sb.input(map[string]any{"file_path": "file:@H/notes/MEMORY.md", "content": "x"})},
 		{name: "file url with one slash in a uri", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__do", input: sb.input(map[string]any{"uri": "file:@H/notes/MEMORY.md"})},
 		{name: "claim split across lines", want: "/facts/b.md claiming confidence: reviewed", tool: "mcp__x__write", input: sb.input(map[string]any{"path": "@H/notes/facts/b.md", "lines": []any{"---", "name: b", "metadata:", "  confidence: \"re\\", "viewed\"", "---", "body"}})},
@@ -778,6 +796,16 @@ func TestToolAllows(t *testing.T) {
 		{name: "edit texts naming a store path", tool: "Edit", input: sb.input(map[string]any{"file_path": "@H/work/a.md", "old_string": "@H/notes/MEMORY.md", "new_string": "@H/notes/.attest/e"})},
 		{name: "mcp prose naming no store", tool: "mcp__x__write", input: sb.input(map[string]any{"body": "see a, b and c/d"})},
 		{name: "packed project paths", tool: "mcp__x__do", input: sb.input(map[string]any{"paths": "@H/work/a,@H/work/b"})},
+
+		// JSON files written whole: their content is not read as input.
+		{name: "json file with a root url", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/cfg.json", "content": `{"start_url": "/"}`})},
+		{name: "json file with a home root", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/cfg.json", "content": `{"root": "~"}`})},
+		{name: "json file extending a parent", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/cfg.json", "content": `{"extends": ".."}`})},
+		{name: "json file with a relative dir", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/cfg.json", "content": `{"dir":"../notes"}`})},
+		{name: "json fixture naming an attest entry", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/fixture.json", "content": `{"entries":["notes/.attest/e1"]}`})},
+		{name: "large json file", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/big.json", "content": "[" + strings.Repeat("1,", 17000) + "1]"})},
+		{name: "deep json file", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/deep.json", "content": strings.Repeat("[", 20) + strings.Repeat("]", 20)})},
+		{name: "edit inserting json", tool: "Edit", input: sb.input(map[string]any{"file_path": "@H/work/a.md", "old_string": "x", "new_string": `{"a": "/"}`})},
 		{name: "no path", tool: "WebFetch", input: sb.input(map[string]any{"url": "https://example.com"})},
 	} {
 		t.Run(c.name, func(t *testing.T) {

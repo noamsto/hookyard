@@ -37,8 +37,10 @@ const (
 	// maxHops bounds the symlinks one path resolves through, as the kernel's
 	// own limit does.
 	maxHops = 40
-	// maxDirs bounds the dirs a command's relative words resolve against.
-	maxDirs = 32
+	// maxDirs bounds the dirs a command changes into, and maxOptionDirs those
+	// only a writer's option values name.
+	maxDirs       = 32
+	maxOptionDirs = 256
 	// maxRead bounds a store file read to simulate an edit.
 	maxRead = 4 << 20
 	// maxNodes and maxDepth bound the walk of a tool's JSON input.
@@ -307,6 +309,9 @@ func (g *Guard) shell(cwd string, texts []string) string {
 	// all: only relative writes resolve against them, once every word has been
 	// judged without them, so a denial names the word it would name anyway. A
 	// value that is itself a store is a write already.
+	if len(c.options) == 0 && !c.optionLost {
+		return ""
+	}
 	c.dirs = append(c.dirs, c.options...)
 	c.lost = c.lost || c.optionLost
 	for _, t := range acc.Words {
@@ -409,7 +414,7 @@ func (g *Guard) tool(cwd, name string, input json.RawMessage) string {
 		return deny("the %s input cannot be read: %v", name, err)
 	}
 	in := &toolInput{}
-	in.walk(v, 0)
+	in.walk(v, 0, true)
 	paths := in.judged()
 	if len(paths) == 0 && len(in.patches) == 0 && !in.truncated {
 		return ""
@@ -725,7 +730,8 @@ type linkTarget struct {
 // newCheck resolves the dirs a command's relative words may be relative to:
 // cwd and every dir it changes into, each against every dir before it. A dir
 // from a writer's option value (From set) resolves only against dirs, not
-// against other option values, and goes to options.
+// against other option values, and goes to options. Option dirs have a bound
+// of their own, so many of them cannot hide a later cd.
 func (g *Guard) newCheck(cwd string, touches []gate.Touch) *check {
 	c := &check{g: g, budget: maxFiles}
 	if filepath.IsAbs(cwd) {
@@ -744,6 +750,10 @@ func (g *Guard) newCheck(cwd string, touches []gate.Touch) *check {
 			c.lost = c.lost || !option
 			continue
 		}
+		if option && len(all)-len(c.dirs) >= maxOptionDirs {
+			c.optionLost = true
+			continue
+		}
 		from := all
 		if option {
 			from = c.dirs
@@ -759,7 +769,7 @@ func (g *Guard) newCheck(cwd string, touches []gate.Touch) *check {
 				all = append(all, d)
 			}
 		}
-		if len(all) > maxDirs {
+		if len(c.dirs) > maxDirs {
 			c.lost = true
 			break
 		}
@@ -1166,7 +1176,10 @@ type toolInput struct {
 	contents []string
 	// other are the strings under keys the guard does not know: a path or
 	// content there is as good as one under a known key.
-	other   []string
+	other []string
+	// unread are the strings holding a JSON document past what the walk
+	// reads, judged by their path tokens however long.
+	unread  []string
 	edits   []edit
 	patches []patchFile
 	nodes   int
@@ -1185,8 +1198,9 @@ type edit struct {
 
 // judged are the strings judged as paths, as they are and trimmed, with the
 // path tokens each holds: those under a path key, and the short ones of
-// other. A call that names no path is judged by its content too. A string
-// under a path key also yields each of its fields, since it may pack a list.
+// other, and the path tokens of unread. A call that names no path is judged by
+// its content too. A string under a path key also yields each of its fields,
+// since it may pack a list.
 func (in *toolInput) judged() []string {
 	var out []string
 	add := func(s string, packed bool) {
@@ -1214,6 +1228,9 @@ func (in *toolInput) judged() []string {
 			add(s, false)
 		}
 	}
+	for _, s := range in.unread {
+		out = append(out, gate.PathTokens(s)...)
+	}
 	return out
 }
 
@@ -1225,7 +1242,9 @@ type patchFile struct {
 	update bool
 }
 
-func (in *toolInput) walk(v any, depth int) {
+// walk reads v. embed reports strings headed to paths or other, where a JSON
+// document is read as input; a content or edit text is a file's own text.
+func (in *toolInput) walk(v any, depth int, embed bool) {
 	if in.nodes++; in.nodes > maxNodes || depth > maxDepth {
 		in.truncated = true
 		return
@@ -1235,19 +1254,43 @@ func (in *toolInput) walk(v any, depth int) {
 		in.object(v, depth)
 	case []any:
 		for _, e := range v {
-			in.walk(e, depth+1)
+			in.walk(e, depth+1, embed)
 		}
 	case string:
 		if strings.Contains(v, "*** Begin Patch") {
 			in.patches = append(in.patches, parsePatch(v)...)
 		}
-		if t := strings.TrimSpace(v); t != "" && (t[0] == '{' || t[0] == '[') && json.Valid([]byte(t)) {
-			var inner any
-			if json.Unmarshal([]byte(t), &inner) == nil {
-				in.walk(inner, depth+1)
-			}
+		if embed {
+			in.embedded(v)
 		}
 	}
+}
+
+// embedded reads the JSON document s holds, if any, with a budget of its own:
+// past it the document is dropped, not the input, and s is judged by its path
+// tokens.
+func (in *toolInput) embedded(s string) {
+	t := strings.TrimSpace(s)
+	if t == "" || (t[0] != '{' && t[0] != '[') {
+		return
+	}
+	var v any
+	if json.Unmarshal([]byte(t), &v) != nil {
+		return
+	}
+	doc := &toolInput{}
+	doc.walk(v, 0, true)
+	if doc.truncated {
+		in.unread = append(in.unread, s)
+		return
+	}
+	in.paths = append(in.paths, doc.paths...)
+	in.contents = append(in.contents, doc.contents...)
+	in.other = append(in.other, doc.other...)
+	in.unread = append(in.unread, doc.unread...)
+	in.edits = append(in.edits, doc.edits...)
+	in.patches = append(in.patches, doc.patches...)
+	in.twice = in.twice || doc.twice
 }
 
 func (in *toolInput) object(m map[string]any, depth int) {
@@ -1259,16 +1302,19 @@ func (in *toolInput) object(m map[string]any, depth int) {
 	taken := in.editsOf(byKey)
 	for _, k := range slices.Sorted(maps.Keys(byKey)) {
 		for _, v := range byKey[k] {
+			embed := false
 			switch {
 			case slices.Contains(taken, k):
 			case slices.Contains(pathKeys, k):
 				in.strings(v, &in.paths, depth+1)
+				embed = true
 			case slices.Contains(contentKeys, k):
 				in.strings(v, &in.contents, depth+1)
 			default:
 				in.strings(v, &in.other, depth+1)
+				embed = true
 			}
-			in.walk(v, depth+1)
+			in.walk(v, depth+1, embed)
 		}
 	}
 }

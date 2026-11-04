@@ -476,7 +476,10 @@ In a shell command:
   judged against it;
 - in a tool's input, a string is also judged by its path tokens, split as
   the shell reader splits a field; every field of a string under a path key
-  counts (`a,notes`); a JSON document inside a string is read as input; a
+  counts (`a,notes`); a JSON document inside a string under a path or unknown
+  key is read as input, with a budget of its own (a content or edit text is a
+  file's own text, not input); past that budget, the string is judged by its
+  path tokens however long; a
   `file:/abs` path is a path; and the elements of an array under a content or
   unknown key are also joined for the `reviewed` check, so a claim split
   across them is seen;
@@ -660,9 +663,10 @@ It over-denies:
 - a writer's option value or glued short-option suffix that names a store, `.`
   or a dir holding one relative to the cwd (`rsync --exclude=notes`, `foo -o.`
   from `~`), or that holds shell text, which is read as a script; past 8
-  option values per call or 32 dirs overall, the relative writes of a command
-  that names a guarded path are unknown, and so is a glued value long enough
-  to pass the parse budget;
+  option values per call, 256 dirs from option values or 32 dirs the command
+  changes into, the relative writes of a command that names a guarded path
+  are unknown, and so is a glued value long enough to pass the parse budget;
+  option dirs never push a later `cd` out;
 - a write tool's text under an unknown key (or a content key when the input
   has no path key) that holds a path token naming a store, a dir holding one
   or an `.attest` element (an issue comment body naming `~/notes/MEMORY.md`),
@@ -701,6 +705,9 @@ It over-denies:
 - prose or patch bodies under an unknown or content key (a PR body, a chat
   message) that hold a path with an `.attest` element, since each short string
   is judged as a path;
+- a JSON document under a path or unknown key past 16384 nodes or 16 levels
+  whose path tokens name a store or a dir holding one (`"/"`), since the
+  string is judged by its tokens instead;
 - an abbreviation of a harmless sed or fd long option.
 
 ## Store repositories
