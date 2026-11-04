@@ -487,7 +487,7 @@ In a shell command:
   counts (`a,notes`); a JSON document inside a string under a path or unknown
   key is read as input, with a budget of its own (a content or edit text is a
   file's own text, not input); past that budget, the string is judged by its
-  path tokens however long; a
+  first 256 path tokens; a
   `file:/abs` path is a path; and the elements of an array under a content or
   unknown key are also joined for the `reviewed` check, so a claim split
   across them is seen;
@@ -636,7 +636,21 @@ It also does not see these open classes:
   a packed list padded past it passes;
 - a data taker's name in another case on a case-insensitive file system
   (`~/bin/GH` on macOS), and variables an earlier call of a persistent shell
-  set.
+  set;
+- a value read as arithmetic that the command builds from pieces
+  (`a='a[$'; b='(rm -rf ../notes/facts)]'; x=$a$b; (( x ))`) or appends to an
+  array element or to a value a `declare`-family word, `read` or `printf -v`
+  set (`x=('a[$' b); x[0]+='(…)]'; (( x ))`), and a value that does not parse
+  as arithmetic whose substitutions a quoted paren hides
+  (`x='a[$(echo "(") + $(cd ..; rm -rf no*s)] + 1 a'; (( x ))`): its write is
+  an opaque one, denied only when the command names a guarded path;
+- a JSON document in a tool-input string past its own budget whose store path
+  hides past 256 path tokens, behind JSON escapes (`\/`), or relative to a
+  store cwd;
+- a dir glued after more than 32 letters of a short-option cluster, past the
+  suffixes after its first and last 16 letters, when its name does not name a
+  store as a whole element (`env -v…v…Clonglink rm -rf facts`, a long link
+  into a store).
 
 It over-denies:
 
@@ -680,7 +694,9 @@ It over-denies:
   are unknown, and so is a glued value long enough to pass the parse budget;
   option dirs never push a later `cd` out; a writer's short-option cluster
   of more than 16 letters (`-DVERYLONGMACRONAME`) is an opaque write and a
-  dir that cannot be told;
+  dir that cannot be told; each relative write is judged against every option
+  dir, so a command with a few hundred option values (`rsync` with 250
+  `--exclude=`s) can run past the guard's time bound and is denied;
 - a write tool's text under an unknown key (or a content key when the input
   has no path key) that holds a path token naming a store, a dir holding one
   or an `.attest` element (an issue comment body naming `~/notes/MEMORY.md`),
