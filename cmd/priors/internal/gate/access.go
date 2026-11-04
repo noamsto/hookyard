@@ -64,6 +64,11 @@ const (
 	// maxLoopRuns bounds the combinations of values finite loop variables are
 	// read in, so per-value touches stay inside maxTouches.
 	maxLoopRuns = 64
+	// maxCluster bounds the glued values read from one short-option cluster.
+	maxCluster = 16
+	// maxOptionDirs bounds the option values one writer call adds as dirs it
+	// may run in; past it the call runs in a dir that cannot be told.
+	maxOptionDirs = 8
 )
 
 var (
@@ -269,9 +274,7 @@ func (a *accessor) script(text string, depth int) {
 	// A script is read once whatever value renders it, so none of its loop
 	// reads may take a pinned value as the only one.
 	defer a.unpin()()
-	a.j.parsed += parseBase + parseCost*len(text)
-	if depth > maxDepth || a.j.parsed > maxParsed || len(text) > maxText || nesting(text) > maxNesting {
-		a.acc.Unreadable = "budget"
+	if !a.charge(text, depth) {
 		return
 	}
 	var stmts []*syntax.Stmt
@@ -300,6 +303,17 @@ func (a *accessor) script(text string, depth int) {
 		}
 		a.unparsed(text)
 	}
+}
+
+// charge charges the budget for parsing text at depth, and reports whether
+// the budget and the parser's limits leave it readable.
+func (a *accessor) charge(text string, depth int) bool {
+	a.j.parsed += parseBase + parseCost*len(text)
+	if depth > maxDepth || a.j.parsed > maxParsed || len(text) > maxText || nesting(text) > maxNesting {
+		a.acc.Unreadable = "budget"
+		return false
+	}
+	return true
 }
 
 // scan reads a script before any of it is read as commands, since a later
@@ -1133,6 +1147,9 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 		}
 		a.word(w, text, depth, write, writer, i == v.cmdArg)
 	}
+	if writer {
+		a.options(v, depth)
+	}
 	if len(loops) > 0 {
 		a.perValue(c, text, v.data, loops)
 	}
@@ -1150,6 +1167,117 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 	}
 	a.chdirs(name, c.Args, argv, idx, v.afterFlag, v.cmdArg, text)
 	return writer
+}
+
+// options reads a writer's options as its program may parse them, whatever
+// spelling it accepts: a long option's =value and each suffix of a short
+// cluster may be a path it writes through, a script it runs or a dir it
+// changes into, and the word after an option with no =value may be a dir. The
+// command word counts only after a flag, whose value it may be. Data words
+// (found only when argv maps one-to-one to the syntax words) stay data. Each
+// dir names the option it came from, which tells it from a known dir change.
+func (a *accessor) options(v callView, depth int) {
+	skip := func(i int) bool {
+		return i == v.idx && !v.afterFlag || slices.Contains(v.data, i)
+	}
+	dirs := 0
+	chdir := func(d, from string) {
+		switch {
+		case dirs < maxOptionDirs:
+			a.touch(Touch{Text: d, Opaque: d == "", Chdir: true, From: from})
+		case dirs == maxOptionDirs:
+			a.touch(Touch{Opaque: true, Chdir: true, From: from})
+		}
+		dirs++
+	}
+	for i, f := range v.argv {
+		if skip(i) || len(f) < 2 || f[0] != '-' || f == "--" {
+			continue
+		}
+		values, glued := optionValues(f)
+		for _, value := range values {
+			a.touch(Touch{Text: value, Write: true, From: f})
+			a.field(value, true, false)
+			chdir(value, f)
+		}
+		if len(values) > 0 && strings.ContainsAny(values[0], scriptBytes) {
+			a.optionScript(values, depth)
+		}
+		if glued || i+1 >= len(v.argv) || skip(i+1) {
+			continue
+		}
+		// An opaque operand is an opaque write already, which denies wherever
+		// a dir that cannot be told would; the command word is no write.
+		if next := v.argv[i+1]; !strings.HasPrefix(next, "-") && (next != "" || i+1 == v.idx) {
+			chdir(next, f)
+		}
+	}
+}
+
+// optionValues returns the values option f may carry glued, longest first:
+// the value of --name=value or -name=value (glued), or each suffix of a short
+// cluster after a letter or digit, as any letter of it may be one that takes a
+// value.
+func optionValues(f string) (values []string, glued bool) {
+	long := strings.HasPrefix(f, "--")
+	if name, value, ok := strings.Cut(f, "="); ok && (long || optionName(name[1:])) {
+		if value == "" {
+			return nil, true
+		}
+		return []string{value}, true
+	}
+	if long {
+		return nil, false
+	}
+	for k := 2; k < len(f) && len(values) < maxCluster && alnum(f[k-1]); k++ {
+		values = append(values, f[k:])
+	}
+	return values, false
+}
+
+// optionName reports a name a single-dash -name=value option may have; a
+// cluster whose glued value holds = (`-c'x --y=1'`) has none.
+func optionName(s string) bool {
+	for i := range len(s) {
+		if !alnum(s[i]) && strings.IndexByte("-_.", s[i]) < 0 {
+			return false
+		}
+	}
+	return s != ""
+}
+
+func alnum(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
+// optionScript reads glued values holding shell text as a script one level
+// deeper. Where a cluster's value starts is not known, so its suffixes are
+// tried longest first and the first that parses is read; when none does, the
+// longest is, which records it as text the parser cannot read.
+func (a *accessor) optionScript(values []string, depth int) {
+	script := values[0]
+	if len(values) > 1 {
+		for _, s := range values {
+			if a.parses(s, depth+1) {
+				script = s
+				break
+			}
+			if a.acc.Unreadable != "" {
+				return
+			}
+		}
+	}
+	a.script(script, depth+1)
+}
+
+// parses reports whether text parses as a script, charged as script charges
+// it but not read.
+func (a *accessor) parses(text string, depth int) bool {
+	if !a.charge(text, depth) {
+		return false
+	}
+	_, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
+	return err == nil
 }
 
 // setsNoVar reports a call to one of nonSetters, or a printf whose first
@@ -2220,28 +2348,16 @@ func (a *accessor) redefiner(s string, cmd bool) {
 	}
 }
 
-// subTokens returns the path-like tokens in s: runs between pathBreaks that
-// hold a slash, start with ~ or name .attest, each also from its first slash
-// or ~ on, as `-o/path` glues one to a flag. $HOME and ~ are expanded.
+// subTokens returns PathTokens of s with $HOME and ~ expanded.
 func (a *accessor) subTokens(s string) []string {
 	if a.j.parsed += len(s); a.j.parsed > maxParsed {
 		a.acc.Unreadable = "budget"
 		return nil
 	}
 	home := a.j.host.Home
-	s = strings.NewReplacer("${HOME}", home, "$HOME", home).Replace(s)
-	var out []string
-	for _, t := range strings.FieldsFunc(s, func(r rune) bool { return strings.ContainsRune(pathBreaks, r) }) {
-		if len(out) >= maxSubTokens {
-			break
-		}
-		if !strings.ContainsAny(t, "/~") && !strings.Contains(t, ".attest") {
-			continue
-		}
-		if k := strings.IndexAny(t, "/~"); k > 0 {
-			out = append(out, a.tildeToken(t[k:]))
-		}
-		out = append(out, a.tildeToken(t))
+	out := PathTokens(strings.NewReplacer("${HOME}", home, "$HOME", home).Replace(s))
+	for i, t := range out {
+		out[i] = a.tildeToken(t)
 	}
 	return out
 }

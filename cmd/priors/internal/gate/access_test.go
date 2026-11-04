@@ -3,6 +3,7 @@ package gate
 import (
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -110,7 +111,7 @@ func TestShellAccess(t *testing.T) {
 		{name: "sudo chdir short", cmd: "sudo -D store touch M", writes: true, want: []Touch{cd("store")}},
 		{name: "sudo chdir short glued", cmd: "sudo -Dstore touch M", writes: true, want: []Touch{cd("store")}},
 		{name: "sudo chdir long", cmd: "sudo --chdir=store touch M", writes: true, want: []Touch{cd("store")}},
-		{name: "sudo -C is no chdir", cmd: "sudo -C 3 true", writes: true, absent: []Touch{cd("3")}},
+		{name: "sudo -C value is an option dir", cmd: "sudo -C 3 true", writes: true, want: []Touch{cd("3")}},
 		{name: "let PATH", cmd: "let PATH=1", writes: true},
 		{name: "arithmetic PATH", cmd: "(( PATH=1 ))", writes: true},
 		{name: "read IFS", cmd: "read IFS <<< X", writes: true},
@@ -152,6 +153,16 @@ func TestShellAccess(t *testing.T) {
 		{name: "git log ext-diff", cmd: "git -C /h/store log --ext-diff -p", writes: true},
 		{name: "git diff textconv", cmd: "git diff --textconv", writes: true},
 		{name: "git log no-ext-diff", cmd: "git -C /h/store log --no-ext-diff -p", want: []Touch{cd("/h/store")}},
+
+		// A writer's option values.
+		{name: "long option value is a write and a dir", cmd: "unshare --wd=store touch M", writes: true, want: []Touch{w("store"), cd("store")}},
+		{name: "single-dash name=value has one value", cmd: "go test -count=1", writes: true, want: []Touch{cd("1")}, absent: []Touch{cd("ount=1"), w("t=1")}},
+		{name: "cluster suffix is a dir", cmd: "env -vCstore touch M", writes: true, want: []Touch{cd("store")}},
+		{name: "word after an abbreviated option is a dir", cmd: "env --ch store touch M", writes: true, want: []Touch{cd("store")}},
+		{name: "glued shell text is a script", cmd: "foo -c'rm -rf /h/store'", writes: true, want: []Touch{w("/h/store")}},
+		{name: "option dirs past the cap", cmd: "rm -a 1 -b 2 -c 3 -d 4 -e 5 -f 6 -g 7 -h 8 -i 9 x", writes: true, want: []Touch{{Opaque: true, Chdir: true}}},
+		{name: "data word is no option value", cmd: "claude -p /h/store --model opus", writes: true, absent: []Touch{cd("/h/store"), w("/h/store")}},
+		{name: "reader option value is no dir", cmd: "cat -A /h/store", absent: []Touch{cd("/h/store")}},
 
 		// Data positions of a cleanly resolved known program.
 		{name: "gh jq filter is data", cmd: `gh pr view 1 --jq '.a // .b'`, writes: true, absent: []Touch{w("//")}},
@@ -351,10 +362,10 @@ func TestShellAccessUnreadable(t *testing.T) {
 }
 
 // TestShellAccessBounded feeds ShellAccess commands built to make it read
-// them more than once. Each must come back read in full or past the budget,
-// within the stack and time bounds TestIngestReasonBounded holds gate 2 to.
-// A command read again allocates up to twice what one read does, so its
-// allocation bound is twice gate 2's.
+// them more than once, or read many option values of one writer. Each must
+// come back read in full or past the budget, within the stack and time bounds
+// TestIngestReasonBounded holds gate 2 to. A command read again allocates up
+// to twice what one read does, so its allocation bound is twice gate 2's.
 func TestShellAccessBounded(t *testing.T) {
 	limitStack(t)
 	timeLimit := time.Second
@@ -362,15 +373,32 @@ func TestShellAccessBounded(t *testing.T) {
 		timeLimit *= 10
 	}
 	trigger := `d=/a; f(){ rm -rf $d; }; declare 'I'FS=Q; f`
+	padded := func(size int) string { return strings.Repeat(": a; ", (size-len(trigger))/5) + trigger }
+	// repeated builds a writer whose words are word(i) for i = 0, 1, …, up to
+	// maxText bytes.
+	repeated := func(word func(int) string) string {
+		var b strings.Builder
+		b.WriteString("rm")
+		for i := 0; ; i++ {
+			w := " " + word(i)
+			if b.Len()+len(w) > maxText {
+				return b.String()
+			}
+			b.WriteString(w)
+		}
+	}
 	for _, tt := range []struct {
 		name string
-		size int
+		cmd  string
 	}{
-		{"setter after a function body, padded to the text bound", maxText},
-		{"setter after a function body, padded so both reads finish", maxText * 5 / 8},
+		{"setter after a function body, padded to the text bound", padded(maxText)},
+		{"setter after a function body, padded so both reads finish", padded(maxText * 5 / 8)},
+		// No suffix of a cluster parses, so each is tried.
+		{"option clusters holding shell text", repeated(func(i int) string { return "'-abcdefghijklmnop;;" + strconv.Itoa(i) + "'" })},
+		{"option values past the dir cap", repeated(func(i int) string { return "--o" + strconv.Itoa(i) + "=d" + strconv.Itoa(i) })},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			cmd := strings.Repeat(": a; ", (tt.size-len(trigger))/5) + trigger
+			cmd := tt.cmd
 			done := make(chan string, 1)
 			var before, after runtime.MemStats
 			runtime.ReadMemStats(&before)

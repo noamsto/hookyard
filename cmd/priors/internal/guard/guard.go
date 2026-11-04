@@ -303,6 +303,20 @@ func (g *Guard) shell(cwd string, texts []string) string {
 			return r
 		}
 	}
+	// A writer's option values may be dirs it runs in, or may not be dirs at
+	// all: only relative writes resolve against them, once every word has been
+	// judged without them, so a denial names the word it would name anyway. A
+	// value that is itself a store is a write already.
+	c.dirs = append(c.dirs, c.options...)
+	c.lost = c.lost || c.optionLost
+	for _, t := range acc.Words {
+		if t.Chdir || !t.Write || filepath.IsAbs(t.Text) {
+			continue
+		}
+		if r := c.shellTouch(t, acc.Writes, involved); r != "" {
+			return r
+		}
+	}
 	return ""
 }
 
@@ -687,6 +701,11 @@ func readSmall(p string) (string, error) {
 type check struct {
 	g    *Guard
 	dirs []string
+	// options are the dirs only a writer's option values name, and optionLost
+	// reports one that cannot be told; shell judges relative writes against
+	// them after dirs.
+	options    []string
+	optionLost bool
 	// lost reports a dir the call changes into that cannot be told.
 	lost bool
 	// linkInfo are the files a hard link could reach, read once; cut reports
@@ -704,7 +723,9 @@ type linkTarget struct {
 }
 
 // newCheck resolves the dirs a command's relative words may be relative to:
-// cwd and every dir it changes into, each against every dir before it.
+// cwd and every dir it changes into, each against every dir before it. A dir
+// from a writer's option value (From set) resolves only against dirs, not
+// against other option values, and goes to options.
 func (g *Guard) newCheck(cwd string, touches []gate.Touch) *check {
 	c := &check{g: g, budget: maxFiles}
 	if filepath.IsAbs(cwd) {
@@ -712,22 +733,40 @@ func (g *Guard) newCheck(cwd string, touches []gate.Touch) *check {
 	} else {
 		c.lost = true
 	}
+	all := slices.Clone(c.dirs)
 	for _, t := range touches {
 		if !t.Chdir {
 			continue
 		}
+		option := t.From != ""
 		if t.Opaque || t.Text == "" {
-			c.lost = true
+			c.optionLost = c.optionLost || option
+			c.lost = c.lost || !option
 			continue
 		}
-		for _, d := range c.candidates(t.Text) {
-			if filepath.IsAbs(d) && !slices.Contains(c.dirs, d) {
+		from := all
+		if option {
+			from = c.dirs
+		}
+		for _, d := range c.resolve(t.Text, from) {
+			if !filepath.IsAbs(d) {
+				continue
+			}
+			if !option && !slices.Contains(c.dirs, d) {
 				c.dirs = append(c.dirs, d)
 			}
+			if !slices.Contains(all, d) {
+				all = append(all, d)
+			}
 		}
-		if len(c.dirs) > maxDirs {
+		if len(all) > maxDirs {
 			c.lost = true
 			break
+		}
+	}
+	for _, d := range all {
+		if !slices.Contains(c.dirs, d) {
+			c.options = append(c.options, d)
 		}
 	}
 	return c
@@ -738,6 +777,11 @@ func (g *Guard) newCheck(cwd string, touches []gate.Touch) *check {
 // after the symlink before it, and resolved after a lexical clean, as Claude
 // Code and pi pass a path.
 func (c *check) candidates(p string) []string {
+	return c.resolve(p, c.dirs)
+}
+
+// resolve is candidates against dirs.
+func (c *check) resolve(p string, dirs []string) []string {
 	if p == "" {
 		return nil
 	}
@@ -745,7 +789,7 @@ func (c *check) candidates(p string) []string {
 	if filepath.IsAbs(p) {
 		abs = []string{p}
 	} else {
-		for _, d := range c.dirs {
+		for _, d := range dirs {
 			abs = append(abs, d+string(filepath.Separator)+p)
 		}
 		if c.lost {

@@ -445,6 +445,33 @@ func TestShellDenies(t *testing.T) {
 		// POSIX classes in a glob.
 		{name: "posix class rm", want: "inside the personal store", input: bash("rm -rf ~/note[[:alpha:]]")},
 		{name: "posix class attest", want: "an .attest dir", input: bash("touch /srv/other/.[[:alpha:]]ttest/e")},
+
+		// A writer's option values, glued or in the next word.
+		{name: "env cluster chdir", want: `the personal store (from the argument "-vCnotes")`, cwd: ".", input: bash(`env -vCnotes touch MEMORY.md`)},
+		{name: "env abbreviated glued chdir", want: `the personal store (from the argument "--ch=notes")`, cwd: ".", input: bash(`env --ch=notes touch MEMORY.md`)},
+		{name: "relative write through an abbreviated option dir", want: "/notes/MEMORY.md, inside the personal store", cwd: ".", input: bash(`env --ch work rm ../notes/MEMORY.md`)},
+		{name: "relative write through a cluster option dir", want: "/notes/MEMORY.md, inside the personal store", cwd: ".", input: bash(`env -vC work rm ../notes/MEMORY.md`)},
+		{name: "env split string cluster chdir", want: "and runs in", cwd: ".", input: bash(`env -S '-Cnotes touch MEMORY.md'`)},
+		{name: "setsid env glued chdir", want: `the personal store (from the argument "-Cnotes")`, cwd: ".", input: bash(`setsid env -Cnotes touch MEMORY.md`)},
+		{name: "sudo cluster glued chdir", want: `the personal store (from the argument "-iDnotes")`, cwd: ".", input: bash(`sudo -iDnotes touch MEMORY.md`)},
+		{name: "sudo abbreviated chdir", want: `the personal store (from the argument "--chd=notes")`, cwd: ".", input: bash(`sudo --chd=notes touch MEMORY.md`)},
+		{name: "unshare wd", want: `the personal store (from the argument "--wd=notes")`, cwd: ".", input: bash(`unshare --wd=notes touch MEMORY.md`)},
+		{name: "uv directory", want: `the personal store (from the argument "--directory=notes")`, cwd: ".", input: bash(`uv --directory=notes run touch MEMORY.md`)},
+		{name: "npm prefix", want: `the personal store (from the argument "--prefix=notes")`, cwd: ".", input: bash(`npm --prefix=notes exec touch MEMORY.md`)},
+		{name: "relative write through an option dir", want: "/notes/MEMORY.md, inside the personal store", cwd: ".", input: bash(`unshare --wd=work rm ../notes/MEMORY.md`)},
+		{name: "option dir resolves against cwd", want: "/notes/MEMORY.md, inside the personal store", cwd: ".", input: bash(`env -vCwork -C work2 rm ../notes/MEMORY.md`)},
+		{name: "option dir resolves against a cd dir", want: "/notes/MEMORY.md, inside the personal store", cwd: ".", input: bash(`cd work && env --ch=sub rm ../../notes/MEMORY.md`)},
+		{name: "writer option before a store path names it", want: "the command writes", input: bash(`rm -rf ~/notes/x`)},
+		{name: "writer option before a relative store path names it", want: `(from the argument "notes/x")`, cwd: ".", input: bash(`rm -rf notes/x`)},
+		{name: "env glued split string", want: "which holds the personal store", cwd: ".", input: bash(`env -u X --split-string='rm -rf .'`)},
+		{name: "glued c script", want: "which holds the personal store", cwd: ".", input: bash(`foo -c'rm -rf .'`)},
+		// A dir or script in a word of its own is read already.
+		{name: "env abbreviated separate chdir", want: "the personal store", cwd: ".", input: bash(`env --ch notes touch MEMORY.md`)},
+		{name: "env cluster separate chdir", want: "the personal store", cwd: ".", input: bash(`env -vC notes touch MEMORY.md`)},
+		{name: "nice env abbreviated chdir", want: "the personal store", cwd: ".", input: bash(`nice env --ch notes touch MEMORY.md`)},
+		{name: "sudo cluster separate chdir", want: "the personal store", cwd: ".", input: bash(`sudo -iD notes touch MEMORY.md`)},
+		{name: "sudo separate chdir", want: "the personal store", cwd: ".", input: bash(`sudo -D notes touch MEMORY.md`)},
+		{name: "env separate split string", want: "which holds the personal store", cwd: ".", input: bash(`env -u X --split-string 'rm -rf .'`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.linuxOnly && runtime.GOOS != "linux" {
@@ -529,6 +556,20 @@ func TestShellAllows(t *testing.T) {
 		{name: "c-style loop then ls of a store", input: bash(`for ((i=0; i<3; i++)); do echo $i; done; ls ~/notes`)},
 		{name: "arithmetic expansion then cat of a store", input: bash(`n=3; echo $(( n + 1 )); cat ~/notes/MEMORY.md`)},
 		{name: "integer test then rg of a store", input: bash(`[[ 1 -lt 2 ]] && rg x ~/notes`)},
+
+		// Writers with option values that name no store.
+		{name: "go test with options", input: bash(`go test ./... -run TestX -count=1 -v`)},
+		{name: "go test of a notes package", input: bash(`go test ./internal/notes/ -run TestX -count=1 -v`)},
+		{name: "go test vet and build", input: bash(`go test ./... -run TestX -count=1 -timeout 30s -v && go vet ./... && go build -o bin/x ./cmd/x`)},
+		{name: "crew await with a timeout", input: bash(`crew await X --timeout 300`)},
+		{name: "crew status with a flag", input: bash(`crew status X working --restamp`)},
+		{name: "gh pr create with a body file", input: bash(`gh pr create --title t --body-file /tmp/b`)},
+		{name: "gh pr view with json and jq", input: bash(`gh pr view 1 --json url --jq .url`)},
+		{name: "rm of build dirs", input: bash(`rm -rf build dist`)},
+		{name: "mkdir then copy", input: bash(`mkdir -p a/b && cp -r src a/b`)},
+		{name: "git commit message", input: bash(`git commit -m "x"`)},
+		{name: "nix develop go vet", input: bash(`nix develop -c go vet ./...`)},
+		{name: "claude prompt with a model from home", cwd: ".", input: bash(`claude -p "fix ." --model opus`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.tool == "" {
