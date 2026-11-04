@@ -312,6 +312,39 @@ store's commit gate. It commits on every run, so a commit held back last time
 (`warning: ...` on stderr, exit still 0) is retried. Running it again is safe:
 an imported source reports `unchanged`, by the sha256 of its bytes.
 
+### Reading the session-start block
+
+On Claude Code the block groups facts by type (`feedback`, `project`,
+`reference`, `user`, `other`) under a one-line pointer to `priors search`,
+`priors show <name>` and `priors list --flagged`. Flagged facts of the local
+layer come last under `flagged, unreviewed`. A fact the project's native
+Claude memory dir already holds (matched by `name`, or by the path an import
+recorded as its source) is left out, and `N facts also in MEMORY.md` counts
+them. `… N entries omitted …` marks a cut to the budget. Codex and Pi get the
+flat list, unchanged.
+
+The source-path match uses the current `HOME`, so a fact imported on another
+host matches by name only.
+
+- `flagged, unreviewed`: the fact is in the host-local layer, `proposed`,
+  because a gate flagged it (`flags:` names why). Nobody has cleared it.
+- `verified never`: `verified` is null, as an import leaves it. `priors add`
+  stamps today's date.
+- stale: `priors list --stale` shows facts never verified or not verified for
+  90 days.
+
+To check that priors works, run `priors list --flagged`, `priors list --stale`
+and `priors lint`; the first two print nothing when there is nothing to show,
+and `priors lint` prints a finding per line and exits 1, or nothing and exits
+0.
+
+`priors` has no review subcommand. Read a flagged fact with `priors show
+<name>`; the row from `priors list --flagged` ends in its `flags:`. A fact
+claims `reviewed` only through attestation, which the write guard keeps agents
+from writing, and `list` marks it `reviewed · `. `priors lint --move-flagged`
+goes the other way: it moves checkout facts that trip a content or size gate
+into the local layer.
+
 ## Wire it into hookyard
 
 [`cmd/priors/hookyard.json`](../../cmd/priors/hookyard.json) is an example

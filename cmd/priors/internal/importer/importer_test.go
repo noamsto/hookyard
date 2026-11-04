@@ -141,7 +141,7 @@ func repo(t *testing.T, remote string) string {
 
 // memDir is the Claude memory dir of a session run in dir.
 func (fx fixture) memDir(dir string) string {
-	return filepath.Join(fx.claude, "projects", encodeProjectDir(dir), "memory")
+	return filepath.Join(fx.claude, "projects", EncodeProjectDir(dir), "memory")
 }
 
 // native is a topic file as Claude writes one.
@@ -221,12 +221,12 @@ func TestImport(t *testing.T) {
 		{"work repo on a personal host is skipped", "personal", func(t *testing.T, fx fixture) []string {
 			mem := fx.memDir(repo(t, workRemote))
 			writeFile(t, filepath.Join(mem, "work-fact.md"), native("work-fact", "a work fact", body))
-			return []string{"skipped " + sourcePath(filepath.Join(mem, "work-fact.md")) + ": routes to the quarantine (work repo on a personal host)"}
+			return []string{"skipped " + SourcePath(filepath.Join(mem, "work-fact.md")) + ": routes to the quarantine (work repo on a personal host)"}
 		}},
 		{"work repo on a work host is skipped", "work", func(t *testing.T, fx fixture) []string {
 			mem := fx.memDir(repo(t, workRemote))
 			writeFile(t, filepath.Join(mem, "work-fact.md"), native("work-fact", "a work fact", body))
-			return []string{"skipped " + sourcePath(filepath.Join(mem, "work-fact.md")) + ": routes to the work store"}
+			return []string{"skipped " + SourcePath(filepath.Join(mem, "work-fact.md")) + ": routes to the work store"}
 		}},
 		{"undecodable project dir is unresolvable", "personal", func(t *testing.T, fx fixture) []string {
 			mem := filepath.Join(fx.claude, "projects", "-no-such-dir-anywhere", "memory")
@@ -236,7 +236,7 @@ func TestImport(t *testing.T) {
 		{"secret-shaped fact is skipped", "personal", func(t *testing.T, fx fixture) []string {
 			mem := fx.memDir(repo(t, personalRemote))
 			writeFile(t, filepath.Join(mem, "leaky.md"), native("leaky", "a key", "the key is "+"AK"+"IA"+"IOSFODNN7EXAMPLE\n"))
-			return []string{"skipped " + sourcePath(filepath.Join(mem, "leaky.md")) + ": refused: leaky.md: secret: matches secret rule(s): aws-access-key-id"}
+			return []string{"skipped " + SourcePath(filepath.Join(mem, "leaky.md")) + ": refused: leaky.md: secret: matches secret rule(s): aws-access-key-id"}
 		}},
 		{"invalid name is slugified", "personal", func(t *testing.T, fx fixture) []string {
 			mem := fx.memDir(repo(t, personalRemote))
@@ -246,7 +246,7 @@ func TestImport(t *testing.T) {
 		{"name that cannot be slugified is skipped", "personal", func(t *testing.T, fx fixture) []string {
 			mem := fx.memDir(repo(t, personalRemote))
 			writeFile(t, filepath.Join(mem, "x.md"), native("שלום", "hello", body))
-			return []string{"skipped " + sourcePath(filepath.Join(mem, "x.md")) + `: name "שלום" cannot be made a valid name`}
+			return []string{"skipped " + SourcePath(filepath.Join(mem, "x.md")) + `: name "שלום" cannot be made a valid name`}
 		}},
 		{"same bytes in two projects import once", "personal", func(t *testing.T, fx fixture) []string {
 			a, b := fx.memDir(repo(t, personalRemote)), fx.memDir(repo(t, personalRemote))
@@ -262,7 +262,7 @@ func TestImport(t *testing.T) {
 			stored := storedFact("seen-fact-elsewhere", "seen before elsewhere", "other body\n")
 			stored.Metadata.Source = &fact.Source{Engine: "claude", Path: "~/.claude/projects/-other/memory/seen-fact.md", SHA256: digest([]byte(text))}
 			putFact(t, filepath.Join(fx.cfg.PersonalStore, "demo", "seen-fact-elsewhere.md"), stored)
-			return []string{"duplicate " + sourcePath(filepath.Join(mem, "seen-fact.md")) + ": " + filepath.Join(fx.cfg.PersonalStore, "demo", "seen-fact-elsewhere.md") + ": same source bytes"}
+			return []string{"duplicate " + SourcePath(filepath.Join(mem, "seen-fact.md")) + ": " + filepath.Join(fx.cfg.PersonalStore, "demo", "seen-fact-elsewhere.md") + ": same source bytes"}
 		}},
 		{"near-duplicates are proposed", "personal", func(t *testing.T, fx fixture) []string {
 			mem := fx.memDir(repo(t, personalRemote))
@@ -272,9 +272,9 @@ func TestImport(t *testing.T) {
 			writeFile(t, filepath.Join(mem, "overlap.md"), native("overlap", "unrelated too", body))
 			kept := filepath.Join(fx.cfg.PersonalStore, "demo", "kept.md")
 			return []string{
-				"propose " + sourcePath(filepath.Join(mem, "kept.md")) + " -> " + kept + ": same name",
-				"propose " + sourcePath(filepath.Join(mem, "layout.md")) + " -> " + kept + ": same description",
-				"propose " + sourcePath(filepath.Join(mem, "overlap.md")) + " -> " + kept + ": body overlap",
+				"propose " + SourcePath(filepath.Join(mem, "kept.md")) + " -> " + kept + ": same name",
+				"propose " + SourcePath(filepath.Join(mem, "layout.md")) + " -> " + kept + ": same description",
+				"propose " + SourcePath(filepath.Join(mem, "overlap.md")) + " -> " + kept + ": body overlap",
 			}
 		}},
 		{"symlinked topic file is refused", "personal", func(t *testing.T, fx fixture) []string {
@@ -286,7 +286,7 @@ func TestImport(t *testing.T) {
 				t.Fatal(err)
 			}
 			return []string{
-				"skipped " + sourcePath(filepath.Join(mem, "outside.md")) + ": a symlink, not a regular file",
+				"skipped " + SourcePath(filepath.Join(mem, "outside.md")) + ": a symlink, not a regular file",
 				"published personal ",
 			}
 		}},
@@ -294,7 +294,7 @@ func TestImport(t *testing.T) {
 			mem := fx.memDir(repo(t, personalRemote))
 			writeFile(t, filepath.Join(mem, "real.md"), native("real", "a real fact", body))
 			writeFile(t, filepath.Join(mem, "MEMORY.md"), "- [Real](real.md) — a real fact\n- [Escape](../../outside.md) — out\n- [Gone](gone.md) — missing\nfree text\n")
-			index := sourcePath(filepath.Join(mem, "MEMORY.md"))
+			index := SourcePath(filepath.Join(mem, "MEMORY.md"))
 			return []string{
 				"skipped " + index + ":2: index link leaves the memory dir",
 				"skipped " + index + ":3: index link names no topic file",
@@ -308,7 +308,7 @@ func TestImport(t *testing.T) {
 			if err := os.Symlink(tempDir(t), filepath.Join(fx.cfg.PersonalStore, "demo")); err != nil {
 				t.Fatal(err)
 			}
-			return []string{"skipped " + sourcePath(filepath.Join(mem, "real.md")) + ": refused: "}
+			return []string{"skipped " + SourcePath(filepath.Join(mem, "real.md")) + ": refused: "}
 		}},
 	}
 	for _, tt := range tests {
@@ -380,7 +380,7 @@ func TestNormalisationDiscardsTrustFields(t *testing.T) {
 	if p := m.Provenance; p == nil || !reflect.DeepEqual(*p, fact.Provenance{Engine: "claude", Session: "native-session", Host: "laptop"}) {
 		t.Errorf("provenance = %+v", p)
 	}
-	want := fact.Source{Engine: "claude", Path: sourcePath(filepath.Join(mem, "trusting.md")), SHA256: digest([]byte(text))}
+	want := fact.Source{Engine: "claude", Path: SourcePath(filepath.Join(mem, "trusting.md")), SHA256: digest([]byte(text))}
 	if s := m.Source; s == nil || !reflect.DeepEqual(*s, want) {
 		t.Errorf("source = %+v, want %+v", s, want)
 	}
@@ -402,7 +402,7 @@ func TestRerunIsANoOpAndAChangedSourceIsProposed(t *testing.T) {
 		t.Errorf("commit subject = %q", subject)
 	}
 
-	wantLines(t, fx.run(t, false), []string{"unchanged " + sourcePath(src) + ": " + stored})
+	wantLines(t, fx.run(t, false), []string{"unchanged " + SourcePath(src) + ": " + stored})
 	if got := git(t, fx.cfg.PersonalStore, "rev-parse", "HEAD"); got != head {
 		t.Errorf("a re-run moved HEAD from %s to %s", head, got)
 	}
@@ -411,7 +411,7 @@ func TestRerunIsANoOpAndAChangedSourceIsProposed(t *testing.T) {
 	}
 
 	writeFile(t, src, native("store-format", "how the store is laid out", "One fact per file, now with more.\n"))
-	wantLines(t, fx.run(t, false), []string{"propose " + sourcePath(src) + " -> " + stored + ": changed source"})
+	wantLines(t, fx.run(t, false), []string{"propose " + SourcePath(src) + " -> " + stored + ": changed source"})
 	if got, err := os.ReadFile(src); err != nil || !strings.Contains(string(got), "now with more") {
 		t.Errorf("native source changed: %q, %v", got, err)
 	}
@@ -425,7 +425,7 @@ func TestDryRunWritesNothing(t *testing.T) {
 	fx.opts.SessionID = ""
 	local := filepath.Join(fx.cfg.State(), "local", "personal", "demo")
 	wantLines(t, fx.run(t, true), []string{
-		"would flag personal " + filepath.Join(local, "a-fact.md") + " <- " + sourcePath(filepath.Join(mem, "a-fact.md")) + ": provenance:unknown-session",
+		"would flag personal " + filepath.Join(local, "a-fact.md") + " <- " + SourcePath(filepath.Join(mem, "a-fact.md")) + ": provenance:unknown-session",
 		"would flag personal " + filepath.Join(local, "b-fact.md"),
 	})
 	for _, dir := range []string{fx.cfg.PersonalStore, filepath.Join(fx.cfg.State(), "local")} {
@@ -472,10 +472,10 @@ func TestDecodeProjectDir(t *testing.T) {
 	tests := []struct {
 		name, encoded, want string
 	}{
-		{"dash in a segment", encodeProjectDir(dirs[0]), dirs[0]},
-		{"dot dir", encodeProjectDir(dirs[1]), dirs[1]},
-		{"ambiguous", encodeProjectDir(dirs[2]), ""},
-		{"missing", encodeProjectDir(filepath.Join(base, "nope")), ""},
+		{"dash in a segment", EncodeProjectDir(dirs[0]), dirs[0]},
+		{"dot dir", EncodeProjectDir(dirs[1]), dirs[1]},
+		{"ambiguous", EncodeProjectDir(dirs[2]), ""},
+		{"missing", EncodeProjectDir(filepath.Join(base, "nope")), ""},
 		{"not absolute", "home-x", ""},
 	}
 	for _, tt := range tests {
@@ -528,8 +528,8 @@ func TestLinkToATargetThatDoesNotPublishIsNotPublished(t *testing.T) {
 			mem := fx.memDir(repo(t, personalRemote))
 			writeFile(t, filepath.Join(mem, "a-linker.md"), native("a-linker", "links to the target", "See [[b-target]]. "+body))
 			writeFile(t, filepath.Join(mem, "b-target.md"), native("b-target", "the target", tt.target))
-			linker := sourcePath(filepath.Join(mem, "a-linker.md"))
-			targetSource := sourcePath(filepath.Join(mem, "b-target.md"))
+			linker := SourcePath(filepath.Join(mem, "a-linker.md"))
+			targetSource := SourcePath(filepath.Join(mem, "b-target.md"))
 			for _, dryRun := range []bool{true, false} {
 				got := fx.run(t, dryRun)
 				if len(got) != 2 {
@@ -559,7 +559,7 @@ func TestADroppedItemNoLongerShadowsItsNearDuplicate(t *testing.T) {
 	writeFile(t, filepath.Join(mem, "a-first.md"), native("a-first", "the same description", "the key is "+"AK"+"IA"+"IOSFODNN7EXAMPLE\n"))
 	writeFile(t, filepath.Join(mem, "b-second.md"), native("b-second", "the same description", "a different body\n"))
 	wantLines(t, fx.run(t, false), []string{
-		"skipped " + sourcePath(filepath.Join(mem, "a-first.md")) + ": refused: ",
+		"skipped " + SourcePath(filepath.Join(mem, "a-first.md")) + ": refused: ",
 		"published personal " + filepath.Join(fx.cfg.PersonalStore, "demo", "b-second.md"),
 	})
 }
@@ -654,8 +654,8 @@ func TestAFailureThatIsNotARefusalFailsTheRun(t *testing.T) {
 		mem := fx.memDir(repo(t, personalRemote))
 		writeFile(t, filepath.Join(mem, "a-linker.md"), native("a-linker", "links to the target", "See [[b-target]]. "+body))
 		writeFile(t, filepath.Join(mem, "b-target.md"), native("b-target", "the target", "The target.\n"))
-		linker := sourcePath(filepath.Join(mem, "a-linker.md"))
-		target := sourcePath(filepath.Join(mem, "b-target.md"))
+		linker := SourcePath(filepath.Join(mem, "a-linker.md"))
+		target := SourcePath(filepath.Join(mem, "b-target.md"))
 		blocker := filepath.Join(fx.cfg.PersonalStore, "demo", "b-target.md")
 		if err := os.MkdirAll(blocker, 0o755); err != nil { //nolint:gosec // test fixture
 			t.Fatal(err)
@@ -690,7 +690,7 @@ func TestAFailureThatIsNotARefusalFailsTheRun(t *testing.T) {
 		mem := fx.memDir(repo(t, personalRemote))
 		writeFile(t, filepath.Join(mem, "a-first.md"), native("a-first", "links to the second", "See [[b-second]]. "+body))
 		writeFile(t, filepath.Join(mem, "b-second.md"), native("b-second", "links to the first", "See [[a-first]]. "+body+"More words.\n"))
-		first := sourcePath(filepath.Join(mem, "a-first.md"))
+		first := SourcePath(filepath.Join(mem, "a-first.md"))
 		if err := os.MkdirAll(filepath.Join(fx.cfg.PersonalStore, "demo", "b-second.md"), 0o755); err != nil { //nolint:gosec // test fixture
 			t.Fatal(err)
 		}
@@ -701,7 +701,7 @@ func TestAFailureThatIsNotARefusalFailsTheRun(t *testing.T) {
 		}
 		wantLines(t, lines, []string{
 			"skipped " + first + ": failed: rolled back, it links b-second",
-			"skipped " + sourcePath(filepath.Join(mem, "b-second.md")) + ": failed: ",
+			"skipped " + SourcePath(filepath.Join(mem, "b-second.md")) + ": failed: ",
 		})
 		if _, err := os.Stat(filepath.Join(fx.cfg.PersonalStore, "demo", "a-first.md")); err == nil {
 			t.Error("the rolled-back fact is still in the checkout")
@@ -722,7 +722,7 @@ func TestAFailureThatIsNotARefusalFailsTheRun(t *testing.T) {
 		fx.opts.Deps.Scanner = gate.Scanner{Bin: script(t, "exit 1\n")}
 		for _, dryRun := range []bool{true, false} {
 			res, lines := fx.runResult(t, dryRun)
-			wantLines(t, lines, []string{"skipped " + sourcePath(filepath.Join(mem, "store-format.md")) + ": failed: secret scanner unavailable"})
+			wantLines(t, lines, []string{"skipped " + SourcePath(filepath.Join(mem, "store-format.md")) + ": failed: secret scanner unavailable"})
 			if res.Failed != 1 {
 				t.Errorf("dry=%v: Failed = %d, want 1", dryRun, res.Failed)
 			}
@@ -749,7 +749,7 @@ func TestACommitHeldBackLastRunIsRetried(t *testing.T) {
 	if err := os.Remove(stray); err != nil {
 		t.Fatal(err)
 	}
-	wantLines(t, fx.run(t, false), []string{"unchanged " + sourcePath(filepath.Join(mem, "store-format.md")) + ": "})
+	wantLines(t, fx.run(t, false), []string{"unchanged " + SourcePath(filepath.Join(mem, "store-format.md")) + ": "})
 	if status := git(t, fx.cfg.PersonalStore, "status", "--porcelain"); status != "" {
 		t.Errorf("the retry left the checkout dirty:\n%s", status)
 	}
@@ -790,7 +790,7 @@ func TestAnUnreadableStoreFactIsReportedAndNeverOverwritten(t *testing.T) {
 				wantLines(t, lines, []string{
 					"skipped " + stray + ": unreadable store fact: ",
 					"skipped " + clash + ": unreadable store fact: ",
-					"skipped " + sourcePath(filepath.Join(mem, "clashes.md")) + ": refused: it would overwrite the unreadable store fact " + clash,
+					"skipped " + SourcePath(filepath.Join(mem, "clashes.md")) + ": refused: it would overwrite the unreadable store fact " + clash,
 					landed + " personal ",
 				})
 				if res.Failed != 0 {
@@ -812,7 +812,7 @@ func TestAFactThatPublishesAfterPlanningFlaggedItDoesNotLinkAFlaggedSibling(t *t
 	mem := fx.memDir(repo(t, personalRemote))
 	writeFile(t, filepath.Join(mem, "a-linker.md"), native("a-linker", "links to the sibling", "See [[b-sibling]]. "+body))
 	writeFile(t, filepath.Join(mem, "b-sibling.md"), native("b-sibling", "the sibling", "see https://example.com/doc for the layout of the store\n"))
-	linker := sourcePath(filepath.Join(mem, "a-linker.md"))
+	linker := SourcePath(filepath.Join(mem, "a-linker.md"))
 
 	// The importing session has no tool record, so the plan flags both facts;
 	// the scanner records one on its trigger-th call, so the linker's write
@@ -874,7 +874,7 @@ func TestARefusedLinkTargetThatLaterPublishesDoesNotLeaveItsLinkerRefused(t *tes
 		}
 		_, lines := fx.runResult(t, dryRun)
 		wantLines(t, lines, []string{
-			"skipped " + sourcePath(filepath.Join(mem, "a-zeta.md")) + ": refused: ",
+			"skipped " + SourcePath(filepath.Join(mem, "a-zeta.md")) + ": refused: ",
 			landed + filepath.Join(fx.cfg.PersonalStore, "demo", "b-yankee.md"),
 			landed + filepath.Join(fx.cfg.PersonalStore, "demo", "c-xray.md"),
 		})
@@ -948,7 +948,7 @@ func TestLinkersOfFactsAShadowHidUntilItWasRefusedPublish(t *testing.T) {
 				}
 				var want []string
 				for _, n := range tt.refused {
-					want = append(want, "skipped "+sourcePath(filepath.Join(mem, n+".md"))+": refused: ")
+					want = append(want, "skipped "+SourcePath(filepath.Join(mem, n+".md"))+": refused: ")
 				}
 				for _, n := range tt.landed {
 					want = append(want, landed+filepath.Join(fx.cfg.PersonalStore, "demo", n+".md"))
@@ -986,7 +986,7 @@ func TestALinkerSetAsideOrRefusedForItsLinkDoesNotShadowItsNearDuplicate(t *test
 			if tt.target != "" {
 				writeFile(t, filepath.Join(mem, tt.link+".md"), native(tt.link, "the target", tt.target))
 			}
-			linker := sourcePath(filepath.Join(mem, "a-linker.md"))
+			linker := SourcePath(filepath.Join(mem, "a-linker.md"))
 			for _, dryRun := range []bool{true, false} {
 				landed := "published personal "
 				if dryRun {
@@ -1080,7 +1080,7 @@ func (r report) from(src string) report {
 }
 
 func source(mem, name string) string {
-	return sourcePath(filepath.Join(mem, name+".md"))
+	return SourcePath(filepath.Join(mem, name+".md"))
 }
 
 func (fx fixture) storePath(name string) string {
@@ -1317,7 +1317,7 @@ func TestInRunLinkerOfHeldBackTargetIsSetAside(t *testing.T) {
 			t.Fatal(err)
 		}
 		reviewed := storedFact("b-flag", "the target", "The target, reviewed.\n")
-		reviewed.Metadata.Source = &fact.Source{Engine: "claude", Path: sourcePath(target), SHA256: digest([]byte(targetText))}
+		reviewed.Metadata.Source = &fact.Source{Engine: "claude", Path: SourcePath(target), SHA256: digest([]byte(targetText))}
 		putFact(t, fx.storePath("b-flag"), reviewed)
 		git(t, fx.cfg.PersonalStore, "add", "-A")
 		git(t, fx.cfg.PersonalStore, "commit", "-q", "-m", "review b-flag")

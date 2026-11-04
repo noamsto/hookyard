@@ -49,11 +49,11 @@ func Claude(ctx context.Context, claudeDir string, cfg config.Config, r route.Re
 			continue
 		}
 		if err != nil {
-			notes = append(notes, Report{Outcome: Skipped, Source: sourcePath(memDir), Detail: err.Error()})
+			notes = append(notes, Report{Outcome: Skipped, Source: SourcePath(memDir), Detail: err.Error()})
 			continue
 		}
 		if !info.IsDir() {
-			notes = append(notes, Report{Outcome: Skipped, Source: sourcePath(memDir), Detail: "not a directory"})
+			notes = append(notes, Report{Outcome: Skipped, Source: SourcePath(memDir), Detail: "not a directory"})
 			continue
 		}
 		got, more := claudeProject(memDir)
@@ -77,7 +77,7 @@ func Claude(ctx context.Context, claudeDir string, cfg config.Config, r route.Re
 func claudeProject(memDir string) (items []Item, notes []Report) {
 	entries, err := os.ReadDir(memDir)
 	if err != nil {
-		return nil, []Report{{Outcome: Skipped, Source: sourcePath(memDir), Detail: err.Error()}}
+		return nil, []Report{{Outcome: Skipped, Source: SourcePath(memDir), Detail: err.Error()}}
 	}
 	var topics []string
 	var index []byte
@@ -87,8 +87,8 @@ func claudeProject(memDir string) (items []Item, notes []Report) {
 			continue
 		}
 		path := filepath.Join(memDir, name)
-		src := sourcePath(path)
-		raw, err := readRegular(path)
+		src := SourcePath(path)
+		raw, err := ReadRegular(path)
 		if err != nil {
 			notes = append(notes, Report{Outcome: Skipped, Source: src, Detail: err.Error()})
 			continue
@@ -106,14 +106,14 @@ func claudeProject(memDir string) (items []Item, notes []Report) {
 		items = append(items, Item{Engine: "claude", Source: src, Raw: raw, Native: f})
 	}
 	if index != nil {
-		notes = append(notes, checkIndex(sourcePath(filepath.Join(memDir, "MEMORY.md")), index, topics)...)
+		notes = append(notes, checkIndex(SourcePath(filepath.Join(memDir, "MEMORY.md")), index, topics)...)
 	}
 	return items, notes
 }
 
-// readRegular reads path only if it is a regular file: O_NOFOLLOW refuses a
+// ReadRegular reads path only if it is a regular file: O_NOFOLLOW refuses a
 // symlink, and O_NONBLOCK keeps a FIFO from hanging the open.
-func readRegular(path string) ([]byte, error) {
+func ReadRegular(path string) ([]byte, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0) //nolint:gosec // path is an entry of the memory dir being imported
 	if errors.Is(err, syscall.ELOOP) {
 		return nil, errors.New("a symlink, not a regular file")
@@ -165,9 +165,9 @@ func checkIndex(src string, raw []byte, topics []string) []Report {
 	return notes
 }
 
-// sourcePath is path as a source block records it: under the home dir it
+// SourcePath is path as a source block records it: under the home dir it
 // starts ~/, so the same native file names itself alike on every host.
-func sourcePath(path string) string {
+func SourcePath(path string) string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return path
@@ -180,9 +180,9 @@ func sourcePath(path string) string {
 
 var nonAlnum = regexp.MustCompile(`[^A-Za-z0-9]`)
 
-// encodeProjectDir is how Claude names a project dir after its path: every
+// EncodeProjectDir is how Claude names a project dir after its path: every
 // character but a letter or digit becomes '-'.
-func encodeProjectDir(path string) string {
+func EncodeProjectDir(path string) string {
 	return nonAlnum.ReplaceAllString(path, "-")
 }
 
@@ -219,7 +219,7 @@ func decodeUnder(dir, rest string, found map[string]bool) {
 		if len(found) > 1 {
 			return
 		}
-		enc := encodeProjectDir(e.Name())
+		enc := EncodeProjectDir(e.Name())
 		tail, ok := strings.CutPrefix(rest, enc)
 		if !ok {
 			continue
