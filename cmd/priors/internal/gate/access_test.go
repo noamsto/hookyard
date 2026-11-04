@@ -187,7 +187,7 @@ func TestShellAccess(t *testing.T) {
 		{name: "loop value shifts the subcommand", cmd: `for s in pr myext; do gh $s view --jq /h/store/M; done`, writes: true, want: []Touch{w("/h/store/M")}},
 		{name: "select withdraws", cmd: `select n in 1 2; do gh issue view $n --jq /h/store/M; done`, writes: true, want: []Touch{w("/h/store/M")}},
 		{name: "brace loop item names a data taker", cmd: `for n in {g,x}h; do cp /bin/rm /h/bin/$n; done; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
-		{name: "glob loop item withdraws",cmd: `for f in *; do cp /bin/rm "$f"; done; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "glob loop item withdraws", cmd: `for f in *; do cp /bin/rm "$f"; done; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
 		{name: "opaque loop item withdraws", cmd: `for f in $(ls); do gh issue view $f --jq /h/store/M; done`, writes: true, want: []Touch{w("/h/store/M")}},
 		{name: "reassigned loop variable withdraws", cmd: `for n in 1 2; do n=$(cat f); cp /bin/rm $n; done; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
 		{name: "loop over the cap withdraws", cmd: `for n in {1..65}; do gh issue view $n --jq /h/store/M; done`, writes: true, want: []Touch{w("/h/store/M")}},

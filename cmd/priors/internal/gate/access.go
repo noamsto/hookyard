@@ -61,6 +61,9 @@ const (
 	maxTouches = 1 << 14
 	// maxSubTokens bounds the path-like tokens taken from one field.
 	maxSubTokens = 256
+	// maxLoopRuns bounds the combinations of values finite loop variables are
+	// read in, so per-value touches stay inside maxTouches.
+	maxLoopRuns = 64
 )
 
 var (
@@ -122,14 +125,25 @@ func ShellAccess(host *Host, texts ...string) (acc Access) {
 		host = &Host{}
 	}
 	a := &accessor{
-		j:       &judge{seen: map[string]bool{}, vars: map[string]string{}, host: host},
-		tainted: map[string]bool{},
-		done:    map[*syntax.Word]bool{},
-		touched: map[Touch]bool{},
-		piped:   map[*syntax.Stmt]bool{},
+		j:         &judge{seen: map[string]bool{}, vars: map[string]string{}, host: host},
+		tainted:   map[string]bool{},
+		done:      map[*syntax.Word]bool{},
+		touched:   map[Touch]bool{},
+		piped:     map[*syntax.Stmt]bool{},
+		loops:     map[string][]string{},
+		assigns:   map[string]int{},
+		mentioned: map[string]bool{},
+		exempted:  map[string]bool{},
 	}
 	for _, text := range texts {
 		a.script(text, 0)
+	}
+	// A loop variable's listed values hold every value it is read with only
+	// if nothing else sets it, which the whole command must be read to tell.
+	for name := range a.exempted {
+		if a.wild || a.nameref || a.assigns[name] != 1 || a.mentioned[name] {
+			a.redefines = true
+		}
 	}
 	// A data position is an exemption only when nothing in the whole command
 	// redefines what a name runs; a trigger seen anywhere withdraws every
@@ -166,6 +180,22 @@ type accessor struct {
 	// deferred are the data words a clean, known program named, held back until
 	// the walk finishes: judged then only if redefines was seen anywhere.
 	deferred []deferral
+	// loops are the for variables over listed plain values, with those values,
+	// which a word opaque only through them is read once per value with.
+	loops map[string][]string
+	// assigns counts the assignments to each name; a loop's own is one.
+	assigns map[string]int
+	// mentioned are the loop names a rendered field, an arithmetic source or a
+	// redirect's {varname} names, any of which may set them again.
+	mentioned map[string]bool
+	// nameref reports a declared nameref, which may set any loop variable.
+	nameref bool
+	// wild reports an opaque word not opaque only through finite loop
+	// variables, or arithmetic expanding one, either of which may compute a
+	// loop variable's name.
+	wild bool
+	// exempted are the loop names a call's per-value check let through.
+	exempted map[string]bool
 	acc      Access
 }
 
@@ -229,6 +259,7 @@ func (a *accessor) scan(text string, stmts []*syntax.Stmt) {
 		walkBounded(s, func(n syntax.Node) bool {
 			if declaresNameref(n) {
 				a.changes(true, true)
+				a.nameref = true
 			}
 			if _, ok := n.(*syntax.FuncDecl); ok {
 				a.redefines = true
@@ -263,6 +294,58 @@ func namesVar(text, name string) bool {
 		}
 		return true
 	}
+}
+
+// countName counts the occurrences of name in s, a rendered field, that may
+// set it: a whole name that is not an expansion reading it ($name, or ${name
+// not followed by = or :=, after an optional index), not escaped (a variable
+// name holds no backslash, so \n is text), not a flag spelling (-n) and not
+// inside a longer name, unless it ends a short-option cluster (-vn).
+func countName(s, name string) int {
+	count := 0
+	for from := 0; ; {
+		k := strings.Index(s[from:], name)
+		if k < 0 {
+			return count
+		}
+		start := from + k
+		end := start + len(name)
+		from = start + 1
+		if end < len(s) && nameByte(s[end]) {
+			continue
+		}
+		switch {
+		case start > 0 && (s[start-1] == '$' || s[start-1] == '\\'):
+			continue
+		case start > 1 && s[start-2:start] == "${":
+			rest := s[end:]
+			if strings.HasPrefix(rest, "[") {
+				if i := strings.IndexByte(rest, ']'); i >= 0 {
+					rest = rest[i+1:]
+				}
+			}
+			if !strings.HasPrefix(rest, "=") && !strings.HasPrefix(rest, ":=") {
+				continue
+			}
+		case start > 0 && nameByte(s[start-1]):
+			run := start - 1
+			for run > 0 && nameByte(s[run-1]) {
+				run--
+			}
+			if !loneDash(s, run-1) {
+				continue
+			}
+		case loneDash(s, start-1):
+			continue
+		}
+		count++
+	}
+}
+
+// loneDash reports a - at i that is not part of -- or of a word: at the start
+// of s, or after a byte that is neither - nor a name byte.
+func loneDash(s string, i int) bool {
+	return i >= 0 && s[i] == '-' && (i == 0 || s[i-1] != '-' && !nameByte(s[i-1]))
 }
 
 // declaresNameref reports a declare, typeset or local with an option cluster
@@ -318,8 +401,25 @@ func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
 			if n.Param != nil && n.Exp != nil && (n.Exp.Op == syntax.AssignUnset || n.Exp.Op == syntax.AssignUnsetOrNull) {
 				a.assign(n.Param.Value, n.Exp.Word)
 			}
+		case *syntax.ForClause:
+			if wi, ok := n.Loop.(*syntax.WordIter); ok && !n.Select {
+				a.loop(wi, text)
+			}
 		case *syntax.WordIter:
 			a.assign(n.Name.Value, n.Items...)
+			// assign keeps a lone item's text, but a brace, a glob or a split
+			// makes it values the text does not show.
+			if len(n.Items) == 1 && !glob(n.Items[0]) && expansions(n.Items) == 1 {
+				fields, r := a.j.fields(real, text, n.Items...)
+				if r != "" {
+					a.acc.Unreadable = r
+					return false
+				}
+				if len(fields) == 1 {
+					break
+				}
+			}
+			a.tainted[n.Name.Value] = true
 		}
 		return !arithmetic(n) && a.j.parsed <= maxParsed
 	})
@@ -349,6 +449,7 @@ func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
 // read another value than the one recorded. Setting a variable that picks the
 // program a name runs writes, whatever the command that follows.
 func (a *accessor) assign(name string, values ...*syntax.Word) {
+	a.assigns[name]++
 	if slices.Contains(programVars, name) || strings.HasPrefix(name, "GIT_") || strings.HasPrefix(name, "LD_") {
 		a.acc.Writes = true
 	}
@@ -359,15 +460,113 @@ func (a *accessor) assign(name string, values ...*syntax.Word) {
 	a.j.assign(name, values...)
 }
 
+// loop registers a for variable whose values the text tells: bash sets no
+// lowercase name on its own, so a lowercase one changes only where the
+// command names it. Its items must be plain and render to at most
+// maxLoopRuns values, none empty: an item's expansion may read a value an
+// untracked read set, a glob names files, and an empty value is the one a
+// default assignment acts on.
+func (a *accessor) loop(wi *syntax.WordIter, text string) {
+	name := wi.Name.Value
+	if name == "" || name[0] < 'a' || name[0] > 'z' {
+		return
+	}
+	if slices.ContainsFunc(wi.Items, func(w *syntax.Word) bool { return !plain(w) || a.opaque(w) }) {
+		return
+	}
+	n := expansions(wi.Items)
+	if n == 0 || n > maxLoopRuns {
+		return
+	}
+	values, r := a.j.fields(real, text, wi.Items...)
+	if r != "" {
+		a.acc.Unreadable = r
+		return
+	}
+	// Each plain alternative renders to one field unless it is empty.
+	if len(values) != n {
+		return
+	}
+	a.loops[name] = values
+}
+
+// plain reports a word of literal and quoted parts only, with no glob.
+func plain(w *syntax.Word) bool {
+	if glob(w) {
+		return false
+	}
+	return !slices.ContainsFunc(w.Parts, func(p syntax.WordPart) bool {
+		switch p := p.(type) {
+		case *syntax.Lit, *syntax.SglQuoted:
+			return false
+		case *syntax.DblQuoted:
+			return slices.ContainsFunc(p.Parts, func(q syntax.WordPart) bool {
+				_, ok := q.(*syntax.Lit)
+				return !ok
+			})
+		}
+		return true
+	})
+}
+
+// glob reports a word holding an unquoted glob character or an extglob.
+func glob(w *syntax.Word) bool {
+	return slices.ContainsFunc(w.Parts, func(p syntax.WordPart) bool {
+		switch p := p.(type) {
+		case *syntax.Lit:
+			return strings.ContainsAny(p.Value, "*?[")
+		case *syntax.ExtGlob:
+			return true
+		}
+		return false
+	})
+}
+
+// expansions counts the words brace expansion makes of words, saturating at
+// maxParsed.
+func expansions(words []*syntax.Word) int {
+	n := 0
+	for _, w := range words {
+		split := *w
+		syntax.SplitBraces(&split)
+		n = min(n+braceCount(split.Parts), maxParsed)
+	}
+	return n
+}
+
 // arithmetic reads an arithmetic expression, which is never walked: a
-// substitution in it runs a command that cannot be seen.
+// substitution in it runs a command that cannot be seen. An expansion of a
+// loop variable may compute a name that cannot be rendered per value.
 func (a *accessor) arithmetic(src string) {
 	runs := strings.Contains(src, "$(") || strings.Contains(src, "`") || strings.Contains(src, "<(") || strings.Contains(src, ">(")
 	if runs {
 		a.acc.Writes = true
 		a.touch(Touch{Write: true, Opaque: true})
 	}
+	for name := range a.loops {
+		if expandsName(src, name) {
+			a.wild = true
+		}
+	}
 	a.field(src, runs, false)
+}
+
+// expandsName reports s holding $name or ${name as a whole name.
+func expandsName(s, name string) bool {
+	for _, p := range []string{"$" + name, "${" + name} {
+		for from := 0; ; {
+			k := strings.Index(s[from:], p)
+			if k < 0 {
+				break
+			}
+			end := from + k + len(p)
+			from = end
+			if end == len(s) || !nameByte(s[end]) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // command reads one statement's simple command and its redirects.
@@ -388,25 +587,13 @@ func (a *accessor) command(st *syntax.Stmt, text string, depth int) {
 
 // call reads a simple command's words and reports whether it may write.
 func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
-	argv := a.argv(c.Args, text)
-	idx, afterFlag := commandWord(argv)
-	name := ""
-	if idx < len(argv) {
-		name = argv[idx]
-	}
+	v := a.view(c, text)
+	argv, idx, name := v.argv, v.idx, v.name
 	assigned := len(c.Assigns) > 0 || slices.ContainsFunc(argv[:idx], assignment)
-	// A word renders to any number of fields, so the command word is found
-	// again among the syntax words to leave it out of the writes.
-	cmdArg := commandArg(c.Args, argv, idx)
-	args := argv[min(idx+1, len(argv)):]
-	heads := args
-	if cmdArg >= 0 {
-		heads = a.heads(c.Args[idx+1:], args)
-	}
 	// A command word found after a flag may be that flag's value, not the
 	// command that runs; none found after one may be a wrapper's split string
 	// (`env -S 'rm -rf x'`), which runs.
-	writer := afterFlag || idx < len(argv) && (assigned || !readOnly(name, args, heads))
+	writer := v.afterFlag || idx < len(argv) && (assigned || !readOnly(name, v.args, v.heads))
 	if writer {
 		a.acc.Writes = true
 		// xargs writes through operands it reads from stdin.
@@ -420,24 +607,86 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 	if idx < len(argv) && name == "" || slices.Contains(redefiners, name) {
 		a.redefines = true
 	}
-	var messages []int
-	if cmdArg >= 0 && a.cleanWrap(argv, idx) {
-		messages = messageArgs(name, args, heads)
-	}
+	var loops []string
 	for i, w := range c.Args {
 		a.done[w] = true
-		write := writer && i != cmdArg
-		if slices.Contains(messages, i-idx-1) {
+		write := writer && i != v.cmdArg
+		if slices.Contains(v.data, i) {
 			a.deferred = append(a.deferred, deferral{w, text, depth, write, writer})
 			continue
 		}
 		if write && a.opaque(w) {
+			if names, ok := a.finiteOnly(w); ok {
+				loops = append(loops, names...)
+			} else {
+				a.redefines = true
+			}
+		}
+		a.word(w, text, depth, write, writer, i == v.cmdArg)
+	}
+	if len(loops) > 0 {
+		a.perValue(c, text, v.data, loops)
+	}
+	a.chdirs(name, c.Args, argv, idx, v.afterFlag, v.cmdArg, text)
+	return writer
+}
+
+// perValue checks a call whose opaque write words are opaque only through the
+// finite loop variables names, which word reads once per value: each
+// combination of values must also leave every data word a data word, as a
+// value may shift what the program parses (`gh $s view`).
+func (a *accessor) perValue(c *syntax.CallExpr, text string, data []int, names []string) {
+	slices.Sort(names)
+	names = slices.Compact(names)
+	ok := a.runs(names, func() {
+		pinned := a.view(c, text).data
+		if slices.ContainsFunc(data, func(i int) bool { return !slices.Contains(pinned, i) }) {
 			a.redefines = true
 		}
-		a.word(w, text, depth, write, writer, i == cmdArg)
+	})
+	if !ok {
+		a.redefines = true
+		return
 	}
-	a.chdirs(name, c.Args, argv, idx, afterFlag, cmdArg, text)
-	return writer
+	for _, name := range names {
+		a.exempted[name] = true
+	}
+}
+
+// callView is what a call's rendered words make of it.
+type callView struct {
+	argv      []string
+	idx       int
+	afterFlag bool
+	name      string
+	// cmdArg is the command word's syntax index, -1 when the words render to
+	// fields one-to-one nowhere before it.
+	cmdArg      int
+	args, heads []string
+	// data are the syntax indexes of the data words of a clean, known program.
+	data []int
+}
+
+func (a *accessor) view(c *syntax.CallExpr, text string) callView {
+	v := callView{argv: a.argv(c.Args, text)}
+	v.idx, v.afterFlag = commandWord(v.argv)
+	if v.idx < len(v.argv) {
+		v.name = v.argv[v.idx]
+	}
+	// A word renders to any number of fields, so the command word is found
+	// again among the syntax words to leave it out of the writes.
+	v.cmdArg = commandArg(c.Args, v.argv, v.idx)
+	v.args = v.argv[min(v.idx+1, len(v.argv)):]
+	v.heads = v.args
+	if v.cmdArg >= 0 {
+		v.heads = a.heads(c.Args[v.idx+1:], v.args)
+		if a.cleanWrap(v.argv, v.idx) {
+			for _, k := range messageArgs(v.name, v.args, v.heads) {
+				v.data = append(v.data, v.idx+1+k)
+			}
+		}
+	}
+	return v
 }
 
 // cleanWrap reports that every word commandWord skipped to reach the command at
@@ -1267,6 +1516,10 @@ func (a *accessor) chdir(w *syntax.Word, field, text string) {
 // here-string is read as a script when a writer reads it, and as data
 // otherwise.
 func (a *accessor) redirect(r *syntax.Redirect, writer bool, text string, depth int) {
+	// A {varname} sets that variable to the fd it opens.
+	if r.N != nil && !digits(r.N.Value) {
+		a.mention(r.N.Value)
+	}
 	switch r.Op {
 	case syntax.Hdoc, syntax.DashHdoc:
 		if r.Word != nil {
@@ -1335,10 +1588,21 @@ func (a *accessor) body(w *syntax.Word, text string, depth int, writer bool) {
 // word records w's fields in each environment, or the prefix of an opaque
 // one, and reads a writer's field that still holds a shell metacharacter as
 // a script one level deeper. cmd marks the call's own command word, which is
-// exempt from the manufactured-name trigger.
+// exempt from the manufactured-name trigger. An opaque word read only through
+// finite loop variables is also read once per combination of their values.
 func (a *accessor) word(w *syntax.Word, text string, depth int, write, writer, cmd bool) {
 	if prefix, ok := a.opaquePrefix(w); ok {
 		a.touch(Touch{Text: prefix, Write: write, Opaque: true})
+		names, finite := a.finiteOnly(w)
+		if !finite || !a.runs(names, func() {
+			if a.opaque(w) {
+				a.wild = true
+				return
+			}
+			a.word(w, text, depth, write, writer, cmd)
+		}) {
+			a.wild = true
+		}
 	}
 	for _, e := range a.envs(w) {
 		fields, r := a.j.fields(e, text, w)
@@ -1388,8 +1652,10 @@ func (a *accessor) field(f string, write, cmd bool) {
 }
 
 // redefiner sets redefines when s names a state variable, or when it is not a
-// command word and its basename is a data-taker.
+// command word and its basename is a data-taker. It also records the loop
+// variables s mentions.
 func (a *accessor) redefiner(s string, cmd bool) {
+	a.mention(s)
 	if !cmd && slices.Contains(dataTakers, wordName(s)) {
 		a.redefines = true
 	}
@@ -1523,4 +1789,122 @@ func (a *accessor) known(name string) bool {
 	}
 	_, ok := a.j.host.lookup(name)
 	return ok
+}
+
+// mention records the registered loop variables s names in a way that may set
+// them, charging the scan to the judge's budget.
+func (a *accessor) mention(s string) {
+	for name := range a.loops {
+		if a.j.parsed += len(s); a.j.parsed > maxParsed {
+			a.acc.Unreadable = "budget"
+			return
+		}
+		if countName(s, name) > 0 {
+			a.mentioned[name] = true
+		}
+	}
+}
+
+// loopReads returns the sorted registered loop variables w expands outside a
+// substitution, whose insides are opaque whatever the loop holds.
+func (a *accessor) loopReads(w *syntax.Word) []string {
+	var names []string
+	walkBounded(w, func(n syntax.Node) bool {
+		switch n := n.(type) {
+		case *syntax.CmdSubst, *syntax.ProcSubst:
+			return false
+		case *syntax.ParamExp:
+			if n.Param != nil {
+				if _, ok := a.loops[n.Param.Value]; ok {
+					names = append(names, n.Param.Value)
+				}
+			}
+		}
+		return !arithmetic(n)
+	})
+	slices.Sort(names)
+	return slices.Compact(names)
+}
+
+// finite reports a loop variable that holds only its listed values so far:
+// assigned only by its loop and not mentioned.
+func (a *accessor) finite(name string) bool {
+	_, ok := a.loops[name]
+	return ok && a.assigns[name] == 1 && !a.mentioned[name]
+}
+
+// finiteOnly returns the loop variables w reads, when they are all finite and
+// w is opaque only through them.
+func (a *accessor) finiteOnly(w *syntax.Word) ([]string, bool) {
+	names := a.loopReads(w)
+	if len(names) == 0 || slices.ContainsFunc(names, func(n string) bool { return !a.finite(n) }) {
+		return nil, false
+	}
+	first := make([]string, len(names))
+	for i, name := range names {
+		first[i] = a.loops[name][0]
+	}
+	restore := a.pin(names, first)
+	defer restore()
+	return names, !a.opaque(w)
+}
+
+// pin sets each of names to its value in values, known, and returns what
+// restores both as they were.
+func (a *accessor) pin(names, values []string) (restore func()) {
+	type saved struct {
+		value        string
+		set, tainted bool
+	}
+	old := make([]saved, len(names))
+	for i, name := range names {
+		old[i].value, old[i].set = a.j.vars[name]
+		old[i].tainted = a.tainted[name]
+		a.j.vars[name] = values[i]
+		delete(a.tainted, name)
+	}
+	return func() {
+		for i, name := range names {
+			delete(a.j.vars, name)
+			if old[i].set {
+				a.j.vars[name] = old[i].value
+			}
+			delete(a.tainted, name)
+			if old[i].tainted {
+				a.tainted[name] = true
+			}
+		}
+	}
+}
+
+// runs calls f once per combination of the values of the loop variables
+// names, in order, with them pinned; it reports false, calling none, when
+// there are more than maxLoopRuns combinations.
+func (a *accessor) runs(names []string, f func()) bool {
+	total := 1
+	for _, name := range names {
+		if total *= len(a.loops[name]); total > maxLoopRuns {
+			return false
+		}
+	}
+	at := make([]int, len(names))
+	values := make([]string, len(names))
+	for {
+		for i, name := range names {
+			values[i] = a.loops[name][at[i]]
+		}
+		restore := a.pin(names, values)
+		f()
+		restore()
+		i := len(names) - 1
+		for ; i >= 0; i-- {
+			if at[i]++; at[i] < len(a.loops[names[i]]) {
+				break
+			}
+			at[i] = 0
+		}
+		if i < 0 {
+			return true
+		}
+	}
 }
