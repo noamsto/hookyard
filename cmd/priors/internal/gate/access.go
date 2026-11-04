@@ -78,6 +78,17 @@ var (
 		"od", "hexdump", "strings", "cut", "tr", "comm", "join", "paste", "fold", "rev", "tac",
 		"id", "whoami", "date", "uname",
 	}
+	// nonSetters set no shell variable, a closed list: a builtin that may set one
+	// by a name the text does not spell (read ?, mapfile -C, wait -p, set -x
+	// with PS4) is left out, as is test, and printf is checked on its own.
+	nonSetters = []string{
+		"cat", "head", "tail", "wc", "ls", "stat", "readlink", "realpath", "basename", "dirname",
+		"cmp", "diff", "du", "df", "md5sum", "sha1sum", "sha224sum", "sha256sum", "sha384sum",
+		"sha512sum", "b2sum", "cksum", "echo", "true", "false", ":", "pwd", "cd", "pushd", "popd",
+		"which", "whereis", "type", "grep", "egrep", "fgrep", "jq", "nl", "od", "hexdump", "strings",
+		"cut", "tr", "comm", "join", "paste", "fold", "rev", "tac", "id", "whoami", "date", "uname",
+		"sort", "uniq", "gh", "glab", "claude", "crew", "git", "sed", "rg", "fd", "find",
+	}
 	// gitReaders leave the work tree as it is: they read, or write only git's
 	// own index, objects and refs.
 	gitReaders = []string{
@@ -142,7 +153,7 @@ func ShellAccess(host *Host, texts ...string) (acc Access) {
 	// if nothing else sets it, which the whole command must be read to tell:
 	// a setter read before its loop is registered counts too.
 	for name := range a.exempted {
-		if a.wild || a.nameref || a.assigns[name] != 1 || a.mentioned[name] || a.named(name) {
+		if a.wild || a.nameref || a.unsafe || a.assigns[name] != 1 || a.mentioned[name] || a.named(name) {
 			a.redefines = true
 		}
 	}
@@ -201,6 +212,12 @@ type accessor struct {
 	// variable's value as an expression: either may compute a loop variable's
 	// name.
 	wild bool
+	// unsafe reports a call outside nonSetters or behind a wrapper, text the
+	// parser cannot read, an assignment or ${x:=} default, a declaration, a
+	// test or arithmetic clause, a coproc, a function, a C-style or select
+	// loop, or a {varname} redirect: only commands that cannot set a shell
+	// variable leave a loop's listed values the only ones it holds.
+	unsafe bool
 	// exempted are the loop names a call's per-value check let through.
 	exempted map[string]bool
 	acc      Access
@@ -245,6 +262,10 @@ func (a *accessor) script(text string, depth int) {
 		a.stmt(stmt, text, depth)
 	}
 	if failed && a.acc.Unreadable == "" {
+		// Text the parser cannot read at depth 0 runs calls it cannot name.
+		if depth == 0 {
+			a.unsafe = true
+		}
 		a.unparsed(text)
 	}
 }
@@ -452,9 +473,20 @@ func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
 				a.word(n, text, depth, false, false, false)
 			}
 		case *syntax.DeclClause:
+			a.unsafe = true
 			// A quoted operand (`declare 'a[x]=1'`) parses with no index.
 			if strings.Contains(source(text, n), "[") {
 				a.wild = true
+			}
+		case *syntax.Assign, *syntax.LetClause, *syntax.ArithmCmd, *syntax.TestClause, *syntax.CoprocClause, *syntax.FuncDecl:
+			a.unsafe = true
+		case *syntax.ParamExp:
+			if n.Exp != nil && (n.Exp.Op == syntax.AssignUnset || n.Exp.Op == syntax.AssignUnsetOrNull) {
+				a.unsafe = true
+			}
+		case *syntax.ForClause:
+			if _, ok := n.Loop.(*syntax.WordIter); !ok || n.Select {
+				a.unsafe = true
 			}
 		}
 		if subscripts(n) {
@@ -506,8 +538,9 @@ func (a *accessor) loop(wi *syntax.WordIter, text string) {
 		a.acc.Unreadable = r
 		return
 	}
-	// Each plain alternative renders to one field unless it is empty.
-	if len(values) != n {
+	// Each plain alternative renders to one field unless it is empty. A quoted
+	// glob character is a glob again where the variable is read unquoted.
+	if len(values) != n || slices.ContainsFunc(values, func(v string) bool { return strings.ContainsAny(v, "*?[") }) {
 		return
 	}
 	a.loops[name] = values
@@ -645,6 +678,14 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 	if nameSubscript(name, v.args) {
 		a.wild = true
 	}
+	// A wrapper before the command word (command read, builtin mapfile) is
+	// outside nonSetters too. A nested script runs, if at all, in a child of a
+	// call at depth 0, which sets this shell's variables only when it is
+	// outside nonSetters itself; a writer's data word read as one names no call
+	// that runs here.
+	if depth == 0 && (idx > 0 || !a.setsNoVar(c, v, text)) {
+		a.unsafe = true
+	}
 	var loops []string
 	for i, w := range c.Args {
 		a.done[w] = true
@@ -670,6 +711,24 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 	}
 	a.chdirs(name, c.Args, argv, idx, v.afterFlag, v.cmdArg, text)
 	return writer
+}
+
+// setsNoVar reports a call to one of nonSetters, or a printf whose first
+// argument is a format and not a flag: one word, not opaque, with no glob, that
+// renders to one field not starting with -.
+func (a *accessor) setsNoVar(c *syntax.CallExpr, v callView, text string) bool {
+	if v.name != "printf" {
+		return slices.Contains(nonSetters, v.name)
+	}
+	if v.cmdArg < 0 || v.cmdArg+1 >= len(c.Args) {
+		return false
+	}
+	format := c.Args[v.cmdArg+1]
+	if a.opaque(format) || glob(format) {
+		return false
+	}
+	fields, r := a.j.fields(real, text, format)
+	return r == "" && len(fields) == 1 && !strings.HasPrefix(fields[0], "-")
 }
 
 // perValue checks a call whose opaque write words are opaque only through the
@@ -1560,6 +1619,7 @@ func (a *accessor) redirect(r *syntax.Redirect, writer bool, text string, depth 
 	// A {varname} sets that variable to the fd it opens; a subscript in it is
 	// arithmetic.
 	if r.N != nil && !digits(r.N.Value) {
+		a.unsafe = true
 		a.mention(r.N.Value)
 		if strings.Contains(r.N.Value, "[") {
 			a.wild = true

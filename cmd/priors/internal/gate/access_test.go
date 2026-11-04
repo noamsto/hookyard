@@ -238,6 +238,18 @@ func TestShellAccess(t *testing.T) {
 		{name: "C-style loop withdraws loop", cmd: `read -r x < /h/f; false && for n in a b; do :; done; for (( x; 0; )); do :; done; cp /bin/rm /h/bin/${n}h; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
 		{name: "subscripted redirect variable withdraws loop", cmd: `read -r x < /h/f; false && for n in a b; do :; done; exec {a[x]}>/dev/null; cp /bin/rm /h/bin/${n}h; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
 		{name: "unrelated arithmetic withdraws loop", cmd: `for n in 1 2; do gh issue view $n --jq /h/store/M; done; echo $((2+3))`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "read of a glob-named variable withdraws loop", cmd: `false && for n in a b; do :; done; read ? < /h/f; cp /bin/rm /h/bin/g$n; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "getopts of a glob-named variable withdraws loop", cmd: `for n in a b; do getopts r ? -r; cp /bin/rm /h/bin/g${n}h; done; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "mapfile of a glob-named variable withdraws loop", cmd: `false && for n in a b; do :; done; mapfile -t ? < /h/f; cp /bin/rm /h/bin/g$n; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "printf -v of a glob-named variable withdraws loop", cmd: `false && for n in a b; do :; done; printf -v ? %s h; cp /bin/rm /h/bin/g$n; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "declare -l of a glob-named variable withdraws loop", cmd: `declare -l ?; for n in GH X; do cp /bin/rm /h/bin/$n; done; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "read of a glob-named IFS withdraws loop", cmd: `read I?? <<< X; for n in ghX a; do cp /bin/rm /h/bin/$n; done; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "mapfile callback withdraws loop", cmd: `false && for n in a b; do :; done; mapfile -t -C declare -c 1 arr < /h/f; cp /bin/rm /h/bin/g$n; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "xtrace prompt default withdraws loop", cmd: `read -r x < /h/f; false && for n in a b; do :; done; PS4='${!x:=h}'; set -x; :; set +x; cp /bin/rm /h/bin/g$n; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "wait -p subscript withdraws loop", cmd: `read -r y < /h/f; x='a[${!y:=h}]'; false && for n in a b; do :; done; sleep 0 & wait -p "b[x]" -n; cp /bin/rm /h/bin/g$n; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "quoted glob loop item withdraws", cmd: `for n in 'g?' x; do cp /bin/rm /h/bin/$n; done; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		// A false positive: test sets no variable but is outside the closed list.
+		{name: "test beside a loop withdraws", cmd: `for n in 1 2; do test -n "$n"; gh issue view $n --jq /h/store/M; done`, writes: true, want: []Touch{w("/h/store/M")}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			acc := ShellAccess(host, tt.cmd)

@@ -456,7 +456,12 @@ In a shell command:
   `mapfile`, `printf -v`, arithmetic, a `{name}` redirect) or mentions it in
   any other word, declares a nameref, uses arithmetic, an array subscript, an
   integer test or `declare -i` anywhere, or holds any other word whose value
-  the text does not tell; and a word,
+  the text does not tell. The exception also needs every command in the call
+  to be one that sets no shell variable (a closed list of readers plus `gh`,
+  `glab`, `claude`, `crew`, `git`, `sed`, `rg`, `fd`, `find`, and `printf`
+  with a literal format), with no assignment, declaration, `[[ ]]`,
+  arithmetic or `{var}` redirect anywhere, and loop values holding no glob
+  character (`*`, `?`, `[`), even quoted; and a word,
   redirect target or path named `claude`, `gh`, `glab` or `crew` that is not
   a call's own command word (`ln -s /bin/rm ~/bin/crew`, `cat /bin/rm >
   ~/bin/gh`). A renamed data taker cannot hide a write: its words are judged
@@ -538,8 +543,9 @@ It over-denies:
   `for` variable, when the variable is mentioned elsewhere in the command
   (`echo "n=$n"`, a jq filter `.n` read by `jq`), a `$(…)` or unknown
   variable sits beside the loop, the command uses arithmetic anywhere
-  (`$((…))`, `[[ $n -gt 1 ]]`), or the loop runs over more than 64 values or
-  a glob;
+  (`$((…))`, `[[ $n -gt 1 ]]`), the loop runs over more than 64 values or
+  a glob, or the loop sits beside any other command or assignment (`test`,
+  `read`, `x=1`);
 - a reader run behind a flagged wrapper (`nice -n 5 git status`) in a store or
   naming one;
 - assigning or exporting `PATH`, `BASH_ENV`, `ENV`, `GIT_*` or `LD_*`, or
