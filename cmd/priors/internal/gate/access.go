@@ -2581,9 +2581,6 @@ func globTaker(base string) bool {
 func loosePattern(g string) string {
 	var b strings.Builder
 	var closes []int
-	if strings.Contains(g, "[") {
-		closes = bracketCloses(g)
-	}
 	for i := 0; i < len(g); i++ {
 		c := g[i]
 		switch {
@@ -2594,6 +2591,9 @@ func loosePattern(g string) string {
 			b.WriteByte('*')
 			i = groupEnd(g, i+1)
 		case c == '[':
+			if closes == nil {
+				closes = bracketCloses(g)
+			}
 			if end := bracketEnd(g, closes, i); end >= 0 {
 				b.WriteByte('?')
 				i = end
