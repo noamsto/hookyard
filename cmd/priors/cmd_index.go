@@ -249,7 +249,7 @@ func assembleIndex(ctx context.Context, cfgPath, cwd, engine string) hookResult 
 	}
 	opts := tier1.Options{Claude: engine == claudeEngine}
 	if home, err := os.UserHomeDir(); err == nil && opts.Claude {
-		opts.NativeMemDir = nativeMemDir(id.cwd, home)
+		opts.NativeMemDir = nativeMemDir(ctx, id.cwd, home)
 	}
 	text, reports := tier1.Assemble(ctx, sessionAt(ctx, id.cwd, cfg), cfg, rules, attest.ForHost(cfg), opts)
 	return hookResult{text: text, reports: reports}

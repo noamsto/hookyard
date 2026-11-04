@@ -52,6 +52,7 @@ func newNativeFixture(t *testing.T) nativeFixture {
 
 	native := filepath.Join(sb.dir, ".claude", "projects", importer.EncodeProjectDir(repo), "memory")
 	sb.putFact(native, "dup-fact.md", newFact("dup-fact", "demo", "project"))
+	sb.writeFile(filepath.Join(native, "MEMORY.md"), "- [dup-fact](dup-fact.md) - hook\n")
 	return nativeFixture{sb: sb, repo: repo, linked: linked}
 }
 

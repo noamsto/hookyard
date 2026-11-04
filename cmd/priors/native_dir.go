@@ -16,13 +16,13 @@ const nativeGitTimeout = 2 * time.Second
 // nativeMemDir is the memory dir Claude loads for a session in cwd. Claude
 // keys it by the main worktree's root, so a linked worktree shares its main
 // repo's dir. Outside a repo, or when git fails, cwd itself is the root.
-func nativeMemDir(cwd, home string) string {
-	root := mainWorktreeRoot(cwd)
+func nativeMemDir(ctx context.Context, cwd, home string) string {
+	root := mainWorktreeRoot(ctx, cwd)
 	return filepath.Join(home, ".claude", "projects", importer.EncodeProjectDir(root), "memory")
 }
 
-func mainWorktreeRoot(cwd string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), nativeGitTimeout)
+func mainWorktreeRoot(ctx context.Context, cwd string) string {
+	ctx, cancel := context.WithTimeout(ctx, nativeGitTimeout)
 	defer cancel()
 	cmd := tools.Command(ctx, tools.Git, "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel")
 	cmd.Env = route.RepoEnv("LC_ALL=C")

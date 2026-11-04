@@ -1,7 +1,7 @@
 package tier1
 
 import (
-	"os"
+	"context"
 	"path/filepath"
 	"strings"
 
@@ -9,38 +9,49 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/importer"
 )
 
+// maxNativeTopics is Claude's own cap on the entries its MEMORY.md index loads.
+const maxNativeTopics = 200
+
 // native is what Claude's own memory dir already tells a session: the names of
-// its topic files and the source paths an import records for them.
+// the topic files its MEMORY.md links and the source paths an import records
+// for them.
 type native struct {
 	names, sources map[string]bool
 }
 
-// has reports whether f is one of the native facts: it carries a native topic
-// file's name, or was imported from one (a rename survives in the source path).
+// has reports whether f is one of the native facts. A fact imported from a
+// Claude memory file is native only if that exact file is; any other fact is
+// native if it carries a native topic file's name.
 func (n native) has(f fact.Fact) bool {
-	if n.names[f.Name] {
-		return true
+	if src := f.Metadata.Source; src != nil && src.Engine == "claude" {
+		return n.sources[src.Path]
 	}
-	src := f.Metadata.Source
-	return src != nil && src.Engine == "claude" && n.sources[src.Path]
+	return n.names[f.Name]
 }
 
-// nativeIndex reads dir's topic files. MEMORY.md, other extensions and files
-// that are not readable facts are ignored.
-func nativeIndex(dir string) native {
+// nativeIndex reads the topic files that the loaded part of dir's MEMORY.md
+// links to, since Claude never loads an unlinked file. A missing or unreadable
+// MEMORY.md, and links to unreadable or non-fact files, count for nothing.
+func nativeIndex(ctx context.Context, dir string) native {
 	n := native{names: map[string]bool{}, sources: map[string]bool{}}
 	if dir == "" {
 		return n
 	}
-	entries, err := os.ReadDir(dir)
+	index, err := importer.ReadRegular(filepath.Join(dir, "MEMORY.md"))
 	if err != nil {
 		return n
 	}
-	for _, e := range entries {
-		name := e.Name()
-		if name == "MEMORY.md" || !strings.HasSuffix(name, ".md") {
+	read := 0
+	seen := map[string]bool{}
+	for _, name := range importer.IndexedTopics(index) {
+		if ctx.Err() != nil || read >= maxNativeTopics {
+			break
+		}
+		if name == "MEMORY.md" || !strings.HasSuffix(name, ".md") || seen[name] {
 			continue
 		}
+		seen[name] = true
+		read++
 		path := filepath.Join(dir, name)
 		raw, err := importer.ReadRegular(path)
 		if err != nil {

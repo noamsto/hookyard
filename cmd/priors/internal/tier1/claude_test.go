@@ -73,6 +73,32 @@ func TestClaudeSourcePathOnlyMatchesClaudeImports(t *testing.T) {
 	}
 }
 
+func TestClaudeSourcePathDecidesForClaudeImports(t *testing.T) {
+	e := newEnv(t)
+	dir := nativeDir(t)
+	writeNative(t, dir, "a.md", mk("a", "d", "global"))
+	put(t, e.personal, "_global/a.md", importedFrom(typed("a", "feedback", "2026-09-08T00:00:00Z"), "claude", "~/.claude/projects/other/memory/a.md"))
+	index(t, e.personal)
+
+	out := e.assembleClaude(personalSession, dir, Budget)
+	if !strings.Contains(out, "[a](_global/a.md)") || strings.Contains(out, "also in MEMORY.md") {
+		t.Errorf("a fact imported from another project's memory was dropped:\n%s", out)
+	}
+}
+
+func TestClaudeUnlinkedNativeFileDoesNotHideFact(t *testing.T) {
+	e := newEnv(t)
+	dir := nativeDir(t)
+	writeNativeUnlinked(t, dir, "c.md", mk("c", "d", "global"))
+	put(t, e.personal, "_global/c.md", typed("c", "project", "2026-09-06T00:00:00Z"))
+	index(t, e.personal)
+
+	out := e.assembleClaude(personalSession, dir, Budget)
+	if !strings.Contains(out, "[c](_global/c.md)") || strings.Contains(out, "also in MEMORY.md") {
+		t.Errorf("an unlinked native file hid the fact:\n%s", out)
+	}
+}
+
 func TestClaudeSingularCount(t *testing.T) {
 	e := newEnv(t)
 	dir := nativeDir(t)
@@ -176,12 +202,15 @@ func TestClaudeBudgetTruncates(t *testing.T) {
 	if got := innerRunes(blocks); got > budget {
 		t.Errorf("inner runes = %d, over budget %d", got, budget)
 	}
-	if lines[0] != pointerLine || lines[1] != "## project" {
-		t.Errorf("block opens with %q, want the pointer then ## project", lines[:2])
+	if lines[0] != pointerLine {
+		t.Errorf("block opens with %q, want the pointer", lines[0])
 	}
 	marker := slices.IndexFunc(lines, func(l string) bool { return strings.HasPrefix(l, "… ") })
-	if marker < 3 || marker >= len(lines)-2 {
-		t.Fatalf("marker at %d of %d lines, want it between kept entries", marker, len(lines))
+	if marker != 1 || !strings.HasSuffix(lines[marker], "entries omitted (project) …") {
+		t.Fatalf("marker at %d: %q, want line 1 naming project", marker, lines)
+	}
+	if lines[2] != "## project" {
+		t.Errorf("heading at line 2 = %q, want ## project", lines[2])
 	}
 	if last := lines[len(lines)-2]; !strings.HasPrefix(last, "- [f") {
 		t.Errorf("tail ends with %q, want the last entry before the count", last)
@@ -213,9 +242,23 @@ func TestClaudeBudgetKeepsCountWhenNoEntryFits(t *testing.T) {
 	if len(blocks) != 1 {
 		t.Fatalf("blocks = %d, want 1", len(blocks))
 	}
-	want := []string{pointerLine, "1 fact also in MEMORY.md"}
+	want := []string{pointerLine, "… 4 entries omitted (project) …", "1 fact also in MEMORY.md"}
 	if !slices.Equal(blocks[0].lines, want) {
 		t.Errorf("lines = %q, want %q", blocks[0].lines, want)
+	}
+}
+
+func TestClaudeMarkerNamesDroppedGroups(t *testing.T) {
+	e := newEnv(t)
+	dir := nativeDir(t)
+	seedTyped(t, e)
+	writeNative(t, dir, "ref-one.md", mk("ref-one", "d", "global"))
+
+	out := e.assembleClaude(personalSession, dir, 440)
+	for l := range strings.SplitSeq(out, "\n") {
+		if strings.HasPrefix(l, "… ") && !strings.Contains(l, "(") {
+			t.Errorf("marker names no group: %q", l)
+		}
 	}
 }
 

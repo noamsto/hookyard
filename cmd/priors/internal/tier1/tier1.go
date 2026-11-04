@@ -48,7 +48,7 @@ func assemble(ctx context.Context, s route.Session, cfg config.Config, rules gat
 	a := assembler{ctx: ctx, session: s, rules: rules, verifier: v}
 	grouped := opts.Claude && opts.NativeMemDir != ""
 	if grouped {
-		a.native = nativeIndex(opts.NativeMemDir)
+		a.native = nativeIndex(ctx, opts.NativeMemDir)
 	}
 	avail := budget
 	var blocks []string

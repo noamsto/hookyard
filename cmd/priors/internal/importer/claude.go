@@ -141,6 +141,31 @@ func ReadRegular(path string) ([]byte, error) {
 
 var indexLinkRE = regexp.MustCompile(`^- \[[^\]]*\]\(([^)]*)\)`)
 
+// Claude loads only the head of MEMORY.md into a session.
+const (
+	loadedIndexLines = 200
+	loadedIndexBytes = 25 << 10
+)
+
+// IndexedTopics is the topic file names MEMORY.md links to within the part
+// Claude loads: the first 200 lines and at most 25 KB. Links that leave the
+// memory dir or point into a subdirectory are not topics.
+func IndexedTopics(index []byte) []string {
+	if len(index) > loadedIndexBytes {
+		index = index[:loadedIndexBytes]
+	}
+	var topics []string
+	sc := bufio.NewScanner(bytes.NewReader(index))
+	for n := 0; n < loadedIndexLines && sc.Scan(); n++ {
+		m := indexLinkRE.FindStringSubmatch(strings.TrimSpace(sc.Text()))
+		if m == nil || !filepath.IsLocal(m[1]) || filepath.Base(m[1]) != m[1] {
+			continue
+		}
+		topics = append(topics, m[1])
+	}
+	return topics
+}
+
 // checkIndex reports each MEMORY.md line that is not a link to one of topics:
 // a link that leaves the memory dir, a link to no topic file, and free text.
 func checkIndex(src string, raw []byte, topics []string) []Report {

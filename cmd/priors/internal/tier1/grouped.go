@@ -3,6 +3,7 @@ package tier1
 import (
 	"fmt"
 	"slices"
+	"strings"
 )
 
 const (
@@ -35,12 +36,24 @@ func nativeCount(n int) string {
 	return fmt.Sprintf("%d facts also in MEMORY.md", n)
 }
 
+// groupedMarker counts the dropped entries and names their groups in group
+// order. It sits outside every group, so no heading claims it.
+func groupedMarker(dropped []entry) string {
+	var groups []string
+	for _, e := range dropped {
+		if g := groupOf(e); !slices.Contains(groups, g) {
+			groups = append(groups, g)
+		}
+	}
+	return fmt.Sprintf("… %d entries omitted (%s) …", len(dropped), strings.Join(groups, ", "))
+}
+
 // groupedLines is one store's body in the grouped layout: a pointer line, the
 // facts Claude's memory does not already hold under a heading per type,
 // flagged ones last, then how many were left out. It returns nil when the
 // store has nothing to say, or when even the framing does not fit avail.
 func groupedLines(entries []entry, avail int) []string {
-	var kept []entry
+	kept := make([]entry, 0, len(entries))
 	dups := 0
 	for _, e := range entries {
 		if e.native {
@@ -76,15 +89,23 @@ func groupedLines(entries []entry, avail int) []string {
 	for i, e := range kept {
 		lines[i] = e.line
 	}
-	lo, hi := fitRange(lines, avail-reserve)
-	if hi-lo == len(lines) && len(lines) > 0 {
-		kept, lo, hi = nil, 0, 0
+	lo, hi := len(lines), len(lines)
+	if reserve+cost(lines) > avail {
+		// The cut needs a marker line, which names the groups it dropped from.
+		reserve += cost([]string{groupedMarker(kept)})
+		if reserve > avail {
+			return nil
+		}
+		lo, hi = fitRange(lines, avail-reserve)
 	}
-	if len(kept) == 0 && dups == 0 {
+	if hi-lo == len(kept) && dups == 0 {
 		return nil
 	}
 
 	out := []string{pointerLine}
+	if hi > lo {
+		out = append(out, groupedMarker(kept[lo:hi]))
+	}
 	last := ""
 	emit := func(from, to int) {
 		for _, e := range kept[from:to] {
@@ -96,9 +117,6 @@ func groupedLines(entries []entry, avail int) []string {
 		}
 	}
 	emit(0, lo)
-	if hi > lo {
-		out = append(out, marker(hi-lo))
-	}
 	emit(hi, len(kept))
 	if dups > 0 {
 		out = append(out, nativeCount(dups))

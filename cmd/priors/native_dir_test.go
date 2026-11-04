@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -61,7 +62,7 @@ func TestNativeMemDir(t *testing.T) {
 		"missing dir (git failure)": {filepath.Join(plain, "absent"), filepath.Join(plain, "absent")},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got, want := nativeMemDir(tc.cwd, home), wantNativeDir(home, tc.root); got != want {
+			if got, want := nativeMemDir(context.Background(), tc.cwd, home), wantNativeDir(home, tc.root); got != want {
 				t.Errorf("nativeMemDir(%q) = %q, want %q", tc.cwd, got, want)
 			}
 		})
@@ -73,7 +74,7 @@ func TestNativeMemDirFallsBackToCWDWhenGitFails(t *testing.T) {
 	saved := tools.Git
 	t.Cleanup(func() { tools.Git = saved })
 	tools.Git = filepath.Join(cwd, "no-such-git")
-	if got, want := nativeMemDir(cwd, "/h"), wantNativeDir("/h", cwd); got != want {
+	if got, want := nativeMemDir(context.Background(), cwd, "/h"), wantNativeDir("/h", cwd); got != want {
 		t.Errorf("nativeMemDir = %q, want %q", got, want)
 	}
 }
