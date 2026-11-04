@@ -18,12 +18,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: DeterminateSystems/nix-installer-action@main
-      # Substitute from dispatcher.cachix.org what main already pushed: shared
-      # build inputs and, after this job has run there, check derivations. The
-      # install packages' own outputs are not PR hits — their source is the
-      # commit under test. Push from main only, with the `cache` job's
-      # token/skipPush guard: every host trusts this cache, so a PR branch's
-      # outputs must never land in it. The cache is public — PR runs still pull.
+      # Substitute shared build inputs (and, once this job runs on main, the
+      # check derivations) from dispatcher.cachix.org. PR runs pull only; the
+      # `cache` job's token/skipPush guard keeps this branch's outputs out of
+      # a cache every host trusts. The install packages are not hits here:
+      # their source is the commit under test.
       - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
         with:
           name: dispatcher
