@@ -18,6 +18,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: DeterminateSystems/nix-installer-action@main
+      # Substitute shared build inputs (and, once this job runs on main, the
+      # check derivations) from dispatcher.cachix.org. PR runs pull only; the
+      # `cache` job's token/skipPush guard keeps this branch's outputs out of
+      # a cache every host trusts. The install packages are not hits here:
+      # their source is the commit under test.
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: dispatcher
+          authToken: ${{ github.event_name == 'push' && secrets.CACHIX_AUTH_TOKEN || '' }}
+          skipPush: ${{ github.event_name != 'push' }}
       # No magic-nix-cache: it now requires a FlakeHub account and fails to
       # authenticate on a plain public repo, adding a red annotation for a
       # build this small does not need.
