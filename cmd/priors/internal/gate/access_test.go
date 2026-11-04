@@ -126,6 +126,8 @@ func TestShellAccess(t *testing.T) {
 		{name: "GOPATH export is no writer", cmd: "export GOPATH=/x PATHS=y"},
 		{name: "declare without nameref stays", cmd: "declare -x r=1; cd store", absent: []Touch{{Opaque: true, Chdir: true}}},
 		{name: "IFS unchanged splits", cmd: "d='/h/store /h/x'; echo $d", want: []Touch{m("/h/store"), m("/h/x")}},
+		{name: "quote-split declared IFS splits opaquely", cmd: "d=/h/a; declare 'I'FS=Q; rm $d", writes: true, want: []Touch{opaque}},
+		{name: "case-changing declare value is opaque", cmd: "declare -l d=/h/A; rm $d", writes: true, want: []Touch{opaque}},
 		{name: "exported GIT config", cmd: "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=x; git -C /h/store status", writes: true},
 		{name: "exported LD_PRELOAD", cmd: "export LD_PRELOAD=/tmp/x.so; cat /h/store/M", writes: true},
 		{name: "exported GITHUB and LDFLAGS", cmd: "export GITHUB=x LDFLAGS=-s"},

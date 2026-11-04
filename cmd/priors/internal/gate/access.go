@@ -100,13 +100,21 @@ var (
 	findActions = []string{"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
 	// programVars change which program a command name, or a shell, runs; so
 	// do the GIT_ and LD_ ones.
-	programVars = []string{"PATH", "BASH_ENV", "ENV"}
+	programVars = []string{"PATH", "BASH_ENV", "ENV", "BASH_CMDS", "BASH_ALIASES"}
 	// shellVars are the variables a script can change without assigning them
 	// (`let`, `read`, `mapfile`, `(( ))`, a nameref), which move what a name
 	// runs, where cd looks, or how a word splits.
 	shellVars = []string{"PATH", "BASH_ENV", "ENV", "CDPATH", "IFS"}
 	// declarers take -n to declare a nameref.
 	declarers = []string{"declare", "typeset", "local"}
+	// setters are the builtins that may set a variable no assignment shows: one
+	// an operand or option value names, or any, through the code they run.
+	setters = []string{
+		"declare", "typeset", "local", "export", "readonly", "read", "mapfile", "readarray",
+		"printf", "getopts", "wait", "unset", "eval", "source", ".",
+	}
+	// scriptShells run the value of -c as a script.
+	scriptShells = []string{"bash", "sh", "zsh", "dash", "ksh", "ash"}
 	// chdirTools take -C as the dir they run in.
 	chdirTools = []string{"git", "make", "tar"}
 	// sinks are redirect targets that are not files.
@@ -420,6 +428,9 @@ func (a *accessor) unparsed(text string) {
 	a.field(overflagQuotes.Replace(text), true, false)
 }
 
+// stmt reads one statement in two walks. The first records what it sets, so
+// a taint covers each of its words whatever their order, as a loop runs a word
+// again after a later setter.
 func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
 	walkBounded(s, func(n syntax.Node) bool {
 		switch n := n.(type) {
@@ -434,6 +445,14 @@ func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
 		case *syntax.ParamExp:
 			if n.Param != nil && n.Exp != nil && (n.Exp.Op == syntax.AssignUnset || n.Exp.Op == syntax.AssignUnsetOrNull) {
 				a.assign(n.Param.Value, n.Exp.Word)
+			}
+		case *syntax.DeclClause:
+			a.declClause(n, text)
+		case *syntax.CallExpr:
+			a.setterCall(n, text)
+		case *syntax.Redirect:
+			if n.N != nil && !digits(n.N.Value) {
+				a.setNames(strings.Trim(n.N.Value, "{}"))
 			}
 		case *syntax.ForClause:
 			if wi, ok := n.Loop.(*syntax.WordIter); ok && !n.Select {
@@ -503,14 +522,258 @@ func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
 // program a name runs writes, whatever the command that follows.
 func (a *accessor) assign(name string, values ...*syntax.Word) {
 	a.assigns[name]++
-	if slices.Contains(programVars, name) || strings.HasPrefix(name, "GIT_") || strings.HasPrefix(name, "LD_") {
+	if programVar(name) {
 		a.acc.Writes = true
 	}
 	a.ifs = a.ifs || name == "IFS"
+	a.cdpath = a.cdpath || name == "CDPATH"
 	if _, ok := a.j.vars[name]; ok || len(values) != 1 || values[0] == nil || a.opaque(values[0]) {
 		a.tainted[name] = true
 	}
 	a.j.assign(name, values...)
+}
+
+// programVar reports a variable that picks the program a name, or a shell,
+// runs.
+func programVar(name string) bool {
+	return slices.Contains(programVars, name) || strings.HasPrefix(name, "GIT_") || strings.HasPrefix(name, "LD_")
+}
+
+// protected applies what setting name does: a program variable writes, a
+// shell variable moves what a name runs, where cd looks or how a word splits,
+// and a state variable can redefine what a name runs.
+func (a *accessor) protected(name string) {
+	if programVar(name) {
+		a.acc.Writes = true
+	}
+	if slices.Contains(shellVars, name) {
+		a.changes(name == "CDPATH", name == "IFS")
+	}
+	if slices.Contains(stateNames, name) {
+		a.redefines = true
+	}
+}
+
+// unknownSetter records a call that may set any variable.
+func (a *accessor) unknownSetter() {
+	a.changes(true, true)
+	a.redefines = true
+	a.unsafe = true
+	a.wild = true
+}
+
+// setNames records name positions: words a builtin reads as the name of a
+// variable it sets, whose value no word can then tell. "" is an opaque one,
+// which may name any, and a subscript is arithmetic.
+func (a *accessor) setNames(names ...string) {
+	for _, s := range names {
+		if s == "" {
+			a.unknownSetter()
+			continue
+		}
+		name, sub, indexed := strings.Cut(s, "[")
+		if indexed {
+			a.arithmetic(strings.TrimSuffix(sub, "]"))
+		}
+		a.protected(name)
+		a.tainted[name] = true
+		a.assigns[name]++
+	}
+}
+
+// setterCall reads the name positions of a call to one of setters, after any
+// wrappers. Only a call whose first word is a setter, a wrapper or not literal
+// is rendered here, as every call is rendered again when it is read.
+func (a *accessor) setterCall(c *syntax.CallExpr, text string) {
+	if len(c.Args) == 0 {
+		return
+	}
+	first := literal(c.Args[0])
+	if first == "" {
+		if fields := a.words(c.Args[:1], text); len(fields) > 0 {
+			first = fields[0]
+		}
+	}
+	if first != "" && !slices.Contains(setters, first) && !slices.Contains(wrappers, wordName(first)) {
+		return
+	}
+	argv := a.words(c.Args, text)
+	if idx, _ := commandWord(argv); idx < len(argv) {
+		a.setter(argv[idx], argv[idx+1:])
+	}
+}
+
+// words renders words as argv does, with "" also standing for a quoted word
+// that renders to no field, which still takes an operand's place
+// (`read -d "" x`).
+func (a *accessor) words(ws []*syntax.Word, text string) []string {
+	var out []string
+	for _, w := range ws {
+		fields := a.argv([]*syntax.Word{w}, text)
+		if len(fields) == 0 && slices.ContainsFunc(w.Parts, func(p syntax.WordPart) bool {
+			switch p.(type) {
+			case *syntax.SglQuoted, *syntax.DblQuoted:
+				return true
+			}
+			return false
+		}) {
+			fields = []string{""}
+		}
+		out = append(out, fields...)
+	}
+	return out
+}
+
+// setter reads the name positions of a call to name with args. An opaque
+// command word, source, an eval of an opaque arg and a mapfile callback run
+// code that may set any variable.
+func (a *accessor) setter(name string, args []string) {
+	switch name {
+	case "", "source", ".":
+		a.unknownSetter()
+	case "eval":
+		if slices.Contains(args, "") {
+			a.unknownSetter()
+		}
+	case "declare", "typeset", "local", "export", "readonly":
+		a.declare(args)
+	case "read":
+		_, operands, values := getopt(args, "utpNnida")
+		a.setNames(operands...)
+		a.setNames(values['a']...)
+	case "mapfile", "readarray":
+		_, operands, values := getopt(args, "dnOsuCc")
+		if len(values['C']) > 0 {
+			a.unknownSetter()
+		}
+		if len(operands) > 0 {
+			a.setNames(operands[0])
+		}
+	case "printf":
+		_, _, values := getopt(args, "v")
+		a.setNames(values['v']...)
+	case "wait":
+		_, _, values := getopt(args, "p")
+		a.setNames(values['p']...)
+	case "getopts":
+		// An opaque option string may be any number of words, so the name may be
+		// any of them.
+		switch _, operands, _ := getopt(args, ""); {
+		case len(operands) > 0 && operands[0] == "":
+			a.unknownSetter()
+		case len(operands) > 1:
+			a.setNames(operands[1])
+		}
+	case "unset":
+		_, operands, _ := getopt(args, "")
+		a.setNames(operands...)
+	}
+}
+
+// declClause reads a declare-family clause as declare reads its args. A
+// literal NAME=value parses as an assignment, which assign records, so it is
+// a name position only after an option that changes how its value reads; its
+// value is rendered only under -n, where it names a variable too.
+func (a *accessor) declClause(d *syntax.DeclClause, text string) {
+	var args []string
+	nameref, transforms := false, false
+	for _, as := range d.Args {
+		switch {
+		case as.Name == nil:
+			fields := a.words([]*syntax.Word{as.Value}, text)
+			nameref = nameref || slices.ContainsFunc(fields, namerefOption)
+			transforms = transforms || slices.ContainsFunc(fields, transformOption)
+			args = append(args, fields...)
+		case !transforms:
+			a.protected(as.Name.Value)
+		case nameref && as.Value != nil:
+			args = append(args, as.Name.Value+"="+strings.Join(a.words([]*syntax.Word{as.Value}, text), " "))
+		default:
+			args = append(args, as.Name.Value)
+		}
+	}
+	a.declare(args)
+}
+
+// declare reads a declare-family builtin's rendered args: options, then NAME
+// or NAME=value operands. Under -n a value names the variable the reference
+// sets, and the reference may name any later, as scan's nameref rule reads.
+func (a *accessor) declare(args []string) {
+	opts, operands, _ := getopt(args, "")
+	nameref := slices.ContainsFunc(opts, namerefOption)
+	if nameref {
+		a.nameref = true
+		a.changes(true, true)
+	}
+	for _, f := range operands {
+		name, value, ok := operand(f)
+		a.setNames(name)
+		if nameref && ok {
+			a.setNames(value)
+		}
+	}
+}
+
+// namerefOption reports a declare option cluster holding -n.
+func namerefOption(f string) bool {
+	return len(f) > 1 && f[0] == '-' && f[1] != '-' && strings.Contains(f, "n")
+}
+
+// transformOption reports a declare option cluster, set or unset, holding a
+// letter that makes a variable read other than its assigned text: a nameref,
+// a case change, an integer or an array.
+func transformOption(f string) bool {
+	return len(f) > 1 && (f[0] == '-' || f[0] == '+') && f[1] != '-' && strings.ContainsAny(f[1:], "nlucaiA")
+}
+
+// operand splits a NAME=value, NAME+=value or NAME[subscript]=value operand
+// at the = that ends its name, past a subscript that may hold one.
+func operand(f string) (name, value string, ok bool) {
+	from := 0
+	if i := strings.IndexAny(f, "=["); i >= 0 && f[i] == '[' {
+		if j := strings.IndexByte(f[i:], ']'); j >= 0 {
+			from = i + j
+		}
+	}
+	k := strings.IndexByte(f[from:], '=')
+	if k < 0 {
+		return f, "", false
+	}
+	return strings.TrimSuffix(f[:from+k], "+"), f[from+k+1:], true
+}
+
+// getopt splits a builtin's rendered args as bash reads them: option clusters
+// up to the first operand or --, where a letter of valued takes the rest of
+// its cluster, or else the next arg, as its value. An opaque "" arg is an
+// operand.
+func getopt(args []string, valued string) (opts, operands []string, values map[byte][]string) {
+	values = map[byte][]string{}
+	for i := 0; i < len(args); i++ {
+		f := args[i]
+		switch {
+		case f == "--":
+			return opts, args[i+1:], values
+		case len(f) < 2 || f[0] != '-' && f[0] != '+':
+			return opts, args[i:], values
+		}
+		opts = append(opts, f)
+		for k := 1; k < len(f); k++ {
+			if strings.IndexByte(valued, f[k]) < 0 {
+				continue
+			}
+			v := f[k+1:]
+			if v == "" {
+				if i+1 == len(args) {
+					break
+				}
+				i++
+				v = args[i]
+			}
+			values[f[k]] = append(values[f[k]], v)
+			break
+		}
+	}
+	return opts, nil, values
 }
 
 // loop registers a for variable whose values the text tells: bash sets no
@@ -706,6 +969,18 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 	}
 	if len(loops) > 0 {
 		a.perValue(c, text, v.data, loops)
+	}
+	// What eval and -c run is a script even when no word of it holds a shell
+	// metacharacter (`eval I\FS=x`).
+	switch {
+	case name == "eval":
+		a.script(strings.Join(v.args, " "), depth+1)
+	case slices.Contains(scriptShells, name):
+		for i := 0; i+1 < len(v.args); i++ {
+			if f := v.args[i]; len(f) > 1 && f[0] == '-' && f[1] != '-' && strings.Contains(f, "c") {
+				a.script(v.args[i+1], depth+1)
+			}
+		}
 	}
 	a.chdirs(name, c.Args, argv, idx, v.afterFlag, v.cmdArg, text)
 	return writer
@@ -1742,7 +2017,8 @@ func (a *accessor) envs(w *syntax.Word) []env {
 // field records f and the path-like tokens in it and its decodings, and flags
 // a word that redefines resolution: one naming a state variable (over the
 // rendered field and its decodings, so a quote-split name is caught), or, unless
-// it is a call's own command word, one whose basename is a data-taker.
+// it is a call's own command word, one whose basename is a data-taker. A field
+// naming one of shellVars writes, as scan's raw check does for a spelled one.
 func (a *accessor) field(f string, write, cmd bool) {
 	a.touch(Touch{Text: f, Write: write})
 	a.redefiner(f, cmd)
@@ -1758,12 +2034,17 @@ func (a *accessor) field(f string, write, cmd bool) {
 }
 
 // redefiner sets redefines when s names a state variable, or when it is not a
-// command word and its basename is a data-taker. It also records the loop
-// variables s mentions.
+// command word and its basename is a data-taker, and records s naming one of
+// shellVars. It also records the loop variables s mentions.
 func (a *accessor) redefiner(s string, cmd bool) {
 	a.mention(s)
 	if !cmd && slices.Contains(dataTakers, wordName(s)) {
 		a.redefines = true
+	}
+	for _, name := range shellVars {
+		if namesVar(s, name) {
+			a.changes(name == "CDPATH", name == "IFS")
+		}
 	}
 	for _, name := range stateNames {
 		if namesVar(s, name) {

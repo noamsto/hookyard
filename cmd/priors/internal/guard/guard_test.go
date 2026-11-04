@@ -400,6 +400,31 @@ func TestShellDenies(t *testing.T) {
 		{name: "posix order sed file operand", want: "inside the personal store", cwd: "work", input: bash(`POSIXLY_CORRECT=1 sed -i --follow-symlinks s/a/b/ -e P`)},
 		{name: "env posix order sed file operand", want: "inside the personal store", cwd: "work", input: bash(`env POSIXLY_CORRECT=1 sed -i --follow-symlinks s/a/b/ -e P`)},
 
+		// Protected variables set under spelled names.
+		{name: "quote-split exported PATH", want: "inside the personal store, and may write", input: bash(`export "PA"TH=/tmp/x; cat ~/notes/MEMORY.md`)},
+		{name: "brace-built exported PATH", want: "inside the personal store, and may write", input: bash(`export {PA,}TH=/tmp/x; cat ~/notes/MEMORY.md`)},
+		{name: "ansi-c declared PATH", want: "inside the personal store, and may write", input: bash(`declare $'\x50ATH'=/tmp/x; cat ~/notes/MEMORY.md`)},
+		{name: "quote-split exported LD_PRELOAD", want: "inside the personal store, and may write", input: bash(`export "LD_"PRELOAD=/tmp/x.so; cat ~/notes/MEMORY.md`)},
+		{name: "quote-split exported GIT_DIR", want: "inside the personal store, and may write", input: bash(`export "GIT_"DIR=/tmp/x; cat ~/notes/MEMORY.md`)},
+		{name: "quote-split declared IFS", want: "builds at run time", input: bash(`d=/tmpQ$HOME/notes; declare 'I'FS=Q; rm -rf $d`)},
+		{name: "printf -v built IFS", want: "builds at run time", input: bash(`d=/tmpQ$HOME/notes; v=IF; printf -v ${v}S Q; rm -rf $d`)},
+		{name: "redirect variable IFS", want: "builds at run time", input: bash(`d=/tmpQ$HOME/notes; exec {IFS}>/tmp/f; rm -rf $d`)},
+		{name: "eval escaped IFS", want: "builds at run time", input: bash(`d=/tmpQ$HOME/notes; eval I\FS=Q; rm -rf $d`)},
+		{name: "opaque declare nameref to IFS", want: "builds at run time", input: bash(`d=/tmpQ$HOME/notes; n=declare; $n -n r=I""FS; r=Q; rm -rf $d`)},
+		{name: "brace-built exported IFS", want: "builds at run time", input: bash(`d=/tmpQ$HOME/notes; export {I,}FS=Q; rm -rf $d`)},
+		{name: "quote-split local IFS", want: "builds at run time", input: bash(`d=/tmpQ$HOME/notes; local "I"FS=Q; rm -rf $d`)},
+		{name: "getopts escaped IFS", want: "builds at run time", input: bash(`d=/tmpQ$HOME/notes; getopts a I\FS; rm -rf $d`)},
+		{name: "wait -p escaped IFS", want: "builds at run time", input: bash(`d=/tmpQ$HOME/notes; wait -p I\FS; rm -rf $d`)},
+		{name: "source may set IFS", want: "builds at run time", input: bash(`d=/tmpQ$HOME/notes; source /tmp/x; rm -rf $d`)},
+		{name: "quote-split readonly IFS", want: "builds at run time", input: bash(`d=/tmpQ$HOME/notes; readonly I""FS=Q; rm -rf $d`)},
+		{name: "read escaped IFS", want: "builds at run time", input: bash(`d=/tmpQ$HOME/notes; read I\FS < /tmp/f; rm -rf $d`)},
+		{name: "eval IFS", want: "builds at run time", input: bash(`d=/tmpQ$HOME/notes; eval IFS=Q; rm -rf $d`)},
+		{name: "quoted typeset IFS", want: "builds at run time", input: bash(`d=/tmpQ$HOME/notes; typeset "IFS"=Q; rm -rf $d`)},
+		{name: "quote-split exported CDPATH", want: "from a dir it changes into at run time", input: bash(`export "CD"PATH=~; cd notes && touch MEMORY.md`)},
+		{name: "quote-split declared CDPATH", want: "from a dir it changes into at run time", input: bash(`declare 'CD'PATH=~; cd notes && touch MEMORY.md`)},
+		{name: "BASH_CMDS renaming a reader", want: "inside the personal store, and may write", input: bash(`BASH_CMDS[ls]=/bin/rm; ls ~/notes/MEMORY.md`)},
+		{name: "read before a data position", want: "which holds the personal store", cwd: ".", input: bash(`n=1; { read n; cp /tmp/evil "$n"; } < f; gh pr view 1 --jq .`)},
+
 		// POSIX classes in a glob.
 		{name: "posix class rm", want: "inside the personal store", input: bash("rm -rf ~/note[[:alpha:]]")},
 		{name: "posix class attest", want: "an .attest dir", input: bash("touch /srv/other/.[[:alpha:]]ttest/e")},
@@ -472,6 +497,16 @@ func TestShellAllows(t *testing.T) {
 		// Finite for-loop variables.
 		{name: "loop over issue numbers with a jq alternative", input: bash(`for n in 254 221; do gh issue view $n --json title --jq '.title, (.comments[-1].body // "" | .[0:600])'; done`)},
 		{name: "loop over crew replies", cwd: ".", input: bash(`for w in a b; do crew reply $w "a / b"; done`)},
+		{name: "loop over issue numbers from home", cwd: ".", input: bash(`for n in 1 2; do gh issue view $n --jq '.a // .b'; done`)},
+
+		// Reads in and around a store, and setters of other names.
+		{name: "jq index filter on a store file", input: bash(`jq '.[] | select(.a[0])' ~/notes/x.json`)},
+		{name: "git reads of a store", input: bash("git -C ~/notes log --oneline; git -C ~/notes diff; git -C ~/notes status")},
+		{name: "sed ls rg of a store", input: bash("sed -n 1,5p ~/notes/MEMORY.md; ls ~/notes; rg -n foo ~/notes")},
+		{name: "cd store then git log and rg", input: bash("cd ~/notes && git log -3 && rg -l x")},
+		{name: "read a line then echo it", input: bash(`read -r line < /tmp/f; echo "$line"`)},
+		{name: "printf -v then echo it", input: bash(`printf -v x '%s' a; echo "$x"`)},
+		{name: "exported and local values written from home", cwd: ".", input: bash(`export d=/tmp/x; local f=/tmp/y; rm -rf "$d" "$f"`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.tool == "" {
