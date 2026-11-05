@@ -105,8 +105,12 @@ func storeRemote(cfg config.Config, id string) (string, error) {
 }
 
 // sshURL reports whether remote is ssh://... or scp-like (host:path, with the
-// colon before any slash).
+// colon before any slash). Git reads <transport>::<address> as a remote
+// helper (ext:: runs a command), so any "::" is refused.
 func sshURL(remote string) bool {
+	if strings.Contains(remote, "::") {
+		return false
+	}
 	if strings.HasPrefix(remote, "ssh://") {
 		return true
 	}

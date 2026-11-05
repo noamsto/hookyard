@@ -1,9 +1,11 @@
 package verify
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
+	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 )
 
 const lapsePath = "facts/a.md"
@@ -88,6 +90,26 @@ func TestLapseWithoutRestore(t *testing.T) {
 			lapseWant(t, lapseRun(f, f.job()), ent, attest.StateLapsed)
 		})
 	}
+}
+
+// TestLapseFactOverSizeCap: a fact over gate 4's cap is never read whole, so
+// it does not hold even when its bytes match the attested hash.
+func TestLapseFactOverSizeCap(t *testing.T) {
+	big := bytes.Repeat([]byte("x"), gate.MaxFactBytes+1)
+	t.Run("attested", func(t *testing.T) {
+		f := newFixture(t)
+		ent := f.entry(f.A, "a", lapsePath, big, 1, "attest")
+		f.commit(map[string][]byte{lapsePath: big, ".attest/a": ent})
+		f.push()
+		lapseWant(t, lapseRun(f, f.job()), ent, attest.StateLapsed)
+	})
+	t.Run("replaced", func(t *testing.T) {
+		f := newFixture(t)
+		ent, _ := lapseAttested(f)
+		f.commit(map[string][]byte{lapsePath: big})
+		f.push()
+		lapseWant(t, lapseRun(f, f.job()), ent, attest.StateLapsed)
+	})
 }
 
 func TestLapseUnreachableLapsingCommit(t *testing.T) {

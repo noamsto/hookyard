@@ -9,11 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"math"
 	"slices"
 	"strings"
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
+	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 )
 
 const walkedRef = "refs/priors/walked/"
@@ -154,6 +154,7 @@ func (w *walker) result(n int, complete bool) walkResult {
 
 // commit applies one commit whose parents are all walked, this run or earlier.
 func (w *walker) commit(oid string, parents []string) error {
+	w.cf.resetTrees()
 	tree, _, err := w.cf.commit(oid)
 	if err != nil {
 		return err
@@ -354,6 +355,8 @@ func (w *walker) boundaryLive(p string) (map[string]bool, error) {
 }
 
 // holds is check 8 at one commit: the file at t.Path is a blob with t.SHA256.
+// A blob over gate 4's cap could never have been attested as a fact, so it
+// does not hold and is not read.
 func (w *walker) holds(tree string, t *Tracked) (bool, error) {
 	oid, ok, err := w.cf.lookupPath(tree, t.Path)
 	if err != nil || !ok {
@@ -361,8 +364,11 @@ func (w *walker) holds(tree string, t *Tracked) (bool, error) {
 	}
 	sum, ok := w.sums[oid]
 	if !ok {
-		b, err := w.cf.blob(oid, math.MaxInt64)
-		if err != nil {
+		b, err := w.cf.blob(oid, gate.MaxFactBytes)
+		switch {
+		case errors.Is(err, errTooBig):
+			return false, nil
+		case err != nil:
 			return false, err
 		}
 		s := sha256.Sum256(b)

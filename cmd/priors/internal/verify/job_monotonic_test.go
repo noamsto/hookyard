@@ -94,8 +94,8 @@ func TestMonotonicForcePushDropsHigherEntry(t *testing.T) {
 	f.forcePush(c1)
 	monoOK(t, f, j)
 	monoWant(t, f, ent1, attest.StateSuperseded, 2)
-	if st, ok := f.verdicts().States[digest(ent2)]; ok && st == attest.StateReviewed {
-		t.Fatalf("dropped entry 2 reads reviewed")
+	if st, ok := f.verdicts().States[digest(ent2)]; ok {
+		t.Fatalf("dropped entry 2 has a line %q, want none", st)
 	}
 }
 

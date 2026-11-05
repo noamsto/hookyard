@@ -69,9 +69,11 @@ func TestMirrorEnvBuiltFromNothing(t *testing.T) {
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_NO_REPLACE_OBJECTS=1",
 		"GIT_DIR=/p/private/mirror.git",
+		"GIT_ALLOW_PROTOCOL=ssh",
 		"GIT_SSH_VARIANT=ssh",
 		"GIT_SSH_COMMAND='/bin/ssh' -F '/etc/ssh config' -o 'UserKnownHostsFile=/etc/known_hosts'" +
-			" -o 'IdentitiesOnly=yes' -o 'IdentityAgent=none' -o 'BatchMode=yes' -o 'ConnectTimeout=30' -i '/p/key'",
+			" -o 'IdentitiesOnly=yes' -o 'IdentityAgent=none' -o 'BatchMode=yes' -o 'ConnectTimeout=30'" +
+			" -o 'LogLevel=VERBOSE' -i '/p/key'",
 	}
 	if got := m.env(); !slices.Equal(got, want) {
 		t.Fatalf("env =\n%q\nwant\n%q", got, want)
@@ -161,6 +163,53 @@ func TestCatFileReadsTreesAndCapsBlobs(t *testing.T) {
 	for _, rel := range []string{"facts/none.md", "nodir/x.md", "facts", ".attest/link", "facts/x.md/deeper"} {
 		if oid, ok, err := cf.lookupPath(tree, rel); oid != "" || ok || err != nil {
 			t.Fatalf("lookupPath(%q) = %q %v %v, want empty", rel, oid, ok, err)
+		}
+	}
+}
+
+// TestCatFileCommitHeader: git reads a commit's tree from the header's first
+// line only, and fsck lets an extra header after committer through, so the
+// parser must not let a later tree line win.
+func TestCatFileCommitHeader(t *testing.T) {
+	pinTools(t)
+	repo := t.TempDir()
+	gitIn(t, repo, "", "init", "-q", "--bare", repo)
+	empty := gitIn(t, repo, "", "hash-object", "-t", "tree", "-w", "--stdin")
+	blob := gitIn(t, repo, "x", "hash-object", "-w", "--stdin")
+	other := gitIn(t, repo, "100644 blob "+blob+"\tx\n", "mktree")
+	parent := gitIn(t, repo, "", "commit-tree", "-m", "p", empty)
+	sig := "t <t@example.com> 1577836800 +0000"
+	commit := func(literally bool, header string) string {
+		t.Helper()
+		args := []string{"hash-object", "-t", "commit", "-w", "--stdin"}
+		if literally {
+			args = append(args, "--literally")
+		}
+		return gitIn(t, repo, header+"\nmsg\n", args...)
+	}
+	second := commit(false, "tree "+empty+"\nparent "+parent+"\nauthor "+sig+"\ncommitter "+sig+"\ntree "+other+"\nparent "+parent+"\n")
+	gitIn(t, repo, "", "fsck", "--strict", "--no-dangling")
+
+	cf, err := newCatFile(t.Context(), mirror{dir: repo, private: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cf.close)
+	tree, parents, err := cf.commit(second)
+	if err != nil || tree != empty || !slices.Equal(parents, []string{parent}) {
+		t.Fatalf("commit = %s %v %v, want %s [%s]", tree, parents, err, empty, parent)
+	}
+
+	for name, header := range map[string]string{
+		"tree not first": "author " + sig + "\ntree " + empty + "\ncommitter " + sig + "\n",
+		"tree not hex":   "tree " + strings.Repeat("z", 40) + "\nauthor " + sig + "\ncommitter " + sig + "\n",
+		"tree short":     "tree " + empty[:39] + "\nauthor " + sig + "\ncommitter " + sig + "\n",
+		"tree uppercase": "tree " + strings.ToUpper(empty) + "\nauthor " + sig + "\ncommitter " + sig + "\n",
+		"parent not hex": "tree " + empty + "\nparent " + strings.Repeat("z", 40) + "\nauthor " + sig + "\ncommitter " + sig + "\n",
+	} {
+		oid := commit(true, header)
+		if tree, parents, err := cf.commit(oid); err == nil {
+			t.Errorf("%s: commit = %s %v, want an error", name, tree, parents)
 		}
 	}
 }

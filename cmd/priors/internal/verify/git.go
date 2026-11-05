@@ -51,13 +51,17 @@ func (m mirror) env() []string {
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_NO_REPLACE_OBJECTS=1",
 		"GIT_DIR=" + m.dir,
+		"GIT_ALLOW_PROTOCOL=ssh",
 		"GIT_SSH_VARIANT=ssh",
+		// VERBOSE logs "Authenticated to" on success, which fetch needs to
+		// tell a pre-authentication failure from text the remote pushed.
 		"GIT_SSH_COMMAND=" + quote(tools.SSH) + " -F " + quote(tools.SSHConfig) +
 			" -o " + quote("UserKnownHostsFile="+tools.KnownHosts) +
 			" -o " + quote("IdentitiesOnly=yes") +
 			" -o " + quote("IdentityAgent=none") +
 			" -o " + quote("BatchMode=yes") +
 			" -o " + quote("ConnectTimeout=30") +
+			" -o " + quote("LogLevel=VERBOSE") +
 			" -i " + quote(m.credential),
 	}
 }
@@ -117,9 +121,10 @@ type treeEntry struct {
 // catFile reads objects through one `git cat-file --batch-command` process
 // started under the context given to newCatFile.
 type catFile struct {
-	cmd   *exec.Cmd
-	in    io.WriteCloser
-	out   *bufio.Reader
+	cmd *exec.Cmd
+	in  io.WriteCloser
+	out *bufio.Reader
+	// trees caches parsed trees until resetTrees.
 	trees map[string][]treeEntry
 	// attest caches attestEntries by the .attest tree oid.
 	attest map[string]map[string]string
@@ -150,6 +155,12 @@ func newCatFile(ctx context.Context, m mirror) (*catFile, error) {
 func (c *catFile) close() {
 	_ = c.in.Close()
 	_ = c.cmd.Wait()
+}
+
+// resetTrees drops the parsed trees, so the walk holds only one commit's
+// trees at a time however much history it reads.
+func (c *catFile) resetTrees() {
+	clear(c.trees)
 }
 
 // header sends command and parses the "<oid> <type> <size>" reply.
@@ -212,25 +223,44 @@ const (
 	maxTree   = 16 << 20
 )
 
-// commit returns a commit's tree and parent ids from its header lines.
+// commit returns a commit's tree and parent ids as git reads them: the tree
+// from the first header line, the parents from the lines right after it. A
+// later tree or parent header passes fsck but means nothing to git.
 func (c *catFile) commit(oid string) (tree string, parents []string, err error) {
 	data, err := c.contents(oid, "commit", maxCommit)
 	if err != nil {
 		return "", nil, err
 	}
 	head, _, _ := bytes.Cut(data, []byte("\n\n"))
-	for line := range strings.SplitSeq(string(head), "\n") {
-		switch k, v, _ := strings.Cut(line, " "); k {
-		case "tree":
-			tree = v
-		case "parent":
-			parents = append(parents, v)
-		}
+	lines := strings.Split(string(head), "\n")
+	tree, ok := strings.CutPrefix(lines[0], "tree ")
+	if !ok || !hexOID(tree) {
+		return "", nil, fmt.Errorf("commit %s: first header is not a tree", oid)
 	}
-	if tree == "" {
-		return "", nil, fmt.Errorf("commit %s has no tree", oid)
+	for _, line := range lines[1:] {
+		p, ok := strings.CutPrefix(line, "parent ")
+		if !ok {
+			break
+		}
+		if !hexOID(p) {
+			return "", nil, fmt.Errorf("commit %s: malformed parent", oid)
+		}
+		parents = append(parents, p)
 	}
 	return tree, parents, nil
+}
+
+// hexOID reports whether s is a sha1 object id in lowercase hex.
+func hexOID(s string) bool {
+	if len(s) != 2*hashLen {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // tree parses `<mode> <name>\0<20 raw bytes>` entries; the result is cached.

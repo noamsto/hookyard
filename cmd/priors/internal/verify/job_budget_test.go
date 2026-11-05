@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -330,6 +331,19 @@ func TestBudgetPreAuthFailureAfterResetIsBehind(t *testing.T) {
 	}
 }
 
+func TestBudgetPostAuthFailureQuotingPreAuthIsBehind(t *testing.T) {
+	f := newFixture(t)
+	budPush(f, 1)
+	j := f.job()
+	budRun(f, j, StatusOK)
+
+	f.sshMode("inject")
+	v := budRun(f, j, StatusBehind)
+	if len(v.States) != 0 {
+		t.Fatalf("states %v, want header only", v.States)
+	}
+}
+
 func TestBudgetVerdictFileHoldsNoFactNameOrPath(t *testing.T) {
 	f := newFixture(t)
 	fact := []byte("zebra fact body\n")
@@ -434,6 +448,78 @@ func TestBudgetNoTipRemovesStaleVerdicts(t *testing.T) {
 	res := f.run(f.job())
 	if res.Status != StatusBehind || res.Wrote {
 		t.Fatalf("run: %+v, want behind and not written", res)
+	}
+	budNoVerdicts(t, f)
+}
+
+// budVerdictsDuringWalk runs the job on a new commit and returns the verdict
+// file's stat error as the walk saw it.
+func budVerdictsDuringWalk(f *fixture, j *Job) error {
+	f.t.Helper()
+	f.commit(map[string][]byte{"facts/n" + strconv.Itoa(f.n) + ".md": []byte("n\n")})
+	f.push()
+	var during error
+	f.t.Cleanup(func() { afterCommit = nil })
+	afterCommit = func(context.Context, int) {
+		_, during = os.Stat(filepath.Join(f.state, "verdicts"))
+	}
+	budRun(f, j, StatusOK)
+	afterCommit = nil
+	return during
+}
+
+func budNoMarker(t *testing.T, f *fixture) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(f.state, "private", "running")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("running marker: stat err %v, want not exist", err)
+	}
+}
+
+// TestBudgetUnfinishedRunDropsVerdicts: a run killed before its verdict write
+// (an agent can push content that does that every run) leaves its marker, and
+// the next run removes the old verdict file before any work.
+func TestBudgetUnfinishedRunDropsVerdicts(t *testing.T) {
+	f := newFixture(t)
+	budPush(f, 1)
+	j := f.job()
+	budRun(f, j, StatusOK)
+	budNoMarker(t, f)
+
+	if err := budVerdictsDuringWalk(f, j); err != nil {
+		t.Fatalf("verdict file during a walk after a finished run: %v, want it kept", err)
+	}
+	budNoMarker(t, f)
+
+	f.write(filepath.Join(f.state, "private", "running"), "", 0o600)
+	if err := budVerdictsDuringWalk(f, j); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("verdict file during a walk after an unfinished run: stat err %v, want not exist", err)
+	}
+	budNoMarker(t, f)
+}
+
+func TestBudgetStateWriteFailureDropsVerdicts(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes through directory modes")
+	}
+	f := newFixture(t)
+	budPush(f, 1)
+	j := f.job()
+	budRun(f, j, StatusOK)
+
+	f.commit(map[string][]byte{"facts/n.md": []byte("n\n")})
+	f.push()
+	private := filepath.Join(f.state, "private")
+	t.Cleanup(func() {
+		afterCommit = nil
+		_ = os.Chmod(private, 0o700)
+	})
+	afterCommit = func(context.Context, int) {
+		if err := os.Chmod(private, 0o500); err != nil {
+			t.Error(err)
+		}
+	}
+	if res, err := j.Run(context.Background()); err == nil {
+		t.Fatalf("run: %+v, want the record save to fail", res)
 	}
 	budNoVerdicts(t, f)
 }

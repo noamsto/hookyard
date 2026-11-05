@@ -13,6 +13,9 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
 )
 
+// runningMarker, in the private dir, exists while a run is unfinished.
+const runningMarker = "running"
+
 // outcome is what the work phases leave for the reserve: the status, the
 // walked prefix to checkpoint, and the verdict lines (ok and stale-remote only).
 type outcome struct {
@@ -51,6 +54,18 @@ func (j *Job) Run(ctx context.Context) (Result, error) {
 			return Result{}, err
 		}
 		return Result{Status: StatusBehind, Reason: "record unreadable"}, nil
+	}
+
+	// A marker left standing means a run died before its verdict write, as
+	// pushed content can make every run do; the old file must not outlive it.
+	running := filepath.Join(private, runningMarker)
+	if _, err := os.Lstat(running); !errors.Is(err, fs.ErrNotExist) {
+		if err := j.removeVerdicts(); err != nil {
+			return Result{}, err
+		}
+	}
+	if err := os.WriteFile(running, nil, 0o600); err != nil {
+		return Result{}, err
 	}
 
 	if err := m.init(soft); err != nil {
@@ -180,10 +195,11 @@ func tipEntries(cf *catFile, tip string) ([]tipEntry, error) {
 
 // finish runs inside the reserve: the record, then the checkpoint, then the
 // verdict file, which has no header to write until a fetch has succeeded; a
-// file from an earlier state dir does not stand in its place.
+// file from an earlier state dir does not stand in its place. Only once the
+// verdict file is written or removed does the running marker go.
 func (j *Job) finish(hard context.Context, m mirror, r *Record, o outcome) (Result, error) {
 	if err := saveRecord(filepath.Join(m.private, "record.json"), r); err != nil {
-		return Result{}, err
+		return Result{}, j.abandon(err)
 	}
 	if err := m.checkpoint(hard, o.w); err != nil {
 		o = outcome{res: Result{Status: StatusBehind, Reason: "checkpoint failed"}}
@@ -195,7 +211,7 @@ func (j *Job) finish(hard context.Context, m mirror, r *Record, o outcome) (Resu
 		if err := j.removeVerdicts(); err != nil {
 			return Result{}, err
 		}
-		return o.res, nil
+		return j.finished(m, o.res)
 	}
 	b, err := attest.FormatVerdicts(attest.Verdicts{
 		Store:      j.Store.ID,
@@ -207,11 +223,26 @@ func (j *Job) finish(hard context.Context, m mirror, r *Record, o outcome) (Resu
 		Superseded: o.seqs,
 	})
 	if err != nil {
-		return Result{}, err
+		return Result{}, j.abandon(err)
 	}
 	if err := atomicfile.Write(filepath.Join(j.Dir, "verdicts"), b, 0o644); err != nil {
-		return Result{}, err
+		return Result{}, j.abandon(err)
 	}
 	o.res.Wrote = true
-	return o.res, nil
+	return j.finished(m, o.res)
+}
+
+// abandon returns err after removing the verdict file as best it can: the
+// run failed before it could vouch for one.
+func (j *Job) abandon(err error) error {
+	_ = j.removeVerdicts()
+	return err
+}
+
+// finished removes the running marker once the verdict file is settled.
+func (j *Job) finished(m mirror, res Result) (Result, error) {
+	if err := os.Remove(filepath.Join(m.private, runningMarker)); err != nil {
+		return Result{}, err
+	}
+	return res, nil
 }

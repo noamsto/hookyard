@@ -27,6 +27,16 @@ func TestPreAuth(t *testing.T) {
 				t.Errorf("preAuth(%q) = true, want false", prefixed)
 			}
 		}
+		// Once ssh has authenticated, a matching line can only be text the
+		// remote sent, quoted by git without a "remote:" prefix.
+		for _, authed := range []string{
+			"Authenticated to h ([192.0.2.1]:22) using \"publickey\".\n" + line + "\n",
+			line + "\nAuthenticated to h (via proxy) using \"publickey\".\n",
+		} {
+			if preAuth(authed) {
+				t.Errorf("preAuth(%q) = true, want false", authed)
+			}
+		}
 	}
 	for _, s := range []string{"ERROR: Repository not found.", "fatal: the remote end hung up unexpectedly", ""} {
 		if preAuth(s) {

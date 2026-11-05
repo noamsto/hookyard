@@ -96,6 +96,10 @@ func TestPrepare(t *testing.T) {
 		{"no remote", func(c *config.Config, _ *Env, _, _ *string) { c.PersonalRemote = "" }, "no remote"},
 		{"https remote", func(c *config.Config, _ *Env, _, _ *string) { c.PersonalRemote = "https://host/p.git" }, "not an ssh url"},
 		{"local path remote", func(c *config.Config, _ *Env, _, _ *string) { c.PersonalRemote = "/local/path" }, "not an ssh url"},
+		{"ext transport remote", func(c *config.Config, _ *Env, _, _ *string) { c.PersonalRemote = "ext::sh -c x" }, "not an ssh url"},
+		{"fd transport remote", func(c *config.Config, _ *Env, _, _ *string) { c.PersonalRemote = "fd::0" }, "not an ssh url"},
+		{"https transport remote", func(c *config.Config, _ *Env, _, _ *string) { c.PersonalRemote = "https::https://h/r" }, "not an ssh url"},
+		{"ssh url with transport", func(c *config.Config, _ *Env, _, _ *string) { c.PersonalRemote = "ssh://h/ext::r" }, "not an ssh url"},
 		{"relative credential", func(_ *config.Config, _ *Env, _, cr *string) { *cr = "key" }, "credential"},
 		{"missing store dir", func(_ *config.Config, e *Env, _, _ *string) { e.Root = filepath.Join(e.Root, "gone") }, "missing"},
 	}

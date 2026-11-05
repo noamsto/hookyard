@@ -38,19 +38,23 @@ type fixture struct {
 }
 
 // fakeSSH logs each invocation to ssh.log, then acts by the mode in ssh.mode:
-// ok runs git's remote command locally; hostkey and refused fail as ssh does
-// before authentication; stall hangs until git dies and closes its stdin (a
-// sleep would outlive the test and hold the descriptors nix develop waits on).
-// The job's environment has no PATH, so every program is named by its
-// absolute path.
+// ok logs authentication as ssh -o LogLevel=VERBOSE does and runs git's
+// remote command locally; hostkey and refused fail as ssh does before
+// authentication; inject fails after authentication with stderr quoting a
+// pre-authentication phrase, as fsck quotes pushed values; stall hangs until
+// git dies and closes its stdin (a sleep would outlive the test and hold the
+// descriptors nix develop waits on). The job's environment has no PATH, so
+// every program is named by its absolute path.
 const fakeSSH = `#!%[1]s
 printf '%%s\n' "$*" >> %[2]s
 for a; do last=$a; done
 read -r mode < %[3]s
+authed='Authenticated to fake ([127.0.0.1]:22) using "publickey".'
 case $mode in
-ok) unset GIT_DIR; PATH=%[4]s; export PATH; exec %[5]s -c "$last" ;;
+ok) echo "$authed" >&2; unset GIT_DIR; PATH=%[4]s; export PATH; exec %[5]s -c "$last" ;;
 hostkey) echo 'Host key verification failed.' >&2; exit 255 ;;
 refused) echo 'Permission denied (publickey).' >&2; exit 255 ;;
+inject) echo "$authed" >&2; echo 'Host key verification failed.' >&2; exit 1 ;;
 stall) while read -r _; do :; done; exit 255 ;;
 esac
 exit 1

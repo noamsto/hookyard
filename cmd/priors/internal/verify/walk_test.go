@@ -227,3 +227,27 @@ func TestWalkSideBranchLapseAndDeadline(t *testing.T) {
 		t.Fatalf("Lapsed = %v, want the side branch's edit to lapse %s", r.Lapsed, digest[:7])
 	}
 }
+
+// TestWalkDropsTreesBetweenCommits: parsed trees are not kept from one
+// walked commit to the next, so a long history cannot grow the cache for the
+// whole run.
+func TestWalkDropsTreesBetweenCommits(t *testing.T) {
+	w := newWalkRepo(t)
+	first := w.commit(map[string][]byte{"facts/a.md": []byte("a")})
+	w.commit(map[string][]byte{"facts/b.md": []byte("b")})
+	last := w.commit(map[string][]byte{"facts/c.md": []byte("c")})
+	w.tip(last)
+	firstRoot := gitIn(t, w.repo, "", "rev-parse", first+"^{tree}")
+
+	cf, err := newCatFile(t.Context(), w.m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cf.close)
+	if res, err := w.m.walk(t.Context(), cf, newRecord(), "s", 10); err != nil || res.N != 3 {
+		t.Fatalf("walk = %+v, %v, want 3 commits", res, err)
+	}
+	if _, ok := cf.trees[firstRoot]; ok {
+		t.Fatalf("tree cache still holds the first commit's root tree: %d trees", len(cf.trees))
+	}
+}

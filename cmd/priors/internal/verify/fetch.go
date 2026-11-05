@@ -36,9 +36,19 @@ type fetchError struct {
 
 func (e *fetchError) Error() string { return e.msg }
 
+// authenticated is the line ssh at LogLevel=VERBOSE logs once authentication
+// has succeeded.
+const authenticated = "Authenticated to "
+
 // preAuth reports whether stderr shows a pre-authentication failure. Lines
-// the remote sent ("remote:") are ignored: the remote controls them.
+// the remote sent ("remote:") are ignored: the remote controls them. Once
+// ssh has authenticated, git also quotes pushed content (fsck messages)
+// without that prefix, so no line counts after authentication; text an agent
+// injects can then only make the run behind.
 func preAuth(stderr string) bool {
+	if strings.Contains(stderr, authenticated) {
+		return false
+	}
 	for line := range strings.Lines(stderr) {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "remote:") {
