@@ -1077,6 +1077,18 @@ func TestStoreWritesStayDenied(t *testing.T) {
 
 		{name: "cdable_vars to an assigned name", want: store, input: bash("shopt -s cdable_vars; d=$HOME/notes; cd d && touch new.md")},
 		{name: "cdable_vars to a host name", want: store, cwd: "elsewhere", input: bash("shopt -s cdable_vars; cd NOTES; rm facts/a.md")},
+		{name: "cdable_vars to the last argument", want: "changes into a dir the guard cannot tell", cwd: "elsewhere", input: bash(`shopt -s cdable_vars; ls ~/notes; cd _ && rm facts/a.md`)},
+		{name: "cdable_vars to BASH_REMATCH", want: "changes into a dir the guard cannot tell", cwd: "elsewhere", input: bash(`shopt -s cdable_vars; [[ ~/notes =~ .* ]]; cd BASH_REMATCH && rm facts/a.md`)},
+		{name: "cdable_vars to OLDPWD", want: "changes into a dir the guard cannot tell", cwd: "elsewhere", input: bash(`shopt -s cdable_vars; cd OLDPWD && rm facts/a.md`)},
+		{name: "nested shell cdable_vars to BASH_ARGV0", want: "changes into a dir the guard cannot tell", cwd: "elsewhere", input: bash(`bash -O cdable_vars -c 'cd BASH_ARGV0 && rm facts/a.md' "$NOTES"`)},
+		{name: "tilde in an option cluster", want: store, input: bash(`foo -o~/notes/MEMORY.md`)},
+		{name: "tilde in an ssh option cluster", want: store, input: bash(`ssh -M -S~/notes/x host`)},
+		{name: "quoted tilde in a -C cluster", want: store, input: bash(`foo -C'~/notes' build`)},
+		{name: "quoted ~user word", want: store, input: bash(`foo '~alice/notes/MEMORY.md'`)},
+		{name: "ssh option value with ~user", want: store, input: bash(`ssh -o 'UserKnownHostsFile=~alice/notes/MEMORY.md' host`)},
+		{name: "tilde value naming a program", want: store, input: bash(`X=~/bin/cat make; cat ~/notes/MEMORY.md`)},
+		{name: "work tree built by a substitution", want: store, input: bash(`GIT_WORK_TREE=../no$(true)tes git checkout -- .`)},
+		{name: "git dir word built by a substitution", want: store, input: bash(`foo GIT_DIR=../no$(true)tes`)},
 
 		{name: "loop variable exported before", want: store, input: bash("export GIT_WORK_TREE; for GIT_WORK_TREE in ~/notes; do git checkout -- .; done")},
 		{name: "loop variable exported inside", want: store, input: bash("for GIT_WORK_TREE in ~/notes; do export GIT_WORK_TREE; git checkout -- .; done")},
