@@ -47,7 +47,7 @@ func (j *Job) Run(ctx context.Context) (Result, error) {
 	if err != nil {
 		// The record is left for a human; with no tip to write a header from,
 		// the old verdict file goes rather than standing for up to 24 h.
-		if err := os.Remove(filepath.Join(j.Dir, "verdicts")); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := j.removeVerdicts(); err != nil {
 			return Result{}, err
 		}
 		return Result{Status: StatusBehind, Reason: "record unreadable"}, nil
@@ -60,6 +60,9 @@ func (j *Job) Run(ctx context.Context) (Result, error) {
 		// A fresh record saved beside old walked refs would skip their
 		// commits for good, so nothing is saved until they are gone.
 		if err := m.dropWalked(soft); err != nil {
+			if err := j.removeVerdicts(); err != nil {
+				return Result{}, err
+			}
 			return behind(soft, "mirror init failed", walkResult{}).res, nil
 		}
 	}
@@ -134,6 +137,15 @@ func (j *Job) observe(soft context.Context, m mirror, r *Record) outcome {
 	return outcome{res: res, w: w, states: states, seqs: seqs}
 }
 
+// removeVerdicts deletes the verdict file, so none stands without a header
+// this run can vouch for.
+func (j *Job) removeVerdicts() error {
+	if err := os.Remove(filepath.Join(j.Dir, "verdicts")); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 // tipReachable reports whether a tip ref contains tip; after a mirror reset
 // none does, and an error counts as no.
 func (m mirror) tipReachable(ctx context.Context, tip string) bool {
@@ -167,7 +179,8 @@ func tipEntries(cf *catFile, tip string) ([]tipEntry, error) {
 }
 
 // finish runs inside the reserve: the record, then the checkpoint, then the
-// verdict file, which has no header to write until a fetch has succeeded.
+// verdict file, which has no header to write until a fetch has succeeded; a
+// file from an earlier state dir does not stand in its place.
 func (j *Job) finish(hard context.Context, m mirror, r *Record, o outcome) (Result, error) {
 	if err := saveRecord(filepath.Join(m.private, "record.json"), r); err != nil {
 		return Result{}, err
@@ -179,6 +192,9 @@ func (j *Job) finish(hard context.Context, m mirror, r *Record, o outcome) (Resu
 		o = outcome{res: Result{Status: StatusBehind, Reason: "deadline"}}
 	}
 	if r.Tip == "" {
+		if err := j.removeVerdicts(); err != nil {
+			return Result{}, err
+		}
 		return o.res, nil
 	}
 	b, err := attest.FormatVerdicts(attest.Verdicts{
