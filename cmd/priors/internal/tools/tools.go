@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 )
 
-// Set by -ldflags -X; empty in an unpinned build. Only priors attest runs
-// SSHKeygen and SSHSKHelper (OpenSSH's signer and its FIDO helper).
+// Set by -ldflags -X; empty in an unpinned build. SSHKeygen and SSHSKHelper
+// are OpenSSH's signer and its FIDO helper.
 var (
 	Git         string
 	SSH         string

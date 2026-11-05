@@ -94,7 +94,6 @@ func cmdAttest(args []string, s streams) int {
 		VerifyUID: attest.VerifyUID,
 		Signer:    signer,
 		Terminal:  signer.CheckTerminal,
-		Home:      home,
 		Now:       time.Now,
 		Wait:      attestcmd.DefaultWait,
 		Poll:      time.Second,

@@ -8,7 +8,8 @@ import (
 	"strings"
 )
 
-func loaderVars(env []string) []string {
+// LoaderVars names the environment's LD_* and DYLD_* variables, in order.
+func LoaderVars(env []string) []string {
 	var out []string
 	for _, kv := range env {
 		name, _, _ := strings.Cut(kv, "=")

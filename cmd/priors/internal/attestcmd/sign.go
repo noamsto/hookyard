@@ -43,10 +43,9 @@ func (k Keygen) CheckTerminal() error {
 	return f.Close()
 }
 
-// Sign runs `ssh-keygen -Y sign` with no file argument, so the payload goes
-// over a pipe: no same-user process can swap a payload file between the
-// human's review and the signature. The environment is built, not scrubbed:
-// only these four variables reach the signer, so SSH_SK_PROVIDER,
+// Sign feeds the payload to `ssh-keygen -Y sign` over a pipe, so no same-user
+// process can swap a payload file between the human's review and the
+// signature. The environment is built, not scrubbed, so SSH_SK_PROVIDER,
 // SSH_AUTH_SOCK, SSH_ASKPASS, LD_*, OPENSSL_* and the like cannot redirect
 // the key, the agent, the PIN prompt or the loaded libraries.
 func (k Keygen) Sign(ctx context.Context, handle string, payload []byte) ([]byte, error) {

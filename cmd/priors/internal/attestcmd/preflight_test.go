@@ -54,10 +54,10 @@ func addWorktree(t *testing.T, root string) string {
 }
 
 func TestLoaderVars(t *testing.T) {
-	got := loaderVars([]string{"PATH=/x", "LD_PRELOAD=a", "DYLD_INSERT_LIBRARIES=b", "XLD_X=c", "LD_=d"})
+	got := LoaderVars([]string{"PATH=/x", "LD_PRELOAD=a", "DYLD_INSERT_LIBRARIES=b", "XLD_X=c", "LD_=d"})
 	want := []string{"LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "LD_"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("loaderVars = %v, want %v", got, want)
+		t.Fatalf("LoaderVars = %v, want %v", got, want)
 	}
 }
 

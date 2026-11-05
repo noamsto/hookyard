@@ -255,11 +255,10 @@ func overlay(dir string, files map[string][]byte) error {
 // parent, the checkout's HEAD, and moves HEAD to the commit. The blobs are the
 // bytes in memory, never the working tree's, and the commit changes only
 // those paths; the caller gates them first (Gate) and holds the store's lock.
-// A HEAD moved off parent fails the commit. The tree and commit are built over
-// the checkout's objects alone (objectsGit), so parent is read with replace
-// objects off and no checkout config applies. The commit is never signed: a
-// signing program named by the checkout's config would be a second PIN prompt
-// right after the attest's, one an agent controls. ident is the author and
+// A HEAD moved off parent fails the commit. Every git run is objectsGit. The
+// commit is never signed: a signing program named by the checkout's config
+// would be a second PIN prompt right after the attest's, one an agent
+// controls. ident is the author and
 // committer environment (Identity). It returns the commit, or a warning naming
 // what stopped it; a commit with a warning was made but the checkout's index
 // was not updated to it.
@@ -432,8 +431,6 @@ func commitTree(ctx context.Context, git gitFunc, dir, parent, tree, msg string,
 	if sign {
 		// Plain -S lets git pick the key and format from the config.
 		args, timeout = append(args, "-S"), signTimeout
-	} else {
-		args = append([]string{"-c", "commit.gpgSign=false"}, args...)
 	}
 	commit, err = git(timeout, env, nil, append(args, tree)...)
 	switch {
@@ -663,8 +660,7 @@ func copyRegular(path, out string) (regular bool, err error) {
 // parent with fill's staging applied, and checks it holds nothing else. fill
 // stages into the index env names and returns each path's staged
 // "<mode> <oid>", or "" for a removal. It returns "" for the tree when that is
-// parent's own tree. Every git it runs is git; dir only names the checkout in
-// warnings.
+// parent's own tree. dir only names the checkout in warnings.
 func gatedTree(git gitFunc, dir, parent string, fill func(env []string) (gated map[string]string, warning string)) (tree, warning string) {
 	tmp, err := os.MkdirTemp("", "priors-index-")
 	if err != nil {

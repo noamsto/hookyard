@@ -41,7 +41,6 @@ type Options struct {
 	VerifyUID string
 	Signer    Signer
 	Terminal  func() error
-	Home      string
 	Now       func() time.Time
 	Wait      time.Duration
 	Poll      time.Duration
@@ -66,9 +65,6 @@ var skipTTY bool
 // RequireTTY reports whether signing must find a controlling terminal; only
 // a priorstest build can turn it off.
 func RequireTTY() bool { return !skipTTY }
-
-// LoaderVars names the environment's LD_* and DYLD_* variables, in order.
-func LoaderVars(env []string) []string { return loaderVars(env) }
 
 const (
 	signTimeout  = 5 * time.Minute
@@ -207,7 +203,7 @@ func Check(ctx context.Context, o Options, name, storeName, sha, commitOid strin
 // preflight runs the checks every mode makes before touching a store: no
 // loader variable, attestation on for this host, and the git and push pins.
 func preflight(o Options) (attest.Host, error) {
-	if vars := loaderVars(o.Env); len(vars) > 0 {
+	if vars := LoaderVars(o.Env); len(vars) > 0 {
 		return attest.Host{}, fmt.Errorf("loader variable(s) %s set: unset them and run priors again", strings.Join(vars, ", "))
 	}
 	host := attest.Classify(o.Config, o.Groups)

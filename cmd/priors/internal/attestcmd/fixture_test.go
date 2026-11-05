@@ -87,7 +87,7 @@ func newFixture(t *testing.T) *fixture {
 		t.Skip("sh not installed")
 	}
 	dir := t.TempDir()
-	// The commit attest makes runs under the user's git config, which a
+	// The commit's identity comes from the user's git config, which a
 	// sandboxed build lacks.
 	gitconfig := filepath.Join(dir, "gitconfig")
 	if err := os.WriteFile(gitconfig, []byte("[user]\n\tname = Priors Test\n\temail = priors@example.invalid\n[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n"), 0o600); err != nil {
@@ -188,7 +188,6 @@ func (f *fixture) opts() Options {
 		VerifyUID: strconv.Itoa(os.Getuid()),
 		Signer:    goSigner{f.A, &f.calls},
 		Terminal:  func() error { return nil },
-		Home:      f.t.TempDir(),
 		Now:       time.Now,
 		Wait:      3 * time.Second,
 		Poll:      50 * time.Millisecond,
