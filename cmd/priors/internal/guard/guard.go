@@ -276,10 +276,10 @@ func CallDir(envelopeCWD string, input json.RawMessage) string {
 	return ""
 }
 
-// shell judges a shell call, in order: what the reader
-// cannot read, code it cannot see, a broken config, a write run in a store,
-// each resolved target, each unresolved target's literal prefix, and an
-// unresolved write with a store in reach.
+// shell judges a shell call, in order: what the reader cannot read, code it
+// cannot see, a broken config, a write run in a store, each resolved target,
+// each unresolved target's literal prefix, and an unresolved write with a
+// store in reach.
 func (g *Guard) shell(cwd string, texts []string) string {
 	acc := gate.ShellAccess(g.host, texts...)
 	switch {
@@ -310,9 +310,8 @@ func (g *Guard) shell(cwd string, texts []string) string {
 			return r
 		}
 	}
-	// An unknown program's option value may be a dir it runs in: only once
-	// every target has been judged as given, so a denial names the target it
-	// would name anyway.
+	// An unknown program's option value may be a dir it runs in; judged after
+	// every target as given, so a denial names the target itself.
 	for _, t := range acc.Targets {
 		if t.Call == 0 || filepath.IsAbs(t.Text) {
 			continue
