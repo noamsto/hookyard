@@ -59,6 +59,9 @@ type prepass struct {
 	// exported are the names exported to a command.
 	exported  map[string]bool
 	allexport bool
+	// cdable reports a shopt that may set cdable_vars, under which cd may
+	// change into the value of a variable its operand names.
+	cdable bool
 	// redefines reports a function, alias, hash, enable, source or `.`.
 	redefines bool
 	// refs are the names arithmetic reads; substituted reports a command
@@ -502,6 +505,8 @@ func (r *reader) preCall(ce *syntax.CallExpr, f feed) {
 		}
 	case "set":
 		r.setCall(args)
+	case "shopt":
+		r.shopt(args)
 	case "test", "[":
 		for i := 0; i+1 < len(args); i++ {
 			if args[i].ok && args[i].text == "-v" {
@@ -673,6 +678,24 @@ func (r *reader) setCall(args []arg) {
 			return
 		}
 	}
+}
+
+// shopt reads shopt for cdable_vars: set with -s by name, or by a word that
+// does not render, which may be the flag or the name.
+func (r *reader) shopt(args []arg) {
+	set, named := false, false
+	for _, a := range args {
+		switch {
+		case !a.ok:
+			r.pre.cdable = true
+			return
+		case len(a.text) > 1 && a.text[0] == '-':
+			set = set || strings.Contains(a.text, "s")
+		case a.text == "cdable_vars":
+			named = true
+		}
+	}
+	r.pre.cdable = r.pre.cdable || set && named
 }
 
 // arith reads an arithmetic context: every name it reads, a substitution it

@@ -40,9 +40,10 @@ var shellOwn = []string{
 }
 
 // render renders w in the host's environment (§4.1): literal text, quotes, a
-// leading ~ or ~user, brace expansion where the shell does it, glob bytes
-// kept as they are, and a plain $NAME of a host variable the command cannot
-// set. host false renders literal text only, as a setter's name must be.
+// ~ or ~user where bash expands one, brace expansion where the shell does it,
+// glob bytes kept as they are, and a plain $NAME of a host variable the
+// command cannot set. host false renders literal text only, as a setter's
+// name must be.
 func (r *reader) render(w *syntax.Word, host bool) rendered {
 	if host {
 		if c, ok := r.cache[w]; ok {
@@ -51,6 +52,13 @@ func (r *reader) render(w *syntax.Word, host bool) rendered {
 	}
 	var out rendered
 	alts := [][]syntax.WordPart{w.Parts}
+	mode := plainWord
+	switch {
+	case r.values[w]:
+		mode = valueWord
+	case assignLike(w.Parts):
+		mode = assignWord
+	}
 	if r.braced[w] {
 		split := *w
 		if syntax.SplitBraces(&split) {
@@ -62,10 +70,13 @@ func (r *reader) render(w *syntax.Word, host bool) rendered {
 			}
 			r.spent += n * cost
 			alts = braceAlts(split.Parts)
+			// bash drops the assignment reading of a word brace expansion
+			// changes.
+			mode = plainWord
 		}
 	}
 	for _, parts := range alts {
-		a := &alt{r: r, host: host}
+		a := &alt{r: r, host: host, mode: mode}
 		a.parts(parts, false, len(parts))
 		a.end(&out)
 		if r.over() {
@@ -94,11 +105,28 @@ func (r *reader) args(words []*syntax.Word, host bool) []arg {
 	return out
 }
 
+// tildeMode is where bash starts a tilde-prefix in a word (§4.1).
+type tildeMode int
+
+const (
+	// plainWord starts one only at the word's start.
+	plainWord tildeMode = iota
+	// assignWord, a word bash reads as an assignment (`of=~/x`), starts one
+	// after its first = and after each unquoted :, and ends one at a :.
+	assignWord
+	// valueWord, an assignment's value, starts one at its start and after
+	// each unquoted :, and ends one at a :.
+	valueWord
+)
+
 // alt renders one brace alternative.
 type alt struct {
 	r    *reader
 	host bool
-	b    strings.Builder
+	mode tildeMode
+	// eq reports the word's first = passed.
+	eq bool
+	b  strings.Builder
 	// open reports a part that does not render; prefix is the text before it.
 	open   bool
 	prefix string
@@ -141,14 +169,16 @@ func (a *alt) end(out *rendered) {
 // parts renders parts; n is how many parts the word has at the top level,
 // as a tilde and a process substitution are read only in a word's own shape.
 func (a *alt) parts(parts []syntax.WordPart, quoted bool, n int) {
-	for i, part := range parts {
-		switch p := part.(type) {
+	for i := 0; i < len(parts); i++ {
+		switch p := parts[i].(type) {
 		case *syntax.Lit:
-			v := p.Value
-			if i == 0 && !quoted && strings.HasPrefix(v, "~") {
-				v = a.tilde(v, n)
+			if quoted {
+				a.write(unescape(p.Value, true))
+				continue
 			}
-			a.write(unescape(v, quoted))
+			v, end := litRun(parts, i)
+			a.lit(v, i == 0, end == n-1)
+			i = end
 		case *syntax.SglQuoted:
 			a.quoted = true
 			a.write(ansi(p))
@@ -190,41 +220,114 @@ func ansi(p *syntax.SglQuoted) string {
 	return v
 }
 
-// tilde expands a leading ~ or ~user, returning the rest of v unexpanded. A
-// tilde-prefix ends at the first slash; one with no slash in its own part is
-// literal unless it is the whole word, as a quoted or expanded byte after it
-// stops the expansion. ~ needs HOME unsettable, and ~+, ~- and ~N name dirs
-// the command may change.
-func (a *alt) tilde(v string, n int) string {
-	user, rest, slash := strings.Cut(v[1:], "/")
-	if !slash && n > 1 {
-		return v
-	}
-	if slash {
-		rest = "/" + rest
-	}
-	if !a.host {
-		a.cut()
-		return rest
-	}
-	switch {
-	case user == "":
-		if !a.r.settable("HOME") {
-			a.write(a.r.host.Home)
-			return rest
-		}
-	case strings.HasPrefix(user, "+"), strings.HasPrefix(user, "-"), digits(user):
-	default:
-		if a.r.host.Users != nil {
-			if home, ok := a.r.host.Users(user); ok {
-				a.write(home)
-				return rest
+// lit writes an unquoted literal run, first and last reporting that it starts
+// and ends the word, expanding each tilde-prefix bash expands in it (§4.1): at
+// the word's start, and in an assignment after its first = and after each
+// unquoted :. A setter's literal text keeps a ~ after = or :.
+func (a *alt) lit(v string, first, last bool) {
+	open := first
+	done := 0
+	for k := 0; k < len(v); k++ {
+		c := v[k]
+		if c == '~' && open {
+			if end, ok := a.prefixEnd(v, k, last); ok {
+				a.write(unescape(v[done:k], false))
+				if !a.tilde(v[k+1 : end]) {
+					a.write(v[k:end])
+				}
+				done, k, open = end, end-1, false
+				continue
 			}
 		}
-		return v
+		open = false
+		switch {
+		case c == '\\':
+			k++
+		case c == ':' && a.mode != plainWord:
+			open = a.host
+		case c == '=' && a.mode == assignWord && !a.eq:
+			a.eq, open = true, a.host
+		}
+	}
+	a.write(unescape(v[done:], false))
+}
+
+// litRun returns the text of the run of literal parts from parts[i], which
+// the parser and brace expansion may split, and the index of its last part.
+func litRun(parts []syntax.WordPart, i int) (string, int) {
+	var b strings.Builder
+	for ; i < len(parts); i++ {
+		lit, ok := parts[i].(*syntax.Lit)
+		if !ok {
+			break
+		}
+		b.WriteString(lit.Value)
+	}
+	return b.String(), i - 1
+}
+
+// prefixEnd returns the end of the tilde-prefix at v[k]: the first slash, or
+// colon in an assignment, after it. One that runs to the end of a part that is
+// not the word's last, or holds a backslash, is literal, as a quoted or
+// expanded byte stops the expansion.
+func (a *alt) prefixEnd(v string, k int, last bool) (int, bool) {
+	for j := k + 1; j < len(v); j++ {
+		switch {
+		case v[j] == '/', v[j] == ':' && a.mode != plainWord:
+			return j, true
+		case v[j] == '\\':
+			return 0, false
+		}
+	}
+	return len(v), last
+}
+
+// tilde writes the expansion of the tilde-prefix ~user, and reports false
+// when bash leaves it literal. ~ needs HOME unsettable, and ~+, ~- and ~N name
+// dirs the command may change.
+func (a *alt) tilde(user string) bool {
+	if a.host {
+		switch {
+		case user == "":
+			if !a.r.settable("HOME") {
+				a.write(a.r.host.Home)
+				return true
+			}
+		case strings.HasPrefix(user, "+"), strings.HasPrefix(user, "-"), digits(user):
+		default:
+			if a.r.host.Users == nil {
+				return false
+			}
+			home, ok := a.r.host.Users(user)
+			if ok {
+				a.write(home)
+			}
+			return ok
+		}
 	}
 	a.cut()
-	return rest
+	return true
+}
+
+// assignLike reports a word bash reads as an assignment: its leading unquoted
+// literal is a name, maybe subscripted, then = or +=.
+func assignLike(parts []syntax.WordPart) bool {
+	v, _ := litRun(parts, 0)
+	k := 0
+	for k < len(v) && nameByte(v[k]) {
+		k++
+	}
+	if !identifier(v[:k]) {
+		return false
+	}
+	if k < len(v) && v[k] == '[' {
+		end := strings.IndexByte(v[k:], ']')
+		if end < 0 {
+			return false
+		}
+		k += end + 1
+	}
+	return strings.HasPrefix(strings.TrimPrefix(v[k:], "+"), "=")
 }
 
 // param renders a plain $NAME or ${NAME} of a host variable the command

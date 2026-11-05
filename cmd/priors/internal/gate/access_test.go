@@ -209,6 +209,16 @@ func TestShellAccessWriters(t *testing.T) {
 		{name: "unset variable renders empty", cmd: `rm -rf "$UNSET/"`, writes: true, targets: []string{"/"}},
 		{name: "special parameter", env: map[string]string{"_": "/h/x"}, cmd: `rm "$_" "$1"`, writes: true, opaque: []string{"", ""}, unresolved: `writes through "$_"`},
 		{name: "settable HOME", cmd: "HOME=/x; rm ~/y", writes: true, opaque: []string{""}, unresolved: `writes through "~/y"`},
+		{name: "tilde after name=", cmd: "dd if=/dev/zero of=~/a", writes: true, targets: []string{"/h/a"}},
+		{name: "tilde after a colon", cmd: "foo a=b:~/y x=a:~", writes: true, targets: []string{"a=b:/h/y", "/h/y", "x=a:/h"}},
+		{name: "tilde after subscripted and appending names", cmd: "foo a[1]=~/x b+=~bob/y", writes: true, targets: []string{"a[1]=/h/x", "b+=/u/bob/y"}},
+		{name: "tilde after an option's =", cmd: "foo --o=~/z", writes: true, targets: []string{"--o=~/z", "~/z"}, notTargets: []string{"/h/z"}},
+		{name: "tilde after a quoted name", cmd: "foo 'a'=~/x", writes: true, notTargets: []string{"/h/x", "a=/h/x"}},
+		{name: "tilde after an escaped colon", cmd: `foo a=b\:~/x a=\~/y`, writes: true, notTargets: []string{"/h/x", "/h/y"}},
+		{name: "tilde before a quote", cmd: `foo a=~"/x"`, writes: true, notTargets: []string{"/h/x", "a=/h/x"}},
+		{name: "tilde after the second =", cmd: "foo a=b=~/x", writes: true, notTargets: []string{"/h/x"}},
+		{name: "tilde after name= with HOME settable", cmd: "HOME=/x; foo a=~/y", writes: true, opaque: []string{"a="}, unresolved: `writes through "a=~/y"`},
+		{name: "tilde after a colon in a value", cmd: "export X=~/a:~/b", writes: true, targets: []string{"/h/a:/h/b", "/h/a", "/h/b"}},
 	})
 }
 
@@ -283,6 +293,12 @@ func TestShellAccessDirs(t *testing.T) {
 		{name: "make", cmd: "make -kC/h/y all", writes: true, dirs: []string{"/h/y"}},
 		{name: "tar", cmd: "tar -C /h/z -xf a.tar", writes: true, dirs: []string{"/h/z"}},
 		{name: "tar old-style", cmd: "tar xzCf d a.tar", writes: true, lost: true, unresolved: "runs a program in a dir the guard cannot tell"},
+		{name: "cdable_vars", cmd: "shopt -s cdable_vars; cd d", lost: true},
+		{name: "cdable_vars dot", cmd: "shopt -s cdable_vars; cd ./d", dirs: []string{"./d"}},
+		{name: "shopt option built at run time", cmd: `o=x; shopt -s "$o"; cd d`, lost: true},
+		{name: "shopt flag built at run time", cmd: `o=x; shopt "$o" cdable_vars; cd d`, lost: true},
+		{name: "other shopt", cmd: "shopt -s nullglob; cd d", dirs: []string{"d"}},
+		{name: "host BASHOPTS cdable_vars", env: map[string]string{"BASHOPTS": "cdable_vars:cmdhist"}, cmd: "cd d", lost: true},
 	})
 }
 
@@ -332,7 +348,7 @@ func TestShellAccessCode(t *testing.T) {
 		{name: "find runs a shell", cmd: "find . -exec sh -c '(( $1 ))' _ {} \\;", writes: true, unresolved: "runs find with -exec", code: arithmetic},
 		{name: "family 2 concatenation", cmd: "a='a[$'; b='(rm -rf ../notes/facts)]'; x=$a$b; (( x ))", writes: true, code: arithmetic},
 		{name: "family 2 array append", cmd: "x=('a[$' b); x[0]+='(rm -rf ../notes/facts)]'; (( x ))", writes: true, code: arithmetic},
-		{name: "family 2 exported append", cmd: "export 'x=a[$'; x+='(rm -rf ../notes/facts)]'; (( x ))", writes: true, code: arithmetic},
+		{name: "family 2 exported append", cmd: "export 'x=a[$'; x+='(rm -rf ../notes/facts)]'; (( x ))", writes: true, unresolved: `writes through "x+='(rm -rf ../notes/facts)]'"`, code: arithmetic},
 		{name: "family 3", cmd: `x='a[$(echo "(") + $(cd ..; rm -rf no*s)] + 1 a'; (( x ))`, writes: true, code: arithmetic},
 		{name: "a name holding a name", cmd: "x=a; (( x ))", writes: true, code: arithmetic},
 	})
@@ -385,6 +401,20 @@ func TestShellAccessWithdrawal(t *testing.T) {
 		{name: "glob target", cmd: "rm -f *; cat x", writes: true, targets: []string{"*", "x"}, unresolved: "runs rm, which the command may have redefined"},
 		{name: "glob that names no program", cmd: "rm -f *.o; cat x", writes: true, targets: []string{"*.o"}, notTargets: []string{"x"}},
 		{name: "unresolved target", cmd: "d=x; cp a \"$d\"; cat y", writes: true, targets: []string{"y"}, unresolved: `writes through "$d"`},
+		{name: "unresolved target under a bin dir", cmd: "x=1; rm ~/bin/$x; cat y", writes: true, targets: []string{"y"}, unresolved: `writes through "~/bin/$x"`},
+		{name: "unresolved target starting a program name", cmd: "x=1; rm ~/bin/g$x; cat y", writes: true, targets: []string{"y"}, unresolved: `writes through "~/bin/g$x"`},
+		{name: "unresolved target starting no program name", cmd: `n=1; grep -e / f > "/tmp/out-$n"`, writes: true, opaque: []string{"/tmp/out-"}, notTargets: []string{"/"}, unresolved: `writes through "/tmp/out-$n"`},
+		{name: "prefix value", cmd: "GIT_WORK_TREE=~/w git checkout -- .", writes: true, targets: []string{"/h/w", "."}},
+		{name: "prefix value to a childless builtin", cmd: "IFS=/ read -r a b < f", writes: true, notTargets: []string{"/"}, unresolved: "feeds read input that may name paths"},
+		{name: "env word value", cmd: "env GIT_DIR=/h/g:/h/k git status", writes: true, targets: []string{"/h/g:/h/k", "/h/g", "/h/k"}, unresolved: "runs git, which the command may have redefined"},
+		{name: "prefix value built at run time", cmd: "HOME=$HOME/w foo", writes: true, opaque: []string{""}, unresolved: `writes through "HOME=$HOME/w"`},
+		{name: "host-exported value", cmd: "USER=/h/u; cat y", writes: true, targets: []string{"/h/u"}, unresolved: cat},
+		{name: "allexport value", cmd: "set -a; X=/h/x", writes: true, targets: []string{"/h/x"}, unresolved: "runs set, which the command may have redefined"},
+		{name: "exported later value", cmd: "X=/h/x; export X", writes: true, targets: []string{"/h/x"}},
+		{name: "builtin export value", cmd: "builtin export X=/h/x", writes: true, targets: []string{"/h/x"}, unresolved: "runs export, which the command may have redefined"},
+		{name: "appended exported value", cmd: "export X=/h; X+=/x", writes: true, opaque: []string{""}, unresolved: `writes through "X+=/x"`},
+		{name: "unexported value", cmd: "i=/h/x; cat y", notTargets: []string{"/h/x"}},
+		{name: "safe prefix value", cmd: "LANG=/h/x sort f", notTargets: []string{"/h/x"}},
 	})
 }
 
@@ -433,6 +463,14 @@ func TestShellAccessTargetFrom(t *testing.T) {
 	}
 	if len(acc.Options) != 1 || !slices.Equal(acc.Options[0], []string{"/x"}) {
 		t.Errorf("Options = %q", acc.Options)
+	}
+	acc = ShellAccess(accessHost(nil), "GIT_DIR=g foo -C d x")
+	if !slices.Contains(acc.Targets, Target{Text: "g", From: "GIT_DIR=g", Call: 1}) {
+		t.Errorf("Targets = %+v", acc.Targets)
+	}
+	acc = ShellAccess(accessHost(nil), "export X=~/a")
+	if !slices.Contains(acc.Targets, Target{Text: "/h/a", From: "X=~/a"}) {
+		t.Errorf("Targets = %+v", acc.Targets)
 	}
 }
 

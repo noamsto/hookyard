@@ -89,6 +89,7 @@ func ShellAccess(host *Host, texts ...string) (acc Access) {
 		seen:   map[string]bool{},
 		cache:  map[*syntax.Word]rendered{},
 		braced: map[*syntax.Word]bool{},
+		values: map[*syntax.Word]bool{},
 		names:  map[string]bool{},
 	}
 	r.pre.init()
@@ -123,9 +124,10 @@ type reader struct {
 	// text is the script whose statements are being walked.
 	text string
 	// cache holds each word's host rendering; braced are the words the shell
-	// brace-expands.
+	// brace-expands, values the assignments' values.
 	cache  map[*syntax.Word]rendered
 	braced map[*syntax.Word]bool
+	values map[*syntax.Word]bool
 	pre    prepass
 	// withdrawn turns every call into an unknown program (§4.7).
 	withdrawn bool
@@ -251,6 +253,10 @@ func (r *reader) discover(s *script) []string {
 		case *syntax.WordIter:
 			for _, w := range n.Items {
 				r.braced[w] = true
+			}
+		case *syntax.Assign:
+			if n.Name != nil && n.Value != nil {
+				r.values[n.Value] = true
 			}
 		case *syntax.ArrayElem:
 			if n.Value != nil {
@@ -379,6 +385,8 @@ func (r *reader) judge() {
 				}
 			case *syntax.CallExpr:
 				r.call(n, f)
+			case *syntax.DeclClause:
+				r.declared(n)
 			}
 		})
 		if r.over() {
@@ -509,15 +517,18 @@ func (r *reader) ownName(t string) {
 	r.out.ownList = append(r.out.ownList, t)
 }
 
-// opaque records an unresolved write target: its literal prefix, and the
-// unresolved write it is.
+// opaque records an unresolved write target: its literal prefix, the
+// unresolved write it is, and a replaced program when the name it ends in may
+// be one.
 func (r *reader) opaque(a arg) {
 	src := a.src
 	if !strings.HasPrefix(src, `"`) && !strings.HasPrefix(src, "'") {
 		src = `"` + src + `"`
 	}
 	r.unresolved("writes through " + src)
-	r.out.replaces = true
+	if !r.out.replaces && startsProgram(a.text) {
+		r.out.replaces = true
+	}
 	t := Target{Text: a.text, From: a.src}
 	if r.out.oseen[t] {
 		return

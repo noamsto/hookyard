@@ -959,6 +959,15 @@ func TestRedesignAllows(t *testing.T) {
 		{name: "awk field separator slash", input: bash(`awk -F/ '{print $NF}' f`)},
 		{name: "arithmetic loop", input: bash(`for i in 1 2 3; do echo $((i*2)); done`)},
 		{name: "cat store into tmp", input: bash(`cat ~/notes/MEMORY.md > /tmp/x`)},
+
+		// An unresolved name that can start no allowlisted program keeps the
+		// allowlist.
+		{name: "jq division into a numbered tmp file", input: bash(`n=1; jq '.a / .b' f > "/tmp/out-$n"`)},
+
+		// Environment values that name no store.
+		{name: "pager prefix", input: bash(`GIT_PAGER=cat git log`)},
+		{name: "locale prefix", input: bash(`LANG=C sort f`)},
+		{name: "PATH prefix with a home bin", input: bash(`PATH="$HOME/bin:$PATH" cmd`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.tool == "" {
@@ -1016,6 +1025,38 @@ func TestRedesignDenies(t *testing.T) {
 			if c.tool == "" {
 				c.tool = "Bash"
 			}
+			wantDenied(t, c, sb.run(t, c))
+		})
+	}
+}
+
+// TestStoreWritesStayDenied holds store writes a gap in rendering a word
+// would let through: a ~ bash expands after name= or :, an environment value
+// a child reads as a path, and a cd cdable_vars resolves.
+func TestStoreWritesStayDenied(t *testing.T) {
+	sb := newSandbox(t)
+	const (
+		store = "the personal store"
+		lost  = "changes into a dir the guard cannot tell"
+	)
+	for _, c := range []call{
+		{name: "dd of= tilde", want: store, input: bash("dd if=/dev/zero of=~/notes/MEMORY.md")},
+		{name: "unknown program name= tilde", want: store, input: bash("foo out=~/notes/MEMORY.md")},
+		{name: "unknown program tilde after a colon", want: store, input: bash("foo a=b:~/notes/MEMORY.md")},
+		{name: "make install PREFIX tilde", want: store, input: bash("make install PREFIX=~/notes")},
+
+		{name: "prefix work tree", want: store, input: bash("GIT_WORK_TREE=~/notes git checkout -- .")},
+		{name: "env work tree and git dir", want: store, input: bash("env GIT_WORK_TREE=~/notes GIT_DIR=~/notes/.git git checkout -- .")},
+		{name: "prefix git dir from HOME", want: store, input: bash("GIT_DIR=$HOME/notes/.git git reset --hard")},
+		{name: "exported work tree", want: store, input: bash("export GIT_WORK_TREE=~/notes; git checkout -- .")},
+		{name: "prefix DESTDIR", want: store, input: bash("DESTDIR=~/notes make install")},
+		{name: "prefix HOME from HOME", want: "the guard cannot resolve", input: bash("HOME=$HOME/notes foo")},
+
+		{name: "cdable_vars to an assigned name", want: lost, input: bash("shopt -s cdable_vars; d=$HOME/notes; cd d && touch new.md")},
+		{name: "cdable_vars to a host name", want: lost, cwd: "elsewhere", input: bash("shopt -s cdable_vars; cd NOTES; rm facts/a.md")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			c.tool = "Bash"
 			wantDenied(t, c, sb.run(t, c))
 		})
 	}

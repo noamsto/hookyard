@@ -1593,8 +1593,15 @@ func scriptsOf(c call, f feed) []string {
 // call classifies one simple command and records what it writes; when it is
 // an unresolved write, the names its own words hold.
 func (r *reader) call(ce *syntax.CallExpr, f feed) {
-	before := r.out.writesUnresolved
+	before, calls := r.out.writesUnresolved, len(r.out.options)
 	r.classifyCall(ce, f)
+	call := 0
+	if len(r.out.options) > calls {
+		call = calls + 1
+	}
+	if !r.over() {
+		r.environment(ce, call)
+	}
 	if r.out.writesUnresolved > before && !r.over() {
 		r.ownNames(ce, f)
 	}
@@ -1860,6 +1867,149 @@ func (r *reader) unknown(name string, words []arg, f feed) {
 	}
 }
 
+// environment judges the values a call puts in the environment of what it
+// runs: its prefix assignments and env's or sudo's NAME=value words, each
+// belonging to the call whose option values call indexes, and a plain
+// assignment to an exported name or a declare-family call's exported values,
+// belonging to the whole command.
+func (r *reader) environment(ce *syntax.CallExpr, call int) {
+	argv := r.args(ce.Args, true)
+	childless := len(argv) > 0 && r.childless(argv[0])
+	for _, as := range ce.Assigns {
+		if as.Name == nil || as.Value == nil || as.Index != nil {
+			continue
+		}
+		switch name := as.Name.Value; {
+		case len(ce.Args) > 0 && !safe(name) && !childless:
+			r.assignValue(as, call)
+		case len(ce.Args) == 0 && r.envReaches(name):
+			r.assignValue(as, 0)
+		}
+	}
+	c := unwrap(argv)
+	for _, a := range c.assigns {
+		if name, v, _ := strings.Cut(a.text, "="); identifier(name) && !safe(name) {
+			r.envValue(arg{text: v, ok: a.ok, word: a.word, src: a.src}, call)
+		}
+	}
+	if !c.lost && c.split == nil && c.at < len(argv) && argv[c.at].ok && slices.Contains(declarers, argv[c.at].text) {
+		r.exports(argv[c.at].text, argv[c.at+1:])
+	}
+}
+
+// childlessBuiltins run no program and no code, so a prefix assignment's
+// value reaches nothing past them.
+var childlessBuiltins = []string{
+	":", "true", "false", "cd", "pushd", "popd", "dirs", "pwd", "echo", "printf", "read", "test", "[", "let",
+	"shift", "getopts", "umask", "wait",
+}
+
+// childless reports a command word naming a childless builtin the command
+// cannot have redefined.
+func (r *reader) childless(cmd arg) bool {
+	return cmd.ok && slices.Contains(childlessBuiltins, cmd.text) && !r.pre.redefines
+}
+
+// declared judges a declare-family clause's values that reach the
+// environment.
+func (r *reader) declared(dc *syntax.DeclClause) {
+	var words []arg
+	for _, as := range dc.Args {
+		switch {
+		case as.Name == nil && as.Value != nil:
+			words = append(words, r.args([]*syntax.Word{as.Value}, true)...)
+		case as.Name != nil && as.Value != nil && as.Index == nil:
+			src, name := source(r.text, as), as.Name.Value+"="
+			if as.Append {
+				name = as.Name.Value + "+="
+			}
+			rw := r.render(as.Value, true)
+			for _, f := range rw.fields {
+				words = append(words, arg{text: name + f, ok: true, word: as.Value, src: src})
+			}
+			for _, p := range rw.opaque {
+				words = append(words, arg{text: name + p, word: as.Value, src: src})
+			}
+		}
+	}
+	r.exports(dc.Variant.Value, words)
+}
+
+// exports judges a declare-family call's NAME=value operands that reach the
+// environment: every one when it exports (export without -n, or -x), else
+// those whose name is exported anyway. An operand that does not render may
+// be any NAME=value.
+func (r *reader) exports(variant string, words []arg) {
+	export, unexport := variant == "export", false
+	for _, a := range words {
+		if a.ok && len(a.text) > 1 && a.text[0] == '-' {
+			export = export || strings.Contains(a.text, "x")
+			unexport = unexport || variant == "export" && strings.Contains(a.text, "n")
+		}
+	}
+	export = export && !unexport
+	for _, a := range words {
+		if a.ok && a.text != "" && (a.text[0] == '-' || a.text[0] == '+') {
+			continue
+		}
+		name, v, assigned := strings.Cut(a.text, "=")
+		if !assigned {
+			if !a.ok && export {
+				r.envValue(arg{word: a.word, src: a.src}, 0)
+			}
+			continue
+		}
+		name, appended := strings.CutSuffix(name, "+")
+		if safe(name) || !export && !r.envReaches(name) {
+			continue
+		}
+		val := arg{text: v, ok: a.ok, word: a.word, src: a.src}
+		if appended {
+			val.text, val.ok = "", false
+		}
+		r.envValue(val, 0)
+	}
+}
+
+// assignValue judges an assignment's value as an environment value. An
+// appended one continues a value the reader cannot tell.
+func (r *reader) assignValue(as *syntax.Assign, call int) {
+	src := source(r.text, as)
+	if as.Append {
+		r.envValue(arg{word: as.Value, src: src}, call)
+		return
+	}
+	rw := r.render(as.Value, true)
+	for _, f := range rw.fields {
+		r.envValue(arg{text: f, ok: true, word: as.Value, src: src}, call)
+	}
+	for _, p := range rw.opaque {
+		r.envValue(arg{text: p, word: as.Value, src: src}, call)
+	}
+}
+
+// envValue judges a value a program finds in its environment like an
+// unknown program's operand, as any of them may read it as a path: the whole
+// value and each field between pathBreaks, from the assignment spelling it.
+// call indexes the option values of the call it belongs to.
+func (r *reader) envValue(v arg, call int) {
+	r.out.writes = true
+	if !v.ok {
+		r.opaque(v)
+		return
+	}
+	r.target(Target{Text: v.text, From: v.src, Call: call})
+	for _, f := range PathFields(v.text) {
+		r.target(Target{Text: f, From: v.src, Call: call})
+	}
+}
+
+// envReaches reports an assigned name, outside the safe set, that the
+// programs the command runs find in their environment.
+func (r *reader) envReaches(name string) bool {
+	return !safe(name) && (r.pre.allexport || r.pre.exported[name] || r.hostHas(name))
+}
+
 // optionValues are the rendered values an unknown program's options may
 // take: a long option's after =, each suffix of a short-option cluster from
 // its third byte, and the word after an option.
@@ -1929,7 +2079,8 @@ func (r *reader) dirsOf(name string, args []arg) {
 
 // cd records cd's or pushd's dir: its operand, home without one. cd -,
 // pushd with no operand or ±N, an operand that does not render, and a
-// relative one CDPATH may resolve are dirs the reader cannot tell.
+// relative one CDPATH or cdable_vars may resolve are dirs the reader cannot
+// tell.
 func (r *reader) cd(name string, args []arg) {
 	i := 0
 	for ; i < len(args); i++ {
@@ -1966,16 +2117,21 @@ func (r *reader) cd(name string, args []arg) {
 	}
 }
 
-// cdpath reports CDPATH set on the host or settable by the command.
+// cdpath reports a relative cd operand bash may look up elsewhere: CDPATH
+// set on the host or settable by the command, or cdable_vars set by the
+// command or the host's BASHOPTS.
 func (r *reader) cdpath() bool {
-	if r.settable("CDPATH") {
+	if r.settable("CDPATH") || r.pre.cdable {
 		return true
 	}
 	if r.host.Env == nil {
 		return false
 	}
-	v, ok := r.host.Env("CDPATH")
-	return ok && v != ""
+	if v, ok := r.host.Env("CDPATH"); ok && v != "" {
+		return true
+	}
+	opts, _ := r.host.Env("BASHOPTS")
+	return slices.Contains(strings.Split(opts, ":"), "cdable_vars")
 }
 
 // gitDirs records git's -C, --git-dir and --work-tree before its
@@ -2089,6 +2245,15 @@ func replacesProgram(target string) bool {
 		return false
 	}
 	pattern := globTokens(base)
+	return slices.ContainsFunc(allowlisted, func(name string) bool { return globMatch(pattern, name) })
+}
+
+// startsProgram reports an unresolved target's literal prefix whose last
+// element, the name the rest continues, may start an allowlisted command
+// name; an empty one may start any.
+func startsProgram(prefix string) bool {
+	partial := prefix[strings.LastIndex(prefix, "/")+1:]
+	pattern := append(globTokens(partial), globToken{star: true})
 	return slices.ContainsFunc(allowlisted, func(name string) bool { return globMatch(pattern, name) })
 }
 
