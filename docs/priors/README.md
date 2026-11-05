@@ -495,14 +495,23 @@ reader parses: each stage of a pipeline, each command of a loop, a `&&` list,
 a function body, an `xargs` inner command, a command substitution, a heredoc
 read as a script (`bash <<EOF`) and a literal `-c` script. A word is rendered
 statically: literal text, quotes, ANSI-C quotes, brace expansion, `~`, globs
-kept as written, and a plain host variable the command cannot set. Bash
+kept as written, and a plain host variable the command cannot set. A `$NAME`
+bash assigns itself never renders, and neither does one bash assigns only
+when unset (`PATH`, `SHELL`, `TERM`, `MAILCHECK`, `HISTFILE`, `HISTSIZE`,
+`HISTFILESIZE`, `POSIXLY_CORRECT`) while the host leaves it unset. Bash
 expands `~` after the `=` of a word shaped `name=…` and after each `:` in it
 (`of=~/x`, `PREFIX=~/notes`, `PATH=~/bin:…`), and the guard renders it the same
 way; `--opt=~/x` stays literal. An unknown program may expand a `~` bash
 leaves to it, so each field of its operands, and of an environment value
-(below), that is `~` or starts with `~/` is judged both as written and with
-the home in its place (`foo a["x"]=~/notes/MEMORY.md`, `foo '~/notes'`); under
-a `HOME` the command may set, such a field is an unresolved write. Anything
+(below), that starts with `~` (`~`, `~/…`, and `~user/…`, that user's home
+from the password database) is judged both as written and with the home in
+its place (`foo a["x"]=~/notes/MEMORY.md`, `foo '~/notes'`,
+`foo '~alice/notes/MEMORY.md'`); `~+`, `~-` and `~N` stay literal, as no
+program expands them. A short cluster's glued suffix and an option value that
+start with `~` are read the same way (`foo -o~/notes/MEMORY.md`,
+`ssh -M -S~/notes/x host`, `foo -C'~/notes' build`, the last also naming its
+option dir with the home in place); under a `HOME` the command may set, such
+a field is an unresolved write. Anything
 else (a variable the command assigns, `$(…)`, `$((…))`, a positional
 parameter) is unresolved, with its literal prefix kept. The guard tracks no
 values in a word: `d=/tmp/x; rm -rf "$d"` is unresolved.
@@ -521,7 +530,11 @@ Each simple command, after its wrappers, is one of three kinds:
   `a,/abs`, `of=/`), a long option's value and a short cluster's glued
   suffix. An operand that holds a script byte (inline code, prose) is an
   unresolved write. So is any operand that does not render, and stdin from a
-  pipe, heredoc or here-string. Its relative operands also resolve against
+  pipe, heredoc or here-string. An operand that does not render is also
+  judged by its literal start: its complete path fields are targets, and its
+  literal prefix and the part of it after the last `=`, `:`, `,` or other
+  path break are target prefixes under check 6 (`foo GIT_DIR=../no$(true)tes`
+  from a sibling of `~/notes`). Its relative operands also resolve against
   each of its own option values that names an existing dir (at most 32 per
   call; past that the command is denied as writing from a dir the guard
   cannot tell).
@@ -565,7 +578,8 @@ A store is in reach of a command when any of these holds:
 - R1: a dir change the guard cannot resolve (an opaque `cd` or `pushd`
   operand, `cd -`, `popd`, `pushd +N`, a relative `cd` while `CDPATH` is set
   on the host or by the command, a `cd NAME` while the command binds `NAME` a
-  value the guard cannot render (below), an unrecognised flag of any wrapper,
+  value the guard cannot render (below), a `cd NAME` where `NAME` is a
+  variable bash assigns, an unrecognised flag of any wrapper,
   a command word holding `=`, an opaque `-C` of git, make or tar, more than 32
   dirs changed into, or more than 32 option values naming dirs in one call);
 - R2: a reach name resolves inside a store, the state dir or the config, or
@@ -595,7 +609,13 @@ host value and every value the command binds to the name (an assignment, a
 prefix, an `env` or `sudo` word, a `for` item, a declare-family operand,
 `${NAME:=v}`) are dirs changed into too, so `bash -O cdable_vars -c 'cd HOME;
 echo x > notes/MEMORY.md'` is denied. A value bound at run time (`read NAME`)
-or appended to is a dir the guard cannot tell (R1).
+or appended to is a dir the guard cannot tell (R1). A name bash assigns
+itself loses the dir (R1), as its run-time value is not the host's: `_`,
+every `BASH*`, `COMP_*` and `READLINE_*` name, and bash's own variables
+(`PWD`, `OLDPWD`, `PIPESTATUS`, `DIRSTACK`, `REPLY`, `OPTARG`, …), so
+`shopt -s cdable_vars; ls ~/notes; cd _ && rm facts/a.md`, `cd BASH_REMATCH`
+and `cd OLDPWD` are denied; so is a name bash assigns only when unset, while
+the host leaves it unset. `HOME` is the host's home.
 
 Opaque code is shell code the guard cannot read, so it may compute any path.
 It is always denied, wherever the command runs. It is:
@@ -643,7 +663,8 @@ the name is `LANG`, `LANGUAGE`, `LC_*`, `TZ`, `NO_COLOR`, `CLICOLOR`,
 `GLOBIGNORE`, `EXECIGNORE`, `BASH_XTRACEFD`, `SHELLOPTS`, `BASHOPTS`,
 `POSIXLY_CORRECT`, `BASH_COMPAT`, `BASH_LOADABLES_PATH` or `FUNCNEST`; a
 computed setter name; or a target whose basename is or may match (as a glob)
-an allowlisted command name (`ln -s /bin/rm ~/bin/gh`, `rm -f *`). A target the
+an allowlisted command name, or an environment value with a dir part that
+does (`ln -s /bin/rm ~/bin/gh`, `rm -f *`). A target the
 guard cannot resolve withdraws only when the part of its last element before
 the unresolved part could start an allowlisted program's name (`> "/tmp/out-$n"`
 does not, `> "$d"` and `cp x "$d"` do). A `NAME=v` prefix, `env NAME=v` or `sudo NAME=v`
@@ -659,9 +680,15 @@ withdraws the allowlist, every value it binds to a name is one for the whole
 command, exported or not, as the guard does not track which names end up
 exported: an assignment, an array element, a `for` item, `${NAME:=v}` and a
 declare-family operand. A value read at run time (`read`, `getopts`,
-`printf -v`, `select`), appended (`NAME+=v`) or that does not render is an
-unresolved write under check 7, never a target prefix, and no environment
-value withdraws the allowlist. So `GIT_WORK_TREE=~/notes git checkout -- .`,
+`printf -v`, `select`) or appended (`NAME+=v`) is an unresolved write under
+check 7; one that does not render is too, and is judged by its literal start
+like an unknown program's operand that does not render
+(`GIT_WORK_TREE=../no$(true)tes git checkout -- .` from a sibling of
+`~/notes` is denied); an empty literal start adds nothing past check 7. A
+value with a dir part (a `/`) whose basename is or may match an allowlisted
+command name withdraws the allowlist, as it may name a file a program writes
+and a later call runs (`X=~/bin/cat make; cat ~/notes/MEMORY.md`); a bare
+name (`PAGER=cat`) does not. So `GIT_WORK_TREE=~/notes git checkout -- .`,
 `DESTDIR=~/notes make install`,
 `export GIT_WORK_TREE; for GIT_WORK_TREE in ~/notes; do git checkout -- .; done`
 and `bash -a -c 'GIT_WORK_TREE=~/notes; git checkout -- .'` are denied, while
@@ -794,8 +821,11 @@ It is not a sandbox. It does not see:
   `eval` or `source` loses the dir instead, as `CDPATH` may be set too;
 - an environment value a program runs as code (`PAGER='sh -c …'`), which is
   judged only for the paths it names;
-- a `~` a modeled writer or reader leaves literal: the home-in-place reading
-  covers unknown programs' operands and environment values only;
+- a `cd NAME` into a variable a builtin names from another (`coproc NAME`
+  sets `NAME_PID`), which is read like any other name;
+- a `~` or `~user` a modeled writer or reader leaves literal: the
+  home-in-place reading covers unknown programs' operands and environment
+  values only;
 - an unknown-key string longer than 4096 bytes, which is not judged at all,
   so a packed list padded past it passes;
 - a variable a shell profile sets, `/proc/<pid>/cwd`, a bind mount, macOS
@@ -842,8 +872,14 @@ It over-denies:
 - any value the command binds that names a store or a dir holding one, once
   it runs an unknown program or withdraws the allowlist, exported or not
   (`d=~; make`), and one it reads at run time while a store is in reach;
-- a quoted `~` in an unknown program's operand, read with the home in place
-  too (`foo '~/notes/x'`);
+- a quoted `~` or `~user` in an unknown program's operand, a cluster suffix
+  or an option value, read with the home in place too (`foo '~/notes/x'`,
+  `foo '~alice/notes/x'`, `foo -o'~/notes/x'`);
+- an environment value naming a path whose basename is an allowlisted
+  command, which withdraws the allowlist even when nothing writes it
+  (`X=~/bin/cat make; cat ~/notes/MEMORY.md`);
+- a `cd NAME` into a dir literally named like a variable bash assigns
+  (`cd PWD`, `cd _`), which loses the dir;
 - a `cd NAME` where `NAME` is a host variable, or one the command binds,
   which also changes into its value with `cdable_vars` off (`cd NOTES; rm
   facts/a.md` from anywhere, when `$NOTES` is a store);
