@@ -99,19 +99,19 @@ func ShellAccess(host *Host, texts ...string) (acc Access) {
 	if !r.over() {
 		r.prepass()
 	}
-	if !r.over() {
+	// A target or value that may replace an allowlisted program withdraws the
+	// allowlist for the whole command, which only the judge finds. The values
+	// the command binds reach only a program the reader does not model, or any
+	// once the allowlist is withdrawn.
+	for !r.over() {
 		r.judge()
-		// A target that may replace an allowlisted program withdraws the
-		// allowlist for the whole command, which only the judge finds.
-		if r.out.replaces && !r.withdrawn && !r.over() {
-			r.withdrawn = true
-			r.judge()
+		if !r.over() && (r.out.ran || r.withdrawn) {
+			r.boundEnv()
 		}
-	}
-	// The values the command binds reach only a program the reader does not
-	// model, or any once the allowlist is withdrawn.
-	if !r.over() && (r.out.ran || r.withdrawn) {
-		r.boundEnv()
+		if !r.out.replaces || r.withdrawn {
+			break
+		}
+		r.withdrawn = true
 	}
 	if !r.over() {
 		r.collectNames()
@@ -527,13 +527,16 @@ func (r *reader) ownName(t string) {
 // opaque records an unresolved write target: its literal prefix, the
 // unresolved write it is, and a replaced program when the name it ends in may
 // be one.
-func (r *reader) opaque(a arg) {
+func (r *reader) opaque(a arg) { r.opaqueAt(a, true) }
+
+// opaqueAt is opaque, replacing a program only when starts allows it.
+func (r *reader) opaqueAt(a arg, starts bool) {
 	src := a.src
 	if !strings.HasPrefix(src, `"`) && !strings.HasPrefix(src, "'") {
 		src = `"` + src + `"`
 	}
 	r.unresolved("writes through " + src)
-	if !r.out.replaces && startsProgram(a.text) {
+	if starts && !r.out.replaces && startsProgram(a.text) {
 		r.out.replaces = true
 	}
 	t := Target{Text: a.text, From: a.src}

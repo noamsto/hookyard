@@ -436,7 +436,7 @@ func TestShellAccessWithdrawal(t *testing.T) {
 		{name: "nameref value", cmd: "declare -n r=X; r=/h/x; git status", writes: true, targets: []string{"/h/x"}, unresolved: "runs git, which the command may have redefined"},
 		{name: "default assignment value", cmd: "make; : ${X:=/h/x}", writes: true, targets: []string{"/h/x"}},
 		{name: "value read at run time", cmd: "read -r X; make", writes: true, unresolved: `puts "$X" in a program's environment`},
-		{name: "tilde value naming a program withdraws the allowlist", cmd: "X=~/bin/cat make; cat x", writes: true, targets: []string{"x"}},
+		{name: "tilde value naming a program withdraws the allowlist", cmd: "X=~/bin/cat make; cat x", writes: true, targets: []string{"x"}, unresolved: "runs cat, which the command may have redefined"},
 		{name: "value naming a program keeps the allowlist", cmd: "PAGER=cat make; cat x", writes: true, targets: []string{"cat"}, notTargets: []string{"x"}},
 		{name: "value built at run time to a program", cmd: "GH_TOKEN=$(gh auth token) gh pr list", writes: true, opaque: []string{}, unresolved: `puts "GH_TOKEN=$(gh auth token)" in a program's environment`},
 		{name: "prefix value to a special builtin", cmd: "X=/h/x :; Y=/h/y shift", writes: true, targets: []string{"/h/x", "/h/y"}, unresolved: "runs :, which the command may have redefined"},

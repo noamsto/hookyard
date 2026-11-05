@@ -1862,7 +1862,7 @@ func (r *reader) unknown(name string, words []arg, f feed) {
 	for _, a := range words {
 		switch {
 		case !a.ok:
-			r.opaque(a)
+			r.opaqueOperand(a, call, false)
 		case strings.ContainsAny(a.text, scriptBytes):
 			r.unresolved(fmt.Sprintf("runs %s on inline code", name))
 		default:
@@ -1932,20 +1932,60 @@ func (r *reader) assignValue(as *syntax.Assign, call int) {
 // unknown program's operand, as any of them may read it as a path: the whole
 // value and each field between pathBreaks, from the assignment spelling it.
 // call indexes the option values of the call it belongs to. A value the
-// reader cannot tell is an unresolved write, and no value replaces a
-// program: an allowlisted one reads none as one it runs.
+// reader cannot tell is an unresolved write. A value naming a path in a dir
+// may name a file a program writes and a later call runs, so one that may
+// name an allowlisted program withdraws the allowlist; a bare name names no
+// dir, and an allowlisted program reads it as no program it runs.
 func (r *reader) envValue(v arg, call int) {
 	r.out.writes = true
 	if !v.ok {
 		r.unresolved(fmt.Sprintf("puts %q in a program's environment", v.src))
+		r.opaqueOperand(v, call, true)
 		return
 	}
 	replaces := r.out.replaces
-	r.target(Target{Text: v.text, From: v.src, Call: call})
-	for _, f := range r.tildeFields(v.text) {
+	fields := append([]string{v.text}, r.tildeFields(v.text)...)
+	for _, f := range fields {
 		r.target(Target{Text: f, From: v.src, Call: call})
 	}
-	r.out.replaces = replaces
+	r.out.replaces = replaces || slices.ContainsFunc(fields, func(f string) bool {
+		return strings.Contains(f, "/") && replacesProgram(f)
+	})
+}
+
+// opaqueOperand records an operand or environment value that does not
+// render, from its literal prefix a.text: each complete path field as a
+// target, the trailing partial one as an unresolved write, each also expanded
+// where it starts with ~. An environment value's prefixes replace a program
+// only when they name a dir.
+func (r *reader) opaqueOperand(a arg, call int, env bool) {
+	fields := PathFields(a.text)
+	partial := ""
+	if a.text != "" && !strings.ContainsRune(pathBreaks, rune(a.text[len(a.text)-1])) {
+		partial, fields = fields[len(fields)-1], fields[:len(fields)-1]
+	}
+	for _, f := range fields {
+		for _, t := range r.tildeFields(f) {
+			r.target(Target{Text: t, From: a.src, Call: call})
+		}
+	}
+	if !env {
+		r.opaque(a)
+	} else if a.text != "" {
+		r.opaqueAt(a, strings.Contains(a.text, "/"))
+	}
+	if partial == "" {
+		return
+	}
+	texts := []string{partial}
+	if strings.HasPrefix(partial, "~") {
+		if home, ok := r.tildeHome(partial); ok {
+			texts = append(texts, home)
+		}
+	}
+	for _, t := range texts {
+		r.opaqueAt(arg{text: t, src: a.src}, env && strings.Contains(t, "/"))
+	}
 }
 
 // boundEnv judges every value the command binds to a name outside the safe
