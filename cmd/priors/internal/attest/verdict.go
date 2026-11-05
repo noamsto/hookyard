@@ -160,11 +160,11 @@ func decimal(s string) (uint64, bool) {
 	return n, err == nil && (s[0] != '0' || s == "0")
 }
 
-// ReadVerdicts is check 1's verdict-file part: the file at path passes the
-// ownership walk with owner as its and its store dir's owner, is at most
-// MaxVerdictBytes, parses strictly, names storeID and trustDigest, and was
-// fetched less than 24 h before now.
-func ReadVerdicts(fsys config.StatFS, path, storeID, trustDigest string, owner uint32, now time.Time) (Verdicts, error) {
+// ReadVerdictLines reads the verdict file at path: it passes the ownership
+// walk with owner as its and its store dir's owner, is at most
+// MaxVerdictBytes, parses strictly, and names storeID. It checks neither
+// trust nor age.
+func ReadVerdictLines(fsys config.StatFS, path, storeID string, owner uint32) (Verdicts, error) {
 	resolved, err := config.CheckOwnedPath(fsys, path, &owner)
 	if errors.Is(err, fs.ErrNotExist) {
 		return Verdicts{}, errors.New("no verdict file")
@@ -193,6 +193,16 @@ func ReadVerdicts(fsys config.StatFS, path, storeID, trustDigest string, owner u
 	}
 	if v.Store != storeID {
 		return Verdicts{}, fmt.Errorf("verdict file names store %s", v.Store)
+	}
+	return v, nil
+}
+
+// ReadVerdicts is check 1's verdict-file part: ReadVerdictLines, plus the
+// file names trustDigest and was fetched less than 24 h before now.
+func ReadVerdicts(fsys config.StatFS, path, storeID, trustDigest string, owner uint32, now time.Time) (Verdicts, error) {
+	v, err := ReadVerdictLines(fsys, path, storeID, owner)
+	if err != nil {
+		return Verdicts{}, err
 	}
 	if v.Trust != trustDigest {
 		return Verdicts{}, errors.New("verdict file is for another trust file")

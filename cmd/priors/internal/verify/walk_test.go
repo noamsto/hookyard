@@ -67,7 +67,7 @@ func (w *walkRepo) walkedRefs() []string {
 
 func (w *walkRepo) walk(ctx context.Context, r *Record, limit int) walkResult {
 	w.t.Helper()
-	cf, err := newCatFile(context.Background(), w.m)
+	cf, err := newCatFile(w.m.cmd(context.Background(), "cat-file", "--batch-command"))
 	if err != nil {
 		w.t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestWalkDropsTreesBetweenCommits(t *testing.T) {
 	w.tip(last)
 	firstRoot := gitIn(t, w.repo, "", "rev-parse", first+"^{tree}")
 
-	cf, err := newCatFile(t.Context(), w.m)
+	cf, err := newCatFile(w.m.cmd(t.Context(), "cat-file", "--batch-command"))
 	if err != nil {
 		t.Fatal(err)
 	}

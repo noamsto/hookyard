@@ -12,13 +12,17 @@ import (
 
 // The subprocess tests run as a user who may be in docker or wheel, as may a
 // CI runner, which would switch attestation off before any check runs. This
-// reads the verdict root from $PRIORS_TEST_VERDICTS and the groups from
-// $PRIORS_TEST_GROUPS (name:gid,name:gid) instead. Only a build with -tags
+// reads the verdict root from $PRIORS_TEST_VERDICTS, the trigger socket root
+// from $PRIORS_TEST_TRIGGER and the groups from $PRIORS_TEST_GROUPS
+// (name:gid,name:gid) instead. Only a build with -tags
 // priorstest compiles this file; the nix build of priors sets no tags, so no
 // flag, env var or file can reach it in a production binary.
 func init() {
 	if root := os.Getenv("PRIORS_TEST_VERDICTS"); root != "" {
 		VerdictRoot = root
+	}
+	if root := os.Getenv("PRIORS_TEST_TRIGGER"); root != "" {
+		TriggerRoot = root
 	}
 	if spec := os.Getenv("PRIORS_TEST_GROUPS"); spec != "" {
 		OSGroups = parseEnvGroups(spec)

@@ -118,7 +118,7 @@ func TestCatFileReadsTreesAndCapsBlobs(t *testing.T) {
 
 	private := t.TempDir()
 	m := mirror{dir: filepath.Join(repo, ".git"), private: private}
-	cf, err := newCatFile(t.Context(), m)
+	cf, err := newCatFile(m.cmd(t.Context(), "cat-file", "--batch-command"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,12 +148,12 @@ func TestCatFileReadsTreesAndCapsBlobs(t *testing.T) {
 	if err != nil || string(got) != "small" {
 		t.Fatalf("blob(small) = %q, %v", got, err)
 	}
-	if _, err := cf.blob(bigOID, 4096); !errors.Is(err, errTooBig) {
-		t.Fatalf("blob(big) err = %v, want errTooBig", err)
+	if _, err := cf.blob(bigOID, 4096); !errors.Is(err, ErrTooBig) {
+		t.Fatalf("blob(big) err = %v, want ErrTooBig", err)
 	}
 	// The process stays in sync after a refused blob.
 	if got, err = cf.blob(smallOID, 4096); err != nil || string(got) != "small" {
-		t.Fatalf("blob(small) after errTooBig = %q, %v", got, err)
+		t.Fatalf("blob(small) after ErrTooBig = %q, %v", got, err)
 	}
 
 	oid, ok, err := cf.lookupPath(tree, "facts/x.md")
@@ -190,7 +190,7 @@ func TestCatFileCommitHeader(t *testing.T) {
 	second := commit(false, "tree "+empty+"\nparent "+parent+"\nauthor "+sig+"\ncommitter "+sig+"\ntree "+other+"\nparent "+parent+"\n")
 	gitIn(t, repo, "", "fsck", "--strict", "--no-dangling")
 
-	cf, err := newCatFile(t.Context(), mirror{dir: repo, private: t.TempDir()})
+	cf, err := newCatFile(mirror{dir: repo, private: t.TempDir()}.cmd(t.Context(), "cat-file", "--batch-command"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestCatFileCancelKillsProcess(t *testing.T) {
 	repo := t.TempDir()
 	gitIn(t, repo, "", "init", "-q", "-b", "main")
 	ctx, cancel := context.WithCancel(t.Context())
-	cf, err := newCatFile(ctx, mirror{dir: filepath.Join(repo, ".git"), private: t.TempDir()})
+	cf, err := newCatFile(mirror{dir: filepath.Join(repo, ".git"), private: t.TempDir()}.cmd(ctx, "cat-file", "--batch-command"))
 	if err != nil {
 		t.Fatal(err)
 	}

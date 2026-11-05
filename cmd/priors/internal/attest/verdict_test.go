@@ -444,3 +444,81 @@ func TestReadVerdicts(t *testing.T) {
 		})
 	}
 }
+
+func TestReadVerdictLines(t *testing.T) {
+	superseded := verdictFile(digestA+" reviewed", digestD+" superseded 9")
+	cases := []struct {
+		name string
+		edit func(f ownedFS)
+		// want is the exact error, or with prefix its prefix and substring;
+		// empty for a pass.
+		want   string
+		prefix bool
+		// wantSuperseded is the Superseded map of a pass.
+		wantSuperseded map[string]uint64
+	}{
+		{name: "fetched 48h ago keeps Superseded", edit: func(f ownedFS) { withVerdictData(f, superseded) }, wantSuperseded: map[string]uint64{digestD: 9}},
+		{name: "trust digest matches nothing", edit: func(f ownedFS) {
+			withVerdictData(f, withHeaderLine(2, "trust: "+digestB)+digestA+" reviewed\n")
+		}, wantSuperseded: map[string]uint64{}},
+		{name: "store mismatch", edit: func(f ownedFS) {
+			withVerdictData(f, withHeaderLine(1, "store: other-store"))
+		}, want: "verdict file names store other-store"},
+		{name: "over 1 MiB by Lstat", edit: func(f ownedFS) {
+			e := f[testVerdictFile]
+			e.size = MaxVerdictBytes + 1
+			f[testVerdictFile] = e
+		}, want: "verdict file over 1 MiB"},
+		{name: "malformed", edit: func(f ownedFS) {
+			withVerdictData(f, verdictFile(digestA+" approved"))
+		}, want: "verdict file malformed: line 7"},
+		{name: "file owned by another uid", edit: func(f ownedFS) {
+			f[testVerdictFile] = ownedEntry{uid: 1000, mode: 0o644, data: verdictFile()}
+		}, want: testVerdictFile + " is owned by uid 1000, not uid 993", prefix: true},
+		{name: "missing file", edit: func(f ownedFS) {
+			delete(f, testVerdictFile)
+		}, want: "no verdict file"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := verdictFS()
+			tc.edit(f)
+
+			v, err := ReadVerdictLines(f, testVerdictFile, testStore, testOwner)
+
+			switch {
+			case tc.want == "":
+				if err != nil {
+					t.Fatal(err)
+				}
+				if v.Store != testStore || v.States[digestA] != StateReviewed {
+					t.Errorf("parsed %+v", v)
+				}
+				if !maps.Equal(v.Superseded, tc.wantSuperseded) {
+					t.Errorf("Superseded = %v, want %v", v.Superseded, tc.wantSuperseded)
+				}
+			case tc.prefix:
+				if err == nil || !strings.HasPrefix(err.Error(), "verdict file: ") || !strings.Contains(err.Error(), tc.want) {
+					t.Errorf("err = %v, want \"verdict file: ...%s\"", err, tc.want)
+				}
+			default:
+				if err == nil || err.Error() != tc.want {
+					t.Errorf("err = %v, want %q", err, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestReadVerdictsStillRejectsWhatLinesAccepts(t *testing.T) {
+	fetched := time.Unix(testFetched, 0)
+	f := verdictFS()
+	if _, err := ReadVerdicts(f, testVerdictFile, testStore, testTrustDigest, testOwner, fetched.Add(48*time.Hour)); err == nil {
+		t.Error("stale file accepted")
+	}
+
+	withVerdictData(f, withHeaderLine(2, "trust: "+digestA))
+	if _, err := ReadVerdicts(f, testVerdictFile, testStore, testTrustDigest, testOwner, fetched.Add(time.Hour)); err == nil {
+		t.Error("other-trust file accepted")
+	}
+}

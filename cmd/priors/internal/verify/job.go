@@ -112,7 +112,7 @@ func (j *Job) observe(soft context.Context, m mirror, r *Record) outcome {
 		}
 	}
 
-	cf, err := newCatFile(soft, m)
+	cf, err := newCatFile(m.cmd(soft, "cat-file", "--batch-command"))
 	if err != nil {
 		return behind(soft, "walk failed", walkResult{})
 	}
@@ -182,7 +182,7 @@ func tipEntries(cf *catFile, tip string) ([]tipEntry, error) {
 	var es []tipEntry
 	for name, blob := range names {
 		raw, err := cf.blob(blob, attest.MaxEntryBytes)
-		if errors.Is(err, errTooBig) {
+		if errors.Is(err, ErrTooBig) {
 			continue
 		}
 		if err != nil {

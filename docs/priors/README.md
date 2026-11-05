@@ -374,6 +374,91 @@ of mode 0700. Anything else exits 1 before any fetch or write.
 
 Deployment (the account, units, socket and credentials) is #191.
 
+### priors attest
+
+Marks a fact `reviewed` for the store's verdict job. It signs an attest entry
+with your FIDO key, commits the fact and its entry, pushes them to the pinned
+remote's default branch, pokes the job's trigger socket and waits up to 60 s
+for the job's verdict.
+
+```
+priors attest [-f <key handle>] [--store personal|work] <name>
+priors attest --revoke [-f <key handle>] [--store personal|work] <name>
+priors attest --check [--store personal|work] <name> <entry sha256> <commit>
+```
+
+- `-f` defaults to `~/.ssh/id_ed25519_sk`, with the home directory read from
+  the password database, never `$HOME`. The handle's public key must be an
+  `sk-ssh-ed25519@openssh.com` or `sk-ecdsa-sha2-nistp256@openssh.com` key on
+  the allowlist, or attest refuses before signing.
+- `--store` picks the store when the name is in both checkouts, or (for
+  `--check`) when no fact of that name exists any more. Otherwise the store is
+  the one whose checkout holds a live fact of that name.
+- `--revoke` signs an `op: revoke` entry for the highest-sequence signed entry
+  of that name. It needs no fact file and does not touch it.
+- Run it as `/run/current-system/sw/bin/priors`, the path the deployment
+  controls, not whatever `priors` your `PATH` finds first.
+
+Order of operations; every refusal exits 1 and writes nothing:
+
+1. Refuse if any environment variable starts with `LD_` or `DYLD_`.
+2. Load the trust file and classify the host. Attestation off (not a
+   `separate` host, or no key enrolled) refuses, before any fetch, render or
+   signature.
+3. Refuse without a terminal (`/dev/tty` must open) and without an allowlisted
+   key handle. The PIN is read only from the controlling terminal; `ssh-keygen`
+   would otherwise fall back to reading the PIN from stdin, which is the payload.
+4. Find the fact and its store. The store must pin an SSH remote. Refuse when
+   the checkout has `info/grafts` or a `shallow` file, or fails the pin check.
+5. Fetch the remote's default branch with a clean git environment (no user or
+   system config, the checkout's refs and replace objects ignored). Refuse
+   unless `HEAD` descends from that tip.
+6. Walk `HEAD`'s history for earlier entries of the name and number the new
+   one one above the highest sequence seen, counting `superseded` lines in the
+   job's verdict file too.
+7. For an attest, run the commit gate over the edited fact before signing, so
+   a fact the commit would refuse never costs a touch.
+8. Print the fact and the payload with control, bidi, zero-width and other
+   invisible characters escaped as `\u{XXXX}`, then sign.
+9. Take the store lock, write the fact and entry, run the commit gate again
+   and commit, check the committed blobs against the signed bytes, push, poke
+   the trigger socket and wait.
+
+Signing runs the build-pinned `ssh-keygen` with an environment of exactly
+`PATH`, `HOME`, `LANG=C` and `SSH_SK_HELPER` (the pinned `ssh-sk-helper`). The
+payload goes over a pipe and never touches the file system. The signature is
+parsed and verified against the allowlist before anything is written, so a
+wrapper that signed other bytes aborts the run with nothing written.
+
+The commit holds only the fact and its `.attest/<name>` entry, built from the
+signed bytes in memory, so a working-tree swap after signing cannot reach it.
+It commits and pushes whatever the `commit` and `push` config keys say,
+because the command is an explicit request to publish. The push goes to the
+pinned URL's default branch only, never the checkout's branch, upstream or
+push config, and never forced.
+
+It prints `<name> <entry sha256> <commit>`, then one of four outcomes:
+
+| Outcome | Exit | What to do |
+|---|---|---|
+| in effect | 0 | Nothing. |
+| observed but not in effect | 1 | `superseded`: re-run the same command; if it is still superseded, re-attest under a new name. `lapsed`: re-attest. Anything else: re-run. |
+| pushed, not yet observed | 1 | The job has not walked the entry yet. Run the printed `priors attest --check` line later. |
+| not pushed | 1 | The commit or push failed (the commit exists only locally; the attest reads proposed everywhere). Fix the reason given and re-run. |
+
+A config error exits 2.
+
+`--check` re-reports a pushed entry and signs, writes, commits and pushes
+nothing. It refuses unless the entry at `<commit>` hashes to
+`<entry sha256>` and passes the entry checks (4 to 6), then classifies once
+against the current verdict file without waiting.
+
+The trigger socket is `/var/run/priors/<store id>.sock`, fixed with the
+deployment ([#191](https://github.com/noamsto/hookyard/issues/191)). If it is
+unreachable, attest says so and the job's timer picks the entry up. The Linux
+binary is static and the darwin one is built restricted, so `LD_*` and
+`DYLD_*` never reach it.
+
 ### Reading the session-start block
 
 On Claude Code the block groups facts by type (`feedback`, `project`,

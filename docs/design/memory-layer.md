@@ -570,7 +570,7 @@ root-owned default; the table decides every key the user config holds today:
 | --- | --- | --- | --- |
 | `profile` | the host kind, so routing and the quarantine | trust file (#174). Implemented: `priors` reads `profile` only from `/etc/priors/trust.toml`, after the ownership walk, along with `trust_root` and each store's id. The key in `config.toml` is an error naming the trust file | flipping it sends work-bound writes to personal on a work-profile host, or quarantines everything |
 | `work_orgs`, `personal_orgs` | org resolution, so both rules above and the personal store's work-org lint | trust file (#174). Implemented: `priors` reads `work_orgs` and `personal_orgs` only from `/etc/priors/trust.toml`, after the ownership walk, along with `trust_root` and each store's id. The keys in `config.toml` are an error naming the trust file | an org dropped from the work list, or added to the personal one, routes work facts to personal |
-| `personal_store`, `work_store` | which checkout each store is read from and published to, and the work-store path the read guard denies | trust file: each store's path **and remote URL**, beside its store id (#178). Implemented: `priors` reads each store's `path` and `remote` only from `/etc/priors/trust.toml`'s `[stores.*]`, after the ownership walk; `personal_store` and `work_store` in `config.toml` are an error naming the trust file. Every read and write of a checkout (`list`, `show`, `search`, the tier-1 index, `index --write`, `lint`, `add`, and the push) first requires its `origin` url, fetch url and push url, with git's rewrites applied under the user's git config, to equal the pinned `remote`, `origin` to be its only remote, and every `branch.*.remote`, `branch.*.pushRemote` and `remote.pushDefault` to be `origin`; with no `remote` pinned it refuses a store dir inside a repo that has a named remote, any `branch.*.remote`, `branch.*.pushRemote` or `remote.pushDefault` entry (a URL included), or a legacy `.git/remotes` or `.git/branches` file. A refused checkout is skipped and reported, never read around. The push runs from a build-pinned, empty, read-only bare git dir in the Nix store (`GIT_DIR`), reading the checkout's objects through `GIT_OBJECT_DIRECTORY`, in an environment built from nothing (`LC_ALL`, `GIT_TERMINAL_PROMPT`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM`, a pinned `GIT_SSH_COMMAND` with `-F` and `UserKnownHostsFile`, `GIT_SSH_VARIANT`, and `SSH_AUTH_SOCK` passed through), through the pinned `ssh` with a build-time ssh config and `known_hosts` (github.com and `ssh.github.com:443`, so a store that must use port 443 pins `ssh://git@ssh.github.com:443/<owner>/<repo>.git` as both origin and remote). It handles sha1 checkouts only and refuses when `git ls-remote --get-url <pin>` differs from the pin | `work_store` pointed at a second clone of the personal remote publishes work facts to personal, irreversibly; `personal_store` pointed at a work clone feeds work facts to non-work sessions. The path alone is not enough: what a read sees is whatever a sync pulled from `origin`, and `priors`'s push takes the branch's upstream remote, both in the checkout's user-writable `.git/config`. So `priors` refuses a checkout whose `origin` differs from the pinned URL, and pushes to the pinned URL from the build-pinned bare git dir, so neither the checkout's config nor any owner-writable config reaches the push, and nothing else the caller exports (`BASH_ENV`, loader, TLS or proxy variables) reaches git or ssh, refusing when the effective push URL after git's rewrites differs from the pinned one. A sync outside `priors` (§4.8) still follows the checkout's own config: a stated residual for content, which §4.4's verdicts do not share, since its job fetches the pinned URL itself. `priors` is itself dynamically linked (cgo, via `os/user`), so a loader variable such as `LD_PRELOAD` in the environment that runs it reaches `priors` itself: out of scope here |
+| `personal_store`, `work_store` | which checkout each store is read from and published to, and the work-store path the read guard denies | trust file: each store's path **and remote URL**, beside its store id (#178). Implemented: `priors` reads each store's `path` and `remote` only from `/etc/priors/trust.toml`'s `[stores.*]`, after the ownership walk; `personal_store` and `work_store` in `config.toml` are an error naming the trust file. Every read and write of a checkout (`list`, `show`, `search`, the tier-1 index, `index --write`, `lint`, `add`, and the push) first requires its `origin` url, fetch url and push url, with git's rewrites applied under the user's git config, to equal the pinned `remote`, `origin` to be its only remote, and every `branch.*.remote`, `branch.*.pushRemote` and `remote.pushDefault` to be `origin`; with no `remote` pinned it refuses a store dir inside a repo that has a named remote, any `branch.*.remote`, `branch.*.pushRemote` or `remote.pushDefault` entry (a URL included), or a legacy `.git/remotes` or `.git/branches` file. A refused checkout is skipped and reported, never read around. The push runs from a build-pinned, empty, read-only bare git dir in the Nix store (`GIT_DIR`), reading the checkout's objects through `GIT_OBJECT_DIRECTORY`, in an environment built from nothing (`LC_ALL`, `GIT_TERMINAL_PROMPT`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM`, a pinned `GIT_SSH_COMMAND` with `-F` and `UserKnownHostsFile`, `GIT_SSH_VARIANT`, and `SSH_AUTH_SOCK` passed through), through the pinned `ssh` with a build-time ssh config and `known_hosts` (github.com and `ssh.github.com:443`, so a store that must use port 443 pins `ssh://git@ssh.github.com:443/<owner>/<repo>.git` as both origin and remote). It handles sha1 checkouts only and refuses when `git ls-remote --get-url <pin>` differs from the pin | `work_store` pointed at a second clone of the personal remote publishes work facts to personal, irreversibly; `personal_store` pointed at a work clone feeds work facts to non-work sessions. The path alone is not enough: what a read sees is whatever a sync pulled from `origin`, and `priors`'s push takes the branch's upstream remote, both in the checkout's user-writable `.git/config`. So `priors` refuses a checkout whose `origin` differs from the pinned URL, and pushes to the pinned URL from the build-pinned bare git dir, so neither the checkout's config nor any owner-writable config reaches the push, and nothing else the caller exports (`BASH_ENV`, loader, TLS or proxy variables) reaches git or ssh, refusing when the effective push URL after git's rewrites differs from the pinned one. A sync outside `priors` (§4.8) still follows the checkout's own config: a stated residual for content, which §4.4's verdicts do not share, since its job fetches the pinned URL itself. The Linux build of `priors` is a static pure-Go binary and the darwin build carries a `__RESTRICT` segment (§4.4), so a loader variable such as `LD_PRELOAD` in the environment that runs it never reaches `priors` itself |
 | `work_names` | the work-name scan behind `priors move --to personal`, the quarantine drain and the personal store's lint | trust file as a floor; the user key may only add names (#179). Implemented: `priors` reads the floor from `/etc/priors/trust.toml`'s `work_names`, after the ownership walk, and the effective list is the floor plus `config.toml`'s names. `priors lint`'s personal-store work-name check, `priors add`'s candidate lint and the commit gate (which `priors add`, `priors index --write` and `priors lint --move-flagged` run before committing) all get the list through one config accessor, so an empty or missing user key leaves the floor in place | emptying it lets every later move pass the scan; adding a name only makes the scan stricter, as `priors lint --work-name` already does |
 | `rules` | write-time redaction (§4.3) and the index and search exclusion; rewriting the key can now only add rules | root-owned default: the built-in set in the system-profile binary is a floor no config removes; the key stays, additive only (#180). Implemented: `gate.LoadRules` always loads the built-in set compiled into the binary and appends a configured file's rules. A configured id that repeats or matches a built-in id, an unknown key in the file, and a missing, unparsable or empty file are errors, so priors fails closed. A rule has only `id` and `regex`, and a match on any rule refuses (no allow list, exception or priority), so a configured rule adds matches and cannot weaken a built-in. `add`, `index`, `search`, `read` and `lint` all get their rules through `LoadRules`, so none sees a set without the floor | a permissive file would disable redaction on every write path; the built-in floor is §4.3's one shared rule set |
 | `scanner` | gate 1's secret scan (§4.4); unset, it is the first `betterleaks` or `gitleaks` on `PATH` | root-owned default with no override: pinned at build time to a Nix store path; the key and the `PATH` lookup are dropped (#181). Implemented: `priors` execs the scanner, `git`, `ssh` and `rg` only through absolute paths set at build time (`-ldflags -X` on package `cmd/priors/internal/tools`; `flake.nix` passes the store paths of `betterleaks`, `git`, `openssh` and `ripgrep`), with no `PATH` lookup and no wrapper `PATH`; every git it runs gets `GIT_SSH_COMMAND` set to the pinned `ssh` and `GIT_EXEC_PATH` removed, so git's own transport for a push or fetch finds neither `ssh` on `PATH` nor its helpers through `GIT_SSH*` or `GIT_EXEC_PATH`. Git config the environment selects (`HOME`, `XDG_CONFIG_HOME`, `GIT_CONFIG_*`) can still rewrite the transport or name a signing program; it is cleared for the push (#178). The `scanner` key is a config error naming the pin, so priors fails closed as it does for any unknown key. A binary built without the pins (a plain `go build`) refuses every subcommand; as a hook handler it still exits 0, and each exec it would make fails instead, so routing reads unresolvable and gate 1 refuses. A missing pinned scanner fails closed | a script printing an empty report passes every fact, and `PATH` is as user-writable as the key |
@@ -1393,8 +1393,12 @@ otherwise aborts with nothing written. It then writes `.attest/<name>` and
 keeps the bytes it signed and wrote in memory, commits the fact and its entry
 together, and refuses to push unless the committed `.attest/<name>` blob, read
 with replace objects off, hashes to those bytes (reported as not pushed,
-below), since the working tree can change between the write and `git add`. It
-pushes the commit to the pinned URL by §4.2's clean push with the explicit
+below), since the working tree can change between the write and `git add`. The
+implementation builds the commit from the signed bytes held in memory
+(`hash-object` from memory into a private index), so a working-tree swap after
+the write cannot reach the commit, and the blob check still refuses a
+committed blob that does not hash to them (a planted object git does not
+re-hash). It pushes the commit to the pinned URL by §4.2's clean push with the explicit
 refspec `HEAD:refs/heads/<that branch>`, never the checkout's own branch or
 push config; a non-fast-forward push is reported as not pushed. It pokes its
 store's trigger socket, waits up to 60 s for the verdict file to show the
@@ -1473,7 +1477,10 @@ and `TMPDIR`. An allowlist, because the denylist missed `SSH_SK_HELPER`,
 attacker-chosen code in the signing process. The key is named by an explicit
 `-f <key handle>` that the human passes (default `~/.ssh/id_ed25519_sk`), and
 `priors attest` refuses a handle whose public key is not on the allowlist
-before signing. The PIN is read from the controlling terminal only.
+before signing. The PIN is read from the controlling terminal only: the
+payload goes to `ssh-keygen` over stdin, never a file, and `priors attest`
+refuses without a controlling terminal, since `ssh-keygen` would otherwise
+read the PIN from stdin.
 A planted middleware could otherwise show the human one fact and have the
 token sign another's payload.
 
@@ -1701,7 +1708,8 @@ input: a connection only asks for an early run of that store's unit, so a
 flood hits the one-queued-run rule. The module's activation pokes every
 store's socket after any trust-file change, so a rebuild's
 digest mismatch leaves facts `proposed` for the length of one run, not until
-the next timer.
+the next timer. The socket is `/var/run/priors/<store id>.sock` (build-time
+`TriggerRoot`), which the deployment (#191) binds.
 
 **The checks.** A fact reads `reviewed` only if every check holds; otherwise
 it reads `proposed`, reported with the failing check, and the run exits 0.
@@ -1919,14 +1927,14 @@ identity — not the guard — is what makes attestation hold.
 
 **Attestation is partly built.** Implemented: checks 1–6 at index time and
 checks 4–6 with check 3's binding in the commit gate (#237), the write guard
-(above), and the verdict job `priors verify` (#238). Still deferred: `priors
-attest` (#239), `priors trust check` (#240, stubbed in the job: it accepts
+(above), the verdict job `priors verify` (#238), and `priors attest` (#239).
+Still deferred: `priors trust check` (#240, stubbed in the job: it accepts
 every parsed allowlist key), deployment (#191), and HTTPS remotes with token
 or GitHub App credentials (the job takes SSH pins only and refuses others;
 §4.4's HTTPS text describes the intended design). The commit gate refuses a `confidence: reviewed` fact as
 `unattested-review` (`cmd/priors/internal/commit/commit.go`) off a separate
 trust root, and on one unless its entry passes checks 4–6 and check 3's
-binding; until `priors attest` exists only a hand-built entry can pass. v0
+binding. v0
 does not wait on it: unflagged facts publish through the gates, and flagged
 ones stay `proposed`. The implementation is §10 workstream
 5, and #173 implements it, the host classification and its off path included.
@@ -2635,7 +2643,9 @@ flagged facts stops being optional.
   file in its git common dir, is refused, by `--check` too; with
   `.attest/<name>` swapped in the working tree for an earlier same-name attest
   between its write and `git add`, it refuses to push, reports not pushed and
-  never prints the swapped bytes' digest; a superseded attest or revoke is
+  never prints the swapped bytes' digest (in the implementation the swap
+  cannot reach the commit, and the refusal covers a committed blob that does
+  not hash to the signed bytes); a superseded attest or revoke is
   retried under the same name; it pushes the commit, and a checkout on another
   branch, or with a repo-local push refspec or `push.default`, still pushes to
   the remote's default branch or reports not pushed, while a checkout whose

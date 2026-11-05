@@ -333,6 +333,35 @@ func pinPush(t *testing.T, sshConfig, knownHosts, gitDir string) {
 	tools.SSHConfig, tools.KnownHosts, tools.PushGitDir = sshConfig, knownHosts, gitDir
 }
 
+func TestObjectsEnv(t *testing.T) {
+	dir := t.TempDir()
+	pinPush(t, filepath.Join(dir, "ssh_config"), filepath.Join(dir, "known_hosts"), filepath.Join(dir, "push.git"))
+	common := filepath.Join(dir, "store", ".git")
+	env, err := ObjectsEnv(common)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"GIT_DIR=" + filepath.Join(dir, "push.git"),
+		"GIT_OBJECT_DIRECTORY=" + filepath.Join(common, "objects"),
+		"GIT_NO_REPLACE_OBJECTS=1",
+	} {
+		if !slices.Contains(env, want) {
+			t.Errorf("ObjectsEnv lacks %q: %v", want, env)
+		}
+	}
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "HOME=") || strings.HasPrefix(entry, "PATH=") {
+			t.Errorf("ObjectsEnv carries %q", entry)
+		}
+	}
+
+	pinPush(t, "", "", "")
+	if env, err := ObjectsEnv(common); err == nil {
+		t.Errorf("ObjectsEnv unpinned = %v, want an error", env)
+	}
+}
+
 func TestPushEnvUnpinned(t *testing.T) {
 	for _, pins := range [][3]string{
 		{"", "", ""},

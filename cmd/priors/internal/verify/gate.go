@@ -47,7 +47,7 @@ func Prepare(cfg config.Config, storeID, credential string, env Env) (*Job, erro
 	if err != nil {
 		return nil, err
 	}
-	if !sshURL(remote) {
+	if !SSHURL(remote) {
 		return nil, errors.New("store remote is not an ssh url")
 	}
 	if !filepath.IsAbs(credential) {
@@ -104,10 +104,10 @@ func storeRemote(cfg config.Config, id string) (string, error) {
 	return remote, nil
 }
 
-// sshURL reports whether remote is ssh://... or scp-like (host:path, with the
+// SSHURL reports whether remote is ssh://... or scp-like (host:path, with the
 // colon before any slash). Git reads <transport>::<address> as a remote
 // helper (ext:: runs a command), so any "::" is refused.
-func sshURL(remote string) bool {
+func SSHURL(remote string) bool {
 	if strings.Contains(remote, "::") {
 		return false
 	}

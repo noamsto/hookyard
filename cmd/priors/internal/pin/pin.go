@@ -48,6 +48,21 @@ func PushEnv() ([]string, error) {
 	return env, nil
 }
 
+// ObjectsEnv is the environment for git runs that read or write a checkout's
+// objects from the pinned push git dir, never its config, refs, grafts or
+// replace refs; common is the checkout's absolute git common dir.
+func ObjectsEnv(common string) ([]string, error) {
+	env, err := PushEnv()
+	if err != nil {
+		return nil, err
+	}
+	return append(env,
+		"GIT_DIR="+tools.PushGitDir,
+		"GIT_OBJECT_DIRECTORY="+filepath.Join(common, "objects"),
+		"GIT_NO_REPLACE_OBJECTS=1",
+	), nil
+}
+
 // quote single-quotes s for the POSIX shell git runs GIT_SSH_COMMAND through.
 func quote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"

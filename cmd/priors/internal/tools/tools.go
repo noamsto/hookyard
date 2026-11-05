@@ -11,12 +11,15 @@ import (
 	"path/filepath"
 )
 
-// Set by -ldflags -X; empty in an unpinned build.
+// Set by -ldflags -X; empty in an unpinned build. Only priors attest runs
+// SSHKeygen and SSHSKHelper (OpenSSH's signer and its FIDO helper).
 var (
-	Git     string
-	SSH     string
-	Rg      string
-	Scanner string
+	Git         string
+	SSH         string
+	Rg          string
+	Scanner     string
+	SSHKeygen   string
+	SSHSKHelper string
 )
 
 // The ssh config and known_hosts a push uses, and the empty, read-only bare

@@ -13,6 +13,8 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -96,6 +98,96 @@ func parse(t testing.TB, blob []byte) ssh.PublicKey {
 		t.Fatal(err)
 	}
 	return pub
+}
+
+// panicTB lets keys rebuilt outside a test sign; a failure panics.
+type panicTB struct{ testing.TB }
+
+func (panicTB) Helper() {}
+
+func (panicTB) Fatal(args ...any) { panic(fmt.Sprint(args...)) }
+
+func (panicTB) Fatalf(format string, args ...any) { panic(fmt.Sprintf(format, args...)) }
+
+const (
+	handleMagic = "openssh-key-v1\x00"
+	handleType  = "OPENSSH PRIVATE KEY"
+)
+
+type handleOuter struct {
+	Cipher, KDF string
+	KDFOpts     string
+	Keys        uint32
+	Pub         []byte
+	Priv        []byte
+}
+
+type handleInner struct {
+	Check1, Check2 uint32
+	Type           string
+	Pub            []byte
+	Application    string
+	Flags          uint8
+	Handle         []byte
+	Reserved       string
+	Comment        string
+	Padding        []byte `ssh:"rest"`
+}
+
+// Handle is the key as an OpenSSH private key file holding an sk-ed25519
+// handle: the key handle is the ed25519 seed and flags ride in the file, so
+// ParseHandle can rebuild a signer from it.
+func (k Key) Handle(flags byte) []byte {
+	k.t.Helper()
+	if k.ed == nil {
+		k.t.Fatal("handles are for sk-ed25519 keys only")
+	}
+	var check [4]byte
+	_, _ = rand.Read(check[:])
+	c := binary.BigEndian.Uint32(check[:])
+	priv := ssh.Marshal(handleInner{
+		Check1: c, Check2: c,
+		Type:        ssh.KeyAlgoSKED25519,
+		Pub:         k.ed.Public().(ed25519.PublicKey),
+		Application: application,
+		Flags:       flags,
+		Handle:      k.ed.Seed(),
+	})
+	for i := byte(1); len(priv)%8 != 0; i++ {
+		priv = append(priv, i)
+	}
+	body := append([]byte(handleMagic), ssh.Marshal(handleOuter{
+		Cipher: "none", KDF: "none", Keys: 1, Pub: k.pub.Marshal(), Priv: priv,
+	})...)
+	return pem.EncodeToMemory(&pem.Block{Type: handleType, Bytes: body})
+}
+
+// ParseHandle reverses Handle.
+func ParseHandle(raw []byte) (Key, byte, error) {
+	block, _ := pem.Decode(raw)
+	if block == nil || block.Type != handleType {
+		return Key{}, 0, errors.New("not an OpenSSH private key")
+	}
+	body, ok := bytes.CutPrefix(block.Bytes, []byte(handleMagic))
+	if !ok {
+		return Key{}, 0, errors.New("bad openssh-key-v1 magic")
+	}
+	var outer handleOuter
+	if err := ssh.Unmarshal(body, &outer); err != nil {
+		return Key{}, 0, err
+	}
+	var inner handleInner
+	if err := ssh.Unmarshal(outer.Priv, &inner); err != nil {
+		return Key{}, 0, err
+	}
+	if inner.Check1 != inner.Check2 || inner.Type != ssh.KeyAlgoSKED25519 || len(inner.Handle) != ed25519.SeedSize {
+		return Key{}, 0, errors.New("not an sk-ed25519 handle")
+	}
+	pub, err := ssh.ParsePublicKey(outer.Pub)
+	if err != nil {
+		return Key{}, 0, err
+	}
+	return Key{t: panicTB{}, pub: pub, ed: ed25519.NewKeyFromSeed(inner.Handle)}, inner.Flags, nil
 }
 
 // AuthorizedKey is the key in authorized_keys form.
