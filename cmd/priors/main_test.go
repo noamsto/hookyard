@@ -37,6 +37,8 @@ var (
 	// toolsDir holds the pinned git, ssh, rg and scanner. Tests run serially,
 	// so they share the scanner.
 	toolsDir string
+	// buildLdflags are the pinning ldflags binPath was built with.
+	buildLdflags []string
 )
 
 const (
@@ -113,6 +115,7 @@ func buildAndRun(m *testing.M) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	buildLdflags = ldflags
 	binPath = filepath.Join(dir, "priors")
 	if out, err := goBuild(binPath, ldflags...); err != nil {
 		fmt.Fprintf(os.Stderr, "go build: %v\n%s", err, out)
