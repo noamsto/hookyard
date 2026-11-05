@@ -402,7 +402,8 @@ must not: it denies a tool call that would write
 The stores are the ones the trust file pins, so the guard covers every
 configured store. A shell command cannot have its content judged, so a shell
 write anywhere in a store is denied, and so is any write while the command
-names a store path, runs in a store, or changes into one. Paths resolve
+runs in a store or changes into one. A write the guard cannot resolve is also
+denied while a store is in reach (below). Paths resolve
 against the call's cwd and every dir the command changes into, with `..` and
 symlinks resolved as the kernel does, and also with `..` cleaned first, as
 Claude Code and pi clean a file tool's path. A hard link elsewhere to any
@@ -432,7 +433,10 @@ reader parses: each stage of a pipeline, each command of a loop, a `&&` list,
 a function body, an `xargs` inner command, a command substitution, a heredoc
 read as a script (`bash <<EOF`) and a literal `-c` script. A word is rendered
 statically: literal text, quotes, ANSI-C quotes, brace expansion, `~`, globs
-kept as written, and a plain host variable the command cannot set. Anything
+kept as written, and a plain host variable the command cannot set. Bash
+expands `~` after the `=` of a word shaped `name=…` and after each `:` in it
+(`of=~/x`, `PREFIX=~/notes`, `PATH=~/bin:…`), and the guard renders it the same
+way; `--opt=~/x` stays literal. Anything
 else (a variable the command assigns, `$(…)`, `$((…))`, a positional
 parameter) is unresolved, with its literal prefix kept. The guard tracks no
 values: `d=/tmp/x; rm -rf "$d"` is unresolved.
@@ -444,7 +448,8 @@ Each simple command, after its wrappers, is one of three kinds:
 - modeled writer: its targets are exactly the words its table names (`rm`,
   `cp`, `mv`, `tee`, `sed -i`, …);
 - unknown program (`make`, `python3 -c …`, `curl -o`, anything with a `/` in
-  its name): it writes its operands and its cwd. Each operand with no script
+  its name): it writes its operands and its cwd, so it is denied when it runs
+  inside a store (check 4), not when its cwd merely holds one. Each operand with no script
   byte (whitespace, quotes, `\`, `$`, a backtick, `;&|()<>{}`) is a target as
   a whole word, and so is each path field of it (`key=/abs`, `out:/abs`,
   `a,/abs`, `of=/`), a long option's value and a short cluster's glued
@@ -452,10 +457,12 @@ Each simple command, after its wrappers, is one of three kinds:
   unresolved write. So is any operand that does not render, and stdin from a
   pipe, heredoc or here-string. Its relative operands also resolve against
   each of its own option values that names an existing dir (at most 32 per
-  call; past that its relative writes have an unknown base).
+  call; past that the command is denied as writing from a dir the guard
+  cannot tell).
 
 A target is a whole word in an output position. A regex, a replacement,
-quoted prose or a data argument of a read-only command is never one, and
+quoted prose or a data argument of a read-only command is never one, unless
+the allowlist is withdrawn, which turns that command into an unknown program.
 `build/` is the target `<cwd>/build/`, never `/`. A bare `/` is a target only
 as a whole word (`rm -rf /`, `> /`, `cp x /`).
 
@@ -480,7 +487,8 @@ A command with no unresolved write and no opaque code is judged by checks 1
 to 6 only, target by target. An unresolved write is an unresolved target
 word of a writer, unknown program or output redirect; an unknown program's
 script-byte operand or fed stdin; a modeled writer behind `xargs` (its
-operands come from stdin); any write while a dir change is unresolved; `find`
+operands come from stdin); a relative write target, or an unknown program,
+while a dir change is unresolved; `find`
 or `fd` with an action (`-delete`, `-exec`, `-ok`, `-fprint`, `-fls`, `-x`,
 `-X`); `sed -f`, or a sed script the guard cannot prove read-only; a shell run
 on a script file (`bash x.sh`, `sh < f`); `source` and `.`; and a call made an
@@ -490,8 +498,10 @@ A store is in reach of a command when any of these holds:
 
 - R1: a dir change the guard cannot resolve (an opaque `cd` or `pushd`
   operand, `cd -`, `popd`, `pushd +N`, a relative `cd` while `CDPATH` is set
-  on the host or by the command, an unrecognised flag of a wrapper that
-  changes dir);
+  on the host or by the command, `shopt -s cdable_vars` (a relative `cd NAME`
+  then may jump to `$NAME`), an unrecognised flag of any wrapper, a command
+  word holding `=`, an opaque `-C` of git, make or tar, more than 32 dirs
+  changed into, or more than 32 option values naming dirs in one call);
 - R2: a reach name resolves inside a store, the state dir or the config, or
   to a dir holding one. Reach names are every word anywhere in the command
   (read-only commands, assignment values, option values, redirect targets,
@@ -500,15 +510,16 @@ A store is in reach of a command when any of these holds:
   short-option cluster. They resolve against the cwd and every dir the
   command changes into, with `..` and symlinks resolved both ways;
 - R3: the call's text, as given, printf-decoded and with quotes deleted,
-  names `.attest`, `MEMORY.md`, a store root's last two elements or a store's
-  name as a whole path element.
+  names `.attest`, `MEMORY.md`, the last two elements of a store root, of the
+  state dir or of the config path, or a store's name as a whole path element.
 
 For an unresolved write, every path field of that call's own words counts
 toward reach: operands, inline code, option values, a sed script, its
 heredoc or here-string body or its stdin script. That includes a bare `/`,
 `.` or `..`, and a name that is a hard link to a guarded file. The prose and
 regexes in other commands' arguments (read-only commands, data) never count a
-bare `/`; a `/` inside a longer word (`A / B`, `build/`) never counts. A cwd
+bare `/`, unless the allowlist is withdrawn, which turns that command into an
+unknown program; a `/` inside a longer word (`A / B`, `build/`) never counts. A cwd
 above a store is not reach by itself.
 
 Opaque code is shell code the guard cannot read, so it may compute any path.
@@ -516,17 +527,19 @@ It is always denied, wherever the command runs. It is:
 
 - `eval` with a non-literal argument (a literal one is read as a script);
 - `bash`, `sh`, `zsh`, `dash`, `ksh` or `ash` with `-c` and a non-literal
-  script, or reading its script from a pipe (a literal `-c` script, heredoc
-  or here-string is read as a nested script);
-- a command word that does not render and holds no literal `/`, since it may
-  name a builtin or a function;
+  script, reading its script from a pipe, or a heredoc or here-string that is
+  not literal (a literal `-c` script, heredoc or here-string is read as a
+  nested script);
+- a command word that does not render and holds no literal `/`, or is a glob,
+  since it may name a builtin or a function;
 - `trap` or `alias` text that is not literal, and `env -S` with a non-literal
   value;
 - an `env` or `sudo` assignment whose name is not an identifier
   (`BASH_FUNC_cat%%=…`);
 - an arithmetic context (`(( ))`, `$(( ))`, `let`, a C-style `for`, the
   integer tests of `[[ ]]`, an array subscript, a substring offset or length)
-  that holds a name whose value may be set at run time (`read x; (( x ))`,
+  that holds a name whose value may be set at run time, or holds a command
+  substitution (`read x; (( x ))`,
   `n=$(wc -l <f); echo $((n+1))`, `while read i; do echo $((i+1)); done`).
   A name set only from literal digits and operators stays readable
   (`for i in 1 2 3; do echo $((i*2)); done`, `n=0; ((n++))`). Any setter or
@@ -543,7 +556,8 @@ It is always denied, wherever the command runs. It is:
 
 A call withdraws the read-only and modeled classes, so that every command in
 it is an unknown program, when anywhere in it there is a function
-definition, `alias`, `hash`, `enable`, `source` or `.`; a name exported to a
+definition, `eval` (literal or not), `alias`, `hash`, `enable`, `source` or
+`.`; a name exported to a
 command (`NAME=v` prefix, `env NAME=v`, `sudo NAME=v`, `export`,
 `declare -x`, `set -a`) or assigned while the host environment has it, unless
 the name is `LANG`, `LANGUAGE`, `LC_*`, `TZ`, `NO_COLOR`, `CLICOLOR`,
@@ -551,12 +565,20 @@ the name is `LANG`, `LANGUAGE`, `LC_*`, `TZ`, `NO_COLOR`, `CLICOLOR`,
 `IFS`, `CDPATH`, `PS4`, `ENV`, `BASH_ENV`, `BASH_CMDS`, `BASH_ALIASES`,
 `GLOBIGNORE`, `EXECIGNORE`, `BASH_XTRACEFD`, `SHELLOPTS`, `BASHOPTS`,
 `POSIXLY_CORRECT`, `BASH_COMPAT`, `BASH_LOADABLES_PATH` or `FUNCNEST`; a
-computed setter name; or a target, resolved or not, whose basename is or may
-match (as a glob) an allowlisted command name (`ln -s /bin/rm ~/bin/gh`,
-`rm -f *`, `cp x "$d"`). A `NAME=v` prefix, `env NAME=v` or `sudo NAME=v`
+computed setter name; or a target whose basename is or may match (as a glob)
+an allowlisted command name (`ln -s /bin/rm ~/bin/gh`, `rm -f *`). A target the
+guard cannot resolve withdraws only when the part of its last element before
+the unresolved part could start an allowlisted program's name (`> "/tmp/out-$n"`
+does not, `> "$d"` and `cp x "$d"` do). A `NAME=v` prefix, `env NAME=v` or `sudo NAME=v`
 before an external program exports to that program alone, so it withdraws
 only that call: `CREW_ID=x crew roster | jq .` leaves `jq` read-only. Before a
 builtin, a function or a shell it withdraws the whole command.
+
+The value of an environment assignment that reaches a program's environment
+(a `NAME=v` prefix, `env NAME=v`, `export`, `declare -x`, allexport, or a name
+the host already exports), other than the safe-set names, is judged like an
+operand: `GIT_WORK_TREE=~/notes git checkout -- .` and
+`DESTDIR=~/notes make install` are denied.
 
 The wrappers `env`, `sudo`, `doas`, `nice`, `nohup`, `timeout`, `stdbuf`,
 `time`, `command`, `builtin`, `exec` and `xargs` are skipped by a closed flag
@@ -566,8 +588,9 @@ table, and a flag that takes a value consumes it. `env -C` and `--chdir`, and
 unrecognised flag, a path-invoked wrapper (`./nice`) or a quoted `NAME=value`
 in command position makes the call an unknown program over all its words,
 with a dir the guard cannot tell. A command word, after the wrappers, that
-holds `=` or a script byte is an unknown program, a write the guard cannot
-resolve and a dir it cannot tell. An `xargs` over a read-only command is
+holds `=` is an unknown program, a write the guard cannot resolve and a dir it
+cannot tell; one holding a script byte (a path with a space) is an ordinary
+unknown program. An `xargs` over a read-only command is
 read-only; over a modeled writer, its literal operands are targets and its
 stdin is an unresolved write; over anything else it is an unresolved write.
 `xargs -I R` makes every word holding `R` unresolved.
@@ -578,9 +601,10 @@ denied as past what the guard reads, and the string is no longer judged by a
 prefix of its tokens. A content or edit text is a file's own text, not input.
 
 Read-only commands, by name and argument shape. A command is read-only only
-when every flag it is given is on its entry's list; any other flag makes it
-an unknown program, and a long option abbreviation that could also be a
-disallowed one is disallowed.
+when its flags pass its entry: `rg`, `fd`, `find`, `sort`, `uniq` and `awk`
+take only listed flags; `git`, `gh`/`glab`, `date` and `diff` take any flag
+except the listed ones. A flag that fails makes it an unknown program, and a
+long option abbreviation that could also be a disallowed one is disallowed.
 
 - No flag of these writes a file or runs a program, so every flag is
   allowed: `cat head tail wc ls stat readlink realpath basename dirname cmp
@@ -624,8 +648,9 @@ disallowed one is disallowed.
   let shopt wait umask sleep`. `mapfile -C` runs a callback and is opaque
   code.
 
-Modeled writers, whose every operand and option value is a target (sources
-included, so `cp ~/notes/x /tmp` is denied): `rm rmdir mkdir touch tee
+Modeled writers, whose every operand is a target (sources included, so
+`cp ~/notes/x /tmp` is denied), and whose option values are too for `touch`,
+`truncate`, `cp`, `mv`, `ln`, `install`, `chmod`, `chown` and `chgrp` only: `rm rmdir mkdir touch tee
 truncate cp mv ln install chmod chown chgrp`, `dd` (the `of=` and `if=`
 values), `sort -o`, the second operand of `uniq`, and `sed -i`, whose file
 operands are the targets while its script is judged as for read-only `sed`.
@@ -672,6 +697,7 @@ It is not a sandbox. It does not see:
   this or an earlier call to a path outside the stores: git hooks and git's
   global `core.hooksPath`, `core.fsmonitor` and `core.pager`, gh's browser, an
   rg config file;
+- `gh … --web`, which launches a browser while run as a reader;
 - `git add`, `git commit`, `git fetch` and `git push` run in or on a store,
   and any other git reader's writes to git's own index, objects and refs
   (these count as git reading);
@@ -699,8 +725,7 @@ It over-denies:
 - a `claude` prompt, or any unknown program's operand, holding a standalone
   `.`, `/` or `..` from a dir that holds a store (`claude -p "check ."` from
   `~`);
-- a shell command that reads a store path while it writes elsewhere, a shell
-  write to a store fact, and a write that may name a dir holding a store
+- a shell write to a store fact, and a write that may name a dir holding a store
   (`cmake ..` from a dir directly under one, `foo .` or `cp x .` from `~`);
 - an unknown program's operand or cluster suffix that names a store or a dir
   holding one (`foo .` from `~`), including a packed operand after `=`, `:`
@@ -709,16 +734,16 @@ It over-denies:
   guard cannot tell, while a program path with a space is an ordinary unknown
   program;
 - a read-only command given a flag outside its list, which is judged as an
-  unknown program: `awk '$1 > 5'`, `awk '/a|b/'` and `awk -F@` (any `>`, `|`
-  or `@` in an awk program), `sort -T`, `gh pr checkout`;
+  unknown program: `awk '$1 > 5'`, `awk '/a|b/'` and `awk '{print "a@b"}'` (any
+  `>`, `|` or `@` in an awk program), `sort -T`, `gh pr checkout`;
 - an associative-array subscript, which is read as arithmetic;
 - a name that no value tracking can resolve: `d=/tmp/x; rm -rf "$d"` is
   unresolved and denied from `~`;
 - a command that withdraws the allowlist and names a store path: any exported
   or host-environment name outside the safe set (`GIT_PAGER=cat git log`),
   and any `PATH`, `IFS` or `BASH_ENV` assignment;
-- `gh --web`, which launches a browser and is allowed as a reader (residual,
-  above);
+- an environment assignment value that names a store or a dir holding one,
+  even when the program ignores it (`PATH=~:$PATH x` from anywhere);
 - any write while running in a store, and a reader run behind a flagged
   wrapper that the table does not know;
 - an unknown tool whose input holds `.`, `..`, `/`, or a word that names a
