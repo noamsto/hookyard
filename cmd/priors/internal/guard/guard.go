@@ -301,11 +301,30 @@ func (g *Guard) shell(cwd string, texts []string) string {
 		}
 	}
 	unresolved := acc.Unresolved
+	optionLost := false
 	for _, t := range acc.Targets {
 		if c.lost && !filepath.IsAbs(t.Text) && unresolved == "" {
 			unresolved = fmt.Sprintf("writes %q from a dir it changes into at run time", t.Text)
 		}
-		if r := c.target(t); r != "" {
+		if r := c.target(t, c.candidates(t.Text)); r != "" {
+			return r
+		}
+	}
+	// An unknown program's option value may be a dir it runs in: only once
+	// every target has been judged as given, so a denial names the target it
+	// would name anyway.
+	for _, t := range acc.Targets {
+		if t.Call == 0 || filepath.IsAbs(t.Text) {
+			continue
+		}
+		dirs, lost := c.optionDirs(t.Call, acc.Options)
+		if lost {
+			optionLost = true
+			if unresolved == "" {
+				unresolved = fmt.Sprintf("writes %q from a dir one of its options may name", t.Text)
+			}
+		}
+		if r := c.target(t, c.resolve(t.Text, dirs)); r != "" {
 			return r
 		}
 	}
@@ -317,10 +336,57 @@ func (g *Guard) shell(cwd string, texts []string) string {
 	if unresolved == "" {
 		return ""
 	}
-	if reach := c.reach(acc.Names, texts); reach != "" {
+	if c.lost || optionLost {
+		return deny("the command %s, which the guard cannot resolve, and changes into a dir the guard cannot tell", unresolved)
+	}
+	if reach := c.reach(acc.OwnNames, acc.Names, texts); reach != "" {
 		return deny("the command %s, which the guard cannot resolve, and %s", unresolved, reach)
 	}
 	return ""
+}
+
+// optionDirs returns the existing dirs among the option values of a call, as
+// the dirs it may run in, each resolved like a dir the command changes into.
+// lost reports more than maxDirs of them. Each value costs one stat per dir
+// it is relative to.
+func (c *check) optionDirs(call int, options [][]string) (dirs []string, lost bool) {
+	if d, ok := c.options[call]; ok {
+		return d.dirs, d.lost
+	}
+	var found []string
+	seen := map[string]bool{}
+	for _, v := range options[call-1] {
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		paths := []string{v}
+		if !filepath.IsAbs(v) {
+			paths = nil
+			for _, d := range c.dirs {
+				paths = append(paths, filepath.Join(d, v))
+			}
+		}
+		for _, p := range paths {
+			if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+				found = append(found, p)
+			}
+		}
+		if len(found) > maxDirs {
+			lost = true
+			found = nil
+			break
+		}
+	}
+	for _, p := range found {
+		for _, d := range c.candidates(p) {
+			if !slices.Contains(dirs, d) {
+				dirs = append(dirs, d)
+			}
+		}
+	}
+	c.options[call] = optionDirs{dirs, lost}
+	return dirs, lost
 }
 
 // argument names the argument a write was judged from, so a denial tells a
@@ -336,9 +402,8 @@ func argument(t gate.Target, p string) string {
 	return fmt.Sprintf(" (from the argument %q)", arg)
 }
 
-// target judges one resolved write target.
-func (c *check) target(t gate.Target) string {
-	cands := c.candidates(t.Text)
+// target judges one resolved write target, as each of cands.
+func (c *check) target(t gate.Target, cands []string) string {
 	for _, p := range cands {
 		switch r := c.relate(p, shellKinds); r.rel {
 		case inside:
@@ -361,25 +426,50 @@ func (c *check) target(t gate.Target) string {
 }
 
 // reach names what puts a store in reach of a write the reader cannot
-// resolve (§3), or "" when nothing does: a dir that cannot be told, a name
-// inside a guarded root or holding one, or a guarded token in the text.
-func (c *check) reach(names, texts []string) string {
-	if c.lost {
-		return "changes into a dir the guard cannot tell"
+// resolve, or "" when nothing does: a name of the write's own words that is
+// inside a guarded root, holds one or is a hard link to a guarded file, any
+// other name inside a guarded root or holding one, or a guarded token in the
+// text.
+func (c *check) reach(own, names, texts []string) string {
+	for _, n := range own {
+		cands := c.candidates(n)
+		if r := c.nameReach(cands); r != "" {
+			return r
+		}
+		for _, p := range cands {
+			if !filepath.IsAbs(p) {
+				continue
+			}
+			to, unknown := c.linked(p)
+			switch {
+			case unknown:
+				return fmt.Sprintf("names %s, which has hard links the guard cannot match to a store file", p)
+			case len(to) > 0:
+				return fmt.Sprintf("names %s, a hard link to %s", p, to[0])
+			}
+		}
 	}
 	for _, n := range names {
-		for _, p := range c.candidates(n) {
-			switch r := c.relate(p, shellKinds); r.rel {
-			case inside:
-				return fmt.Sprintf("names %s, %s", p, describe(r.root, p))
-			case ancestor:
-				return fmt.Sprintf("names %s, which holds %s", p, r.root.label)
-			case none:
-			}
+		if r := c.nameReach(c.candidates(n)); r != "" {
+			return r
 		}
 	}
 	if c.g.involves(texts) {
 		return "names a guarded path"
+	}
+	return ""
+}
+
+// nameReach names the first of cands inside a guarded root or holding one.
+func (c *check) nameReach(cands []string) string {
+	for _, p := range cands {
+		switch r := c.relate(p, shellKinds); r.rel {
+		case inside:
+			return fmt.Sprintf("names %s, %s", p, describe(r.root, p))
+		case ancestor:
+			return fmt.Sprintf("names %s, which holds %s", p, r.root.label)
+		case none:
+		}
 	}
 	return ""
 }
@@ -712,6 +802,9 @@ type check struct {
 	dirs []string
 	// lost reports a dir the call changes into that cannot be told.
 	lost bool
+	// options are the dirs each unknown program call's option values name,
+	// found once per call.
+	options map[int]optionDirs
 	// linkInfo are the files a hard link could reach, read once; cut reports
 	// a store walk that ran out of budget or could not read a dir.
 	linkInfo []linkTarget
@@ -719,6 +812,11 @@ type check struct {
 	cut      bool
 	// budget is the store files the walk may read.
 	budget int
+}
+
+type optionDirs struct {
+	dirs []string
+	lost bool
 }
 
 type linkTarget struct {
@@ -730,7 +828,7 @@ type linkTarget struct {
 // cwd and every dir it changes into, each against every dir before it. lost
 // reports a dir change the reader cannot resolve.
 func (g *Guard) newCheck(cwd string, dirs []string, lost bool) *check {
-	c := &check{g: g, budget: maxFiles, lost: lost}
+	c := &check{g: g, budget: maxFiles, lost: lost, options: map[int]optionDirs{}}
 	if filepath.IsAbs(cwd) {
 		c.dirs = c.candidates(cwd)
 	} else {

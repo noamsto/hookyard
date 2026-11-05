@@ -108,6 +108,16 @@ func optionWrites() string {
 	return strings.Join(calls, "; ")
 }
 
+// manyOptionDirs is an unknown program given one more option value naming an
+// existing dir than the guard resolves, then a relative operand.
+func manyOptionDirs() string {
+	cmd := "foo"
+	for i := range maxDirs + 1 {
+		cmd += " --d=" + strings.Repeat("./", i) + "sub"
+	}
+	return cmd + " x"
+}
+
 func bash(cmd string) string {
 	b, _ := json.Marshal(map[string]string{"command": cmd})
 	return string(b)
@@ -381,10 +391,10 @@ func TestShellDenies(t *testing.T) {
 		{name: "lua execute root", want: "which holds", cwd: ".", input: bash(`lua -e 'os.execute("rm -rf /")'`)},
 		{name: "node execSync root", want: "which holds", cwd: ".", input: bash(`node -e 'require("child_process").execSync("rm -rf /")'`)},
 		{name: "python rmtree root", want: "which holds", cwd: ".", input: bash(`python3 -c 'import shutil; shutil.rmtree("/", ignore_errors=True)'`)},
-		{name: "sed e command relative store name", want: "cannot resolve, and names a guarded path", cwd: ".", input: bash(`sed -n '1e rm -rf notes' f`)},
-		{name: "sed e cd relative store name", want: "cannot resolve, and names a guarded path", cwd: "work", input: bash(`sed -n '1e cd .. && rm -rf notes' f`)},
-		{name: "python shutil relative store name", want: "cannot resolve, and names a guarded path", cwd: ".", input: bash(`python3 -c 'import shutil; shutil.rmtree("notes")'`)},
-		{name: "node rmSync relative store name", want: "cannot resolve, and names a guarded path", cwd: ".", input: bash(`node -e 'require("fs").rmSync("notes",{recursive:true})'`)},
+		{name: "sed e command relative store name", want: "cannot resolve, and names ", cwd: ".", input: bash(`sed -n '1e rm -rf notes' f`)},
+		{name: "sed e cd relative store name", want: "cannot resolve, and names ", cwd: "work", input: bash(`sed -n '1e cd .. && rm -rf notes' f`)},
+		{name: "python shutil relative store name", want: "cannot resolve, and names ", cwd: ".", input: bash(`python3 -c 'import shutil; shutil.rmtree("notes")'`)},
+		{name: "node rmSync relative store name", want: "cannot resolve, and names ", cwd: ".", input: bash(`node -e 'require("fs").rmSync("notes",{recursive:true})'`)},
 		{name: "sed w hardlink operand", want: "a hard link to", cwd: "work", input: bash(`sed -n 'w hard' f`)},
 		{name: "sed w symlink attest operand", want: "an .attest dir", cwd: "work", input: bash(`sed -n 'w rel' f`)},
 		{name: "python glued out root", want: "which holds", cwd: ".", input: bash(`python3 tool.py --out=/`)},
@@ -502,9 +512,30 @@ func TestShellDenies(t *testing.T) {
 		// target from a dir holding a store, withdrawal.
 		{name: "exported and local values written from home", want: "which reaches into the personal store", cwd: ".", input: bash(`export d=/tmp/x; local f=/tmp/y; rm -rf "$d" "$f"`)},
 		{name: "c-style loop to an unknown bound then cat of a store", want: "shell code the guard cannot read", input: bash(`n=$1; for ((i=0; i<$n; i++)); do echo $i; done; cat ~/notes/MEMORY.md`)},
-		{name: "export -n then cat of a store", want: "cannot resolve, and names a guarded path", input: bash(`export -n FOO; cat ~/notes/facts/a.md`)},
 		{name: "loop redirect before a gh filter from home", want: "which holds the personal store", cwd: ".", input: bash(`for n in a b; do echo x > ~/work/$n.log; done; gh pr view 1 --jq .`)},
 		{name: "loop heredoc to a shell before a gh filter from home", want: "shell code the guard cannot read", cwd: ".", input: bash("for f in a b; do sh <<EOF\necho $f\nEOF\ndone; gh pr view 1 --jq .")},
+
+		// An inline program, remote script or prompt holding a standalone /, .
+		// or .. names it, as the call may write it.
+		{name: "unparsed string naming dot is not a path", want: "which holds the personal store", cwd: ".", input: bash(`watch 'rm -rf . ('`)},
+		{name: "jq alternative filter after an assignment", want: "names /, which holds the personal store", input: bash(`CREW_ID=x crew roster | jq -c '.[]? // .'`)},
+		{name: "claude prompt with a dot", want: "which holds the personal store", cwd: ".", input: bash(`claude -p "check the build ." --tools=Bash`)},
+		{name: "env unset before a claude prompt", want: "which holds the personal store", cwd: ".", input: bash(`env -u A -u B claude -p "check . now"`)},
+		{name: "timeout before a claude prompt", want: "which holds the personal store", cwd: ".", input: bash(`timeout 5 claude -p "check ."`)},
+		{name: "claude prompt with a model from home", want: "which holds the personal store", cwd: ".", input: bash(`claude -p "fix ." --model opus`)},
+		{name: "unknown program on a spaced slash", want: "names /, which holds the personal store", input: bash(`foo "a / b"`)},
+		{name: "PATH before crew body", want: "names /, which holds the personal store", input: bash(`PATH=~/evil:$PATH; crew reply x "a / b"`)},
+		{name: "python inline spaced slash", want: "names /, which holds the personal store", input: bash(`python3 -c 'x = "a / b"'`)},
+		{name: "python heredoc slash string", want: "names /, which holds the personal store", input: bash("python3 - <<EOF\nsep = \"/\"\nEOF")},
+		{name: "python rmtree root from a project", want: "names /, which holds the personal store", input: bash(`python3 -c 'import shutil; shutil.rmtree("/")'`)},
+		{name: "sed e command root from a project", want: "names /, which holds the personal store", input: bash(`sed -n '1e rm -rf /' f`)},
+		{name: "remote script parent from a project", want: "which holds the personal store", input: bash(`ssh localhost 'rm -rf ..'`)},
+
+		// An unknown program's option value naming a dir it may run in.
+		{name: "glued option dir", want: "/notes/MEMORY.md, inside the personal store", cwd: ".", input: bash(`foo -Cwork rm ../notes/MEMORY.md`)},
+		{name: "option dir as the next word", want: "/notes/x, inside the personal store", cwd: ".", input: bash(`foo -C work rm ../notes/x`)},
+		{name: "option dir holding a hard link", want: "a hard link to", cwd: "elsewhere", input: bash(`foo --dir=../work touch hard`)},
+		{name: "too many option dirs", want: "changes into a dir the guard cannot tell", input: bash(manyOptionDirs())},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.linuxOnly && runtime.GOOS != "linux" {
@@ -546,16 +577,11 @@ func TestShellAllows(t *testing.T) {
 		{name: "commit message with store name", input: bash(`git commit -m "notes $(date)"`)},
 		{name: "pr body heredoc", input: bash("gh pr create --title t --body \"$(cat <<'EOF'\nfix MEMORY.md handling in notes\nEOF\n)\"")},
 		{name: "sed script with e letters", input: bash(`cd /tmp/x && grep -oE '^(published|flagged|would [a-z]+ [a-z]+|would [a-z]+|unchanged|duplicate|propose|skipped)' import-dry-run.md | sort | uniq -c; grep -c 'work-name' import-dry-run.md; grep -c 'wikilink-dangling' import-dry-run.md; grep -oE ': (refused: [^:]+: [a-z-]+|routes to the quarantine|not a fact file)' import-dry-run.md | sed -E 's/refused: [^:]+: /refused: /' | sort | uniq -c; sed -n 95,131p import-dry-run.md | cut -c1-220`)},
-		{name: "unparsed string naming dot is not a path", cwd: ".", input: bash(`watch 'rm -rf . ('`)},
 		{name: "jq filter after an assignment", input: bash(`CREW_ID=x crew roster | jq -c '.[] | select(.state=="working" or .state=="blocked") | {name,branch,state,age_s}'`)},
-		{name: "jq alternative filter after an assignment", input: bash(`CREW_ID=x crew roster | jq -c '.[]? // .'`)},
 
 		// Data positions of a cleanly resolved known program are text, not a path.
-		{name: "claude prompt with a dot", cwd: ".", input: bash(`claude -p "check the build ." --tools=Bash`)},
 		{name: "gh jq with a slash alternative", input: bash(`gh pr view 1 --json state,mergeCommit --jq '"\(.state) \(.mergeCommit.oid // "-")"'`)},
 		{name: "crew body with a spaced slash", cwd: ".", input: bash(`crew reply worker:x "a / b"`)},
-		{name: "env unset before a claude prompt", cwd: ".", input: bash(`env -u A -u B claude -p "check . now"`)},
-		{name: "timeout before a claude prompt", cwd: ".", input: bash(`timeout 5 claude -p "check ."`)},
 		{name: "glab jq alternative", input: bash(`glab mr view 3 --jq '.a // .b'`)},
 		{name: "gh api q alternative", input: bash(`gh api x -q '.a // .b'`)},
 		{name: "crew body after a crew id", cwd: ".", input: bash(`crew --crew c reply x "a / b"`)},
@@ -604,7 +630,6 @@ func TestShellAllows(t *testing.T) {
 		{name: "mkdir then copy", input: bash(`mkdir -p a/b && cp -r src a/b`)},
 		{name: "git commit message", input: bash(`git commit -m "x"`)},
 		{name: "nix develop go vet", input: bash(`nix develop -c go vet ./...`)},
-		{name: "claude prompt with a model from home", cwd: ".", input: bash(`claude -p "fix ." --model opus`)},
 		{name: "writers with many option values", input: bash(optionWrites())},
 
 		// Heredoc bodies, globs and redirect targets that name no data taker.
@@ -619,17 +644,17 @@ func TestShellAllows(t *testing.T) {
 		// Readers, data and prose the default-deny rule does not read as
 		// targets, and a ~ bash leaves literal after --opt=.
 		{name: "option value", input: bash("cp --target-directory=~/notes/facts x")},
-		{name: "unknown program on a spaced slash", input: bash(`foo "a / b"`)},
 		{name: "env split string runs a crew body", input: bash(`env -S 'crew reply x /'`)},
 		{name: "gh path after double dash", input: bash(`gh api x -q / -- cat ~/notes/MEMORY.md`)},
-		{name: "PATH before crew body", input: bash(`PATH=~/evil:$PATH; crew reply x "a / b"`)},
 		{name: "awk address program", input: bash(`awk '/^foo$/{print $1}' f`)},
 		{name: "awk division program", input: bash(`awk '{print $1 / $2}' f`)},
 		{name: "awk glued field separator", input: bash(`awk -F/ '{print $NF}' f`)},
-		{name: "python inline spaced slash", input: bash(`python3 -c 'x = "a / b"'`)},
-		{name: "python heredoc slash string", input: bash("python3 - <<EOF\nsep = \"/\"\nEOF")},
 		{name: "deferred sed script redefines", input: bash(`git commit -m '~/notes/MEMORY.md' && sed -i '#/crew' f`)},
 		{name: "sed in-place script trailing slash regex", input: bash(`sed -i 's/^        monthlyTarget = 100;$/        monthlyTarget = 30;/' home/ai/claude-code/default.nix`)},
+		{name: "export -n then cat of a store", input: bash(`export -n FOO; cat ~/notes/facts/a.md`)},
+		{name: "inline code naming no path from home", cwd: ".", input: bash(`python3 -c 'print(1)'`)},
+		{name: "option value naming a project dir from home", cwd: ".", input: bash(`rsync -a --exclude=work src/ dst/`)},
+		{name: "option value naming no dir", input: bash(`foo --exclude=notes rm x`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.tool == "" {

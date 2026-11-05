@@ -1587,8 +1587,17 @@ func scriptsOf(c call, f feed) []string {
 	return out
 }
 
-// call classifies one simple command and records what it writes.
+// call classifies one simple command and records what it writes; when it is
+// an unresolved write, the names its own words hold.
 func (r *reader) call(ce *syntax.CallExpr, f feed) {
+	before := r.out.writesUnresolved
+	r.classifyCall(ce, f)
+	if r.out.writesUnresolved > before && !r.over() {
+		r.ownNames(ce, f)
+	}
+}
+
+func (r *reader) classifyCall(ce *syntax.CallExpr, f feed) {
 	argv := r.args(ce.Args, true)
 	if r.over() || len(argv) == 0 {
 		return
@@ -1710,7 +1719,7 @@ func (r *reader) call(ce *syntax.CallExpr, f feed) {
 		r.out.writes = true
 		for _, t := range v.targets {
 			if t.ok {
-				r.target(t.text, "")
+				r.target(Target{Text: t.text})
 			} else {
 				r.opaque(t)
 			}
@@ -1733,6 +1742,7 @@ func (r *reader) redefined(name string, args []arg, f feed) {
 // unresolved write named only when no other is.
 func (r *reader) redefines(name string) {
 	r.out.writes = true
+	r.out.writesUnresolved++
 	if r.out.redefined == "" {
 		r.out.redefined = fmt.Sprintf("runs %s, which the command may have redefined", name)
 	}
@@ -1827,6 +1837,11 @@ func globWord(w *syntax.Word) bool {
 func (r *reader) unknown(name string, words []arg, f feed) {
 	r.out.writes = true
 	r.out.ran = true
+	call := 0
+	if opts := optionValues(words); len(opts) > 0 {
+		r.out.options = append(r.out.options, opts)
+		call = len(r.out.options)
+	}
 	for _, a := range words {
 		switch {
 		case !a.ok:
@@ -1834,7 +1849,7 @@ func (r *reader) unknown(name string, words []arg, f feed) {
 		case strings.ContainsAny(a.text, scriptBytes):
 			r.unresolved(fmt.Sprintf("runs %s on inline code", name))
 		default:
-			r.operandTargets(a.text)
+			r.operandTargets(a.text, call)
 		}
 	}
 	if f.kind != noFeed {
@@ -1842,21 +1857,49 @@ func (r *reader) unknown(name string, words []arg, f feed) {
 	}
 }
 
+// optionValues are the rendered values an unknown program's options may
+// take: a long option's after =, each suffix of a short-option cluster from
+// its third byte, and the word after an option.
+func optionValues(words []arg) []string {
+	var out []string
+	for i, a := range words {
+		w := a.text
+		if !a.ok || len(w) < 2 || w[0] != '-' {
+			continue
+		}
+		if w == "--" {
+			break
+		}
+		if name, v, ok := strings.Cut(w, "="); ok && strings.HasPrefix(name, "--") {
+			out = append(out, v)
+		} else if w[1] != '-' {
+			for k := 2; k < len(w); k++ {
+				out = append(out, w[k:])
+			}
+		}
+		if i+1 < len(words) && words[i+1].ok && !strings.HasPrefix(words[i+1].text, "-") {
+			out = append(out, words[i+1].text)
+		}
+	}
+	return slices.DeleteFunc(out, func(v string) bool { return v == "" })
+}
+
 // operandTargets records an unknown program's operand: the whole word, each
 // field between pathBreaks, a long option's value, and each suffix of a
-// short-option cluster from its third byte.
-func (r *reader) operandTargets(w string) {
-	r.target(w, "")
+// short-option cluster from its third byte. call indexes the call's option
+// values.
+func (r *reader) operandTargets(w string, call int) {
+	r.target(Target{Text: w, Call: call})
 	for _, f := range PathFields(w) {
-		r.target(f, w)
+		r.target(Target{Text: f, From: w, Call: call})
 	}
 	if name, v, ok := strings.Cut(w, "="); ok && strings.HasPrefix(name, "--") {
-		r.target(v, w)
+		r.target(Target{Text: v, From: w, Call: call})
 	}
 	if len(w) > 2 && w[0] == '-' && w[1] != '-' {
 		for k := 2; k < len(w) && !r.over(); k++ {
 			if r.spend(len(w) - k) {
-				r.target(w[k:], w)
+				r.target(Target{Text: w[k:], From: w, Call: call})
 			}
 		}
 	}

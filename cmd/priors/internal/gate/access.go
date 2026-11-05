@@ -36,14 +36,26 @@ type Access struct {
 	Code string
 	// Names are every path a word of the command may name, deduplicated.
 	Names []string
+	// OwnNames are the fields of the words of each call that is an
+	// unresolved write, and of its heredoc or here-string: every run between
+	// pathBreaks, / . and .. included, as that call may write any of them.
+	OwnNames []string
+	// Options are, per unknown program call, the values its options may
+	// take, any of which may be a dir it runs in; a Target's Call indexes it.
+	Options [][]string
 	// Unreadable names why the command could not be read in full: "budget"
 	// or "fallback".
 	Unreadable string
 }
 
 // Target is one write target: Text the rendered path, From the argument it
-// was read out of, empty for a whole word.
-type Target struct{ Text, From string }
+// was read out of, empty for a whole word. Call is one more than the index in
+// Access.Options of the option values of the call it is an operand of, 0 for
+// none.
+type Target struct {
+	Text, From string
+	Call       int
+}
 
 // maxTouches bounds the targets and names one command may have.
 const maxTouches = 1 << 14
@@ -130,8 +142,14 @@ type out struct {
 	writes     bool
 	targets    []Target
 	opaque     []Target
-	seen       map[string]bool
+	seen       map[Target]bool
 	oseen      map[Target]bool
+	options    [][]string
+	own        map[string]bool
+	ownList    []string
+	// writesUnresolved counts the unresolved writes found, so a call can
+	// tell whether it added one.
+	writesUnresolved int
 	dirs       []string
 	dirLost    bool
 	unresolved string
@@ -351,7 +369,7 @@ func stdinOf(st *syntax.Stmt) (feed, bool) {
 
 // judge classifies every simple command and redirect of every parsed text.
 func (r *reader) judge() {
-	r.out = out{seen: map[string]bool{}, oseen: map[Target]bool{}}
+	r.out = out{seen: map[Target]bool{}, oseen: map[Target]bool{}, own: map[string]bool{}}
 	for _, s := range r.scripts {
 		r.walk(s, func(n syntax.Node, f feed) {
 			switch n := n.(type) {
@@ -381,7 +399,7 @@ func (r *reader) redirect(rd *syntax.Redirect) {
 			continue
 		}
 		r.out.writes = true
-		r.target(f, "")
+		r.target(Target{Text: f})
 	}
 	for _, p := range rw.opaque {
 		r.out.writes = true
@@ -402,6 +420,7 @@ func outputOp(op syntax.RedirOperator) bool {
 
 func (r *reader) unresolved(why string) {
 	r.out.writes = true
+	r.out.writesUnresolved++
 	if r.out.unresolved == "" {
 		r.out.unresolved = why
 	}
@@ -426,22 +445,68 @@ func (r *reader) dir(a arg) {
 	}
 }
 
-func (r *reader) touches() int { return len(r.out.targets) + len(r.out.opaque) + len(r.nameList) }
+func (r *reader) touches() int {
+	return len(r.out.targets) + len(r.out.opaque) + len(r.out.ownList) + len(r.nameList)
+}
 
 // target records a resolved write target.
-func (r *reader) target(text, from string) {
-	if text == "" || r.out.seen[text] {
+func (r *reader) target(t Target) {
+	if t.Text == "" || r.out.seen[t] {
 		return
 	}
 	if r.touches() >= maxTouches {
 		r.fail("budget")
 		return
 	}
-	r.out.seen[text] = true
-	r.out.targets = append(r.out.targets, Target{Text: text, From: from})
-	if !r.out.replaces && replacesProgram(text) {
+	r.out.seen[t] = true
+	r.out.targets = append(r.out.targets, t)
+	if !r.out.replaces && replacesProgram(t.Text) {
 		r.out.replaces = true
 	}
+}
+
+// ownNames records the fields of an unresolved write's own words and of its
+// heredoc or here-string, with $HOME and ~ expanded, as they are and
+// printf-decoded.
+func (r *reader) ownNames(ce *syntax.CallExpr, f feed) {
+	words := ce.Args
+	if f.kind == docFeed {
+		switch {
+		case f.doc.Hdoc != nil:
+			words = append(slices.Clone(words), f.doc.Hdoc)
+		case f.doc.Op == syntax.WordHdoc && f.doc.Word != nil:
+			words = append(slices.Clone(words), f.doc.Word)
+		}
+	}
+	home := r.host.Home
+	for _, w := range words {
+		rw := r.render(w, true)
+		for _, s := range slices.Concat(rw.fields, rw.opaque, rw.chunks) {
+			for _, d := range Decodings(s) {
+				if !r.spend(len(d)) {
+					return
+				}
+				for _, t := range PathFields(strings.NewReplacer("${HOME}", home, "$HOME", home).Replace(d)) {
+					if t == "~" || strings.HasPrefix(t, "~/") {
+						t = home + t[1:]
+					}
+					r.ownName(t)
+				}
+			}
+		}
+	}
+}
+
+func (r *reader) ownName(t string) {
+	if r.out.own[t] {
+		return
+	}
+	if r.touches() >= maxTouches {
+		r.fail("budget")
+		return
+	}
+	r.out.own[t] = true
+	r.out.ownList = append(r.out.ownList, t)
 }
 
 // opaque records an unresolved write target: its literal prefix, and the
@@ -559,6 +624,8 @@ func (r *reader) result() Access {
 		Unresolved: o.unresolved,
 		Code:       r.code,
 		Names:      r.nameList,
+		OwnNames:   o.ownList,
+		Options:    o.options,
 		Unreadable: r.unreadable,
 	}
 	if acc.Code == "" {

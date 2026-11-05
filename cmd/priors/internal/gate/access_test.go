@@ -37,6 +37,8 @@ type accessCase struct {
 	code       string
 	names      []string
 	notNames   []string
+	own        []string
+	notOwn     []string
 }
 
 func (c accessCase) check(t *testing.T) {
@@ -91,6 +93,16 @@ func (c accessCase) check(t *testing.T) {
 	for _, n := range c.notNames {
 		if slices.Contains(acc.Names, n) {
 			t.Errorf("name %q unexpected in %q", n, acc.Names)
+		}
+	}
+	for _, n := range c.own {
+		if !slices.Contains(acc.OwnNames, n) {
+			t.Errorf("own name %q missing from %q", n, acc.OwnNames)
+		}
+	}
+	for _, n := range c.notOwn {
+		if slices.Contains(acc.OwnNames, n) {
+			t.Errorf("own name %q unexpected in %q", n, acc.OwnNames)
 		}
 	}
 }
@@ -348,6 +360,8 @@ func TestShellAccessWithdrawal(t *testing.T) {
 		{name: "source", cmd: "source ./e.sh; cat x", writes: true, targets: []string{"x"}, unresolved: "runs source on a script file"},
 		{name: "computed setter", cmd: "v=x; read \"$v\" <<< y; cat z", writes: true, targets: []string{"z"}, unresolved: `writes through "$v"`},
 		{name: "export", cmd: "export FOO=1; cat x", writes: true, targets: []string{"x"}, unresolved: cat},
+		{name: "export -n un-exports", cmd: "export -n FOO; cat x"},
+		{name: "declare -n is a nameref", cmd: "declare -n r=x; cat y", writes: true, unresolved: cat},
 		{name: "declare -x", cmd: "declare -x FOO=1; cat x", writes: true, unresolved: cat},
 		{name: "set -a", cmd: "set -a; cat x", writes: true, unresolved: "runs set, which the command may have redefined"},
 		{name: "allexport", cmd: "set -o allexport; cat x", writes: true, unresolved: "runs set, which the command may have redefined"},
@@ -379,10 +393,38 @@ func TestShellAccessNames(t *testing.T) {
 	})
 }
 
+func TestShellAccessOwnNames(t *testing.T) {
+	runAccess(t, []accessCase{
+		{name: "inline root", cmd: `python3 -c 'shutil.rmtree("/")'`, writes: true, unresolved: "runs python3 on inline code", own: []string{"/", "shutil.rmtree", "-c", "python3"}},
+		{name: "sed w file", cmd: "sed -n 'w hard' f", writes: true, unresolved: "runs sed with a script that may write", own: []string{"w", "hard", "f"}},
+		{name: "heredoc dot", cmd: "python3 - <<EOF\nrm -rf .\nEOF", writes: true, unresolved: "feeds python3 input that may name paths", own: []string{".", "rm", "-"}},
+		{name: "here-string home", cmd: "foo <<< '~/x ..'", writes: true, unresolved: "feeds foo input that may name paths", own: []string{"/h/x", ".."}},
+		{name: "only the unresolved call's words", cmd: `echo "a / b"; python3 -c 'print(1)'`, writes: true, unresolved: "runs python3 on inline code", own: []string{"print", "1"}, notOwn: []string{"/", "a", "b"}},
+		{name: "read-only prose owns nothing", cmd: `gh repo create o/r --description "A / B"`, notOwn: []string{"/", "A"}},
+		{name: "resolved writer owns nothing", cmd: "rm -rf build/", writes: true, targets: []string{"build/"}, notOwn: []string{"build"}},
+	})
+}
+
+func TestShellAccessOptions(t *testing.T) {
+	acc := ShellAccess(accessHost(nil), "unshare --wd=w -C d -xvf a.tar rm ../x -- -Cz")
+	if want := []string{"w", "d", "vf", "f", "a.tar"}; len(acc.Options) != 1 || !slices.Equal(acc.Options[0], want) {
+		t.Errorf("Options = %q, want [%q]", acc.Options, want)
+	}
+	if !slices.Contains(acc.Targets, Target{Text: "../x", Call: 1}) {
+		t.Errorf("Targets = %+v", acc.Targets)
+	}
+	if acc := ShellAccess(accessHost(nil), "rm -r -- ../x"); len(acc.Options) != 0 {
+		t.Errorf("a modeled writer has Options %q", acc.Options)
+	}
+}
+
 func TestShellAccessTargetFrom(t *testing.T) {
 	acc := ShellAccess(accessHost(nil), "foo --out=/x")
-	if !slices.Contains(acc.Targets, Target{Text: "/x", From: "--out=/x"}) || !slices.Contains(acc.Targets, Target{Text: "--out=/x"}) {
+	if !slices.Contains(acc.Targets, Target{Text: "/x", From: "--out=/x", Call: 1}) || !slices.Contains(acc.Targets, Target{Text: "--out=/x", Call: 1}) {
 		t.Errorf("Targets = %+v", acc.Targets)
+	}
+	if len(acc.Options) != 1 || !slices.Equal(acc.Options[0], []string{"/x"}) {
+		t.Errorf("Options = %q", acc.Options)
 	}
 }
 

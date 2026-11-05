@@ -545,7 +545,7 @@ func (r *reader) printfName(args []arg) {
 // whose value the Assign case reads.
 func (r *reader) declare(variant string, words []arg) {
 	p := &r.pre
-	export := variant == "export"
+	export, unexport := variant == "export", false
 	if variant == "nameref" {
 		p.computed = true
 	}
@@ -557,8 +557,13 @@ func (r *reader) declare(variant string, words []arg) {
 		}
 		t := a.text
 		if t != "" && (t[0] == '-' || t[0] == '+') {
+			// export -n un-exports; the rest of the family declares a nameref.
 			if t[0] == '-' && strings.Contains(t, "n") {
-				p.computed = true
+				if variant == "export" {
+					unexport = true
+				} else {
+					p.computed = true
+				}
 			}
 			if t[0] == '-' && strings.Contains(t, "i") {
 				p.sinks = append(p.sinks, "an integer variable assigned at run time")
@@ -575,7 +580,7 @@ func (r *reader) declare(variant string, words []arg) {
 			r.valueString(base, v)
 		}
 	}
-	if export {
+	if export && !unexport {
 		for _, n := range names {
 			p.exported[n] = true
 		}
