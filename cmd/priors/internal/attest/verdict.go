@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"regexp"
 	"slices"
 	"strconv"
@@ -80,6 +81,44 @@ func ParseVerdicts(raw []byte) (Verdicts, error) {
 		raw = rest
 	}
 	return v, nil
+}
+
+// FormatVerdicts renders v as a verdict file, lines sorted by digest. It
+// refuses any v that ParseVerdicts would reject, so a written file always
+// parses back to v.
+func FormatVerdicts(v Verdicts) ([]byte, error) {
+	if v.Fetched.Unix() < 0 {
+		return nil, errors.New("verdicts: fetched before the epoch")
+	}
+	var b strings.Builder
+	b.WriteString(verdictMagic + "\n")
+	for i, val := range []string{v.Store, v.Trust, v.Tip, strconv.FormatInt(v.Fetched.Unix(), 10), v.Status} {
+		h := verdictFields[i]
+		if !h.set(&Verdicts{}, val) {
+			return nil, fmt.Errorf("verdicts: bad %s", h.key)
+		}
+		b.WriteString(h.key + ": " + val + "\n")
+	}
+	for digest := range v.Superseded {
+		if v.States[digest] != StateSuperseded {
+			return nil, errors.New("verdicts: sequence for a digest that is not superseded")
+		}
+	}
+	for _, digest := range slices.Sorted(maps.Keys(v.States)) {
+		state := v.States[digest]
+		if !sha256RE.MatchString(digest) {
+			return nil, errors.New("verdicts: bad digest")
+		}
+		switch seq := v.Superseded[digest]; {
+		case state == StateSuperseded && seq != 0 && seq <= 1<<63-1:
+			fmt.Fprintf(&b, "%s %s %d\n", digest, state, seq)
+		case slices.Contains(plainStates, state) && seq == 0:
+			fmt.Fprintf(&b, "%s %s\n", digest, state)
+		default:
+			return nil, fmt.Errorf("verdicts: bad state for %s", digest)
+		}
+	}
+	return []byte(b.String()), nil
 }
 
 // parseLine parses line n (1-based) into v.

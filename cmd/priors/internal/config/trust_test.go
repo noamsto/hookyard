@@ -598,6 +598,49 @@ func TestReadTrustAttestKeys(t *testing.T) {
 	}
 }
 
+func TestLoadTrustReadsOnlyTheTrustFile(t *testing.T) {
+	user := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(user, []byte("profile = \"x\"\nbogus = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PRIORS_CONFIG", user)
+
+	sk, skKey := skKeyLine(t)
+	body := strings.NewReplacer(
+		`id   = "noamsto-priors"`, "id   = \"noamsto-priors\"\nremote = \"git@h:p.git\"",
+		`id   = "factify-priors"`, "id   = \"factify-priors\"\nremote = \"git@h:w.git\"",
+		`trust_root    = "separate"`, "trust_root    = \"separate\"\nwork_names    = [\"acme\"]",
+	).Replace(validTrust) + attestEntry(sk, "YXR0ZXN0", "Y2hhbA==")
+	f := etcFS()
+	f[etcTrust] = file(body)
+
+	got, err := loadTrust(etcTrust, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Profile != "work" || got.TrustRoot != "separate" || got.TrustRootLabel != "separate" || got.TrustDigest != sha256Hex(body) {
+		t.Errorf("profile, trust root, digest = %q, %q, %q, %q", got.Profile, got.TrustRoot, got.TrustRootLabel, got.TrustDigest)
+	}
+	if !reflect.DeepEqual(got.WorkOrgs, []string{"github.com/factify-inc"}) || !reflect.DeepEqual(got.PersonalOrgs, []string{"github.com/noamsto"}) {
+		t.Errorf("orgs = %v, %v", got.WorkOrgs, got.PersonalOrgs)
+	}
+	if got.PersonalStoreID != "noamsto-priors" || got.PersonalStore != "/m/personal" || got.PersonalRemote != "git@h:p.git" ||
+		got.WorkStoreID != "factify-priors" || got.WorkStore != "/m/work" || got.WorkRemote != "git@h:w.git" {
+		t.Errorf("stores = %+v", got)
+	}
+	if len(got.AttestKeys) != 1 || !bytes.Equal(got.AttestKeys[0].Key.Marshal(), skKey.Marshal()) {
+		t.Errorf("AttestKeys = %+v", got.AttestKeys)
+	}
+	if want := []string{"acme"}; !reflect.DeepEqual(got.WorkNames(), want) {
+		t.Errorf("WorkNames() = %v, want exactly the floor %v", got.WorkNames(), want)
+	}
+
+	_, err = loadTrust("/etc/priors/absent.toml", etcFS())
+	if !errors.Is(err, ErrNoTrust) {
+		t.Errorf("missing trust file: %v, want ErrNoTrust", err)
+	}
+}
+
 func TestReadTrustRejectsAMalformedAttestKey(t *testing.T) {
 	sk, _ := skKeyLine(t)
 	rejected := map[string]struct{ entry, want string }{

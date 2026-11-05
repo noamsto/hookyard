@@ -1915,18 +1915,24 @@ listed in the [priors README](../priors/README.md#write-guard). The key's
 non-usability plus an unwritable allowlist, and an entry bound to the fact's
 identity — not the guard — is what makes attestation hold.
 
-**v0 builds no attestation**: no entry, no verdict job, no `priors verify`,
-no `priors attest`, no `priors trust check`. Its commit gate refuses every
-`confidence: reviewed` fact as `unattested-review`
-(`cmd/priors/internal/commit/commit.go`), which stays correct until the
-verdict job exists, since nothing can be validly reviewed yet. v0 does not
-wait on it: unflagged facts publish through the gates, and flagged ones stay
-`proposed`. The implementation is §10 workstream 5, and #173 implements it,
-the host classification and its off path included. The trust file itself,
-with the profile and org lists that §4.2's routing reads, under check 1's
-ownership test, lands with v0's routing (§10 workstreams 1–2); `cmd/priors`
-reads those lists from `config.toml` today, and moving them is
-[#174](https://github.com/noamsto/hookyard/issues/174).
+**Attestation is partly built.** Implemented: checks 1–6 at index time and
+checks 4–6 with check 3's binding in the commit gate (#237), the write guard
+(above), and the verdict job `priors verify` (#238). Still deferred: `priors
+attest` (#239), `priors trust check` (#240, stubbed in the job: it accepts
+every parsed allowlist key), deployment (#191), and HTTPS remotes with token
+or GitHub App credentials (the job takes SSH pins only and refuses others;
+§4.4's HTTPS text describes the intended design). The commit gate refuses a `confidence: reviewed` fact as
+`unattested-review` (`cmd/priors/internal/commit/commit.go`) off a separate
+trust root, and on one unless its entry passes checks 4–6 and check 3's
+binding; until `priors attest` exists only a hand-built entry can pass. v0
+does not wait on it: unflagged facts publish through the gates, and flagged
+ones stay `proposed`. The implementation is §10 workstream
+5, and #173 implements it, the host classification and its off path included.
+The trust file, with the
+profile and org lists that §4.2's routing reads, is implemented: `cmd/priors`
+reads them only from `/etc/priors/trust.toml` after the ownership walk
+([#174](https://github.com/noamsto/hookyard/issues/174),
+[#178](https://github.com/noamsto/hookyard/issues/178)).
 
 ### 4.5 Retrieval backend: one interface, three implementations
 

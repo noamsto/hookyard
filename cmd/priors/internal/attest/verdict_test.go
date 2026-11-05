@@ -23,6 +23,7 @@ const (
 	digestB = "2222222222222222222222222222222222222222222222222222222222222222"
 	digestC = "3333333333333333333333333333333333333333333333333333333333333333"
 	digestD = "4444444444444444444444444444444444444444444444444444444444444444"
+	digestE = "5555555555555555555555555555555555555555555555555555555555555555"
 )
 
 // verdictHeader is a valid header for testStore, one line per element.
@@ -105,6 +106,100 @@ func TestParseVerdictsHeaderValues(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if _, err := ParseVerdicts([]byte(raw)); err != nil {
 				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func validVerdicts() Verdicts {
+	return Verdicts{
+		Store: testStore, Trust: testTrustDigest, Tip: testTip, Status: "ok",
+		Fetched:    time.Unix(testFetched, 0),
+		States:     map[string]State{},
+		Superseded: map[string]uint64{},
+	}
+}
+
+func TestFormatVerdictsRoundTrip(t *testing.T) {
+	full := validVerdicts()
+	full.States = map[string]State{digestD: StateSuperseded, digestB: StateRevoked, digestA: StateReviewed, digestC: StateLapsed, digestE: StateSuperseded}
+	full.Superseded = map[string]uint64{digestD: 1<<63 - 1, digestE: 1}
+	sha256Tip := validVerdicts()
+	sha256Tip.Tip = digestA
+
+	cases := map[string]Verdicts{"full": full, "sha256 tip": sha256Tip}
+	for _, status := range verdictStatus {
+		v := validVerdicts()
+		v.Status = status
+		cases["header only "+status] = v
+	}
+	for name, v := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := FormatVerdicts(v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := ParseVerdicts(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Store != v.Store || got.Trust != v.Trust || got.Tip != v.Tip || got.Status != v.Status || !got.Fetched.Equal(v.Fetched) {
+				t.Errorf("header = %+v, want %+v", got, v)
+			}
+			if !maps.Equal(got.States, v.States) || !maps.Equal(got.Superseded, v.Superseded) {
+				t.Errorf("body = %v %v, want %v %v", got.States, got.Superseded, v.States, v.Superseded)
+			}
+			again, err := FormatVerdicts(v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(again) != string(raw) {
+				t.Errorf("second format differs:\n%s\nvs\n%s", raw, again)
+			}
+		})
+	}
+
+	raw, err := FormatVerdicts(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := verdictFile(
+		digestA+" reviewed",
+		digestB+" revoked",
+		digestC+" lapsed",
+		digestD+" superseded 9223372036854775807",
+		digestE+" superseded 1",
+	)
+	if string(raw) != want {
+		t.Errorf("bytes =\n%s\nwant\n%s", raw, want)
+	}
+}
+
+func TestFormatVerdictsRefuses(t *testing.T) {
+	body := func(states map[string]State, superseded map[string]uint64) func(*Verdicts) {
+		return func(v *Verdicts) { v.States, v.Superseded = states, superseded }
+	}
+	cases := map[string]func(*Verdicts){
+		"bad store":                   func(v *Verdicts) { v.Store = "Bad" },
+		"bad trust":                   func(v *Verdicts) { v.Trust = "abc" },
+		"bad tip":                     func(v *Verdicts) { v.Tip = "xyz" },
+		"bad status":                  func(v *Verdicts) { v.Status = "fine" },
+		"negative fetched":            func(v *Verdicts) { v.Fetched = time.Unix(-1, 0) },
+		"bad digest":                  body(map[string]State{"abc": StateReviewed}, nil),
+		"bad state":                   body(map[string]State{digestA: "maybe"}, nil),
+		"superseded without seq":      body(map[string]State{digestA: StateSuperseded}, nil),
+		"superseded seq zero":         body(map[string]State{digestA: StateSuperseded}, map[string]uint64{digestA: 0}),
+		"seq on a reviewed digest":    body(map[string]State{digestA: StateReviewed}, map[string]uint64{digestA: 3}),
+		"seq without a state":         body(nil, map[string]uint64{digestA: 3}),
+		"seq for another digest":      body(map[string]State{digestA: StateReviewed}, map[string]uint64{digestB: 3}),
+		"seq above the decimal range": body(map[string]State{digestA: StateSuperseded}, map[string]uint64{digestA: 1 << 63}),
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			v := validVerdicts()
+			mutate(&v)
+			if raw, err := FormatVerdicts(v); err == nil {
+				t.Errorf("formatted %q", raw)
 			}
 		})
 	}

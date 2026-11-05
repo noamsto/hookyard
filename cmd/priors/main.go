@@ -28,6 +28,7 @@ commands:
   search   search facts visible to this session
   lint     check a store against the lint rules and gates
   index    tier-1 session_start output; --write regenerates every MEMORY.md
+  verify   the verdict job for one store (run as priors-verify)
 
 With no command and an event envelope on stdin, priors runs as a hookyard
 exec handler.
@@ -73,6 +74,8 @@ func run(args []string, s streams) int {
 		return cmdLint(rest, s)
 	case "index":
 		return cmdIndex(rest, s)
+	case "verify":
+		return cmdVerify(rest, s)
 	default:
 		s.errText(usage)
 		return 1
