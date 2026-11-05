@@ -162,6 +162,7 @@ type out struct {
 	// tell whether it added one.
 	writesUnresolved int
 	dirs             []string
+	dseen            map[string]bool
 	dirLost          bool
 	// cdable are the names whose values a cd operand has added to dirs.
 	cdable     map[string]bool
@@ -386,7 +387,7 @@ func stdinOf(st *syntax.Stmt) (feed, bool) {
 
 // judge classifies every simple command and redirect of every parsed text.
 func (r *reader) judge() {
-	r.out = out{seen: map[Target]bool{}, oseen: map[Target]bool{}, own: map[string]bool{}, cdable: map[string]bool{}}
+	r.out = out{seen: map[Target]bool{}, oseen: map[Target]bool{}, dseen: map[string]bool{}, own: map[string]bool{}, cdable: map[string]bool{}}
 	for _, s := range r.scripts {
 		r.walk(s, func(n syntax.Node, f feed) {
 			switch n := n.(type) {
@@ -457,9 +458,11 @@ func (r *reader) dir(a arg) {
 		r.dirLost()
 		return
 	}
-	if !slices.Contains(r.out.dirs, a.text) {
-		r.out.dirs = append(r.out.dirs, a.text)
+	if r.out.dseen[a.text] {
+		return
 	}
+	r.out.dseen[a.text] = true
+	r.out.dirs = append(r.out.dirs, a.text)
 }
 
 func (r *reader) touches() int {
