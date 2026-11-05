@@ -39,6 +39,16 @@ var shellOwn = []string{
 	"HISTCMD", "MAPFILE", "COPROC", "IFS", "PS1", "PS2", "PS3", "PS4", "COLUMNS", "LINES",
 }
 
+// bashAssigns reports a name bash assigns whatever the host holds.
+func bashAssigns(name string) bool {
+	return name == "_" || strings.HasPrefix(name, "BASH") || strings.HasPrefix(name, "COMP_") ||
+		strings.HasPrefix(name, "READLINE_") || slices.Contains(shellOwn, name)
+}
+
+// bashDefaults are the names bash assigns only when the host leaves them
+// unset; HOME is the host's Home.
+var bashDefaults = []string{"PATH", "SHELL", "TERM", "MAILCHECK", "HISTFILE", "HISTSIZE", "HISTFILESIZE", "POSIXLY_CORRECT"}
+
 // render renders w in the host's environment (§4.1): literal text, quotes, a
 // ~ or ~user where bash expands one, brace expansion where the shell does it,
 // glob bytes kept as they are, and a plain $NAME of a host variable the
@@ -339,7 +349,7 @@ func (a *alt) param(p *syntax.ParamExp, quoted bool) (string, bool) {
 		return "", false
 	}
 	name := p.Param.Value
-	if !identifier(name) || name == "_" || slices.Contains(shellOwn, name) || strings.HasPrefix(name, "BASH") || a.r.settable(name) {
+	if !identifier(name) || bashAssigns(name) || a.r.settable(name) {
 		return "", false
 	}
 	v, set := a.r.host.Home, true
@@ -350,6 +360,9 @@ func (a *alt) param(p *syntax.ParamExp, quoted bool) (string, bool) {
 		}
 	}
 	if !set {
+		if slices.Contains(bashDefaults, name) {
+			return "", false
+		}
 		v = ""
 	}
 	if !quoted && (strings.ContainsAny(v, " \t\n*?[") || strings.Contains(v, "@(") || strings.Contains(v, "!(") ||

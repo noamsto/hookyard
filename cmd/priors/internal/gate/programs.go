@@ -1855,7 +1855,7 @@ func (r *reader) unknown(name string, words []arg, f feed) {
 	r.out.writes = true
 	r.out.ran = true
 	call := 0
-	if opts := optionValues(words); len(opts) > 0 {
+	if opts := r.optionValues(words); len(opts) > 0 {
 		r.out.options = append(r.out.options, opts)
 		call = len(r.out.options)
 	}
@@ -2010,28 +2010,48 @@ func (r *reader) boundValues(b bound) []boundValue {
 	return out
 }
 
-// tildeFields are s's fields between pathBreaks, each that starts a ~
-// element also with the home in its place, as bash may expand it there. One
-// under a HOME the command may set is an unresolved write.
+// tildeHome is f, which starts with ~, with its tilde-prefix expanded as a
+// program may, and false when none is: ~ under a HOME the command may set is
+// an unresolved write, and ~+, ~- and ~N name dirs no program expands.
+func (r *reader) tildeHome(f string) (string, bool) {
+	user, rest := f[1:], ""
+	if k := strings.IndexByte(user, '/'); k >= 0 {
+		user, rest = user[:k], user[k:]
+	}
+	switch {
+	case user == "":
+		if r.settable("HOME") {
+			r.unresolved(fmt.Sprintf("writes through %q", f))
+			return "", false
+		}
+		return r.host.Home + rest, true
+	case strings.HasPrefix(user, "+"), strings.HasPrefix(user, "-"), digits(user), r.host.Users == nil:
+		return "", false
+	}
+	home, ok := r.host.Users(user)
+	return home + rest, ok
+}
+
+// tildeFields are s's fields between pathBreaks, each that starts with ~
+// also with its tilde-prefix expanded, as a program may expand it there.
 func (r *reader) tildeFields(s string) []string {
 	fields := PathFields(s)
 	for _, f := range fields {
-		if f != "~" && !strings.HasPrefix(f, "~/") {
+		if !strings.HasPrefix(f, "~") {
 			continue
 		}
-		if r.settable("HOME") {
-			r.unresolved(fmt.Sprintf("writes through %q", f))
-			continue
+		if home, ok := r.tildeHome(f); ok {
+			fields = append(fields, home)
 		}
-		fields = append(fields, r.host.Home+f[1:])
 	}
 	return fields
 }
 
 // optionValues are the rendered values an unknown program's options may
 // take: a long option's after =, each suffix of a short-option cluster from
-// its third byte, and the word after an option.
-func optionValues(words []arg) []string {
+// its third byte, and the word after an option, each that starts with ~ also
+// expanded.
+func (r *reader) optionValues(words []arg) []string {
 	var out []string
 	for i, a := range words {
 		w := a.text
@@ -2052,13 +2072,21 @@ func optionValues(words []arg) []string {
 			out = append(out, words[i+1].text)
 		}
 	}
+	for _, v := range out {
+		if !strings.HasPrefix(v, "~") {
+			continue
+		}
+		if home, ok := r.tildeHome(v); ok {
+			out = append(out, home)
+		}
+	}
 	return slices.DeleteFunc(out, func(v string) bool { return v == "" })
 }
 
 // operandTargets records an unknown program's operand: the whole word, each
 // field between pathBreaks, a long option's value, and each suffix of a
-// short-option cluster from its third byte. call indexes the call's option
-// values.
+// short-option cluster from its third byte, with the first field of one
+// that starts with ~ expanded. call indexes the call's option values.
 func (r *reader) operandTargets(w string, call int) {
 	r.target(Target{Text: w, Call: call})
 	for _, f := range r.tildeFields(w) {
@@ -2071,6 +2099,12 @@ func (r *reader) operandTargets(w string, call int) {
 		for k := 2; k < len(w) && !r.over(); k++ {
 			if r.spend(len(w) - k) {
 				r.target(Target{Text: w[k:], From: w, Call: call})
+				if w[k] != '~' {
+					continue
+				}
+				if home, ok := r.tildeHome(PathFields(w[k:])[0]); ok {
+					r.target(Target{Text: home, From: w, Call: call})
+				}
 			}
 		}
 	}
@@ -2142,17 +2176,31 @@ func (r *reader) cd(name string, args []arg) {
 // besides itself: cdable_vars, which a shopt, a shell's options or the host
 // may set however they spell it, takes it to the variable's value. That is
 // the host's value and each value the command binds to the name; one the
-// reader cannot tell loses the dir. A setter that may set any name makes
-// CDPATH settable, which loses the dir before this.
+// reader cannot tell loses the dir, as does a name bash assigns itself or,
+// unset on the host, a default it assigns. A setter that may set any name
+// makes CDPATH settable, which loses the dir before this.
 func (r *reader) cdable(name string) {
 	if r.out.cdable[name] {
 		return
 	}
 	r.out.cdable[name] = true
-	if r.host.Env != nil {
-		if v, ok := r.host.Env(name); ok && v != "" {
+	if bashAssigns(name) {
+		r.dirLost()
+		return
+	}
+	switch {
+	case name == "HOME":
+		r.dir(arg{text: r.host.Home, ok: true})
+	case r.host.Env != nil:
+		v, ok := r.host.Env(name)
+		if !ok && slices.Contains(bashDefaults, name) {
+			r.dirLost()
+		}
+		if ok && v != "" {
 			r.dir(arg{text: v, ok: true})
 		}
+	case slices.Contains(bashDefaults, name):
+		r.dirLost()
 	}
 	if r.named == nil {
 		r.named = map[string][]boundValue{}
