@@ -134,6 +134,9 @@ type call struct {
 	// want is a piece of the deny reason that names the rule the case
 	// exercises; the allow tables leave it empty.
 	want string
+	// caseFoldedWant replaces want on a case-insensitive filesystem, where the
+	// folded path resolves to the store and a precise store rule denies it first.
+	caseFoldedWant string
 	// cwd is relative to the home; "" is ~/work.
 	cwd   string
 	tool  string
@@ -152,6 +155,18 @@ func wantDenied(t *testing.T, c call, reason string) {
 	case !strings.Contains(reason, c.want):
 		t.Errorf("denied %s %s by another rule\n got: %s\nwant: ...%s...", c.tool, c.input, reason, c.want)
 	}
+}
+
+// caseInsensitiveFS reports whether the test's temp dir resolves an upper-cased
+// name to a file written in lower case, as macOS's default APFS does.
+func caseInsensitiveFS(t *testing.T) bool {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "probe"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := os.Stat(filepath.Join(dir, "PROBE"))
+	return err == nil
 }
 
 func (sb sandbox) run(t *testing.T, c call) string {
@@ -218,7 +233,7 @@ func TestShellDenies(t *testing.T) {
 		{name: "backslashes", want: "/notes/MEMORY.md, inside the personal store", input: bash(`echo x > ~/no\tes/MEMORY\.md`)},
 		{name: "ansi c", want: "/work/.attest/e, inside an .attest dir", input: bash(`echo x > ~/work/$'\x2eattest'/e`)},
 		{name: "braces", want: "/notes/facts/n.md, inside the personal store", input: bash("echo x | tee ~/{work,notes}/facts/n.md")},
-		{name: "case folded token", want: "cannot resolve, and names a guarded path", input: bash(`echo x > "$(echo ~/NOTES/memory.md | tr A-Z a-z)"`)},
+		{name: "case folded token", want: "cannot resolve, and names a guarded path", caseFoldedWant: "inside the personal store", input: bash(`echo x > "$(echo ~/NOTES/memory.md | tr A-Z a-z)"`)},
 		{name: "assigned variable", want: "which reaches into the personal store", input: bash("N=notes; echo x > ~/$N/MEMORY.md")},
 		{name: "default expansion", want: "cannot resolve, and names a guarded path", input: bash("echo x > ${HOME:-/x}/notes/MEMORY.md")},
 		{name: "extglob", want: "/+(no)tes/f, inside the personal store", input: bash("shopt -s extglob; echo x > ~/+(no)tes/f")},
@@ -542,6 +557,9 @@ func TestShellDenies(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if c.linuxOnly && runtime.GOOS != "linux" {
 				t.Skipf("%s has no such path", runtime.GOOS)
+			}
+			if c.caseFoldedWant != "" && caseInsensitiveFS(t) {
+				c.want = c.caseFoldedWant
 			}
 			if c.tool == "" {
 				c.tool = "Bash"
