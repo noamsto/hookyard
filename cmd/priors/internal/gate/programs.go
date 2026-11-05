@@ -1972,13 +1972,13 @@ func (r *reader) opaqueOperand(a arg, call int, env bool) {
 			named = named || strings.Contains(t, "/") && replacesProgram(t)
 		}
 	}
-	if env {
-		r.out.replaces = replaces || named
-	}
 	if !env {
 		r.opaque(a)
-	} else if a.text != "" {
-		r.opaqueAt(a, strings.Contains(a.text, "/"))
+	} else {
+		r.out.replaces = replaces || named
+		if a.text != "" {
+			r.opaqueAt(a, strings.Contains(a.text, "/"))
+		}
 	}
 	if len(a.text) > 2 && a.text[0] == '-' && a.text[1] != '-' {
 		for k := 2; k < len(a.text) && !r.over(); k++ {
