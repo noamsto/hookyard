@@ -17,7 +17,7 @@ import (
 
 const recordVersion = 1
 
-// Record is the per-name record (spec R6): the job's monotonic memory of
+// Record is the per-name record (memory-layer §4.4): the job's monotonic memory of
 // every well-formed entry it has walked. It only grows, so a mirror reset or
 // a remote rewrite cannot make a superseded, tied or lapsed entry pass again.
 type Record struct {

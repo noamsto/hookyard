@@ -17,7 +17,7 @@ type tipEntry struct {
 	Raw  []byte
 }
 
-// Lines computes the verdict lines (spec R8) from the tip's entries, the
+// Lines computes the verdict lines (memory-layer §4.4) from the tip's entries, the
 // record and the current allowlist: the state per entry digest, and the
 // record's highest sequence for each superseded digest. Only a tip entry that
 // passes checks 4–6 against keys can read reviewed; non-tip lines are only

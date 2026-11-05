@@ -32,8 +32,8 @@ func behind(soft context.Context, reason string, w walkResult) outcome {
 	return outcome{res: Result{Status: StatusBehind, Reason: reason}, w: w}
 }
 
-// Run fetches the store, walks what is new and writes the verdict file (spec
-// R3–R9). Once gating has passed, every failure ends the run behind with a
+// Run fetches the store, walks what is new and writes the verdict file
+// (memory-layer §4.4). Once gating has passed, every failure ends the run behind with a
 // header-only file, so content an agent pushed can never keep an old reviewed
 // by making the job error out; only a failure to write the state dir itself
 // is returned.

@@ -55,7 +55,7 @@ type walker struct {
 }
 
 // walk walks the unwalked commits reachable from the tip refs, parents first,
-// applying checks 7 and 8 to r (spec R5–R7). It stops after limit commits or
+// applying checks 7 and 8 to r (memory-layer §4.4). It stops after limit commits or
 // once soft is done; the commits walked by then are fully applied, so the
 // result can be checkpointed.
 func (m mirror) walk(soft context.Context, cf *catFile, r *Record, storeID string, limit int) (walkResult, error) {
