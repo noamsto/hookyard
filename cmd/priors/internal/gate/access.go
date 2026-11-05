@@ -528,8 +528,10 @@ func (r *reader) name(s string, whole bool) {
 	}
 }
 
+// subName records a path token inside a word, unless it is only slashes
+// (`//` in a jq or awk program).
 func (r *reader) subName(t string) {
-	if t != "/" {
+	if strings.Trim(t, "/") != "" {
 		r.addName(t)
 	}
 }

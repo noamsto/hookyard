@@ -21,6 +21,13 @@ var (
 		"tac", "id", "whoami", "uname", "column", "grep", "egrep", "fgrep", "jq", "cd", "pushd",
 		"popd", "printf", "priors", "crew",
 	}
+	// builtins write no file: the variables they set are the pre-pass's, and
+	// their redirects are targets like any call's.
+	builtins = []string{
+		"set", "shift", "exit", "return", "break", "continue", "export", "local", "declare", "typeset",
+		"readonly", "unset", "read", "mapfile", "readarray", "getopts", "let", "shopt", "wait", "umask",
+		"sleep",
+	}
 	// scriptShells run a script: their -c value, a file, or stdin.
 	scriptShells = []string{"bash", "sh", "zsh", "dash", "ksh", "ash"}
 	awks         = []string{"awk", "gawk", "mawk", "nawk"}
@@ -399,7 +406,7 @@ const (
 func classify(name string, args []arg) verdict {
 	unknown := verdict{kind: unknownKind}
 	switch {
-	case slices.Contains(flagFree, name):
+	case slices.Contains(flagFree, name), slices.Contains(builtins, name):
 		return verdict{}
 	case slices.Contains(awks, name):
 		if awkReads(args) {
@@ -1485,6 +1492,32 @@ func trapAction(args []arg) (arg, bool) {
 	return args[i], true
 }
 
+// mapfileCallback reports a mapfile call that may be given -C, whose value
+// bash runs as code. A word that does not render may be that flag.
+func mapfileCallback(args []arg) bool {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case !a.ok:
+			return true
+		case a.text == "--", len(a.text) < 2 || a.text[0] != '-':
+			return false
+		}
+		for k := 1; k < len(a.text); k++ {
+			if a.text[k] == 'C' {
+				return true
+			}
+			if strings.IndexByte("dnOsuc", a.text[k]) >= 0 {
+				if k == len(a.text)-1 {
+					i++
+				}
+				break
+			}
+		}
+	}
+	return false
+}
+
 // execs returns the commands find's -exec family or fd's -x and -X run,
 // each up to its ; or +.
 func execs(name string, args []arg) [][]arg {
@@ -1506,13 +1539,20 @@ func execs(name string, args []arg) [][]arg {
 	return out
 }
 
+// splitScript is env -S's string as the script it runs: env splits it into
+// its own arguments, so its flags (-C) are env's.
+func splitScript(a arg) arg {
+	a.text = "env " + a.text
+	return a
+}
+
 // scriptsOf returns the literal scripts a call runs: a shell's -c script,
 // heredoc or here-string, eval's words, trap's action, env -S's string, and
 // those of a shell run by find -exec or fd -x.
 func scriptsOf(c call, f feed) []string {
 	var out []string
 	if c.split != nil && isLiteral(c.split.word) && c.split.ok {
-		out = append(out, c.split.text)
+		out = append(out, splitScript(*c.split).text)
 	}
 	if c.lost || c.at >= len(c.argv) || !c.argv[c.at].ok {
 		return out
@@ -1568,7 +1608,7 @@ func (r *reader) call(ce *syntax.CallExpr, f feed) {
 		return
 	}
 	if c.split != nil {
-		r.nested(*c.split, "env runs a split string built at run time")
+		r.nested(splitScript(*c.split), "env runs a split string built at run time")
 		if c.at < len(argv) {
 			r.unknown("env", argv[c.at:], f)
 		}
@@ -1647,6 +1687,10 @@ func (r *reader) call(ce *syntax.CallExpr, f feed) {
 		r.unresolved(fmt.Sprintf("runs %s on a script file", name))
 		r.unknown(name, args, f)
 		return
+	case "mapfile", "readarray":
+		if mapfileCallback(args) {
+			r.codeOut("mapfile runs a callback as code")
+		}
 	}
 	v := classify(name, args)
 	if r.withdrawn && v.kind != unknownKind {
@@ -1975,7 +2019,7 @@ func (r *reader) clusterDirs(args []arg, values, long string, minLen int) {
 // allowlisted are the names a write may replace to change what a call the
 // reader trusts runs.
 var allowlisted = func() []string {
-	names := slices.Concat(flagFree, awks, scriptShells, []string{"date", "diff", "sort", "uniq", "sed", "rg", "fd", "find", "git", "gh", "glab", "dd"})
+	names := slices.Concat(flagFree, builtins, awks, scriptShells, []string{"date", "diff", "sort", "uniq", "sed", "rg", "fd", "find", "git", "gh", "glab", "dd"})
 	for w := range wrapperFlags {
 		names = append(names, w)
 	}
