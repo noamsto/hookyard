@@ -165,9 +165,6 @@ type judge struct {
 	parsed int
 	seen   map[string]bool
 	vars   map[string]string
-	// host is the real environment ShellAccess renders paths in; nil for
-	// gate 2, which judges names and never needs a real path.
-	host *Host
 }
 
 // env is a stand-in for the unknown environment a command runs in.
@@ -183,9 +180,6 @@ const (
 	// assigned sets each variable the command assigns to its first assigned
 	// value, and the rest as unset does.
 	assigned
-	// real is assigned with every other variable read from the host's
-	// environment; only ShellAccess renders in it.
-	real
 )
 
 var envs = []env{unset, placeholder, assigned}
@@ -347,16 +341,13 @@ func walkBounded(root syntax.Node, f func(syntax.Node) bool) {
 }
 
 // assign records values, joined by spaces, as name's, unless name already has
-// one. The values are rendered in the unset environment, or the host's for
-// ShellAccess, so one assignment never feeds another.
+// one. The values are rendered in the unset environment, so one assignment
+// never feeds another.
 func (j *judge) assign(name string, values ...*syntax.Word) {
 	if _, ok := j.vars[name]; ok || len(values) == 0 || values[0] == nil {
 		return
 	}
-	r := &render{spent: &j.parsed, host: j.host}
-	if j.host != nil {
-		r.env = real
-	}
+	r := &render{spent: &j.parsed}
 	rendered := make([]string, len(values))
 	for i, v := range values {
 		rendered[i] = r.operand(v, false)
@@ -473,8 +464,8 @@ func (j *judge) word(w *syntax.Word, text string, depth int) string {
 // is the one step whose output can outgrow a word's source, so its whole cost
 // is paid before any of it is built.
 func (j *judge) fields(e env, text string, words ...*syntax.Word) ([]string, string) {
-	r := &render{env: e, spent: &j.parsed, host: j.host}
-	if e == assigned || e == real {
+	r := &render{env: e, spent: &j.parsed}
+	if e == assigned {
 		r.vars = j.vars
 	}
 	for _, w := range words {
@@ -605,7 +596,6 @@ func braceAlts(parts []syntax.WordPart) [][]syntax.WordPart {
 type render struct {
 	env    env
 	vars   map[string]string
-	host   *Host
 	fields []string
 	cur    strings.Builder
 	// whole renders an operand, split into fields only where it is used.
@@ -709,23 +699,10 @@ func unescape(v string, quoted bool) string {
 }
 
 // tilde expands a leading ~ or ~user. Gate 2 needs no real home, only one that
-// keeps the word's last element; ShellAccess takes the host's.
+// keeps the word's last element.
 func (r *render) tilde(v string) string {
-	user, rest, slash := strings.Cut(v[1:], "/")
-	if r.host == nil {
-		return "/home/" + rest
-	}
-	home, ok := r.host.Home, user == ""
-	if !ok && r.host.Users != nil {
-		home, ok = r.host.Users(user)
-	}
-	switch {
-	case !ok:
-		return v
-	case slash:
-		return home + "/" + rest
-	}
-	return home
+	_, rest, _ := strings.Cut(v[1:], "/")
+	return "/home/" + rest
 }
 
 // operand renders w as one string, as an operand or assignment value is
@@ -734,7 +711,7 @@ func (r *render) operand(w *syntax.Word, quoted bool) string {
 	if w == nil {
 		return ""
 	}
-	sub := &render{env: r.env, vars: r.vars, host: r.host, whole: true, spent: r.spent}
+	sub := &render{env: r.env, vars: r.vars, whole: true, spent: r.spent}
 	sub.parts(w.Parts, quoted)
 	return sub.cur.String()
 }
@@ -784,21 +761,12 @@ func (r *render) param(p *syntax.ParamExp, quoted bool) string {
 }
 
 // value is a variable's stand-in: its first assigned value in the assigned
-// environment; the host's HOME, and in the real environment its other
-// variables, for ShellAccess; bash's defaults for HOME, IFS and PS4; and a
-// neutral word for the special parameters, the variables bash always sets, and
-// in the placeholder environment every other one.
+// environment; bash's defaults for HOME, IFS and PS4; and a neutral word for
+// the special parameters, the variables bash always sets, and in the
+// placeholder environment every other one.
 func (r *render) value(name string) (string, bool) {
 	if v, ok := r.vars[name]; ok {
 		return v, true
-	}
-	if h := r.host; h != nil {
-		if name == "HOME" {
-			return h.Home, true
-		}
-		if v, ok := h.lookup(name); ok && r.env == real {
-			return v, true
-		}
 	}
 	switch {
 	case name == "HOME":
