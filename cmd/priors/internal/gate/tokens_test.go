@@ -30,7 +30,11 @@ func TestPathTokens(t *testing.T) {
 		}
 	}
 	decoys := strings.Repeat("/x ", 300) + "/notes/MEMORY.md"
-	if got := PathTokens(decoys); len(got) != 301 || got[300] != "/notes/MEMORY.md" {
-		t.Errorf("PathTokens of 300 decoys ends %q after %d tokens", got[len(got)-1], len(got))
+	got := PathTokens(decoys)
+	if len(got) != 301 {
+		t.Fatalf("PathTokens of 300 decoys gave %d tokens, want 301", len(got))
+	}
+	if got[300] != "/notes/MEMORY.md" {
+		t.Errorf("PathTokens of 300 decoys ends %q", got[300])
 	}
 }

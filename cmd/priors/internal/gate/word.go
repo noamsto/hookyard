@@ -80,7 +80,7 @@ func (r *reader) render(w *syntax.Word, host bool) rendered {
 
 // args renders words into a command's arguments.
 func (r *reader) args(words []*syntax.Word, host bool) []arg {
-	var out []arg
+	out := []arg{}
 	for _, w := range words {
 		src := source(r.text, w)
 		rw := r.render(w, host)

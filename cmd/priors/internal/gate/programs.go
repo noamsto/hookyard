@@ -125,6 +125,9 @@ type hit struct {
 // indexes of the operands, and where a non-permuting read stopped; ok is
 // false for an option f does not allow, or a word it cannot tell from one.
 func (f *flags) read(args []arg, from int) (hits []hit, operands []int, next int, ok bool) {
+	if f == nil {
+		return nil, nil, 0, false
+	}
 	i := from
 	stop := func() (bool, int) {
 		if f.permute {
@@ -235,7 +238,7 @@ func (f *flags) long1(name string) (full string, kind int, known bool) {
 	}
 	lists := [][]string{f.long, f.longValue, f.longOptional, f.badLong}
 	var matches []string
-	var kinds []int
+	kinds := []int{}
 	for k, list := range lists {
 		for _, l := range list {
 			switch {

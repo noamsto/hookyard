@@ -12,7 +12,7 @@ func PathFields(s string) []string {
 // hold a slash, start with ~ or name .attest. A token starting with - is also
 // taken from its first slash or ~ on, as `-o/path` glues one to a flag.
 func PathTokens(s string) []string {
-	var out []string
+	out := []string{}
 	for _, t := range PathFields(s) {
 		if !strings.ContainsAny(t, "/~") && !strings.Contains(t, ".attest") {
 			continue
