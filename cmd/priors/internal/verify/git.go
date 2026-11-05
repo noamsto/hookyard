@@ -76,15 +76,15 @@ func (m mirror) cmd(ctx context.Context, args ...string) *exec.Cmd {
 }
 
 // run returns stdout; a failure carries the trimmed stderr.
-func (m mirror) run(ctx context.Context, args ...string) (string, error) {
-	cmd := m.cmd(ctx, args...)
+func (m mirror) run(ctx context.Context, sub string, args ...string) (string, error) {
+	cmd := m.cmd(ctx, append([]string{sub}, args...)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
 		if msg := short(stderr.String()); msg != "" {
-			return "", fmt.Errorf("git %s: %w: %s", args[0], err, msg)
+			return "", fmt.Errorf("git %s: %w: %s", sub, err, msg)
 		}
-		return "", fmt.Errorf("git %s: %w", args[0], err)
+		return "", fmt.Errorf("git %s: %w", sub, err)
 	}
 	return stdout.String(), nil
 }

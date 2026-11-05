@@ -75,7 +75,7 @@ func TestServeQueuesOneRun(t *testing.T) {
 	for _, c := range conns {
 		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
 		n, err := c.Read(make([]byte, 1))
-		if n != 0 || !(errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET)) {
+		if n != 0 || (!errors.Is(err, io.EOF) && !errors.Is(err, syscall.ECONNRESET)) {
 			t.Fatalf("client read = %d, %v; want 0 and EOF or ECONNRESET", n, err)
 		}
 	}

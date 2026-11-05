@@ -198,7 +198,11 @@ func (w *walker) commit(oid string, parents []string) error {
 			delete(live, d)
 			continue
 		}
-		ok, err := w.holds(tree, w.r.Entries[d])
+		t, found := w.r.Entries[d]
+		if !found || t == nil {
+			continue
+		}
+		ok, err := w.holds(tree, t)
 		if err != nil {
 			return err
 		}
@@ -336,7 +340,11 @@ func (w *walker) boundaryLive(p string) (map[string]bool, error) {
 			ancestors[c] = true
 		}
 		for _, d := range cands {
-			if slices.ContainsFunc(w.r.Entries[d].Intros, func(c string) bool { return ancestors[c] }) {
+			t, found := w.r.Entries[d]
+			if !found || t == nil {
+				continue
+			}
+			if slices.ContainsFunc(t.Intros, func(c string) bool { return ancestors[c] }) {
 				live[d] = true
 			}
 		}

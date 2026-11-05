@@ -3,6 +3,7 @@ package verify
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -145,7 +146,7 @@ func TestCatFileReadsTreesAndCapsBlobs(t *testing.T) {
 	if err != nil || string(got) != "small" {
 		t.Fatalf("blob(small) = %q, %v", got, err)
 	}
-	if _, err := cf.blob(bigOID, 4096); err != errTooBig {
+	if _, err := cf.blob(bigOID, 4096); !errors.Is(err, errTooBig) {
 		t.Fatalf("blob(big) err = %v, want errTooBig", err)
 	}
 	// The process stays in sync after a refused blob.

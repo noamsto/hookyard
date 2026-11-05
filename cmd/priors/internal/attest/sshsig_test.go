@@ -101,7 +101,8 @@ func TestVerifyEntryFails(t *testing.T) {
 	tampered.Signed[len(tampered.Signed)-2] ^= 1
 
 	corrupt := good
-	corrupt.Signature = append([]byte(nil), good.Signature...)
+	corrupt.Signature = make([]byte, len(good.Signature))
+	copy(corrupt.Signature, good.Signature)
 	// The last five bytes are the flags and counter; the byte before them
 	// ends the ed25519 signature.
 	corrupt.Signature[len(corrupt.Signature)-6] ^= 1

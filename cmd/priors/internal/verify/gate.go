@@ -86,13 +86,14 @@ func Prepare(cfg config.Config, storeID, credential string, env Env) (*Job, erro
 }
 
 func storeRemote(cfg config.Config, id string) (string, error) {
-	var remote string
-	switch {
-	case id == "":
+	if id == "" {
 		return "", errors.New("store id is empty")
-	case id == cfg.PersonalStoreID:
+	}
+	var remote string
+	switch id {
+	case cfg.PersonalStoreID:
 		remote = cfg.PersonalRemote
-	case id == cfg.WorkStoreID:
+	case cfg.WorkStoreID:
 		remote = cfg.WorkRemote
 	default:
 		return "", fmt.Errorf("unknown store %s", id)
@@ -129,16 +130,16 @@ func ensurePrivate(private string) error {
 
 // Lock takes the store's run lock; the release func closes the descriptor.
 func Lock(dir string) (release func(), err error) {
-	f, err := os.OpenFile(filepath.Join(dir, "private", "lock"), os.O_RDWR|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(filepath.Join(dir, "private", "lock"), os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // dir is the job's own store dir, named by the trust file's validated id
 	if err != nil {
 		return nil, err
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
+		_ = f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
 			return nil, errors.New("another run holds the lock")
 		}
 		return nil, err
 	}
-	return func() { f.Close() }, nil
+	return func() { _ = f.Close() }, nil
 }

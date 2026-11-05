@@ -57,7 +57,7 @@ func SystemdListener() (Listener, error) {
 		return nil, nil
 	}
 	f := os.NewFile(3, "trigger")
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	fl, err := net.FileListener(f)
 	if err != nil {
 		return nil, fmt.Errorf("socket activation: %w", err)
