@@ -259,21 +259,21 @@ func overlay(dir string, files map[string][]byte) error {
 // the checkout's objects alone (objectsGit), so parent is read with replace
 // objects off and no checkout config applies. The commit is never signed: a
 // signing program named by the checkout's config would be a second PIN prompt
-// right after the attest's, one an agent controls. It returns the commit, or a
-// warning naming what stopped it; a commit with a warning was made but the
-// checkout's index was not reset to it.
-func Files(ctx context.Context, dir, parent string, files map[string][]byte, msg string) (commit, warning string) {
+// right after the attest's, one an agent controls. ident is the author and
+// committer environment (Identity). It returns the commit, or a warning naming
+// what stopped it; a commit with a warning was made but the checkout's index
+// was not updated to it.
+func Files(ctx context.Context, dir, parent string, ident []string, files map[string][]byte, msg string) (commit, warning string) {
 	git, err := objectsGit(ctx, dir)
 	if err != nil {
 		return "", fmt.Sprintf("nothing committed in %s: %v", dir, err)
 	}
-	ident, warning := identity(ctx, dir)
-	if warning != "" {
-		return "", warning
-	}
 	beforeStage()
+	var staged map[string]string
 	tree, warning := gatedTree(git, dir, parent, func(env []string) (map[string]string, string) {
-		return stageBytes(git, env, files)
+		var w string
+		staged, w = stageBytes(git, env, files)
+		return staged, w
 	})
 	if warning != "" {
 		return "", warning
@@ -284,11 +284,29 @@ func Files(ctx context.Context, dir, parent string, files map[string][]byte, msg
 	if commit, warning = commitTree(ctx, git, dir, parent, tree, msg, false, ident); warning != "" {
 		return "", warning
 	}
-	rels := slices.Sorted(maps.Keys(files))
-	if out, err := runGit(ctx, dir, gitTimeout, strings.NewReader(strings.Join(rels, "\x00")), "reset", "-q", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
-		return commit, gitWarning("git reset", out, err)
+	return commit, syncIndex(ctx, git, dir, staged)
+}
+
+// syncIndex points the checkout index's entries for staged's paths at the
+// blobs HEAD now holds, or git status would show them staged as reverting the
+// commit. It writes through git, objectsGit, which holds none of the
+// checkout's config: any index write re-hashes the files of racily clean
+// entries, --no-refresh or not, and the checkout's config could name a clean
+// filter or fsmonitor for that to run, right after the PIN prompt.
+func syncIndex(ctx context.Context, git gitFunc, dir string, staged map[string]string) (warning string) {
+	gitDir, err := runGit(ctx, dir, gitTimeout, nil, "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return gitWarning("git rev-parse", gitDir, err)
 	}
-	return commit, ""
+	var info strings.Builder
+	for _, rel := range slices.Sorted(maps.Keys(staged)) {
+		info.WriteString(staged[rel] + "\t" + rel + "\x00")
+	}
+	env := []string{"GIT_INDEX_FILE=" + filepath.Join(strings.TrimSpace(gitDir), "index")}
+	if out, err := git(gitTimeout, env, strings.NewReader(info.String()), "update-index", "-z", "--index-info"); err != nil {
+		return gitWarning("git update-index", out, err)
+	}
+	return ""
 }
 
 // pushProtocol is the one transport PushBranch lets git use, a test seam.
@@ -352,25 +370,25 @@ func objectsGit(ctx context.Context, dir string) (gitFunc, error) {
 	}, nil
 }
 
-// identity is the author and committer environment for a commit objectsGit
-// makes, from the checkout's user.name and user.email; git config --get runs
-// no program.
-func identity(ctx context.Context, dir string) (env []string, warning string) {
+// Identity is the author and committer environment for a commit Files makes,
+// from the checkout's user.name and user.email; git config --get runs no
+// program.
+func Identity(ctx context.Context, dir string) ([]string, error) {
 	var who [2]string
 	for i, key := range []string{"user.name", "user.email"} {
 		out, err := runGit(ctx, dir, gitTimeout, nil, "config", "--get", key)
 		if exitsOne(err) {
-			return nil, fmt.Sprintf("nothing committed in %s: no git identity (user.name/user.email) configured for the store", dir)
+			return nil, errors.New("no git identity (user.name/user.email) configured for the store")
 		}
 		if err != nil {
-			return nil, gitWarning("git config", out, err)
+			return nil, errors.New(gitWarning("git config", out, err))
 		}
 		who[i] = strings.TrimSpace(out)
 	}
 	return []string{
 		"GIT_AUTHOR_NAME=" + who[0], "GIT_AUTHOR_EMAIL=" + who[1],
 		"GIT_COMMITTER_NAME=" + who[0], "GIT_COMMITTER_EMAIL=" + who[1],
-	}, ""
+	}, nil
 }
 
 // leftNote names up to three of the paths a commit left out, content-free.
@@ -1148,11 +1166,13 @@ func runGitEnv(ctx context.Context, dir string, env []string, timeout time.Durat
 }
 
 // runGitExact runs git in dir with exactly env as its environment. No hook
-// runs: one could stage, amend or move a ref after the gates passed.
+// runs: one could stage, amend or move a ref after the gates passed. Nor does
+// a core.fsmonitor program the checkout names, which git starts on an index
+// refresh with the user's environment and terminal.
 func runGitExact(ctx context.Context, dir string, env []string, timeout time.Duration, stdin io.Reader, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := tools.Command(ctx, tools.Git, append([]string{"-C", dir, "-c", "core.hooksPath=/dev/null"}, args...)...)
+	cmd := tools.Command(ctx, tools.Git, append([]string{"-C", dir, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"}, args...)...)
 	cmd.Env = env
 	cmd.Stdin = stdin
 	cmd.WaitDelay = waitDelay

@@ -100,7 +100,7 @@ func TestFilesCommitsTheInMemoryBytes(t *testing.T) {
 	beforeStage = func() { writeFile(t, filepath.Join(fx.dir(), rel), marshal(t, linkyFact("good-fact"))) }
 	t.Cleanup(func() { beforeStage = func() {} })
 
-	c, w := Files(context.Background(), fx.dir(), base, map[string][]byte{rel: want}, "attest: x #1")
+	c, w := Files(context.Background(), fx.dir(), base, ident(t, fx.dir()), map[string][]byte{rel: want}, "attest: x #1")
 	if w != "" || c == "" {
 		t.Fatalf("Files = %q, %q", c, w)
 	}
@@ -131,7 +131,7 @@ func TestFilesStaleParentCommitsNothing(t *testing.T) {
 	fx.commitAll(t, "moves HEAD")
 	moved := head(t, fx.dir())
 
-	c, w := Files(context.Background(), fx.dir(), stale, map[string][]byte{"_global/good-fact.md": marshal(t, cleanFact("good-fact"))}, "attest: x #1")
+	c, w := Files(context.Background(), fx.dir(), stale, ident(t, fx.dir()), map[string][]byte{"_global/good-fact.md": marshal(t, cleanFact("good-fact"))}, "attest: x #1")
 	if c != "" || w == "" {
 		t.Errorf("Files = %q, %q, want a warning and no commit", c, w)
 	}
@@ -159,7 +159,7 @@ func TestFilesNeverSigns(t *testing.T) {
 	git(t, fx.dir(), "config", "user.signingkey", signer)
 	base := head(t, fx.dir())
 
-	c, w := Files(context.Background(), fx.dir(), base, map[string][]byte{"_global/good-fact.md": marshal(t, cleanFact("good-fact"))}, "attest: x #1")
+	c, w := Files(context.Background(), fx.dir(), base, ident(t, fx.dir()), map[string][]byte{"_global/good-fact.md": marshal(t, cleanFact("good-fact"))}, "attest: x #1")
 	if c == "" || w != "" {
 		t.Fatalf("Files = %q, %q, want an unsigned commit", c, w)
 	}
@@ -171,19 +171,25 @@ func TestFilesNeverSigns(t *testing.T) {
 	}
 }
 
-func TestFilesWithoutIdentityCommitsNothing(t *testing.T) {
+func TestIdentityMissingRefuses(t *testing.T) {
 	fx := setup(t)
-	committest.PinPush(t)
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
-	base := head(t, fx.dir())
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 
-	c, w := Files(context.Background(), fx.dir(), base, map[string][]byte{"_global/good-fact.md": marshal(t, cleanFact("good-fact"))}, "attest: x #1")
-	if c != "" || !strings.Contains(w, "no git identity (user.name/user.email) configured for the store") {
-		t.Errorf("Files = %q, %q, want the missing identity named", c, w)
+	env, err := Identity(context.Background(), fx.dir())
+	if env != nil || err == nil || !strings.Contains(err.Error(), "no git identity (user.name/user.email) configured for the store") {
+		t.Errorf("Identity = %q, %v, want the missing identity named", env, err)
 	}
-	if got := head(t, fx.dir()); got != base {
-		t.Errorf("HEAD moved: %s -> %s", base, got)
+}
+
+// ident is the checkout's commit identity, which setup configures.
+func ident(t *testing.T, dir string) []string {
+	t.Helper()
+	env, err := Identity(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
 	}
+	return env
 }
 
 // replaceHead plants refs/replace/<HEAD> pointing at a commit whose tree is
@@ -223,7 +229,7 @@ func TestFilesIgnoresReplaceRefs(t *testing.T) {
 			replaceHead(t, fx.dir(), func(entries []string) []string { return tt.edit(t, fx.dir(), entries) })
 			raw := marshal(t, cleanFact("good-fact"))
 
-			c, w := Files(context.Background(), fx.dir(), base, map[string][]byte{rel: raw}, "attest: x #1")
+			c, w := Files(context.Background(), fx.dir(), base, ident(t, fx.dir()), map[string][]byte{rel: raw}, "attest: x #1")
 			if c == "" {
 				t.Fatalf("Files = %q, %q", c, w)
 			}

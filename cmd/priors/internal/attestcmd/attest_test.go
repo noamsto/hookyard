@@ -606,6 +606,52 @@ func TestAttest(t *testing.T) {
 		}
 	})
 
+	t.Run("no git identity refuses before signing", func(t *testing.T) {
+		f := newFixture(t)
+		t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+		raw, head, remote := f.factRaw(), f.head(f.root), f.remoteMain()
+
+		f.requireClean(f.opts(), attest.OpAttest, 0)
+		if !strings.Contains(f.errb.String(), "no git identity (user.name/user.email) configured for the store") {
+			t.Errorf("stderr = %s", f.errb.String())
+		}
+		if !bytes.Equal(f.factRaw(), raw) {
+			t.Error("fact was rewritten")
+		}
+		if _, err := os.Lstat(filepath.Join(f.root, ".attest", "h")); !os.IsNotExist(err) {
+			t.Errorf(".attest/h exists: %v", err)
+		}
+		if f.head(f.root) != head || f.remoteMain() != remote {
+			t.Error("HEAD or remote moved")
+		}
+	})
+
+	t.Run("entry write fails after the fact write", func(t *testing.T) {
+		f := newFixture(t)
+		want, err := fact.WithConfidence(f.factRaw(), "reviewed")
+		if err != nil {
+			t.Fatal(err)
+		}
+		head, remote := f.head(f.root), f.remoteMain()
+		if err := os.MkdirAll(filepath.Join(f.root, ".attest", "h"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		if code := f.run(f.opts(), attest.OpAttest); code != 1 {
+			t.Fatalf("exit = %d, want 1\n%s", code, f.all())
+		}
+		line := strings.TrimSpace(f.out.String()[strings.LastIndex(strings.TrimSpace(f.out.String()), "\n")+1:])
+		if !strings.HasPrefix(line, "not committed: writing the entry: ") || !strings.HasSuffix(line, "; the edited fact is left in the working tree") {
+			t.Errorf("last stdout line = %q\n%s", line, f.all())
+		}
+		if !bytes.Equal(f.factRaw(), want) {
+			t.Errorf("fact on disk =\n%s\nwant the edited fact\n%s", f.factRaw(), want)
+		}
+		if f.head(f.root) != head || f.remoteMain() != remote {
+			t.Error("HEAD or remote moved")
+		}
+	})
+
 	t.Run("head moves before the commit", func(t *testing.T) {
 		f := newFixture(t)
 		remote := f.remoteMain()
@@ -734,6 +780,46 @@ func TestAttestCheckoutTampering(t *testing.T) {
 			t.Errorf("pushed commit is signed:\n%s", obj)
 		}
 	})
+
+	for _, tc := range []struct{ name, attrs string }{
+		{"fsmonitor and filter via info/attributes", ".git/info/attributes"},
+		{"fsmonitor and filter via a committed .gitattributes", ".gitattributes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.jobOnTrigger = true
+			sh, err := exec.LookPath("sh")
+			if err != nil {
+				t.Skip("sh not installed")
+			}
+			if tc.attrs == ".gitattributes" {
+				f.writeFile(filepath.Join(f.root, ".gitattributes"), "* filter=x\n", 0o644)
+				gitOut(t, f.root, "", "add", ".gitattributes")
+				gitOut(t, f.root, "", "commit", "-q", "-m", "attributes")
+				gitOut(t, f.root, "", "push", "-q", f.remote, "HEAD:main")
+				gitOut(t, f.work, "", "pull", "-q", "--ff-only", f.remote, "main")
+			} else {
+				f.writeFile(filepath.Join(f.root, tc.attrs), "* filter=x\n", 0o644)
+			}
+			fsm, filter := filepath.Join(f.dir, "marker-fsm"), filepath.Join(f.dir, "marker-filter")
+			f.writeFile(filepath.Join(f.dir, "fsmonitor"), "#!"+sh+"\ntouch "+shQuote(fsm)+"\nexit 1\n", 0o755)
+			f.writeFile(filepath.Join(f.dir, "clean"), "#!"+sh+"\ntouch "+shQuote(filter)+"\nexec cat\n", 0o755)
+			gitOut(t, f.root, "", "config", "core.fsmonitor", filepath.Join(f.dir, "fsmonitor"))
+			gitOut(t, f.root, "", "config", "filter.x.clean", filepath.Join(f.dir, "clean"))
+
+			if code := f.run(f.opts(), attest.OpAttest); code != 0 {
+				t.Fatalf("exit = %d, want 0\n%s", code, f.all())
+			}
+			for _, m := range []string{fsm, filter} {
+				if _, err := os.Lstat(m); !os.IsNotExist(err) {
+					t.Errorf("a checkout program ran (%s): %v", filepath.Base(m), err)
+				}
+			}
+			if got := gitOut(t, f.root, "", "diff", "--cached", "--name-only"); got != "" {
+				t.Errorf("index differs from HEAD: %s", got)
+			}
+		})
+	}
 
 	t.Run("commit off HEAD or changing other paths", func(t *testing.T) {
 		f := newFixture(t)

@@ -129,6 +129,7 @@ type run struct {
 	repo   repo
 	head   string
 	branch string
+	ident  []string
 	// raw is the fact as read and newRaw as it is committed; attest only.
 	raw, newRaw []byte
 	factMode    fs.FileMode
@@ -250,6 +251,9 @@ func (a *run) prepare(ctx context.Context) error {
 		return err
 	}
 	if a.head, err = checkoutHead(ctx, a.t.root.Path); err != nil {
+		return err
+	}
+	if a.ident, err = commit.Identity(ctx, a.t.root.Path); err != nil {
 		return err
 	}
 	versions, err := a.cleanHistory(ctx)
@@ -389,7 +393,7 @@ func (a *run) publish(ctx context.Context) (commitOid, failed string, err error)
 	}
 	hook(a.o.beforeCommit)
 	msg := fmt.Sprintf("%s: %s #%d", a.req.Op, a.req.Name, a.seq)
-	commitOid, warning := commit.Files(ctx, a.t.root.Path, a.head, files, msg)
+	commitOid, warning := commit.Files(ctx, a.t.root.Path, a.head, a.ident, files, msg)
 	if commitOid == "" {
 		return "", a.notCommitted(warning), nil
 	}
