@@ -518,7 +518,8 @@ func TestShellDenies(t *testing.T) {
 		// An inline program, remote script or prompt holding a standalone /, .
 		// or .. names it, as the call may write it.
 		{name: "unparsed string naming dot is not a path", want: "which holds the personal store", cwd: ".", input: bash(`watch 'rm -rf . ('`)},
-		{name: "jq alternative filter after an assignment", want: "names /, which holds the personal store", input: bash(`CREW_ID=x crew roster | jq -c '.[]? // .'`)},
+		{name: "prefix PATH before a reader of a store", want: "/notes/MEMORY.md, inside the personal store", input: bash(`PATH=/x cat ~/notes/MEMORY.md`)},
+		{name: "prefix PATH before a builtin", want: "/notes/MEMORY.md, inside the personal store", input: bash(`PATH=/x true; cat ~/notes/MEMORY.md`)},
 		{name: "claude prompt with a dot", want: "which holds the personal store", cwd: ".", input: bash(`claude -p "check the build ." --tools=Bash`)},
 		{name: "env unset before a claude prompt", want: "which holds the personal store", cwd: ".", input: bash(`env -u A -u B claude -p "check . now"`)},
 		{name: "timeout before a claude prompt", want: "which holds the personal store", cwd: ".", input: bash(`timeout 5 claude -p "check ."`)},
@@ -652,6 +653,7 @@ func TestShellAllows(t *testing.T) {
 		{name: "deferred sed script redefines", input: bash(`git commit -m '~/notes/MEMORY.md' && sed -i '#/crew' f`)},
 		{name: "sed in-place script trailing slash regex", input: bash(`sed -i 's/^        monthlyTarget = 100;$/        monthlyTarget = 30;/' home/ai/claude-code/default.nix`)},
 		{name: "export -n then cat of a store", input: bash(`export -n FOO; cat ~/notes/facts/a.md`)},
+		{name: "jq alternative filter after an assignment", input: bash(`CREW_ID=x crew roster | jq -c '.[]? // .'`)},
 		{name: "inline code naming no path from home", cwd: ".", input: bash(`python3 -c 'print(1)'`)},
 		{name: "option value naming a project dir from home", cwd: ".", input: bash(`rsync -a --exclude=work src/ dst/`)},
 		{name: "option value naming no dir", input: bash(`foo --exclude=notes rm x`)},

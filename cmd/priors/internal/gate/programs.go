@@ -1702,7 +1702,7 @@ func (r *reader) classifyCall(ce *syntax.CallExpr, f feed) {
 		}
 	}
 	v := classify(name, args)
-	if r.withdrawn && v.kind != unknownKind {
+	if (r.withdrawn || r.pre.scoped[ce]) && v.kind != unknownKind {
 		r.redefines(name)
 		v = verdict{kind: unknownKind}
 	}

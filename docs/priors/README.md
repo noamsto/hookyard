@@ -553,7 +553,10 @@ the name is `LANG`, `LANGUAGE`, `LC_*`, `TZ`, `NO_COLOR`, `CLICOLOR`,
 `POSIXLY_CORRECT`, `BASH_COMPAT`, `BASH_LOADABLES_PATH` or `FUNCNEST`; a
 computed setter name; or a target, resolved or not, whose basename is or may
 match (as a glob) an allowlisted command name (`ln -s /bin/rm ~/bin/gh`,
-`rm -f *`, `cp x "$d"`).
+`rm -f *`, `cp x "$d"`). A `NAME=v` prefix, `env NAME=v` or `sudo NAME=v`
+before an external program exports to that program alone, so it withdraws
+only that call: `CREW_ID=x crew roster | jq .` leaves `jq` read-only. Before a
+builtin, a function or a shell it withdraws the whole command.
 
 The wrappers `env`, `sudo`, `doas`, `nice`, `nohup`, `timeout`, `stdbuf`,
 `time`, `command`, `builtin`, `exec` and `xargs` are skipped by a closed flag
@@ -693,6 +696,9 @@ It over-denies:
   `..` that reaches an ancestor of a store, or a store's name anywhere in the
   call's text. This includes an inline program or remote script holding a
   standalone `/`, `.` or `..` (`python3 -c 'print(1 / 2)'`);
+- a `claude` prompt, or any unknown program's operand, holding a standalone
+  `.`, `/` or `..` from a dir that holds a store (`claude -p "check ."` from
+  `~`);
 - a shell command that reads a store path while it writes elsewhere, a shell
   write to a store fact, and a write that may name a dir holding a store
   (`cmake ..` from a dir directly under one, `foo .` or `cp x .` from `~`);

@@ -20,6 +20,16 @@ var (
 	safeEnv = []string{"LANG", "LANGUAGE", "TZ", "NO_COLOR", "CLICOLOR", "FORCE_COLOR", "TERM", "COLUMNS", "LINES"}
 	// declarers are the declare family run as a call (`builtin declare`).
 	declarers = []string{"declare", "typeset", "local", "export", "readonly"}
+	// shellBuiltins run in the shell itself, where a prefix assignment may
+	// outlast the call or reach code it runs.
+	shellBuiltins = []string{
+		":", ".", "[", "alias", "bg", "bind", "break", "builtin", "caller", "cd", "command", "compgen",
+		"complete", "compopt", "continue", "declare", "dirs", "disown", "echo", "enable", "eval", "exec",
+		"exit", "export", "false", "fc", "fg", "getopts", "hash", "help", "history", "jobs", "kill", "let",
+		"local", "logout", "mapfile", "popd", "printf", "pushd", "pwd", "read", "readarray", "readonly",
+		"return", "set", "shift", "shopt", "source", "suspend", "test", "times", "trap", "true", "type",
+		"typeset", "ulimit", "umask", "unalias", "unset", "wait",
+	}
 )
 
 // positional is the pseudo-name of the positional parameters.
@@ -28,8 +38,13 @@ const positional = "@"
 // prepass is what the setter pre-pass (§4.6, §4.7, §5) finds over every
 // parsed statement before any call is judged.
 type prepass struct {
-	// set are the names a setter sets by literal name.
-	set map[string]bool
+	// set are the names a setter sets by literal name, and assigned those of
+	// them set other than by a prefix assignment to an external program.
+	set, assigned map[string]bool
+	// scoped are the external program calls a prefix assignment exports to,
+	// each withdrawn on its own; scopedAssigns are those assignments.
+	scoped        map[*syntax.CallExpr]bool
+	scopedAssigns map[*syntax.Assign]bool
 	// computed reports a setter whose name is not literal, a nameref, or
 	// eval, source or `.`, any of which may set any name.
 	computed bool
@@ -59,6 +74,7 @@ type prepass struct {
 func (p *prepass) init() {
 	p.set, p.untame, p.funcs, p.exported, p.refs = map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	p.arithDone = map[syntax.Node]bool{}
+	p.assigned, p.scoped, p.scopedAssigns = map[string]bool{}, map[*syntax.CallExpr]bool{}, map[*syntax.Assign]bool{}
 }
 
 // settable reports a name the command may set.
@@ -96,7 +112,11 @@ func (r *reader) preNode(n syntax.Node, f feed) {
 			return
 		}
 		name := n.Name.Value
-		r.setName(name)
+		if p.scopedAssigns[n] {
+			r.setScoped(name)
+		} else {
+			r.setName(name)
+		}
 		if n.Value != nil {
 			r.value(name, n.Value)
 		}
@@ -237,6 +257,27 @@ func globbed(w *syntax.Word) bool {
 }
 
 func (r *reader) setName(name string) {
+	r.pre.assigned[name] = true
+	r.setScoped(name)
+}
+
+// external reports a call whose command, after its wrappers, is a program the
+// shell execs: no builtin, function or shell, which runs in the shell or runs
+// shell code a prefix assignment reaches.
+func (r *reader) external(c call) bool {
+	if c.lost || c.split != nil || c.listing || c.at >= len(c.argv) {
+		return false
+	}
+	cmd := c.argv[c.at]
+	if !cmd.ok || globWord(cmd.word) || strings.Contains(cmd.text, "=") {
+		return false
+	}
+	name := cmd.text
+	return !slices.Contains(shellBuiltins, name) && !r.pre.funcs[name] && !slices.Contains(scriptShells, wordName(name))
+}
+
+// setScoped records a name a prefix assignment to an external program sets.
+func (r *reader) setScoped(name string) {
 	r.pre.set[name] = true
 	if name == "PS4" {
 		r.pre.sinks = append(r.pre.sinks, "a PS4 prompt set by the command")
@@ -366,22 +407,38 @@ func (r *reader) varTest(ops []arg) {
 // positional parameters.
 func (r *reader) preCall(ce *syntax.CallExpr, f feed) {
 	p := &r.pre
+	argv := r.args(ce.Args, false)
+	c := unwrap(argv)
+	// A prefix assignment to an external program exports to it alone, so
+	// it withdraws the allowlist for that call only.
+	scoped := r.external(c)
+	export := func(name string) {
+		switch {
+		case !scoped:
+			p.exported[name] = true
+		case !safe(name):
+			p.scoped[ce] = true
+		}
+	}
 	if len(ce.Args) > 0 {
 		for _, a := range ce.Assigns {
 			if a.Name != nil {
-				p.exported[a.Name.Value] = true
+				export(a.Name.Value)
+				p.scopedAssigns[a] = scoped
 			}
 		}
 	}
-	argv := r.args(ce.Args, false)
-	c := unwrap(argv)
 	for _, a := range c.assigns {
 		name, v, _ := strings.Cut(a.text, "=")
 		if !identifier(name) {
 			continue
 		}
-		r.setName(name)
-		p.exported[name] = true
+		if scoped {
+			r.setScoped(name)
+		} else {
+			r.setName(name)
+		}
+		export(name)
 		if a.ok {
 			r.valueString(name, v)
 		} else {
@@ -780,7 +837,7 @@ func (r *reader) decide() {
 	for name := range p.exported {
 		withdraw = withdraw || !safe(name)
 	}
-	for name := range p.set {
+	for name := range p.assigned {
 		withdraw = withdraw || slices.Contains(bashSpecial, name) || !safe(name) && r.hostHas(name)
 	}
 	r.withdrawn = withdraw
