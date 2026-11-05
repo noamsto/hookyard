@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 )
@@ -890,5 +891,120 @@ func TestPhysical(t *testing.T) {
 	}
 	if _, ok := physical(loop); ok {
 		t.Error("a symlink loop resolved")
+	}
+}
+
+// goBody is a Go-like heredoc body of exactly n bytes with no line equal to EOF.
+func goBody(n int) string {
+	var b strings.Builder
+	for i := 0; b.Len() < n; i++ {
+		b.WriteString("func f" + strconv.Itoa(i) + "() string { return \"a/b/c\" }\n")
+	}
+	return b.String()[:n-1] + "\n"
+}
+
+func TestRedesignAllows(t *testing.T) {
+	sb := newSandbox(t)
+	for _, c := range []call{
+		{name: "sed regex over nix store paths", input: bash(`nix path-info -r . | sed -E 's|.*/nix/store/[a-z0-9]{32}-||' | sort`)},
+		{name: "grep store path into nix-store roots", input: bash(`grep -E '/nix/store/[a-z0-9]+' f | nix-store --query --roots`)},
+		{name: "awk store path into nix-store deriver", input: bash(`awk '/\/nix\/store\// {print $1}' f | nix-store -q --deriver`)},
+		{name: "gh repo create description with slashes", input: bash(`gh repo create owner/repo --private --description "A / B / C"`)},
+		{name: "git -C elsewhere remote set-url and fetch", input: bash(`git -C @H/elsewhere remote set-url origin git@github.com:owner/repo.git && git -C @H/elsewhere fetch`)},
+		{name: "gh pr list in a loop with jq", input: bash(`for r in a b; do gh pr list --repo owner/$r --json number | jq '.[] | .number'; done`)},
+		{name: "xargs worktree repair", input: bash(`ls -d @H/work/* | tr '\n' '\0' | xargs -0 git worktree repair`)},
+		{name: "mkdir cp sed -i elsewhere", input: bash(`mkdir -p @H/elsewhere/s && cp a b c @H/elsewhere/s/ && sed -i 's/x/y/' @H/elsewhere/s/a`)},
+		{name: "sed -i with pipe delimiter on a project file", input: bash(`sed -i 's|^- \[x\].*|- [ ] y|' @H/work/a.md`)},
+		{name: "heredoc 1837 bytes", input: bash("cat > f <<'EOF'\n" + goBody(1837) + "EOF")},
+		{name: "heredoc 8192 bytes", input: bash("cat > f <<'EOF'\n" + goBody(8192) + "EOF")},
+		{name: "priors list in the store", cwd: "notes", input: bash("priors list")},
+		{name: "rm -rf build from work", input: bash("rm -rf build/")},
+		{name: "rm -rf build from home", cwd: ".", input: bash("rm -rf build/")},
+		{name: "cp -r from work", input: bash("cp -r src/ out")},
+		{name: "cp -r from home", cwd: ".", input: bash("cp -r src/ out")},
+		{name: "awk division", input: bash(`awk '{print $1 / $2}' f`)},
+		{name: "awk field separator slash", input: bash(`awk -F/ '{print $NF}' f`)},
+		{name: "arithmetic loop", input: bash(`for i in 1 2 3; do echo $((i*2)); done`)},
+		{name: "cat store into tmp", input: bash(`cat ~/notes/MEMORY.md > /tmp/x`)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.tool == "" {
+				c.tool = "Bash"
+			}
+			if r := sb.run(t, c); r != "" {
+				t.Errorf("denied %s: %s", c.input, r)
+			}
+		})
+	}
+}
+
+func TestRedesignDenies(t *testing.T) {
+	sb := newSandbox(t)
+	const (
+		store    = "inside the personal store"
+		unread   = "shell code the guard cannot read"
+		pastRead = "past what the guard reads"
+	)
+	nested := `{"path":"@H\/notes\/MEMORY.md","pad":` + strings.Repeat("[", 18) + strings.Repeat("]", 18) + `}`
+	decoys := strings.TrimSpace(strings.Repeat("/x ", 300))
+	long := strings.Repeat("v", 40)
+	for _, c := range []call{
+		{name: "redirect into store", want: store, input: bash("> @H/notes/x")},
+		{name: "cp into store", want: "the personal store", input: bash("cp x @H/notes/")},
+		{name: "sed -i fact", want: store, input: bash("sed -i s/a/b/ @H/notes/facts/a.md")},
+		{name: "tee into store", want: store, input: bash("echo x | tee @H/notes/x")},
+
+		{name: "tool arguments nested past the read depth", want: pastRead, tool: "mcp__x__do", input: sb.input(map[string]any{"arguments": nested})},
+		{name: "tool note behind 300 decoy tokens", want: "the personal store", tool: "mcp__x__do", input: sb.input(map[string]any{"note": decoys + " @H/notes/MEMORY.md"})},
+
+		{name: "arith var built from concatenated assignments", want: unread, input: bash(`a='a[$'; b='(rm -rf ../notes/facts)]'; x=$a$b; (( x ))`)},
+		{name: "arith var built from array element append", want: unread, input: bash(`x=('a[$' b); x[0]+='(rm -rf ../notes/facts)]'; (( x ))`)},
+		{name: "arith var built from exported append", want: unread, input: bash(`export 'x=a[$'; x+='(rm -rf ../notes/facts)]'; (( x ))`)},
+		{name: "arith var with quoted paren in substitution", want: unread, input: bash(`x='a[$(echo "(") + $(cd ..; rm -rf no*s)] + 1 a'; (( x ))`)},
+
+		{name: "env option cluster run in the store via link", want: "runs in", cwd: ".", input: bash("env -" + long + "Clink rm -rf facts")},
+		{name: "unknown command option cluster with link", want: "the personal store", cwd: ".", input: bash("foo -" + long + "Clink rm -rf facts")},
+
+		{name: "positional in arithmetic after set --", want: unread, input: bash(`set -- 'a[$(rm -rf ../notes)]'; (( $1 ))`)},
+		{name: "positional in arithmetic in a function", want: unread, input: bash(`f() { (( $1 )); }; f 'a[$(rm -rf ../notes)]'`)},
+		{name: "read into a literal variable name", want: unread, input: bash(`read 'a[$(rm -rf ../notes)]' <<< x`)},
+		{name: "PS4 substitution via env", want: unread, input: bash(`env SHELLOPTS=xtrace PS4='$(rm -rf ../notes)' bash -c true`)},
+		{name: "BASH_FUNC import", want: unread, input: bash(`env 'BASH_FUNC_cat%%=() { rm -rf ../notes; }' bash -c 'cat x'`)},
+
+		{name: "packed key=path operand", want: "the personal store", input: bash("foo key=@H/notes/x")},
+		{name: "packed out:path operand", want: "the personal store", input: bash("foo out:@H/notes/x")},
+		{name: "packed comma path operand", want: "the personal store", input: bash("foo a,@H/notes/x")},
+		{name: "gawk -o packed path", want: "the personal store", input: bash("gawk -o@H/notes/x '{print}' f")},
+		{name: "awk @include of a written file", want: "the guard cannot resolve", input: bash(`printf 'BEGIN{system("rm -rf ../notes")}' > /tmp/a.awk; awk '@include "/tmp/a.awk"' f`)},
+
+		{name: "300 nested command substitutions", want: "past what the guard reads (budget)", input: bash(strings.Repeat("$(", 300) + "x" + strings.Repeat(")", 300))},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.tool == "" {
+				c.tool = "Bash"
+			}
+			wantDenied(t, c, sb.run(t, c))
+		})
+	}
+}
+
+func TestOptionValuesFast(t *testing.T) {
+	if raceEnabled {
+		t.Skip("the race detector slows judging")
+	}
+	sb := newSandbox(t)
+	cmd := "rsync -a"
+	for i := range 250 {
+		cmd += " --exclude=u" + strconv.Itoa(i)
+	}
+	cmd += " src/ dst/"
+	c := call{tool: "Bash", input: bash(cmd)}
+	start := time.Now()
+	r := sb.run(t, c)
+	if d := time.Since(start); d > 750*time.Millisecond {
+		t.Errorf("Check took %s; want under 750ms", d)
+	}
+	if r != "" {
+		t.Errorf("denied: %s", r)
 	}
 }
