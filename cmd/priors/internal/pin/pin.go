@@ -159,13 +159,15 @@ func remoteConfig(ctx context.Context, dir string) ([][2]string, error) {
 // legacyRemote returns the first entry of the repo's legacy remotes/ or
 // branches/ directory, which git remote does not reliably cover.
 func legacyRemote(ctx context.Context, dir string) (string, error) {
-	out, err := runGit(ctx, dir, "rev-parse", "--git-common-dir")
+	// Absolute, since git prints a path relative to its physical cwd, which a
+	// symlinked dir would make a join against dir resolve elsewhere.
+	out, err := runGit(ctx, dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", dir, gitFailed("rev-parse --git-common-dir", out, err))
 	}
 	common := strings.TrimSuffix(out, "\n")
-	if !filepath.IsAbs(common) {
-		common = filepath.Join(dir, common)
+	if _, err := os.Stat(common); err != nil {
+		return "", fmt.Errorf("%s: git common dir %s: %w", dir, short(common), err)
 	}
 	for _, sub := range []string{"remotes", "branches"} {
 		entries, err := os.ReadDir(filepath.Join(common, sub))

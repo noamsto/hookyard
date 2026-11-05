@@ -156,6 +156,20 @@ func TestCheck(t *testing.T) {
 			want: "legacy remote file branches/origin",
 		},
 		{
+			name: "no pin, legacy remote reached through a symlink to a subdir",
+			setup: func(t *testing.T, base, _ string) string {
+				r := repo(t, base, "")
+				legacyFile(t, r, "remotes")
+				sub := subdir(t, r)
+				link := filepath.Join(t.TempDir(), "lnk")
+				if err := os.Symlink(sub, link); err != nil {
+					t.Fatal(err)
+				}
+				return link
+			},
+			want: "legacy remote file remotes/origin",
+		},
+		{
 			name: "pin, plain dir", remote: pinned,
 			setup: func(t *testing.T, base, _ string) string { return base },
 			want:  "not the top level of a git checkout",
