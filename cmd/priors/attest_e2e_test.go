@@ -139,7 +139,8 @@ func TestAttestOffSeparateRefuses(t *testing.T) {
 func TestAttestLoaderVarsRefused(t *testing.T) {
 	r := newAttestRig(t, trustOpts{root: "separate"})
 	checkArgs := []string{"attest", "--check", "h", strings.Repeat("a", 64), strings.Repeat("b", 40)}
-	for _, v := range []string{"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "DYLD_INSERT_LIBRARIES"} {
+	// Not DYLD_INSERT_LIBRARIES: dyld aborts before main on an unloadable one, so the test would never reach priors.
+	for _, v := range []string{"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "DYLD_FALLBACK_LIBRARY_PATH"} {
 		for _, args := range [][]string{
 			{"attest", "-f", r.handle, "h"},
 			{"attest", "--revoke", "-f", r.handle, "h"},
@@ -350,7 +351,8 @@ func main() {}
 		cmd := exec.Command(bin, args...)
 		cmd.Env = append(sb.childEnv(), "LD_PRELOAD="+so, "MARK="+mark)
 		cmd.Dir = sb.dir
-		if out, err := cmd.CombinedOutput(); err != nil {
+		// The preloaded library can break the git subprocess, so a non-zero exit is fine; only a failure to start is not.
+		if out, err := cmd.CombinedOutput(); err != nil && !errors.As(err, new(*exec.ExitError)) {
 			t.Fatalf("%s %v: %v\n%s", bin, args, err, out)
 		}
 	}
