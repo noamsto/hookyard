@@ -1,6 +1,7 @@
 package attest
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 
@@ -136,6 +137,45 @@ func TestVerifyEntryFails(t *testing.T) {
 			err := VerifyEntry(tc.e, tc.allow, tc.store, tc.file)
 			if got := checkOf(err); got != tc.check {
 				t.Fatalf("VerifyEntry = %v (check %d), want check %d", err, got, tc.check)
+			}
+		})
+	}
+}
+
+func TestSigner(t *testing.T) {
+	sk := attesttest.NewSKEd25519(t)
+	for _, op := range []string{"attest", "revoke"} {
+		got, err := Signer(entry(t, sk, op, 0x05, Namespace), testStore, testName)
+		if err != nil {
+			t.Fatalf("%s: %v", op, err)
+		}
+		if !bytes.Equal(got.Marshal(), sk.PublicKey().Marshal()) {
+			t.Errorf("%s: Signer is not the signing key", op)
+		}
+	}
+
+	good := entry(t, sk, "attest", 0x05, Namespace)
+	garbled := good
+	garbled.Signature = []byte("not a signature")
+	unsigned := good
+	unsigned.Signature = nil
+	cases := []struct {
+		name  string
+		e     Entry
+		store string
+		file  string
+	}{
+		{"garbled signature", garbled, testStore, testName},
+		{"unsigned", unsigned, testStore, testName},
+		{"plain ed25519", entry(t, attesttest.NewEd25519(t), "attest", 0x05, Namespace), testStore, testName},
+		{"flags UP only", entry(t, sk, "attest", 0x01, Namespace), testStore, testName},
+		{"wrong store", good, "store-2", testName},
+		{"wrong name", good, testStore, "other-fact"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, err := Signer(tc.e, tc.store, tc.file); err == nil {
+				t.Fatalf("Signer = %v, want an error", got)
 			}
 		})
 	}

@@ -105,13 +105,53 @@ func load(path, trustPath string, fsys StatFS) (Config, error) {
 	return loadWith(path, trustPath, fsys, false)
 }
 
-func loadWith(path, trustPath string, fsys StatFS, pathsOnly bool) (Config, error) {
+// LoadTrust reads only the trust file, never the user config, so a job with no
+// user home sees the same trust-derived fields Load does. Store paths are as
+// the trust file states them, not resolved or checked.
+func LoadTrust() (Config, error) {
+	trustPath, fsys := trustSource()
+	return loadTrust(trustPath, fsys)
+}
+
+func loadTrust(trustPath string, fsys StatFS) (Config, error) {
+	t, err := loadTrustFile(trustPath, fsys)
+	if err != nil {
+		return Config{}, err
+	}
+	var c Config
+	c.applyTrust(t, fsys)
+	return c, nil
+}
+
+func loadTrustFile(trustPath string, fsys StatFS) (trust, error) {
 	t, err := readTrust(fsys, trustPath)
 	if errors.Is(err, fs.ErrNotExist) {
 		err = fmt.Errorf("%w: %w", ErrNoTrust, err)
 	}
 	if err != nil {
-		return Config{}, fmt.Errorf("trust file %s: %w", trustPath, err)
+		return trust{}, fmt.Errorf("trust file %s: %w", trustPath, err)
+	}
+	return t, nil
+}
+
+// applyTrust fills every field the trust file decides. workNames is the trust
+// floor; loadWith unions the user's additions on top.
+func (c *Config) applyTrust(t trust, fsys StatFS) {
+	c.Profile, c.WorkOrgs, c.PersonalOrgs = t.Profile, t.WorkOrgs, t.PersonalOrgs
+	c.TrustRoot, _ = t.TrustRoot.(string)
+	c.workNames = t.WorkNames
+	c.TrustRootLabel, c.AttestKeys, c.TrustDigest = t.rootLabel, t.keys, t.digest
+	c.fsys = fsys
+	c.PersonalStoreID, c.PersonalStore, c.PersonalRemote = t.Stores.Personal.ID, t.Stores.Personal.Path, t.Stores.Personal.Remote
+	if w := t.Stores.Work; w != nil {
+		c.WorkStoreID, c.WorkStore, c.WorkRemote = w.ID, w.Path, w.Remote
+	}
+}
+
+func loadWith(path, trustPath string, fsys StatFS, pathsOnly bool) (Config, error) {
+	t, err := loadTrustFile(trustPath, fsys)
+	if err != nil {
+		return Config{}, err
 	}
 	var u struct {
 		Config
@@ -140,15 +180,8 @@ func loadWith(path, trustPath string, fsys StatFS, pathsOnly bool) (Config, erro
 		return Config{}, fmt.Errorf("%s: unknown keys: %s", path, strings.Join(keys, ", "))
 	}
 	c := u.Config
-	c.Profile, c.WorkOrgs, c.PersonalOrgs = t.Profile, t.WorkOrgs, t.PersonalOrgs
-	c.TrustRoot, _ = t.TrustRoot.(string)
+	c.applyTrust(t, fsys)
 	c.workNames = unionNames(t.WorkNames, u.WorkNames)
-	c.TrustRootLabel, c.AttestKeys, c.TrustDigest = t.rootLabel, t.keys, t.digest
-	c.fsys = fsys
-	c.PersonalStoreID, c.PersonalStore, c.PersonalRemote = t.Stores.Personal.ID, t.Stores.Personal.Path, t.Stores.Personal.Remote
-	if w := t.Stores.Work; w != nil {
-		c.WorkStoreID, c.WorkStore, c.WorkRemote = w.ID, w.Path, w.Remote
-	}
 	for _, p := range []*string{&c.StateDir, &c.EventRecord, &c.Rules, &c.SSHConfig} {
 		if *p, err = expandHome(*p); err != nil {
 			return Config{}, err

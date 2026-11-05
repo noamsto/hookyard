@@ -46,6 +46,24 @@ func (b sigBlob) marshal() []byte {
 	return append([]byte(sshsigMagic), ssh.Marshal(b)...)
 }
 
+// Signer is the key e's own signature names, once VerifyEntry passes with that
+// key as the whole allowlist: it vouches for the signature's form, not for the
+// key. Either op is accepted.
+func Signer(e Entry, storeID, fileName string) (ssh.PublicKey, error) {
+	b, err := parseBlob(e.Signature)
+	if err != nil {
+		return nil, &CheckError{Check: 4, Reason: err.Error()}
+	}
+	pub, err := ssh.ParsePublicKey(b.PublicKey)
+	if err != nil {
+		return nil, &CheckError{Check: 4, Reason: fmt.Sprintf("public key: %v", err)}
+	}
+	if err := VerifyEntry(e, []ssh.PublicKey{pub}, storeID, fileName, OpAttest, OpRevoke); err != nil {
+		return nil, err
+	}
+	return pub, nil
+}
+
 // VerifyEntry runs checks 4–6 on e: an SSHSIG over e.Signed in Namespace by a
 // key in allow, from a hardware key with user presence and verification, for
 // this store and file name. ops lists the accepted ops, OpAttest by default.
