@@ -239,9 +239,11 @@ func (a *run) prepare(ctx context.Context) error {
 		return err
 	}
 	if a.req.Op == attest.OpAttest {
-		if a.raw, a.factMode, err = readFact(a.t.factPath()); err != nil {
+		raw, mode, err := readFact(a.t.factPath())
+		if err != nil {
 			return err
 		}
+		a.raw, a.factMode = raw, mode
 		hook(a.o.afterRead)
 	}
 	if a.repo, err = openRepo(ctx, a.t); err != nil {
@@ -551,7 +553,8 @@ func findTarget(cfg config.Config, name, want string, needLive bool) (target, er
 		}
 		ids = []route.StoreID{route.StoreID(want)}
 	}
-	var candidates, hits []target
+	candidates := make([]target, 0, len(ids))
+	var hits []target
 	for _, id := range ids {
 		t := target{id: id, storeID: attest.TrustStoreID(cfg, id), root: checkoutRoot(cfg, id)}
 		t.entry, t.found = lookup(t.root, name, needLive)
@@ -627,6 +630,9 @@ func readFact(path string) ([]byte, fs.FileMode, error) {
 	if len(raw) > maxFactBytes {
 		return nil, 0, fmt.Errorf("%s is over 1 MiB", path)
 	}
+	if len(raw) == 0 {
+		return nil, 0, fmt.Errorf("%s is empty", path)
+	}
 	return raw, info.Mode().Perm(), nil
 }
 
@@ -665,6 +671,9 @@ func checkoutHead(ctx context.Context, dir string) (string, error) {
 
 func checkoutGit(ctx context.Context, dir string, args ...string) (string, error) {
 	var stdout, stderr bytes.Buffer
+	if len(args) == 0 {
+		return "", errors.New("git: no subcommand")
+	}
 	cmd := tools.Command(ctx, tools.Git, append([]string{"-C", dir, "-c", "core.hooksPath=/dev/null"}, args...)...)
 	cmd.Env = route.RepoEnv("LC_ALL=C", "GIT_TERMINAL_PROMPT=0", "GIT_NO_REPLACE_OBJECTS=1")
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

@@ -22,7 +22,7 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	raw, err := os.ReadFile(handle)
+	raw, err := os.ReadFile(handle) //nolint:gosec // handle is the -f argv of a test-only stand-in
 	if err != nil {
 		fatal(err)
 	}
@@ -39,7 +39,7 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	log, err := os.OpenFile(handle+".log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	log, err := os.OpenFile(handle+".log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // handle is the -f argv of a test-only stand-in
 	if err != nil {
 		fatal(err)
 	}
@@ -50,7 +50,7 @@ func main() {
 		fatal(err)
 	}
 
-	if _, err := os.Stat(handle + ".fail"); err == nil {
+	if _, err := os.Stat(handle + ".fail"); err == nil { //nolint:gosec // handle is the -f argv of a test-only stand-in
 		fmt.Fprintln(os.Stderr, "sign failed")
 		os.Exit(1)
 	}

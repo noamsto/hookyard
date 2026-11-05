@@ -30,7 +30,7 @@ func checkELF(t *testing.T, bin string) {
 	if err != nil {
 		t.Fatalf("elf.Open: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	for _, p := range f.Progs {
 		if p.Type == elf.PT_INTERP {
@@ -50,7 +50,7 @@ func checkMachO(t *testing.T, bin string) {
 	if err != nil {
 		t.Fatalf("macho.Open: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if f.Segment("__RESTRICT") == nil {
 		t.Fatal("binary has no __RESTRICT segment")

@@ -215,9 +215,7 @@ func (r *attestRig) serveTrigger(dir string) {
 		r.t.Fatal(err)
 	}
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			c, err := l.Accept()
 			if err != nil {
@@ -234,7 +232,7 @@ func (r *attestRig) serveTrigger(dir string) {
 			sum := sha256.Sum256(blob)
 			r.writeVerdicts(attestStoreID, hex.EncodeToString(sum[:])+" reviewed")
 		}
-	}()
+	})
 	r.t.Cleanup(func() {
 		_ = l.Close()
 		wg.Wait()

@@ -66,6 +66,9 @@ func subcommand(args []string) string {
 	for len(args) > 2 && args[0] == "-c" {
 		args = args[2:]
 	}
+	if len(args) == 0 {
+		return ""
+	}
 	return args[0]
 }
 

@@ -135,7 +135,7 @@ func newFixture(t *testing.T) *fixture {
 		VerifyUID: strconv.Itoa(os.Getuid()),
 		Root:      f.verdictRoot,
 	})
-	if err != nil {
+	if err != nil || f.job == nil {
 		t.Fatal(err)
 	}
 	f.statFS = ownerFS{leaf: filepath.Join(f.verdictRoot, fixtureStoreID), uid: uint32(os.Getuid())}
@@ -306,6 +306,9 @@ func (f *fixture) trigger(string) error {
 
 func (f *fixture) runJob() verify.Result {
 	f.t.Helper()
+	if f.job == nil {
+		f.t.Fatal("fixture has no job")
+	}
 	res, err := f.job.Run(context.Background())
 	if err != nil {
 		f.t.Fatal(err)
