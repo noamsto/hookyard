@@ -108,6 +108,11 @@ func ShellAccess(host *Host, texts ...string) (acc Access) {
 			r.judge()
 		}
 	}
+	// The values the command binds reach only a program the reader does not
+	// model, or any once the allowlist is withdrawn.
+	if !r.over() && (r.out.ran || r.withdrawn) {
+		r.boundEnv()
+	}
 	if !r.over() {
 		r.collectNames()
 	}
@@ -129,6 +134,8 @@ type reader struct {
 	braced map[*syntax.Word]bool
 	values map[*syntax.Word]bool
 	pre    prepass
+	// named are the bound values by the name they bind, rendered once.
+	named map[string][]boundValue
 	// withdrawn turns every call into an unknown program (§4.7).
 	withdrawn bool
 	// code is the first opaque-code reason found before the judge.
@@ -141,19 +148,21 @@ type reader struct {
 
 // out is what the judge finds, reset when it runs again.
 type out struct {
-	writes     bool
-	targets    []Target
-	opaque     []Target
-	seen       map[Target]bool
-	oseen      map[Target]bool
-	options    [][]string
-	own        map[string]bool
-	ownList    []string
+	writes  bool
+	targets []Target
+	opaque  []Target
+	seen    map[Target]bool
+	oseen   map[Target]bool
+	options [][]string
+	own     map[string]bool
+	ownList []string
 	// writesUnresolved counts the unresolved writes found, so a call can
 	// tell whether it added one.
 	writesUnresolved int
-	dirs       []string
-	dirLost    bool
+	dirs             []string
+	dirLost          bool
+	// cdable are the names whose values a cd operand has added to dirs.
+	cdable     map[string]bool
 	unresolved string
 	// redefined names a call withdrawal made an unknown program.
 	redefined string
@@ -375,7 +384,7 @@ func stdinOf(st *syntax.Stmt) (feed, bool) {
 
 // judge classifies every simple command and redirect of every parsed text.
 func (r *reader) judge() {
-	r.out = out{seen: map[Target]bool{}, oseen: map[Target]bool{}, own: map[string]bool{}}
+	r.out = out{seen: map[Target]bool{}, oseen: map[Target]bool{}, own: map[string]bool{}, cdable: map[string]bool{}}
 	for _, s := range r.scripts {
 		r.walk(s, func(n syntax.Node, f feed) {
 			switch n := n.(type) {
@@ -385,8 +394,6 @@ func (r *reader) judge() {
 				}
 			case *syntax.CallExpr:
 				r.call(n, f)
-			case *syntax.DeclClause:
-				r.declared(n)
 			}
 		})
 		if r.over() {

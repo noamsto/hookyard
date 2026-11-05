@@ -35,6 +35,17 @@ var (
 // positional is the pseudo-name of the positional parameters.
 const positional = "@"
 
+// bound is a value a setter binds to name, word in the script text, spelled
+// src; a nil word is one the reader cannot tell: read at run time or
+// appended to another. An operand's word renders NAME=value and so names
+// the variable itself: a declare-family operand, or env's or sudo's. A
+// prefix one reaches only the call it is a prefix of.
+type bound struct {
+	name, text, src string
+	word            *syntax.Word
+	operand, prefix bool
+}
+
 // prepass is what the setter pre-pass (§4.6, §4.7, §5) finds over every
 // parsed statement before any call is judged.
 type prepass struct {
@@ -42,7 +53,8 @@ type prepass struct {
 	// them set other than by a prefix assignment to an external program.
 	set, assigned map[string]bool
 	// scoped are the external program calls a prefix assignment exports to,
-	// each withdrawn on its own; scopedAssigns are those assignments.
+	// each withdrawn on its own; scopedAssigns holds every prefix
+	// assignment, true for those.
 	scoped        map[*syntax.CallExpr]bool
 	scopedAssigns map[*syntax.Assign]bool
 	// computed reports a setter whose name is not literal, a nameref, or
@@ -59,9 +71,8 @@ type prepass struct {
 	// exported are the names exported to a command.
 	exported  map[string]bool
 	allexport bool
-	// cdable reports a shopt that may set cdable_vars, under which cd may
-	// change into the value of a variable its operand names.
-	cdable bool
+	// bound are the values every setter binds.
+	bound []bound
 	// redefines reports a function, alias, hash, enable, source or `.`.
 	redefines bool
 	// refs are the names arithmetic reads; substituted reports a command
@@ -115,18 +126,25 @@ func (r *reader) preNode(n syntax.Node, f feed) {
 			return
 		}
 		name := n.Name.Value
-		if p.scopedAssigns[n] {
+		scoped, prefix := p.scopedAssigns[n]
+		if scoped {
 			r.setScoped(name)
 		} else {
 			r.setName(name)
 		}
 		if n.Value != nil {
 			r.value(name, n.Value)
+			b := bound{name: name, src: source(r.text, n), word: n.Value, prefix: prefix}
+			if n.Append {
+				b.word = nil
+			}
+			r.bind(b)
 		}
 		if n.Array != nil {
 			for _, e := range n.Array.Elems {
 				if e.Value != nil {
 					r.value(name, e.Value)
+					r.bind(bound{name: name, src: source(r.text, e), word: e.Value, prefix: prefix})
 				}
 			}
 		}
@@ -158,6 +176,7 @@ func (r *reader) preNode(n syntax.Node, f feed) {
 		}
 		for _, w := range n.Items {
 			r.value(name, w)
+			r.bind(bound{name: name, src: source(r.text, w), word: w})
 			if globbed(w) {
 				p.runtime, p.untame[name] = true, true
 			}
@@ -224,6 +243,7 @@ func (r *reader) param(n *syntax.ParamExp) {
 			r.setName(n.Param.Value)
 			if n.Exp.Word != nil {
 				r.value(n.Param.Value, n.Exp.Word)
+				r.bind(bound{name: n.Param.Value, src: source(r.text, n), word: n.Exp.Word})
 			}
 		}
 	}
@@ -290,7 +310,14 @@ func (r *reader) setScoped(name string) {
 // setRuntime records a setter that reads a value at run time into name.
 func (r *reader) setRuntime(name string) {
 	r.setName(name)
+	r.bind(bound{name: name, src: "$" + name})
 	r.pre.runtime, r.pre.untame[name] = true, true
+}
+
+// bind records a value bound in the text being walked.
+func (r *reader) bind(b bound) {
+	b.text = r.text
+	r.pre.bound = append(r.pre.bound, b)
 }
 
 // value records a value word that reaches name.
@@ -447,6 +474,9 @@ func (r *reader) preCall(ce *syntax.CallExpr, f feed) {
 		} else {
 			p.runtime, p.untame[name] = true, true
 		}
+		if a.word != nil {
+			r.bind(bound{src: a.src, word: a.word, operand: true, prefix: true})
+		}
 	}
 	if c.split != nil {
 		r.positionals(argv[c.at:])
@@ -457,6 +487,7 @@ func (r *reader) preCall(ce *syntax.CallExpr, f feed) {
 	name, args := argv[c.at].text, argv[c.at+1:]
 	if slices.Contains(scriptShells, wordName(name)) {
 		s := readShell(args)
+		p.allexport = p.allexport || s.allexport
 		if c.xargs || s.stdin && f.kind == pipeFeed {
 			p.runtime, p.untame[positional] = true, true
 		}
@@ -505,8 +536,6 @@ func (r *reader) preCall(ce *syntax.CallExpr, f feed) {
 		}
 	case "set":
 		r.setCall(args)
-	case "shopt":
-		r.shopt(args)
 	case "test", "[":
 		for i := 0; i+1 < len(args); i++ {
 			if args[i].ok && args[i].text == "-v" {
@@ -615,6 +644,9 @@ func (r *reader) declare(variant string, words []arg) {
 	for _, a := range words {
 		if !a.ok {
 			p.computed = true
+			if a.word != nil {
+				r.bind(bound{src: a.src, word: a.word, operand: true})
+			}
 			continue
 		}
 		t := a.text
@@ -640,6 +672,7 @@ func (r *reader) declare(variant string, words []arg) {
 		names = append(names, base)
 		if assigned && a.word != nil {
 			r.valueString(base, v)
+			r.bind(bound{src: a.src, word: a.word, operand: true})
 		}
 	}
 	if export && !unexport {
@@ -678,24 +711,6 @@ func (r *reader) setCall(args []arg) {
 			return
 		}
 	}
-}
-
-// shopt reads shopt for cdable_vars: set with -s by name, or by a word that
-// does not render, which may be the flag or the name.
-func (r *reader) shopt(args []arg) {
-	set, named := false, false
-	for _, a := range args {
-		switch {
-		case !a.ok:
-			r.pre.cdable = true
-			return
-		case len(a.text) > 1 && a.text[0] == '-':
-			set = set || strings.Contains(a.text, "s")
-		case a.text == "cdable_vars":
-			named = true
-		}
-	}
-	r.pre.cdable = r.pre.cdable || set && named
 }
 
 // arith reads an arithmetic context: every name it reads, a substitution it

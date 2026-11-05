@@ -436,10 +436,14 @@ statically: literal text, quotes, ANSI-C quotes, brace expansion, `~`, globs
 kept as written, and a plain host variable the command cannot set. Bash
 expands `~` after the `=` of a word shaped `name=…` and after each `:` in it
 (`of=~/x`, `PREFIX=~/notes`, `PATH=~/bin:…`), and the guard renders it the same
-way; `--opt=~/x` stays literal. Anything
+way; `--opt=~/x` stays literal. An unknown program may expand a `~` bash
+leaves to it, so each field of its operands, and of an environment value
+(below), that is `~` or starts with `~/` is judged both as written and with
+the home in its place (`foo a["x"]=~/notes/MEMORY.md`, `foo '~/notes'`); under
+a `HOME` the command may set, such a field is an unresolved write. Anything
 else (a variable the command assigns, `$(…)`, `$((…))`, a positional
 parameter) is unresolved, with its literal prefix kept. The guard tracks no
-values: `d=/tmp/x; rm -rf "$d"` is unresolved.
+values in a word: `d=/tmp/x; rm -rf "$d"` is unresolved.
 
 Each simple command, after its wrappers, is one of three kinds:
 
@@ -498,10 +502,10 @@ A store is in reach of a command when any of these holds:
 
 - R1: a dir change the guard cannot resolve (an opaque `cd` or `pushd`
   operand, `cd -`, `popd`, `pushd +N`, a relative `cd` while `CDPATH` is set
-  on the host or by the command, `shopt -s cdable_vars` (a relative `cd NAME`
-  then may jump to `$NAME`), an unrecognised flag of any wrapper, a command
-  word holding `=`, an opaque `-C` of git, make or tar, more than 32 dirs
-  changed into, or more than 32 option values naming dirs in one call);
+  on the host or by the command, a `cd NAME` while the command binds `NAME` a
+  value the guard cannot render (below), an unrecognised flag of any wrapper,
+  a command word holding `=`, an opaque `-C` of git, make or tar, more than 32
+  dirs changed into, or more than 32 option values naming dirs in one call);
 - R2: a reach name resolves inside a store, the state dir or the config, or
   to a dir holding one. Reach names are every word anywhere in the command
   (read-only commands, assignment values, option values, redirect targets,
@@ -521,6 +525,15 @@ regexes in other commands' arguments (read-only commands, data) never count a
 bare `/`, unless the allowlist is withdrawn, which turns that command into an
 unknown program; a `/` inside a longer word (`A / B`, `build/`) never counts. A cwd
 above a store is not reach by itself.
+
+A `cd` or `pushd` operand that is a variable name may also change into that
+variable's value, as under `cdable_vars`, whether or not anything visibly sets
+it (`shopt`, a shell's `-O`, the host's `BASHOPTS`, however spelled): its
+host value and every value the command binds to the name (an assignment, a
+prefix, an `env` or `sudo` word, a `for` item, a declare-family operand,
+`${NAME:=v}`) are dirs changed into too, so `bash -O cdable_vars -c 'cd HOME;
+echo x > notes/MEMORY.md'` is denied. A value bound at run time (`read NAME`)
+or appended to is a dir the guard cannot tell (R1).
 
 Opaque code is shell code the guard cannot read, so it may compute any path.
 It is always denied, wherever the command runs. It is:
@@ -559,7 +572,9 @@ it is an unknown program, when anywhere in it there is a function
 definition, `eval` (literal or not), `alias`, `hash`, `enable`, `source` or
 `.`; a name exported to a
 command (`NAME=v` prefix, `env NAME=v`, `sudo NAME=v`, `export`,
-`declare -x`, `set -a`) or assigned while the host environment has it, unless
+`declare -x`, `set -a` or `set -o allexport`, and a shell's `-a` or
+`-o allexport`, clusters included, read as `set` reads them) or assigned
+while the host environment has it, unless
 the name is `LANG`, `LANGUAGE`, `LC_*`, `TZ`, `NO_COLOR`, `CLICOLOR`,
 `FORCE_COLOR`, `TERM`, `COLUMNS` or `LINES`; an assignment to `PATH`, `HOME`,
 `IFS`, `CDPATH`, `PS4`, `ENV`, `BASH_ENV`, `BASH_CMDS`, `BASH_ALIASES`,
@@ -574,11 +589,22 @@ before an external program exports to that program alone, so it withdraws
 only that call: `CREW_ID=x crew roster | jq .` leaves `jq` read-only. Before a
 builtin, a function or a shell it withdraws the whole command.
 
-The value of an environment assignment that reaches a program's environment
-(a `NAME=v` prefix, `env NAME=v`, `export`, `declare -x`, allexport, or a name
-the host already exports), other than the safe-set names, is judged like an
-operand: `GIT_WORK_TREE=~/notes git checkout -- .` and
-`DESTDIR=~/notes make install` are denied.
+An environment value, other than a safe-set name's, is judged like an
+operand of an unknown program. A `NAME=v` prefix, `env NAME=v` or
+`sudo NAME=v` is one for its own call (a prefix to `:` or `shift` too, which
+outlasts them in POSIX mode). Once the command runs an unknown program or
+withdraws the allowlist, every value it binds to a name is one for the whole
+command, exported or not, as the guard does not track which names end up
+exported: an assignment, an array element, a `for` item, `${NAME:=v}` and a
+declare-family operand. A value read at run time (`read`, `getopts`,
+`printf -v`, `select`), appended (`NAME+=v`) or that does not render is an
+unresolved write under check 7, never a target prefix, and no environment
+value withdraws the allowlist. So `GIT_WORK_TREE=~/notes git checkout -- .`,
+`DESTDIR=~/notes make install`,
+`export GIT_WORK_TREE; for GIT_WORK_TREE in ~/notes; do git checkout -- .; done`
+and `bash -a -c 'GIT_WORK_TREE=~/notes; git checkout -- .'` are denied, while
+`PAGER=cat make build && grep x ~/notes/MEMORY.md` and
+`GH_TOKEN=$(gh auth token) gh pr list` from `~` are not.
 
 The wrappers `env`, `sudo`, `doas`, `nice`, `nohup`, `timeout`, `stdbuf`,
 `time`, `command`, `builtin`, `exec` and `xargs` are skipped by a closed flag
@@ -701,6 +727,13 @@ It is not a sandbox. It does not see:
 - `git add`, `git commit`, `git fetch` and `git push` run in or on a store,
   and any other git reader's writes to git's own index, objects and refs
   (these count as git reading);
+- a `cd NAME` into a value `NAME` got outside the command's text (a shell
+  profile, an earlier call, a script file a shell runs); a value set through
+  `eval` or `source` loses the dir instead, as `CDPATH` may be set too;
+- an environment value a program runs as code (`PAGER='sh -c …'`), which is
+  judged only for the paths it names;
+- a `~` a modeled writer or reader leaves literal: the home-in-place reading
+  covers unknown programs' operands and environment values only;
 - an unknown-key string longer than 4096 bytes, which is not judged at all,
   so a packed list padded past it passes;
 - a variable a shell profile sets, `/proc/<pid>/cwd`, a bind mount, macOS
@@ -744,6 +777,14 @@ It over-denies:
   and any `PATH`, `IFS` or `BASH_ENV` assignment;
 - an environment assignment value that names a store or a dir holding one,
   even when the program ignores it (`PATH=~:$PATH x` from anywhere);
+- any value the command binds that names a store or a dir holding one, once
+  it runs an unknown program or withdraws the allowlist, exported or not
+  (`d=~; make`), and one it reads at run time while a store is in reach;
+- a quoted `~` in an unknown program's operand, read with the home in place
+  too (`foo '~/notes/x'`);
+- a `cd NAME` where `NAME` is a host variable, or one the command binds,
+  which also changes into its value with `cdable_vars` off (`cd NOTES; rm
+  facts/a.md` from anywhere, when `$NOTES` is a store);
 - any write while running in a store, and a reader run behind a flagged
   wrapper that the table does not know;
 - an unknown tool whose input holds `.`, `..`, `/`, or a word that names a

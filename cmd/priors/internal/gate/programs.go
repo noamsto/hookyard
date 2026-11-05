@@ -1415,6 +1415,8 @@ type shellRun struct {
 	stdin bool
 	// lost reports an option word that does not render.
 	lost bool
+	// allexport reports -a or -o allexport, read as set reads them.
+	allexport bool
 }
 
 func readShell(args []arg) shellRun {
@@ -1448,8 +1450,13 @@ options:
 					s.file = true
 				case 's':
 					fromStdin = true
+				case 'a':
+					s.allexport = s.allexport || w[0] == '-'
 				case 'o', 'O':
 					i++
+					if c == 'o' && i < len(args) && (!args[i].ok || args[i].text == "allexport") {
+						s.allexport = true
+					}
 				}
 			}
 		default:
@@ -1869,9 +1876,8 @@ func (r *reader) unknown(name string, words []arg, f feed) {
 
 // environment judges the values a call puts in the environment of what it
 // runs: its prefix assignments and env's or sudo's NAME=value words, each
-// belonging to the call whose option values call indexes, and a plain
-// assignment to an exported name or a declare-family call's exported values,
-// belonging to the whole command.
+// belonging to the call whose option values call indexes. boundEnv judges
+// the values the command's other setters bind.
 func (r *reader) environment(ce *syntax.CallExpr, call int) {
 	argv := r.args(ce.Args, true)
 	childless := len(argv) > 0 && r.childless(argv[0])
@@ -1879,11 +1885,8 @@ func (r *reader) environment(ce *syntax.CallExpr, call int) {
 		if as.Name == nil || as.Value == nil || as.Index != nil {
 			continue
 		}
-		switch name := as.Name.Value; {
-		case len(ce.Args) > 0 && !safe(name) && !childless:
+		if len(ce.Args) > 0 && !safe(as.Name.Value) && !childless {
 			r.assignValue(as, call)
-		case len(ce.Args) == 0 && r.envReaches(name):
-			r.assignValue(as, 0)
 		}
 	}
 	c := unwrap(argv)
@@ -1892,83 +1895,20 @@ func (r *reader) environment(ce *syntax.CallExpr, call int) {
 			r.envValue(arg{text: v, ok: a.ok, word: a.word, src: a.src}, call)
 		}
 	}
-	if !c.lost && c.split == nil && c.at < len(argv) && argv[c.at].ok && slices.Contains(declarers, argv[c.at].text) {
-		r.exports(argv[c.at].text, argv[c.at+1:])
-	}
 }
 
-// childlessBuiltins run no program and no code, so a prefix assignment's
-// value reaches nothing past them.
+// childlessBuiltins run no program and no code, and none is a POSIX special
+// builtin, whose prefix assignments outlast it in POSIX mode, so a prefix
+// assignment's value reaches nothing past them.
 var childlessBuiltins = []string{
-	":", "true", "false", "cd", "pushd", "popd", "dirs", "pwd", "echo", "printf", "read", "test", "[", "let",
-	"shift", "getopts", "umask", "wait",
+	"true", "false", "cd", "pushd", "popd", "dirs", "pwd", "echo", "printf", "read", "test", "[", "let",
+	"getopts", "umask", "wait",
 }
 
 // childless reports a command word naming a childless builtin the command
 // cannot have redefined.
 func (r *reader) childless(cmd arg) bool {
 	return cmd.ok && slices.Contains(childlessBuiltins, cmd.text) && !r.pre.redefines
-}
-
-// declared judges a declare-family clause's values that reach the
-// environment.
-func (r *reader) declared(dc *syntax.DeclClause) {
-	var words []arg
-	for _, as := range dc.Args {
-		switch {
-		case as.Name == nil && as.Value != nil:
-			words = append(words, r.args([]*syntax.Word{as.Value}, true)...)
-		case as.Name != nil && as.Value != nil && as.Index == nil:
-			src, name := source(r.text, as), as.Name.Value+"="
-			if as.Append {
-				name = as.Name.Value + "+="
-			}
-			rw := r.render(as.Value, true)
-			for _, f := range rw.fields {
-				words = append(words, arg{text: name + f, ok: true, word: as.Value, src: src})
-			}
-			for _, p := range rw.opaque {
-				words = append(words, arg{text: name + p, word: as.Value, src: src})
-			}
-		}
-	}
-	r.exports(dc.Variant.Value, words)
-}
-
-// exports judges a declare-family call's NAME=value operands that reach the
-// environment: every one when it exports (export without -n, or -x), else
-// those whose name is exported anyway. An operand that does not render may
-// be any NAME=value.
-func (r *reader) exports(variant string, words []arg) {
-	export, unexport := variant == "export", false
-	for _, a := range words {
-		if a.ok && len(a.text) > 1 && a.text[0] == '-' {
-			export = export || strings.Contains(a.text, "x")
-			unexport = unexport || variant == "export" && strings.Contains(a.text, "n")
-		}
-	}
-	export = export && !unexport
-	for _, a := range words {
-		if a.ok && a.text != "" && (a.text[0] == '-' || a.text[0] == '+') {
-			continue
-		}
-		name, v, assigned := strings.Cut(a.text, "=")
-		if !assigned {
-			if !a.ok && export {
-				r.envValue(arg{word: a.word, src: a.src}, 0)
-			}
-			continue
-		}
-		name, appended := strings.CutSuffix(name, "+")
-		if safe(name) || !export && !r.envReaches(name) {
-			continue
-		}
-		val := arg{text: v, ok: a.ok, word: a.word, src: a.src}
-		if appended {
-			val.text, val.ok = "", false
-		}
-		r.envValue(val, 0)
-	}
 }
 
 // assignValue judges an assignment's value as an environment value. An
@@ -1991,23 +1931,101 @@ func (r *reader) assignValue(as *syntax.Assign, call int) {
 // envValue judges a value a program finds in its environment like an
 // unknown program's operand, as any of them may read it as a path: the whole
 // value and each field between pathBreaks, from the assignment spelling it.
-// call indexes the option values of the call it belongs to.
+// call indexes the option values of the call it belongs to. A value the
+// reader cannot tell is an unresolved write, and no value replaces a
+// program: an allowlisted one reads none as one it runs.
 func (r *reader) envValue(v arg, call int) {
 	r.out.writes = true
 	if !v.ok {
-		r.opaque(v)
+		r.unresolved(fmt.Sprintf("puts %q in a program's environment", v.src))
 		return
 	}
+	replaces := r.out.replaces
 	r.target(Target{Text: v.text, From: v.src, Call: call})
-	for _, f := range PathFields(v.text) {
+	for _, f := range r.tildeFields(v.text) {
 		r.target(Target{Text: f, From: v.src, Call: call})
+	}
+	r.out.replaces = replaces
+}
+
+// boundEnv judges every value the command binds to a name outside the safe
+// set, but for a prefix one, as an environment value of the whole command,
+// whichever names it exports: a program the reader does not model may find
+// any of them.
+func (r *reader) boundEnv() {
+	for _, b := range r.pre.bound {
+		if b.prefix {
+			continue
+		}
+		for _, v := range r.boundValues(b) {
+			if !safe(v.name) {
+				r.envValue(arg{text: v.text, ok: v.ok, word: b.word, src: b.src}, 0)
+			}
+		}
 	}
 }
 
-// envReaches reports an assigned name, outside the safe set, that the
-// programs the command runs find in their environment.
-func (r *reader) envReaches(name string) bool {
-	return !safe(name) && (r.pre.allexport || r.pre.exported[name] || r.hostHas(name))
+// boundValue is one rendering of a bound value: its text, or the literal
+// prefix of one that does not render, and the name it binds, "" for any.
+type boundValue struct {
+	name, text string
+	ok         bool
+}
+
+// boundValues renders b's values. A declare-family operand renders
+// NAME=value: one without = binds nothing, and one appended to or whose name
+// does not render binds a value the reader cannot tell.
+func (r *reader) boundValues(b bound) []boundValue {
+	if b.word == nil {
+		return []boundValue{{name: b.name}}
+	}
+	text := r.text
+	r.text = b.text
+	rw := r.render(b.word, true)
+	r.text = text
+	var out []boundValue
+	add := func(s string, ok bool) {
+		if !b.operand {
+			out = append(out, boundValue{name: b.name, text: s, ok: ok})
+			return
+		}
+		name, v, assigned := strings.Cut(s, "=")
+		base, _, _ := strings.Cut(strings.TrimSuffix(name, "+"), "[")
+		switch {
+		case !assigned && ok:
+		case !assigned:
+			out = append(out, boundValue{})
+		case strings.HasSuffix(name, "+"):
+			out = append(out, boundValue{name: base})
+		default:
+			out = append(out, boundValue{name: base, text: v, ok: ok})
+		}
+	}
+	for _, f := range rw.fields {
+		add(f, true)
+	}
+	for _, p := range rw.opaque {
+		add(p, false)
+	}
+	return out
+}
+
+// tildeFields are s's fields between pathBreaks, each that starts a ~
+// element also with the home in its place, as bash may expand it there. One
+// under a HOME the command may set is an unresolved write.
+func (r *reader) tildeFields(s string) []string {
+	fields := PathFields(s)
+	for _, f := range fields {
+		if f != "~" && !strings.HasPrefix(f, "~/") {
+			continue
+		}
+		if r.settable("HOME") {
+			r.unresolved(fmt.Sprintf("writes through %q", f))
+			continue
+		}
+		fields = append(fields, r.host.Home+f[1:])
+	}
+	return fields
 }
 
 // optionValues are the rendered values an unknown program's options may
@@ -2043,7 +2061,7 @@ func optionValues(words []arg) []string {
 // values.
 func (r *reader) operandTargets(w string, call int) {
 	r.target(Target{Text: w, Call: call})
-	for _, f := range PathFields(w) {
+	for _, f := range r.tildeFields(w) {
 		r.target(Target{Text: f, From: w, Call: call})
 	}
 	if name, v, ok := strings.Cut(w, "="); ok && strings.HasPrefix(name, "--") {
@@ -2079,8 +2097,8 @@ func (r *reader) dirsOf(name string, args []arg) {
 
 // cd records cd's or pushd's dir: its operand, home without one. cd -,
 // pushd with no operand or ±N, an operand that does not render, and a
-// relative one CDPATH or cdable_vars may resolve are dirs the reader cannot
-// tell.
+// relative one CDPATH may resolve are dirs the reader cannot tell; one
+// naming a variable may also be its value.
 func (r *reader) cd(name string, args []arg) {
 	i := 0
 	for ; i < len(args); i++ {
@@ -2113,25 +2131,53 @@ func (r *reader) cd(name string, args []arg) {
 	case first != "" && first != "." && first != ".." && r.cdpath():
 		r.dirLost()
 	default:
+		if identifier(a.text) {
+			r.cdable(a.text)
+		}
 		r.dir(a)
 	}
 }
 
+// cdable records the dirs a cd operand naming a variable may change into
+// besides itself: cdable_vars, which a shopt, a shell's options or the host
+// may set however they spell it, takes it to the variable's value. That is
+// the host's value and each value the command binds to the name; one the
+// reader cannot tell loses the dir. A setter that may set any name makes
+// CDPATH settable, which loses the dir before this.
+func (r *reader) cdable(name string) {
+	if r.out.cdable[name] {
+		return
+	}
+	r.out.cdable[name] = true
+	if r.host.Env != nil {
+		if v, ok := r.host.Env(name); ok && v != "" {
+			r.dir(arg{text: v, ok: true})
+		}
+	}
+	if r.named == nil {
+		r.named = map[string][]boundValue{}
+		for _, b := range r.pre.bound {
+			for _, v := range r.boundValues(b) {
+				r.named[v.name] = append(r.named[v.name], v)
+			}
+		}
+	}
+	for _, v := range r.named[name] {
+		r.dir(arg{text: v.text, ok: v.ok})
+	}
+}
+
 // cdpath reports a relative cd operand bash may look up elsewhere: CDPATH
-// set on the host or settable by the command, or cdable_vars set by the
-// command or the host's BASHOPTS.
+// set on the host or settable by the command.
 func (r *reader) cdpath() bool {
-	if r.settable("CDPATH") || r.pre.cdable {
+	if r.settable("CDPATH") {
 		return true
 	}
 	if r.host.Env == nil {
 		return false
 	}
-	if v, ok := r.host.Env("CDPATH"); ok && v != "" {
-		return true
-	}
-	opts, _ := r.host.Env("BASHOPTS")
-	return slices.Contains(strings.Split(opts, ":"), "cdable_vars")
+	v, ok := r.host.Env("CDPATH")
+	return ok && v != ""
 }
 
 // gitDirs records git's -C, --git-dir and --work-tree before its

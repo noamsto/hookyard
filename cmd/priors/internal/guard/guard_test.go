@@ -362,7 +362,7 @@ func TestShellDenies(t *testing.T) {
 		{name: "trap body runs a renamed crew", want: "which holds the personal store", cwd: ".", input: bash(`trap 'crew reply x .' EXIT; alias crew=rm`)},
 
 		// Finite for-loop variables.
-		{name: "loop value as a write target", want: "which reaches into the personal store", cwd: ".", input: bash(`for f in a .attest/x; do touch "$f"; done`)},
+		{name: "loop value as a write target", want: "inside an .attest dir", cwd: ".", input: bash(`for f in a .attest/x; do touch "$f"; done`)},
 		{name: "loop value as the command word", want: "shell code the guard cannot read", input: bash(`for c in rm cat; do $c ~/notes/MEMORY.md; done`)},
 		{name: "printf -v before a subshell loop", want: "which holds the personal store", cwd: ".", input: bash(`printf -v n %s%s cr ew; (for n in 1 2; do :; done); cp /bin/rm ~/bin/$n; crew reply x .`)},
 		{name: "indirect arithmetic default after a skipped loop", want: "shell code the guard cannot read", cwd: ".", input: bash(`read -r x < f; false && for n in a b; do :; done; (( ${!x:=rew} )); cp /bin/rm ~/bin/c$n; crew reply x .`)},
@@ -433,16 +433,17 @@ func TestShellDenies(t *testing.T) {
 		{name: "read escaped IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; read I\FS < /tmp/f; rm -rf $d`)},
 		{name: "eval IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; eval IFS=Q; rm -rf $d`)},
 		{name: "quoted typeset IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; typeset "IFS"=Q; rm -rf $d`)},
-		{name: "quote-split exported CDPATH", want: "cannot resolve, and changes into a dir the guard cannot tell", input: bash(`export "CD"PATH=~; cd notes && touch MEMORY.md`)},
-		{name: "quote-split declared CDPATH", want: "cannot resolve, and changes into a dir the guard cannot tell", input: bash(`declare 'CD'PATH=~; cd notes && touch MEMORY.md`)},
+		{name: "quote-split exported CDPATH", want: "which holds the personal store", input: bash(`export "CD"PATH=~; cd notes && touch MEMORY.md`)},
+		{name: "quote-split declared CDPATH", want: "which holds the personal store", input: bash(`declare 'CD'PATH=~; cd notes && touch MEMORY.md`)},
+		{name: "quote-split exported CDPATH elsewhere", want: "cannot resolve, and changes into a dir the guard cannot tell", input: bash(`export "CD"PATH=@H/elsewhere; cd notes && touch MEMORY.md`)},
 		{name: "BASH_CMDS renaming a reader", want: "/notes/MEMORY.md, inside the personal store", input: bash(`BASH_CMDS[ls]=/bin/rm; ls ~/notes/MEMORY.md`)},
 		{name: "read before a data position", want: "which holds the personal store", cwd: ".", input: bash(`n=1; { read n; cp /tmp/evil "$n"; } < f; gh pr view 1 --jq .`)},
 
 		// Setters read after the words they change, and arithmetic.
 		{name: "function body before a quote-split IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; f(){ rm -rf $d; }; declare 'I'FS=Q; f`)},
 		{name: "trap body before a quote-split IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; trap 'rm -rf $d' EXIT; declare 'I'FS=Q`)},
-		{name: "function body before a quote-split CDPATH", want: "cannot resolve, and changes into a dir the guard cannot tell", input: bash(`f(){ cd notes && touch MEMORY.md; }; export "CD"PATH=~; f`)},
-		{name: "function body before a default CDPATH", want: "cannot resolve, and changes into a dir the guard cannot tell", input: bash(`f(){ cd notes && touch MEMORY.md; }; : ${CDPATH:=~}; f`)},
+		{name: "function body before a quote-split CDPATH", want: "which holds the personal store", input: bash(`f(){ cd notes && touch MEMORY.md; }; export "CD"PATH=~; f`)},
+		{name: "function body before a default CDPATH", want: "which holds the personal store", input: bash(`f(){ cd notes && touch MEMORY.md; }; : ${CDPATH:=~}; f`)},
 		{name: "function body before an eval IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; f(){ rm -rf $d; }; eval I\FS=Q; f`)},
 		{name: "function body before a source", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; f(){ rm -rf $d; }; source /tmp/x; f`)},
 		{name: "arithmetic target built IFS", want: "shell code the guard cannot read", input: bash(`v=IF; (( ${v}S = 5 )); d=/tmp5$HOME/notes; rm -rf $d`)},
@@ -968,6 +969,10 @@ func TestRedesignAllows(t *testing.T) {
 		{name: "pager prefix", input: bash(`GIT_PAGER=cat git log`)},
 		{name: "locale prefix", input: bash(`LANG=C sort f`)},
 		{name: "PATH prefix with a home bin", input: bash(`PATH="$HOME/bin:$PATH" cmd`)},
+		{name: "prefix to one program, store read by another", input: bash(`PAGER=cat make build && grep x ~/notes/MEMORY.md`)},
+		{name: "token from a substitution in home", cwd: ".", input: bash(`GH_TOKEN=$(gh auth token) gh pr list`)},
+		{name: "version from a substitution in home", cwd: ".", input: bash(`VERSION=$(date +%s) make build`)},
+		{name: "cdable_vars to a name nothing sets", input: bash(`shopt -s cdable_vars; cd build && make`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.tool == "" {
@@ -1036,8 +1041,8 @@ func TestRedesignDenies(t *testing.T) {
 func TestStoreWritesStayDenied(t *testing.T) {
 	sb := newSandbox(t)
 	const (
-		store = "the personal store"
-		lost  = "changes into a dir the guard cannot tell"
+		store   = "the personal store"
+		guarded = "names a guarded path"
 	)
 	for _, c := range []call{
 		{name: "dd of= tilde", want: store, input: bash("dd if=/dev/zero of=~/notes/MEMORY.md")},
@@ -1052,8 +1057,28 @@ func TestStoreWritesStayDenied(t *testing.T) {
 		{name: "prefix DESTDIR", want: store, input: bash("DESTDIR=~/notes make install")},
 		{name: "prefix HOME from HOME", want: "the guard cannot resolve", input: bash("HOME=$HOME/notes foo")},
 
-		{name: "cdable_vars to an assigned name", want: lost, input: bash("shopt -s cdable_vars; d=$HOME/notes; cd d && touch new.md")},
-		{name: "cdable_vars to a host name", want: lost, cwd: "elsewhere", input: bash("shopt -s cdable_vars; cd NOTES; rm facts/a.md")},
+		{name: "cdable_vars to an assigned name", want: store, input: bash("shopt -s cdable_vars; d=$HOME/notes; cd d && touch new.md")},
+		{name: "cdable_vars to a host name", want: store, cwd: "elsewhere", input: bash("shopt -s cdable_vars; cd NOTES; rm facts/a.md")},
+
+		{name: "loop variable exported before", want: store, input: bash("export GIT_WORK_TREE; for GIT_WORK_TREE in ~/notes; do git checkout -- .; done")},
+		{name: "loop variable exported inside", want: store, input: bash("for GIT_WORK_TREE in ~/notes; do export GIT_WORK_TREE; git checkout -- .; done")},
+		{name: "loop git dir", want: store, input: bash("export GIT_DIR; for GIT_DIR in ~/notes/.git; do git reset --hard; done")},
+		{name: "loop HOME", want: guarded, input: bash("for HOME in ~/notes; do export HOME; git config --global a.b c; done")},
+		{name: "nameref to an exported name", want: guarded, input: bash("declare -n r=GIT_WORK_TREE; export GIT_WORK_TREE; r=~/notes; git checkout -- .")},
+		{name: "local nameref in a function", want: guarded, input: bash("f() { local -n r=GIT_WORK_TREE; r=~/notes; }; export GIT_WORK_TREE; f; git checkout -- .")},
+		{name: "nested shell -a", want: store, input: bash("bash -a -c 'GIT_WORK_TREE=~/notes; git checkout -- .'")},
+		{name: "nested shell -ac", want: store, input: bash("bash -ac 'GIT_WORK_TREE=~/notes; git checkout -- .'")},
+		{name: "nested shell -o allexport", want: store, input: bash("bash -o allexport -c 'GIT_WORK_TREE=~/notes; git checkout -- .'")},
+		{name: "nested shell -O cdable_vars to HOME", want: store, input: bash("bash -O cdable_vars -c 'cd HOME; echo x > notes/MEMORY.md'")},
+		{name: "nested sh -O cdable_vars to HOME", want: store, input: bash("sh -O cdable_vars -c 'cd HOME; touch notes/facts/n.md'")},
+		{name: "shopt glob operand", want: store, input: bash("touch cdable_vars; shopt -s cdable_var?; cd HOME && echo x > notes/MEMORY.md")},
+		{name: "nested shell -O cdable_vars to an assigned name", want: store, input: bash("bash -O cdable_vars -c 'd=$HOME/notes; cd d && touch new.md'")},
+		{name: "prefix value named by a nested cd", want: store, input: bash("d=~/notes bash -O cdable_vars -c 'cd d && touch new.md'")},
+		{name: "env value named by a nested cd", want: store, input: bash("env d=~/notes bash -O cdable_vars -c 'cd d && touch new.md'")},
+		{name: "prefix value to cd naming it", want: store, input: bash("shopt -s cdable_vars; d=~/notes cd d && touch new.md")},
+		{name: "source before a cd naming a variable", want: "changes into a dir the guard cannot tell", input: bash("shopt -s cdable_vars; source ./e.sh; cd d && touch new.md")},
+		{name: "unknown program double quoted subscript tilde", want: store, input: bash(`foo a["x"]=~/notes/MEMORY.md`)},
+		{name: "unknown program single quoted subscript tilde", want: store, input: bash(`foo a['x']=~/notes/MEMORY.md`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			c.tool = "Bash"
