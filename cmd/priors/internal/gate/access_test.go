@@ -1,9 +1,12 @@
 package gate
 
 import (
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestShellAccess(t *testing.T) {
@@ -108,7 +111,7 @@ func TestShellAccess(t *testing.T) {
 		{name: "sudo chdir short", cmd: "sudo -D store touch M", writes: true, want: []Touch{cd("store")}},
 		{name: "sudo chdir short glued", cmd: "sudo -Dstore touch M", writes: true, want: []Touch{cd("store")}},
 		{name: "sudo chdir long", cmd: "sudo --chdir=store touch M", writes: true, want: []Touch{cd("store")}},
-		{name: "sudo -C is no chdir", cmd: "sudo -C 3 true", writes: true, absent: []Touch{cd("3")}},
+		{name: "sudo -C value is an option dir", cmd: "sudo -C 3 true", writes: true, want: []Touch{cd("3")}},
 		{name: "let PATH", cmd: "let PATH=1", writes: true},
 		{name: "arithmetic PATH", cmd: "(( PATH=1 ))", writes: true},
 		{name: "read IFS", cmd: "read IFS <<< X", writes: true},
@@ -125,7 +128,27 @@ func TestShellAccess(t *testing.T) {
 		{name: "PATH expansion reads", cmd: `echo $PATH ${PATH} "$PATH" ${PATH:-x} $IFS $GOPATH`},
 		{name: "GOPATH export is no writer", cmd: "export GOPATH=/x PATHS=y"},
 		{name: "declare without nameref stays", cmd: "declare -x r=1; cd store", absent: []Touch{{Opaque: true, Chdir: true}}},
+		{name: "export -n is no nameref", cmd: "export -n FOO; cd store", absent: []Touch{{Opaque: true, Chdir: true}}},
+		{name: "builtin export -n is no nameref", cmd: "builtin export -n FOO; cd store", writes: true, absent: []Touch{{Opaque: true, Chdir: true}}},
+		{name: "readonly -n is no nameref", cmd: "readonly -n FOO; cd store", absent: []Touch{{Opaque: true, Chdir: true}}},
+		{name: "opaque arithmetic word without an assignment", cmd: "n=$1; (( i < $n )); d=/h/a; rm $d", writes: true, want: []Touch{w("/h/a")}},
+		{name: "let of an opaque word holding an assignment", cmd: `v=i; let "${v^^}FS=0"; d=/h/a; rm $d`, writes: true, want: []Touch{opaque}},
+		{name: "unparsable arithmetic value may set any name", cmd: "x='$(rm /h/store/M) b'; (( x )); d=/h/a; rm $d", writes: true, want: []Touch{opaque, w("/h/store/M")}},
+		{name: "default assignment inside arithmetic", cmd: "(( ${IFS:=5} )); d=/h/a; rm $d", writes: true, want: []Touch{opaque}},
+		{name: "every assigned value is read as arithmetic", cmd: "x=0; x='a[$(rm /h/store/M)]'; (( x ))", writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "appended value is read as arithmetic", cmd: "x='a[$(rm /h/st'; x+='ore/M)]'; (( x ))", writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "printf -v value is read as arithmetic", cmd: "printf -v x %s 'a[$(rm /h/store/M)]'; (( x ))", writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "printf -v escaped value is read as arithmetic", cmd: `printf -v x 'a[\x24(rm /h/store/M)]'; (( x ))`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "read here-string value is read as arithmetic", cmd: "read x <<< 'a[$(rm /h/store/M)]'; (( x ))", writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "expansion index is arithmetic", cmd: "a=(1); x='a[$(rm /h/store/M)]'; echo ${a[x]}", writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "expansion slice is arithmetic", cmd: "s=abc; x='a[$(rm /h/store/M)]'; echo ${s:x}", writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "expansion length index is arithmetic", cmd: "a=(1); x='a[$(rm /h/store/M)]'; echo ${#a[x]}", writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "all-elements index is no arithmetic", cmd: `for n in 1 2; do gh issue view $n --jq /h/store/M; done; echo ${#a[@]}`, writes: true, absent: []Touch{w("/h/store/M")}},
+		{name: "quoted paren beside an arithmetic substitution", cmd: `(( $(echo "(") + $(rm /h/store/M) ))`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "quoted paren beside a value substitution", cmd: `x='a[$(echo "(") + $(rm /h/store/M)]'; (( x ))`, writes: true, want: []Touch{w("/h/store/M")}},
 		{name: "IFS unchanged splits", cmd: "d='/h/store /h/x'; echo $d", want: []Touch{m("/h/store"), m("/h/x")}},
+		{name: "quote-split declared IFS splits opaquely", cmd: "d=/h/a; declare 'I'FS=Q; rm $d", writes: true, want: []Touch{opaque}},
+		{name: "case-changing declare value is opaque", cmd: "declare -l d=/h/A; rm $d", writes: true, want: []Touch{opaque}},
 		{name: "exported GIT config", cmd: "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=x; git -C /h/store status", writes: true},
 		{name: "exported LD_PRELOAD", cmd: "export LD_PRELOAD=/tmp/x.so; cat /h/store/M", writes: true},
 		{name: "exported GITHUB and LDFLAGS", cmd: "export GITHUB=x LDFLAGS=-s"},
@@ -148,6 +171,19 @@ func TestShellAccess(t *testing.T) {
 		{name: "git log ext-diff", cmd: "git -C /h/store log --ext-diff -p", writes: true},
 		{name: "git diff textconv", cmd: "git diff --textconv", writes: true},
 		{name: "git log no-ext-diff", cmd: "git -C /h/store log --no-ext-diff -p", want: []Touch{cd("/h/store")}},
+
+		// A writer's option values.
+		{name: "long option value is a write and a dir", cmd: "unshare --wd=store touch M", writes: true, want: []Touch{w("store"), cd("store")}},
+		{name: "single-dash name=value is a cluster too", cmd: "go test -count=1", writes: true, want: []Touch{cd("1"), cd("ount=1"), w("t=1")}},
+		{name: "single-dash name=value cluster suffixes", cmd: "unshare -wa=b touch M", writes: true, want: []Touch{cd("a=b"), cd("=b"), cd("b")}},
+		{name: "cluster suffix is a dir", cmd: "env -vCstore touch M", writes: true, want: []Touch{cd("store")}},
+		{name: "cluster past the bound is unreadable", cmd: "env -vvvvvvvvvvvvvvvvvvvvCstore rm -rf M", writes: true, want: []Touch{cd("store"), opaque, {Opaque: true, Chdir: true}}},
+		{name: "word after an abbreviated option is a dir", cmd: "env --ch store touch M", writes: true, want: []Touch{cd("store")}},
+		{name: "glued shell text is a script", cmd: "foo -c'rm -rf /h/store'", writes: true, want: []Touch{w("/h/store")}},
+		{name: "option dirs past the bound", cmd: "rm" + strings.Repeat(" -a 1", maxSubTokens+1) + " x", writes: true, want: []Touch{{Opaque: true, Chdir: true}}},
+		{name: "many option dirs stay known", cmd: "rm -a 1 -b 2 -c 3 -d 4 -e 5 -f 6 -g 7 -h 8 -i 9 x", writes: true, want: []Touch{cd("9")}, absent: []Touch{{Opaque: true, Chdir: true}}},
+		{name: "data word is no option value", cmd: "claude -p /h/store --model opus", writes: true, absent: []Touch{cd("/h/store"), w("/h/store")}},
+		{name: "reader option value is no dir", cmd: "cat -A /h/store", absent: []Touch{cd("/h/store")}},
 
 		// Data positions of a cleanly resolved known program.
 		{name: "gh jq filter is data", cmd: `gh pr view 1 --jq '.a // .b'`, writes: true, absent: []Touch{w("//")}},
@@ -248,6 +284,15 @@ func TestShellAccess(t *testing.T) {
 		{name: "xtrace prompt default withdraws loop", cmd: `read -r x < /h/f; false && for n in a b; do :; done; PS4='${!x:=h}'; set -x; :; set +x; cp /bin/rm /h/bin/g$n; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
 		{name: "wait -p subscript withdraws loop", cmd: `read -r y < /h/f; x='a[${!y:=h}]'; false && for n in a b; do :; done; sleep 0 & wait -p "b[x]" -n; cp /bin/rm /h/bin/g$n; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
 		{name: "quoted glob loop item withdraws", cmd: `for n in 'g?' x; do cp /bin/rm /h/bin/$n; done; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "glob-named data taker withdraws", cmd: `cp /bin/rm /h/bin/g?; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "bracket-named data taker withdraws", cmd: `cp /bin/rm /h/bin/[g]h; gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "negated extglob data taker withdraws", cmd: `cp /bin/rm /h/bin/!(x); gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "glob that cannot name a data taker keeps the filter", cmd: `rm -f *.o; gh pr view 1 --jq /h/store/M`, writes: true, absent: []Touch{w("/h/store/M")}},
+		{name: "opaque redirect target withdraws", cmd: `cat /bin/rm > /h/bin/g$(echo h); gh pr view 1 --jq /h/store/M`, writes: true, want: []Touch{w("/h/store/M")}},
+		{name: "loop redirect target keeps the filter", cmd: `for n in a b; do echo x > /h/log/$n; done; gh pr view 1 --jq /h/store/M`, writes: true, absent: []Touch{w("/h/store/M")}},
+		{name: "opaque here-string to a writer", cmd: `bash <<< "$(cat /h/f)"`, writes: true, want: []Touch{opaque}},
+		{name: "loop heredoc to a writer per value", cmd: "for d in a b; do bash <<EOF\nrm /h/$d\nEOF\ndone", writes: true, want: []Touch{w("/h/a"), w("/h/b")}},
+		{name: "loop heredoc to a writer keeps the filter", cmd: "for d in a b; do sh <<EOF\necho $d\nEOF\ndone; gh pr view 1 --jq /h/store/M", writes: true, absent: []Touch{w("/h/store/M")}},
 		// A false positive: test sets no variable but is outside the closed list.
 		{name: "test beside a loop withdraws", cmd: `for n in 1 2; do test -n "$n"; gh issue view $n --jq /h/store/M; done`, writes: true, want: []Touch{w("/h/store/M")}},
 	} {
@@ -343,6 +388,76 @@ func TestShellAccessUnreadable(t *testing.T) {
 	}
 	if acc := ShellAccess(nil, script); acc.Unreadable != "budget" {
 		t.Errorf("deep nesting: Unreadable = %q, want budget", acc.Unreadable)
+	}
+}
+
+// TestShellAccessBounded feeds ShellAccess commands built to make it read
+// them more than once, or read many option values of one writer. Each must
+// come back read in full or past the budget, within the stack and time bounds
+// TestIngestReasonBounded holds gate 2 to. A command read again allocates up
+// to twice what one read does, so its allocation bound is twice gate 2's.
+func TestShellAccessBounded(t *testing.T) {
+	limitStack(t)
+	timeLimit := time.Second
+	if raceEnabled {
+		timeLimit *= 10
+	}
+	trigger := `d=/a; f(){ rm -rf $d; }; declare 'I'FS=Q; f`
+	padded := func(size int) string { return strings.Repeat(": a; ", (size-len(trigger))/5) + trigger }
+	// repeated builds a writer whose words are word(i) for i = 0, 1, …, up to
+	// maxText bytes.
+	repeated := func(word func(int) string) string {
+		var b strings.Builder
+		b.WriteString("rm")
+		for i := 0; ; i++ {
+			w := " " + word(i)
+			if b.Len()+len(w) > maxText {
+				return b.String()
+			}
+			b.WriteString(w)
+		}
+	}
+	for _, tt := range []struct {
+		name string
+		cmd  string
+	}{
+		{"setter after a function body, padded to the text bound", padded(maxText)},
+		{"setter after a function body, padded so both reads finish", padded(maxText * 5 / 8)},
+		// No suffix of a cluster parses, so each is tried.
+		{"option clusters holding shell text", repeated(func(i int) string { return "'-abcdefghijklmnop;;" + strconv.Itoa(i) + "'" })},
+		{"option values past the dir cap", repeated(func(i int) string { return "--o" + strconv.Itoa(i) + "=d" + strconv.Itoa(i) })},
+		{"unclosed brackets in a glob", "echo '" + strings.Repeat("[)", 40<<10) + "'"},
+		{"unclosed class openers in a glob", "echo '" + strings.Repeat("[:)", 2<<10) + "'"},
+		{"unclosed class openers before a close", "echo '" + strings.Repeat("[:)", 2<<10) + "]'"},
+		{"unclosed brackets before an escaped close", "echo '" + strings.Repeat("[)", 40<<10) + `\]'`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := tt.cmd
+			done := make(chan string, 1)
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			start := time.Now()
+			go func() { done <- ShellAccess(&Host{Home: "/h"}, cmd).Unreadable }()
+			var reason string
+			select {
+			case reason = <-done:
+			case <-time.After(hangGuard):
+				t.Fatalf("reading %d bytes took over %v", len(cmd), hangGuard)
+			}
+			elapsed := time.Since(start)
+			runtime.ReadMemStats(&after)
+			alloc := after.TotalAlloc - before.TotalAlloc
+			t.Logf("%d bytes read in %v, %d KiB allocated", len(cmd), elapsed, alloc>>10)
+			if reason != "" && reason != "budget" {
+				t.Errorf("Unreadable = %q, want none or budget", reason)
+			}
+			if elapsed > timeLimit {
+				t.Errorf("reading %d bytes took %v, over %v", len(cmd), elapsed, timeLimit)
+			}
+			if alloc > 2*boundAlloc {
+				t.Errorf("reading %d bytes allocated %d MiB", len(cmd), alloc>>20)
+			}
+		})
 	}
 }
 

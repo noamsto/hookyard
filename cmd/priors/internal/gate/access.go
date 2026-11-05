@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"path"
 	"slices"
 	"strings"
 
@@ -64,6 +65,9 @@ const (
 	// maxLoopRuns bounds the combinations of values finite loop variables are
 	// read in, so per-value touches stay inside maxTouches.
 	maxLoopRuns = 64
+	// maxCluster bounds the glued values read from each end of one
+	// short-option cluster; a longer one is read as unknown.
+	maxCluster = 16
 )
 
 var (
@@ -100,13 +104,21 @@ var (
 	findActions = []string{"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
 	// programVars change which program a command name, or a shell, runs; so
 	// do the GIT_ and LD_ ones.
-	programVars = []string{"PATH", "BASH_ENV", "ENV"}
+	programVars = []string{"PATH", "BASH_ENV", "ENV", "BASH_CMDS", "BASH_ALIASES"}
 	// shellVars are the variables a script can change without assigning them
 	// (`let`, `read`, `mapfile`, `(( ))`, a nameref), which move what a name
 	// runs, where cd looks, or how a word splits.
 	shellVars = []string{"PATH", "BASH_ENV", "ENV", "CDPATH", "IFS"}
 	// declarers take -n to declare a nameref.
 	declarers = []string{"declare", "typeset", "local"}
+	// setters are the builtins that may set a variable no assignment shows: one
+	// an operand or option value names, or any, through the code they run.
+	setters = []string{
+		"declare", "typeset", "local", "export", "readonly", "read", "mapfile", "readarray",
+		"printf", "getopts", "wait", "unset", "eval", "source", ".",
+	}
+	// scriptShells run the value of -c as a script.
+	scriptShells = []string{"bash", "sh", "zsh", "dash", "ksh", "ash"}
 	// chdirTools take -C as the dir they run in.
 	chdirTools = []string{"git", "make", "tar"}
 	// sinks are redirect targets that are not files.
@@ -135,19 +147,14 @@ func ShellAccess(host *Host, texts ...string) (acc Access) {
 	if host == nil {
 		host = &Host{}
 	}
-	a := &accessor{
-		j:         &judge{seen: map[string]bool{}, vars: map[string]string{}, host: host},
-		tainted:   map[string]bool{},
-		done:      map[*syntax.Word]bool{},
-		touched:   map[Touch]bool{},
-		piped:     map[*syntax.Stmt]bool{},
-		loops:     map[string][]string{},
-		assigns:   map[string]int{},
-		mentioned: map[string]bool{},
-		exempted:  map[string]bool{},
-	}
-	for _, text := range texts {
-		a.script(text, 0)
+	a := read(host, texts, 0, false, false)
+	// Words read cdpath and ifs as they render, so a setter read after a word
+	// it changes (in a function body or trap text read before it) is missed
+	// there: the command is read again from scratch with both preset, on the
+	// budget the last read left, until neither changes. Each only turns on, so
+	// that is at most two more reads.
+	for a.acc.Unreadable == "" && (a.cdpath && !a.baseline.cdpath || a.ifs && !a.baseline.ifs) {
+		a = read(host, texts, a.j.parsed, a.cdpath, a.ifs)
 	}
 	// A loop variable's listed values hold every value it is read with only
 	// if nothing else sets it, which the whole command must be read to tell:
@@ -168,6 +175,30 @@ func ShellAccess(host *Host, texts ...string) (acc Access) {
 	return a.acc
 }
 
+// read reads texts as one command with cdpath and ifs preset, its budget
+// starting at parsed.
+func read(host *Host, texts []string, parsed int, cdpath, ifs bool) *accessor {
+	a := &accessor{
+		j:         &judge{parsed: parsed, seen: map[string]bool{}, vars: map[string]string{}, host: host},
+		tainted:   map[string]bool{},
+		done:      map[*syntax.Word]bool{},
+		touched:   map[Touch]bool{},
+		piped:     map[*syntax.Stmt]bool{},
+		loops:     map[string][]string{},
+		assigns:   map[string]int{},
+		mentioned: map[string]bool{},
+		exempted:  map[string]bool{},
+		latest:    map[string]string{},
+		cdpath:    cdpath,
+		ifs:       ifs,
+	}
+	for _, text := range texts {
+		a.script(text, 0)
+	}
+	a.evaluated()
+	return a
+}
+
 // accessor collects one command's Access, sharing gate 2's budget.
 type accessor struct {
 	j *judge
@@ -184,6 +215,17 @@ type accessor struct {
 	// While ifs holds a word's split cannot be told, so an unquoted expansion
 	// is opaque.
 	cdpath, ifs bool
+	// baseline is cdpath and ifs once the first text's scan has run, before
+	// any word renders: a flag set past it may come after a word it changes.
+	baseline struct{ set, cdpath, ifs bool }
+	// evaluates reports anything bash evaluates as arithmetic, which may read
+	// any assigned value as an expression.
+	evaluates bool
+	// values are every value the command assigns, in order, which evaluated
+	// reads: j.vars keeps only a name's first. latest is each name's last
+	// value, which an append (+=) extends.
+	values []string
+	latest map[string]string
 	// redefines reports a command that can redefine what a name runs (shell
 	// state, a function, a redefiner call, an opaque or manufactured name). It
 	// withdraws every data position, so deferred data words are judged after the
@@ -238,9 +280,7 @@ func (a *accessor) script(text string, depth int) {
 	// A script is read once whatever value renders it, so none of its loop
 	// reads may take a pinned value as the only one.
 	defer a.unpin()()
-	a.j.parsed += parseBase + parseCost*len(text)
-	if depth > maxDepth || a.j.parsed > maxParsed || len(text) > maxText || nesting(text) > maxNesting {
-		a.acc.Unreadable = "budget"
+	if !a.charge(text, depth) {
 		return
 	}
 	var stmts []*syntax.Stmt
@@ -253,6 +293,9 @@ func (a *accessor) script(text string, depth int) {
 		stmts = append(stmts, stmt)
 	}
 	a.scan(text, stmts)
+	if depth == 0 && !a.baseline.set {
+		a.baseline.set, a.baseline.cdpath, a.baseline.ifs = true, a.cdpath, a.ifs
+	}
 	for _, stmt := range stmts {
 		if a.acc.Unreadable != "" {
 			break
@@ -266,6 +309,17 @@ func (a *accessor) script(text string, depth int) {
 		}
 		a.unparsed(text)
 	}
+}
+
+// charge charges the budget for parsing text at depth, and reports whether
+// the budget and the parser's limits leave it readable.
+func (a *accessor) charge(text string, depth int) bool {
+	a.j.parsed += parseBase + parseCost*len(text)
+	if depth > maxDepth || a.j.parsed > maxParsed || len(text) > maxText || nesting(text) > maxNesting {
+		a.acc.Unreadable = "budget"
+		return false
+	}
+	return true
 }
 
 // scan reads a script before any of it is read as commands, since a later
@@ -294,6 +348,7 @@ func (a *accessor) scan(text string, stmts []*syntax.Stmt) {
 			// arithmetic, which writes nothing by itself.
 			if declares(n, "i") {
 				a.wild = true
+				a.evaluates = true
 			}
 			if _, ok := n.(*syntax.FuncDecl); ok {
 				a.redefines = true
@@ -420,6 +475,9 @@ func (a *accessor) unparsed(text string) {
 	a.field(overflagQuotes.Replace(text), true, false)
 }
 
+// stmt reads one statement in two walks. The first records what it sets, so
+// a taint covers each of its words whatever their order, as a loop runs a word
+// again after a later setter.
 func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
 	walkBounded(s, func(n syntax.Node) bool {
 		switch n := n.(type) {
@@ -428,12 +486,26 @@ func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
 			case n.Name == nil:
 			case n.Array != nil:
 				a.assign(n.Name.Value, elemValues(n.Array)...)
+			case n.Append && n.Value != nil:
+				prior := a.latest[n.Name.Value]
+				a.assign(n.Name.Value, n.Value)
+				a.appended(n.Name.Value, prior)
 			default:
 				a.assign(n.Name.Value, n.Value)
 			}
 		case *syntax.ParamExp:
 			if n.Param != nil && n.Exp != nil && (n.Exp.Op == syntax.AssignUnset || n.Exp.Op == syntax.AssignUnsetOrNull) {
 				a.assign(n.Param.Value, n.Exp.Word)
+			}
+		case *syntax.DeclClause:
+			a.declClause(n, text, depth)
+		case *syntax.Stmt:
+			if c, ok := n.Cmd.(*syntax.CallExpr); ok {
+				a.setterCall(c, n.Redirs, text, depth)
+			}
+		case *syntax.Redirect:
+			if n.N != nil && !digits(n.N.Value) {
+				a.setNames(depth, strings.Trim(n.N.Value, "{}"))
 			}
 		case *syntax.ForClause:
 			if wi, ok := n.Loop.(*syntax.WordIter); ok && !n.Select {
@@ -489,13 +561,156 @@ func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
 		}
 		if subscripts(n) {
 			a.wild = true
+			a.evaluates = true
 		}
 		if arithmetic(n) {
-			a.arithmetic(source(text, n))
+			a.targets(n, source(text, n), text, depth)
 			return false
 		}
 		return a.acc.Unreadable == "" && a.j.parsed <= maxParsed
 	})
+}
+
+// targets reads an arithmetic node of text at depth, src its source. Bash
+// evaluates it, which may read any assigned value as an expression. A word in
+// it sets any name its rendered text spells (`v=IF; let "${v}S=1"`), and an
+// opaque word spelling an assignment (`let "${v^^}FS=0"`) may set any name. A
+// substitution in it runs, its statements read as any others are. Its tree
+// nests one level per operator, so each node is charged to the budget.
+func (a *accessor) targets(n syntax.Node, src, text string, depth int) {
+	a.wild = true
+	a.evaluates = true
+	runs := false
+	walkBounded(n, func(n syntax.Node) bool {
+		if a.j.parsed++; a.j.parsed > maxParsed {
+			a.acc.Unreadable = "budget"
+			return false
+		}
+		switch n := n.(type) {
+		case *syntax.CmdSubst:
+			runs = true
+			for _, s := range n.Stmts {
+				a.stmt(s, text, depth)
+			}
+			return false
+		case *syntax.ProcSubst:
+			runs = true
+			for _, s := range n.Stmts {
+				a.stmt(s, text, depth)
+			}
+			return false
+		case *syntax.ParamExp:
+			if n.Param != nil && n.Exp != nil && (n.Exp.Op == syntax.AssignUnset || n.Exp.Op == syntax.AssignUnsetOrNull) {
+				a.assign(n.Param.Value, n.Exp.Word)
+			}
+		case *syntax.Word:
+			if a.opaque(n) && spellsAssignment(source(text, n)) {
+				a.unknownSetter()
+			}
+			fields, r := a.j.fields(real, text, n)
+			if r != "" {
+				a.acc.Unreadable = r
+				return false
+			}
+			for _, f := range fields {
+				for _, d := range Decodings(f) {
+					a.protects(d)
+				}
+			}
+		}
+		return a.acc.Unreadable == ""
+	})
+	if runs {
+		a.acc.Writes = true
+		a.touch(Touch{Write: true, Opaque: true})
+	}
+	a.field(src, runs, false)
+}
+
+// spellsAssignment reports an arithmetic word's source holding an assignment
+// or increment operator.
+func spellsAssignment(s string) bool {
+	return strings.Contains(s, "=") || strings.Contains(s, "++") || strings.Contains(s, "--")
+}
+
+// arithmetic reads src, text bash evaluates as arithmetic at run time (an
+// assigned value, a setter's subscript), as the arithmetic command `(( src ))`
+// parsed one level deeper. Text that is not one such command may still set
+// any name, and runs every substitution a scan of its text finds.
+func (a *accessor) arithmetic(src string, depth int) {
+	a.wild = true
+	a.evaluates = true
+	text := "(( " + src + " ))"
+	if !a.charge(text, depth+1) {
+		return
+	}
+	f, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
+	if err == nil && len(f.Stmts) == 1 && len(f.Stmts[0].Redirs) == 0 {
+		if c, ok := f.Stmts[0].Cmd.(*syntax.ArithmCmd); ok {
+			a.targets(c, src, text, depth+1)
+			return
+		}
+	}
+	a.unknownSetter()
+	a.touch(Touch{Write: true, Opaque: true})
+	a.field(src, true, false)
+	for _, s := range substitutions(src) {
+		a.script(s, depth+1)
+	}
+}
+
+// protects applies protected to every name s spells that is not an
+// expansion, as arithmetic evaluating s may set any of them.
+func (a *accessor) protects(s string) {
+	if a.j.parsed += len(s); a.j.parsed > maxParsed {
+		a.acc.Unreadable = "budget"
+		return
+	}
+	for i := 0; i < len(s); {
+		if !nameByte(s[i]) {
+			i++
+			continue
+		}
+		end := i
+		for end < len(s) && nameByte(s[end]) {
+			end++
+		}
+		if i == 0 || s[i-1] != '$' && s[i-1] != '{' {
+			a.protected(s[i:end])
+		}
+		i = end
+	}
+}
+
+// evaluated reads, once anything evaluates arithmetic, every value the
+// command assigns as an expression: a name's value can name another name,
+// so all are read, and one a substitution read assigns too.
+func (a *accessor) evaluated() {
+	if !a.evaluates {
+		return
+	}
+	checked := map[string]bool{}
+	for from := 0; from < len(a.values) && a.acc.Unreadable == ""; {
+		batch := slices.Clone(a.values[from:])
+		from = len(a.values)
+		slices.Sort(batch)
+		for _, v := range slices.Compact(batch) {
+			if checked[v] || a.acc.Unreadable != "" {
+				continue
+			}
+			checked[v] = true
+			if substitutes(v) {
+				a.arithmetic(v, 1)
+			}
+			a.protects(v)
+		}
+	}
+}
+
+// substitutes reports s holding a substitution's opener, or a ${ whose
+// operator may assign: what evaluating s as arithmetic may run.
+func substitutes(s string) bool {
+	return strings.Contains(s, "$(") || strings.Contains(s, "${") || strings.Contains(s, "`") || strings.Contains(s, "<(") || strings.Contains(s, ">(")
 }
 
 // assign records name's value as gate 2 does, and taints it when a word may
@@ -503,14 +718,345 @@ func (a *accessor) stmt(s *syntax.Stmt, text string, depth int) {
 // program a name runs writes, whatever the command that follows.
 func (a *accessor) assign(name string, values ...*syntax.Word) {
 	a.assigns[name]++
-	if slices.Contains(programVars, name) || strings.HasPrefix(name, "GIT_") || strings.HasPrefix(name, "LD_") {
+	if programVar(name) {
 		a.acc.Writes = true
 	}
 	a.ifs = a.ifs || name == "IFS"
+	a.cdpath = a.cdpath || name == "CDPATH"
 	if _, ok := a.j.vars[name]; ok || len(values) != 1 || values[0] == nil || a.opaque(values[0]) {
 		a.tainted[name] = true
 	}
+	for _, v := range values {
+		if v != nil {
+			a.latest[name] = a.record(v)
+		}
+	}
 	a.j.assign(name, values...)
+}
+
+// record adds w's value, rendered as j.assign renders one, to values and
+// returns it.
+func (a *accessor) record(w *syntax.Word) string {
+	if w == nil {
+		return ""
+	}
+	r := &render{env: real, host: a.j.host, spent: &a.j.parsed}
+	v := r.operand(w, false)
+	a.values = append(a.values, v)
+	return v
+}
+
+// printed records what printf -v assigns from format and args, near enough
+// for evaluated to read: each conversion, flags and width dropped, takes the
+// next arg, and the format is read again while args remain. Every decoding
+// counts, as the format's escapes and a %b arg's are read.
+func (a *accessor) printed(format string, args []string) {
+	var b strings.Builder
+	for {
+		if a.j.parsed += len(format); a.j.parsed > maxParsed {
+			a.acc.Unreadable = "budget"
+			return
+		}
+		used := false
+		for i := 0; i < len(format); i++ {
+			if format[i] != '%' {
+				b.WriteByte(format[i])
+				continue
+			}
+			j := i + 1
+			for j < len(format) && strings.IndexByte("#0123456789-+ '.*", format[j]) >= 0 {
+				j++
+			}
+			switch {
+			case j == len(format):
+				b.WriteString(format[i:])
+			case format[j] == '%':
+				b.WriteByte('%')
+			case len(args) > 0:
+				b.WriteString(args[0])
+				args, used = args[1:], true
+			}
+			i = j
+		}
+		if !used || len(args) == 0 {
+			break
+		}
+	}
+	a.values = append(a.values, Decodings(b.String())...)
+}
+
+// appended records the value name holds after an append (`x+=…`): prior, its
+// value before, extended by the one assign just recorded.
+func (a *accessor) appended(name, prior string) {
+	v := prior + a.latest[name]
+	if a.j.parsed += len(v); a.j.parsed > maxParsed {
+		a.acc.Unreadable = "budget"
+		return
+	}
+	a.latest[name] = v
+	a.values = append(a.values, v)
+}
+
+// programVar reports a variable that picks the program a name, or a shell,
+// runs.
+func programVar(name string) bool {
+	return slices.Contains(programVars, name) || strings.HasPrefix(name, "GIT_") || strings.HasPrefix(name, "LD_")
+}
+
+// protected applies what setting name does: a program variable writes, a
+// shell variable moves what a name runs, where cd looks or how a word splits,
+// and a state variable can redefine what a name runs.
+func (a *accessor) protected(name string) {
+	if programVar(name) {
+		a.acc.Writes = true
+	}
+	if slices.Contains(shellVars, name) {
+		a.changes(name == "CDPATH", name == "IFS")
+	}
+	if slices.Contains(stateNames, name) {
+		a.redefines = true
+	}
+}
+
+// unknownSetter records a call that may set any variable.
+func (a *accessor) unknownSetter() {
+	a.changes(true, true)
+	a.redefines = true
+	a.unsafe = true
+	a.wild = true
+}
+
+// setNames records name positions: words a builtin reads as the name of a
+// variable it sets, whose value no word can then tell. "" is an opaque one,
+// which may name any, and a subscript is arithmetic in the script at depth.
+func (a *accessor) setNames(depth int, names ...string) {
+	for _, s := range names {
+		if s == "" {
+			a.unknownSetter()
+			continue
+		}
+		name, sub, indexed := strings.Cut(s, "[")
+		if indexed {
+			a.arithmetic(strings.TrimSuffix(sub, "]"), depth)
+		}
+		a.protected(name)
+		a.tainted[name] = true
+		a.assigns[name]++
+	}
+}
+
+// setterCall reads the name positions of a call to one of setters, after any
+// wrappers. Only a call whose first word is a setter, a wrapper or not literal
+// is rendered here, as every call is rendered again when it is read. redirs
+// are its statement's, whose heredoc or here-string read takes a value from.
+func (a *accessor) setterCall(c *syntax.CallExpr, redirs []*syntax.Redirect, text string, depth int) {
+	if len(c.Args) == 0 {
+		return
+	}
+	first := literal(c.Args[0])
+	if first == "" {
+		if fields := a.words(c.Args[:1], text); len(fields) > 0 {
+			first = fields[0]
+		}
+	}
+	if first != "" && !slices.Contains(setters, first) && !slices.Contains(wrappers, wordName(first)) {
+		return
+	}
+	argv := a.words(c.Args, text)
+	if idx, _ := commandWord(argv); idx < len(argv) {
+		a.setter(argv[idx], argv[idx+1:], redirs, depth)
+	}
+}
+
+// words renders words as argv does, with "" also standing for a quoted word
+// that renders to no field, which still takes an operand's place
+// (`read -d "" x`).
+func (a *accessor) words(ws []*syntax.Word, text string) []string {
+	var out []string
+	for _, w := range ws {
+		fields := a.argv([]*syntax.Word{w}, text)
+		if len(fields) == 0 && slices.ContainsFunc(w.Parts, func(p syntax.WordPart) bool {
+			switch p.(type) {
+			case *syntax.SglQuoted, *syntax.DblQuoted:
+				return true
+			}
+			return false
+		}) {
+			fields = []string{""}
+		}
+		out = append(out, fields...)
+	}
+	return out
+}
+
+// setter reads the name positions of a call to name with args, and records
+// the values the text shows it setting: what printf -v prints, and the
+// heredoc or here-string read reads. An opaque command word, source, an eval
+// of an opaque arg and a mapfile callback run code that may set any variable.
+func (a *accessor) setter(name string, args []string, redirs []*syntax.Redirect, depth int) {
+	switch name {
+	case "", "source", ".":
+		a.unknownSetter()
+	case "eval":
+		if slices.Contains(args, "") {
+			a.unknownSetter()
+		}
+	case "declare", "typeset", "local", "export", "readonly":
+		a.declare(args, slices.Contains(declarers, name), depth)
+	case "read":
+		_, operands, values := getopt(args, "utpNnida")
+		a.setNames(depth, operands...)
+		a.setNames(depth, values['a']...)
+		for _, r := range redirs {
+			switch r.Op {
+			case syntax.WordHdoc:
+				a.record(r.Word)
+			case syntax.Hdoc, syntax.DashHdoc:
+				a.record(r.Hdoc)
+			default:
+			}
+		}
+	case "mapfile", "readarray":
+		_, operands, values := getopt(args, "dnOsuCc")
+		if len(values['C']) > 0 {
+			a.unknownSetter()
+		}
+		if len(operands) > 0 {
+			a.setNames(depth, operands[0])
+		}
+	case "printf":
+		_, operands, values := getopt(args, "v")
+		a.setNames(depth, values['v']...)
+		if len(values['v']) > 0 && len(operands) > 0 {
+			a.printed(operands[0], operands[1:])
+		}
+	case "wait":
+		_, _, values := getopt(args, "p")
+		a.setNames(depth, values['p']...)
+	case "getopts":
+		// An opaque option string may be any number of words, so the name may be
+		// any of them.
+		switch _, operands, _ := getopt(args, ""); {
+		case len(operands) > 0 && operands[0] == "":
+			a.unknownSetter()
+		case len(operands) > 1:
+			a.setNames(depth, operands[1])
+		}
+	case "unset":
+		_, operands, _ := getopt(args, "")
+		a.setNames(depth, operands...)
+	}
+}
+
+// declClause reads a declare-family clause as declare reads its args. A
+// literal NAME=value parses as an assignment, which assign records, so it is
+// a name position only after an option that changes how its value reads; its
+// value is rendered only under -n, where it names a variable too.
+func (a *accessor) declClause(d *syntax.DeclClause, text string, depth int) {
+	var args []string
+	refs := slices.Contains(declarers, d.Variant.Value)
+	nameref, transforms := false, false
+	for _, as := range d.Args {
+		switch {
+		case as.Name == nil:
+			fields := a.words([]*syntax.Word{as.Value}, text)
+			nameref = nameref || refs && slices.ContainsFunc(fields, namerefOption)
+			transforms = transforms || slices.ContainsFunc(fields, transformOption)
+			args = append(args, fields...)
+		case !transforms:
+			a.protected(as.Name.Value)
+		case nameref && as.Value != nil:
+			args = append(args, as.Name.Value+"="+strings.Join(a.words([]*syntax.Word{as.Value}, text), " "))
+		default:
+			args = append(args, as.Name.Value)
+		}
+	}
+	a.declare(args, refs, depth)
+}
+
+// declare reads a declare-family builtin's rendered args: options, then NAME
+// or NAME=value operands. Under -n of one of declarers (refs; export's -n
+// unexports) a value names the variable the reference sets, and the reference
+// may name any later, as scan's nameref rule reads.
+func (a *accessor) declare(args []string, refs bool, depth int) {
+	opts, operands, _ := getopt(args, "")
+	nameref := refs && slices.ContainsFunc(opts, namerefOption)
+	if nameref {
+		a.nameref = true
+		a.changes(true, true)
+	}
+	for _, f := range operands {
+		name, value, ok := operand(f)
+		a.setNames(depth, name)
+		if ok {
+			a.values = append(a.values, value)
+		}
+		if nameref && ok {
+			a.setNames(depth, value)
+		}
+	}
+}
+
+// namerefOption reports a declare option cluster holding -n.
+func namerefOption(f string) bool {
+	return len(f) > 1 && f[0] == '-' && f[1] != '-' && strings.Contains(f, "n")
+}
+
+// transformOption reports a declare option cluster, set or unset, holding a
+// letter that makes a variable read other than its assigned text: a nameref,
+// a case change, an integer or an array.
+func transformOption(f string) bool {
+	return len(f) > 1 && (f[0] == '-' || f[0] == '+') && f[1] != '-' && strings.ContainsAny(f[1:], "nlucaiA")
+}
+
+// operand splits a NAME=value, NAME+=value or NAME[subscript]=value operand
+// at the = that ends its name, past a subscript that may hold one.
+func operand(f string) (name, value string, ok bool) {
+	from := 0
+	if i := strings.IndexAny(f, "=["); i >= 0 && f[i] == '[' {
+		if j := strings.IndexByte(f[i:], ']'); j >= 0 {
+			from = i + j
+		}
+	}
+	k := strings.IndexByte(f[from:], '=')
+	if k < 0 {
+		return f, "", false
+	}
+	return strings.TrimSuffix(f[:from+k], "+"), f[from+k+1:], true
+}
+
+// getopt splits a builtin's rendered args as bash reads them: option clusters
+// up to the first operand or --, where a letter of valued takes the rest of
+// its cluster, or else the next arg, as its value. An opaque "" arg is an
+// operand.
+func getopt(args []string, valued string) (opts, operands []string, values map[byte][]string) {
+	values = map[byte][]string{}
+	for i := 0; i < len(args); i++ {
+		f := args[i]
+		switch {
+		case f == "--":
+			return opts, args[i+1:], values
+		case len(f) < 2 || f[0] != '-' && f[0] != '+':
+			return opts, args[i:], values
+		}
+		opts = append(opts, f)
+		for k := 1; k < len(f); k++ {
+			if strings.IndexByte(valued, f[k]) < 0 {
+				continue
+			}
+			v := f[k+1:]
+			if v == "" {
+				if i+1 == len(args) {
+					break
+				}
+				i++
+				v = args[i]
+			}
+			values[f[k]] = append(values[f[k]], v)
+			break
+		}
+	}
+	return opts, nil, values
 }
 
 // loop registers a for variable whose values the text tells: bash sets no
@@ -588,28 +1134,64 @@ func expansions(words []*syntax.Word) int {
 	return n
 }
 
-// arithmetic reads an arithmetic expression, which is never walked: a
-// substitution in it runs a command that cannot be seen. Any name in it may
-// hold an expression that sets a loop variable (`x='n=7'; (( x ))`).
-func (a *accessor) arithmetic(src string) {
-	runs := strings.Contains(src, "$(") || strings.Contains(src, "`") || strings.Contains(src, "<(") || strings.Contains(src, ">(")
-	if runs {
-		a.acc.Writes = true
-		a.touch(Touch{Write: true, Opaque: true})
+// substitutions returns the inner text of each $(…) and `…` span in src, read
+// as text: parens balanced, quotes not read, and an unclosed span running to
+// the end. A $((…)) whose inner parens close together is an arithmetic
+// expansion, whose own spans are read.
+func substitutions(src string) []string {
+	// closes[k] is where the paren opened at k closes, or len(src).
+	closes := make([]int, len(src))
+	var open []int
+	for k := range len(src) {
+		switch src[k] {
+		case '(':
+			open = append(open, k)
+			closes[k] = len(src)
+		case ')':
+			if len(open) > 0 {
+				closes[open[len(open)-1]] = k
+				open = open[:len(open)-1]
+			}
+		}
 	}
-	a.wild = true
-	a.field(src, runs, false)
+	var spans []string
+	for i := 0; i < len(src); i++ {
+		switch {
+		case src[i] == '`':
+			end := strings.IndexByte(src[i+1:], '`')
+			if end < 0 {
+				return append(spans, src[i+1:])
+			}
+			spans = append(spans, src[i+1:i+1+end])
+			i += end + 1
+		case strings.HasPrefix(src[i:], "$("):
+			end := closes[i+1]
+			if i+2 < len(src) && src[i+2] == '(' && closes[i+2] == end-1 {
+				i++
+				continue
+			}
+			spans = append(spans, src[i+2:end])
+			i = end
+		}
+	}
+	return spans
 }
 
 // subscripts reports a node bash evaluates as arithmetic outside an
-// arithmetic node: an index, a C-style loop, an integer test, or a -v or -R
-// test, whose operand may be subscripted.
+// arithmetic node: an index (an expansion's other than [@] or [*] too), an
+// expansion's slice, a C-style loop, an integer test, or a -v or -R test,
+// whose operand may be subscripted.
 func subscripts(n syntax.Node) bool {
 	switch n := n.(type) {
 	case *syntax.Assign:
 		return n.Index != nil
 	case *syntax.ArrayElem:
 		return n.Index != nil
+	case *syntax.ParamExp:
+		if w, ok := n.Index.(*syntax.Word); ok && (literal(w) == "@" || literal(w) == "*") {
+			return n.Slice != nil
+		}
+		return n.Index != nil || n.Slice != nil
 	case *syntax.CStyleLoop:
 		return true
 	case *syntax.BinaryTest:
@@ -675,6 +1257,7 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 	}
 	if nameSubscript(name, v.args) {
 		a.wild = true
+		a.evaluates = true
 	}
 	// A wrapper before the command word (command read, builtin mapfile) is
 	// outside nonSetters too. A nested script runs, if at all, in a child of a
@@ -704,11 +1287,157 @@ func (a *accessor) call(c *syntax.CallExpr, text string, depth int) bool {
 		}
 		a.word(w, text, depth, write, writer, i == v.cmdArg)
 	}
+	if writer {
+		a.options(v, depth)
+	}
 	if len(loops) > 0 {
 		a.perValue(c, text, v.data, loops)
 	}
+	// What eval and -c run is a script even when no word of it holds a shell
+	// metacharacter (`eval I\FS=x`).
+	switch {
+	case name == "eval":
+		a.script(strings.Join(v.args, " "), depth+1)
+	case slices.Contains(scriptShells, name):
+		for i := 0; i+1 < len(v.args); i++ {
+			if f := v.args[i]; len(f) > 1 && f[0] == '-' && f[1] != '-' && strings.Contains(f, "c") {
+				a.script(v.args[i+1], depth+1)
+			}
+		}
+	}
 	a.chdirs(name, c.Args, argv, idx, v.afterFlag, v.cmdArg, text)
 	return writer
+}
+
+// options reads a writer's options as its program may parse them, whatever
+// spelling it accepts: a long option's =value and each suffix of a short
+// cluster may be a path it writes through, a script it runs or a dir it
+// changes into, and the word after an option with no =value may be a dir. The
+// command word counts only after a flag, whose value it may be. Data words
+// (found only when argv maps one-to-one to the syntax words) stay data. Each
+// dir names the option it came from, which tells it from a known dir change.
+func (a *accessor) options(v callView, depth int) {
+	skip := func(i int) bool {
+		return i == v.idx && !v.afterFlag || slices.Contains(v.data, i)
+	}
+	// A call's option dirs past maxSubTokens are one dir that cannot be told,
+	// which keeps them well under maxTouches.
+	dirs := 0
+	chdir := func(d, from string) {
+		switch {
+		case dirs < maxSubTokens:
+			a.touch(Touch{Text: d, Opaque: d == "", Chdir: true, From: from})
+		case dirs == maxSubTokens:
+			a.touch(Touch{Opaque: true, Chdir: true, From: from})
+		}
+		dirs++
+	}
+	for i, f := range v.argv {
+		if skip(i) || len(f) < 2 || f[0] != '-' || f == "--" {
+			continue
+		}
+		values, glued, lost := optionValues(f)
+		// A cluster past maxCluster letters may glue a value past the suffixes
+		// read: it may write anywhere, from any dir.
+		if lost {
+			a.touch(Touch{Write: true, Opaque: true, From: f})
+			chdir("", f)
+		}
+		for _, value := range values {
+			a.touch(Touch{Text: value, Write: true, From: f})
+			a.field(value, true, false)
+			chdir(value, f)
+		}
+		if len(values) > 0 && strings.ContainsAny(values[0], scriptBytes) {
+			a.optionScript(values, depth)
+		}
+		if glued || i+1 >= len(v.argv) || skip(i+1) {
+			continue
+		}
+		// An opaque operand is an opaque write already, which denies wherever
+		// a dir that cannot be told would; the command word is no write.
+		if next := v.argv[i+1]; !strings.HasPrefix(next, "-") && (next != "" || i+1 == v.idx) {
+			chdir(next, f)
+		}
+	}
+}
+
+// optionValues returns the values option f may carry glued, longest first:
+// the value of --name=value, or each suffix of a short cluster after a letter
+// or digit, as any letter of it may be one that takes a value; -name=value is
+// such a cluster, and also glues its =value. glued reports a value glued after
+// =. A cluster of more than maxCluster letters is lost: only the suffixes after
+// its first and last maxCluster letters are returned.
+func optionValues(f string) (values []string, glued, lost bool) {
+	long := strings.HasPrefix(f, "--")
+	name, value, eq := strings.Cut(f, "=")
+	glued = eq && (long || optionName(name[1:]))
+	if long {
+		if glued && value != "" {
+			values = []string{value}
+		}
+		return values, glued, false
+	}
+	// Suffixes start at k for each letter f[k-1], up to the last byte.
+	end := 1
+	for end < len(f)-1 && alnum(f[end]) {
+		end++
+	}
+	lost = end-1 > maxCluster
+	for k := 2; k <= end; k++ {
+		if !lost || k <= 1+maxCluster || k > end-maxCluster {
+			values = append(values, f[k:])
+		}
+	}
+	if glued && value != "" {
+		values = append(values, value)
+	}
+	return values, glued, lost
+}
+
+// optionName reports a name a single-dash -name=value option may have; a
+// cluster whose glued value holds = (`-c'x --y=1'`) has none.
+func optionName(s string) bool {
+	for i := range len(s) {
+		if !alnum(s[i]) && strings.IndexByte("-_.", s[i]) < 0 {
+			return false
+		}
+	}
+	return s != ""
+}
+
+func alnum(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
+// optionScript reads glued values holding shell text as a script one level
+// deeper. Where a cluster's value starts is not known, so its suffixes are
+// tried longest first and the first that parses is read; when none does, the
+// longest is, which records it as text the parser cannot read.
+func (a *accessor) optionScript(values []string, depth int) {
+	script := values[0]
+	if len(values) > 1 {
+		for _, s := range values {
+			if a.parses(s, depth+1) {
+				script = s
+				break
+			}
+			if a.acc.Unreadable != "" {
+				return
+			}
+		}
+	}
+	a.script(script, depth+1)
+}
+
+// parses reports whether text parses as a script, charged as script charges
+// it but not read.
+func (a *accessor) parses(text string, depth int) bool {
+	if !a.charge(text, depth) {
+		return false
+	}
+	_, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
+	return err == nil
 }
 
 // setsNoVar reports a call to one of nonSetters, or a printf whose first
@@ -1648,6 +2377,13 @@ func (a *accessor) redirect(r *syntax.Redirect, writer bool, text string, depth 
 	write := outputOp(r.Op) && !a.sink(r)
 	if write {
 		a.acc.Writes = true
+		// A file it builds at run time may be a data-taker it replaces, as an
+		// opaque write word may.
+		if a.opaque(r.Word) {
+			if _, ok := a.finiteOnly(r.Word); !ok {
+				a.redefines = true
+			}
+		}
 	}
 	a.word(r.Word, text, depth, write, false, false)
 }
@@ -1674,21 +2410,48 @@ func (a *accessor) sink(r *syntax.Redirect) bool {
 }
 
 // body reads a heredoc or here-string: as a script when a writer reads it,
-// since a shell runs it, else as data.
+// since a shell runs it, else as data. A writer's opaque body runs text the
+// command does not show, as an opaque word names a path it does not: one
+// opaque only through finite loop variables is also read once per
+// combination of their values.
 func (a *accessor) body(w *syntax.Word, text string, depth int, writer bool) {
-	if a.opaque(w) {
+	switch {
+	case !a.opaque(w):
+	case !writer:
 		a.wild = true
+	default:
+		// Recorded last, so a denial names a write the body does show first.
+		defer a.touch(Touch{Write: true, Opaque: true})
+		names, finite := a.finiteOnly(w)
+		if !finite || !a.runs(names, func() { a.bodyScript(w, text, depth) }) {
+			a.wild = true
+		}
 	}
-	fields, r := a.j.fields(real, text, w)
-	if r != "" {
-		a.acc.Unreadable = r
+	body, ok := a.joined(w, text)
+	if !ok {
 		return
 	}
-	body := strings.Join(fields, " ")
 	a.field(body, writer, false)
 	if writer {
 		a.script(body, depth+1)
 	}
+}
+
+// bodyScript reads w rendered as a script one level deeper.
+func (a *accessor) bodyScript(w *syntax.Word, text string, depth int) {
+	if body, ok := a.joined(w, text); ok {
+		a.script(body, depth+1)
+	}
+}
+
+// joined returns w's fields joined by spaces, as a body reads.
+func (a *accessor) joined(w *syntax.Word, text string) (string, bool) {
+	fields, r := a.j.fields(real, text, w)
+	if r != "" {
+		a.acc.Unreadable = r
+		return "", false
+	}
+	return strings.Join(fields, " "), true
 }
 
 // word records w's fields in each environment, or the prefix of an opaque
@@ -1742,7 +2505,8 @@ func (a *accessor) envs(w *syntax.Word) []env {
 // field records f and the path-like tokens in it and its decodings, and flags
 // a word that redefines resolution: one naming a state variable (over the
 // rendered field and its decodings, so a quote-split name is caught), or, unless
-// it is a call's own command word, one whose basename is a data-taker.
+// it is a call's own command word, one whose basename is a data-taker. A field
+// naming one of shellVars writes, as scan's raw check does for a spelled one.
 func (a *accessor) field(f string, write, cmd bool) {
 	a.touch(Touch{Text: f, Write: write})
 	a.redefiner(f, cmd)
@@ -1750,7 +2514,7 @@ func (a *accessor) field(f string, write, cmd bool) {
 		a.redefiner(d, cmd)
 		for _, t := range a.subTokens(d) {
 			a.touch(Touch{Text: t, Write: write, From: f})
-			if !cmd && slices.Contains(dataTakers, wordName(t)) {
+			if !cmd && a.dataTaker(t) {
 				a.redefines = true
 			}
 		}
@@ -1758,12 +2522,17 @@ func (a *accessor) field(f string, write, cmd bool) {
 }
 
 // redefiner sets redefines when s names a state variable, or when it is not a
-// command word and its basename is a data-taker. It also records the loop
-// variables s mentions.
+// command word and its basename is a data-taker, and records s naming one of
+// shellVars. It also records the loop variables s mentions.
 func (a *accessor) redefiner(s string, cmd bool) {
 	a.mention(s)
-	if !cmd && slices.Contains(dataTakers, wordName(s)) {
+	if !cmd && a.dataTaker(s) {
 		a.redefines = true
+	}
+	for _, name := range shellVars {
+		if namesVar(s, name) {
+			a.changes(name == "CDPATH", name == "IFS")
+		}
 	}
 	for _, name := range stateNames {
 		if namesVar(s, name) {
@@ -1773,28 +2542,149 @@ func (a *accessor) redefiner(s string, cmd bool) {
 	}
 }
 
-// subTokens returns the path-like tokens in s: runs between pathBreaks that
-// hold a slash, start with ~ or name .attest, each also from its first slash
-// or ~ on, as `-o/path` glues one to a flag. $HOME and ~ are expanded.
+// dataTaker reports s whose basename names a data-taker, or is a glob that
+// may expand to one: a write through it may replace that program. The glob is
+// read loosely, each bracket expression as `?` and each extglob group as `*`,
+// and one path.Match cannot read counts. Both the raw basename and wordName's
+// are tried, since wordName trims the `!` of an extglob.
+func dataTaker(s string) bool {
+	name := wordName(s)
+	if slices.Contains(dataTakers, name) {
+		return true
+	}
+	return globTaker(s[strings.LastIndex(s, "/")+1:]) || globTaker(name)
+}
+
+// dataTaker is dataTaker charged to the budget: reading s as a glob scans it.
+func (a *accessor) dataTaker(s string) bool {
+	if a.j.parsed += len(s); a.j.parsed > maxParsed {
+		a.acc.Unreadable = "budget"
+		return true
+	}
+	return dataTaker(s)
+}
+
+func globTaker(base string) bool {
+	if !strings.ContainsAny(base, "*?[") && !strings.Contains(base, "@(") && !strings.Contains(base, "!(") && !strings.Contains(base, "+(") {
+		return false
+	}
+	p := loosePattern(base)
+	return slices.ContainsFunc(dataTakers, func(t string) bool {
+		ok, err := path.Match(p, t)
+		return ok || err != nil
+	})
+}
+
+// loosePattern rewrites a bash glob into a path.Match pattern that matches at
+// least what it does: an extglob group becomes `*`, a bracket expression `?`,
+// and a `[` bash reads as a literal (no closing `]`) stays one.
+func loosePattern(g string) string {
+	var b strings.Builder
+	var closes []int
+	for i := 0; i < len(g); i++ {
+		c := g[i]
+		switch {
+		case c == '\\' && i+1 < len(g):
+			b.WriteString(g[i : i+2])
+			i++
+		case i+1 < len(g) && g[i+1] == '(' && strings.IndexByte("@!?*+", c) >= 0:
+			b.WriteByte('*')
+			i = groupEnd(g, i+1)
+		case c == '[':
+			if closes == nil {
+				closes = bracketCloses(g)
+			}
+			if end := bracketEnd(g, closes, i); end >= 0 {
+				b.WriteByte('?')
+				i = end
+			} else {
+				b.WriteString(`\[`)
+			}
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// groupEnd is the index of the `)` closing the group opened at g[open], or
+// the last index when none does.
+func groupEnd(g string, open int) int {
+	depth := 0
+	for k := open; k < len(g); k++ {
+		switch g[k] {
+		case '(':
+			depth++
+		case ')':
+			if depth--; depth == 0 {
+				return k
+			}
+		}
+	}
+	return len(g) - 1
+}
+
+// bracketEnd is the index of the `]` closing the bracket expression opened at
+// g[open], or -1: a `]` first (after `!` or `^`) is a member, and the rest is
+// read as bracketCloses reads it.
+func bracketEnd(g string, closes []int, open int) int {
+	k := open + 1
+	if k < len(g) && (g[k] == '!' || g[k] == '^') {
+		k++
+	}
+	if k < len(g) && g[k] == ']' {
+		k++
+	}
+	return closes[k]
+}
+
+// bracketCloses returns, for each index of g and len(g), the index of the `]`
+// a bracket expression's members read from there end at, or -1: a backslash
+// escapes the next byte, and `[:…:]`, `[.….]` and `[=…=]` are units. Built
+// right to left, it reads g a bounded number of times however many brackets
+// open in it.
+func bracketCloses(g string) []int {
+	n := len(g)
+	closes := make([]int, n+2)
+	closes[n], closes[n+1] = -1, -1
+	// unit[u] is the least j ≥ k+2 where the unit closer ":]", ".]" or "=]"
+	// (u indexing ":.=") starts, or -1.
+	unit := [3]int{-1, -1, -1}
+	for k := n - 1; k >= 0; k-- {
+		if j := k + 2; j+1 < n && g[j+1] == ']' {
+			if u := strings.IndexByte(":.=", g[j]); u >= 0 {
+				unit[u] = j
+			}
+		}
+		switch g[k] {
+		case ']':
+			closes[k] = k
+		case '\\':
+			closes[k] = closes[k+2]
+		case '[':
+			closes[k] = closes[k+1]
+			if k+1 < n {
+				if u := strings.IndexByte(":.=", g[k+1]); u >= 0 && unit[u] >= 0 {
+					closes[k] = closes[unit[u]+2]
+				}
+			}
+		default:
+			closes[k] = closes[k+1]
+		}
+	}
+	return closes
+}
+
+// subTokens returns PathTokens of s with $HOME and ~ expanded.
 func (a *accessor) subTokens(s string) []string {
 	if a.j.parsed += len(s); a.j.parsed > maxParsed {
 		a.acc.Unreadable = "budget"
 		return nil
 	}
 	home := a.j.host.Home
-	s = strings.NewReplacer("${HOME}", home, "$HOME", home).Replace(s)
-	var out []string
-	for _, t := range strings.FieldsFunc(s, func(r rune) bool { return strings.ContainsRune(pathBreaks, r) }) {
-		if len(out) >= maxSubTokens {
-			break
-		}
-		if !strings.ContainsAny(t, "/~") && !strings.Contains(t, ".attest") {
-			continue
-		}
-		if k := strings.IndexAny(t, "/~"); k > 0 {
-			out = append(out, a.tildeToken(t[k:]))
-		}
-		out = append(out, a.tildeToken(t))
+	out := PathTokens(strings.NewReplacer("${HOME}", home, "$HOME", home).Replace(s))
+	for i, t := range out {
+		out[i] = a.tildeToken(t)
 	}
 	return out
 }

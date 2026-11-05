@@ -37,8 +37,10 @@ const (
 	// maxHops bounds the symlinks one path resolves through, as the kernel's
 	// own limit does.
 	maxHops = 40
-	// maxDirs bounds the dirs a command's relative words resolve against.
-	maxDirs = 32
+	// maxDirs bounds the dirs a command changes into, and maxOptionDirs those
+	// only a writer's option values name.
+	maxDirs       = 32
+	maxOptionDirs = 256
 	// maxRead bounds a store file read to simulate an edit.
 	maxRead = 4 << 20
 	// maxNodes and maxDepth bound the walk of a tool's JSON input.
@@ -303,6 +305,23 @@ func (g *Guard) shell(cwd string, texts []string) string {
 			return r
 		}
 	}
+	// A writer's option values may be dirs it runs in, or may not be dirs at
+	// all: only relative writes resolve against them, once every word has been
+	// judged without them, so a denial names the word it would name anyway. A
+	// value that is itself a store is a write already.
+	if len(c.options) == 0 && !c.optionLost {
+		return ""
+	}
+	c.dirs = append(c.dirs, c.options...)
+	c.lost = c.lost || c.optionLost
+	for _, t := range acc.Words {
+		if t.Chdir || !t.Write || filepath.IsAbs(t.Text) {
+			continue
+		}
+		if r := c.shellTouch(t, acc.Writes, involved); r != "" {
+			return r
+		}
+	}
 	return ""
 }
 
@@ -395,7 +414,7 @@ func (g *Guard) tool(cwd, name string, input json.RawMessage) string {
 		return deny("the %s input cannot be read: %v", name, err)
 	}
 	in := &toolInput{}
-	in.walk(v, 0)
+	in.walk(v, 0, true)
 	paths := in.judged()
 	if len(paths) == 0 && len(in.patches) == 0 && !in.truncated {
 		return ""
@@ -479,7 +498,8 @@ func (c *check) toolCandidates(p string) []string {
 }
 
 // piPath is p as pi's file tools resolve it: Unicode spaces as spaces, one
-// leading @ dropped, ~ as the home, and a file:// URL as its path.
+// leading @ dropped, ~ as the home, and a file: URL, with or without the
+// slashes of an authority, as its path.
 func (g *Guard) piPath(p string) string {
 	p = strings.Map(func(r rune) rune {
 		if r == '\u00a0' || r >= '\u2000' && r <= '\u200a' || r == '\u202f' || r == '\u205f' || r == '\u3000' {
@@ -495,11 +515,17 @@ func (g *Guard) piPath(p string) string {
 			p = home
 		}
 	}
-	if len(p) < len("file://") || !strings.EqualFold(p[:len("file://")], "file://") {
-		return p
-	}
-	host, rest, _ := strings.Cut(p[len("file://"):], "/")
-	if host != "" && host != "localhost" {
+	var rest string
+	switch {
+	case len(p) >= len("file://") && strings.EqualFold(p[:len("file://")], "file://"):
+		var host string
+		host, rest, _ = strings.Cut(p[len("file://"):], "/")
+		if host != "" && host != "localhost" {
+			return p
+		}
+	case len(p) > len("file:/") && strings.EqualFold(p[:len("file:/")], "file:/"):
+		rest = p[len("file:/"):]
+	default:
 		return p
 	}
 	rest, _, _ = strings.Cut(rest, "?")
@@ -680,6 +706,11 @@ func readSmall(p string) (string, error) {
 type check struct {
 	g    *Guard
 	dirs []string
+	// options are the dirs only a writer's option values name, and optionLost
+	// reports one that cannot be told; shell judges relative writes against
+	// them after dirs.
+	options    []string
+	optionLost bool
 	// lost reports a dir the call changes into that cannot be told.
 	lost bool
 	// linkInfo are the files a hard link could reach, read once; cut reports
@@ -697,7 +728,10 @@ type linkTarget struct {
 }
 
 // newCheck resolves the dirs a command's relative words may be relative to:
-// cwd and every dir it changes into, each against every dir before it.
+// cwd and every dir it changes into, each against every dir before it. A dir
+// from a writer's option value (From set) resolves only against dirs, not
+// against other option values, and goes to options. Option dirs have a bound
+// of their own, so many of them cannot hide a later cd.
 func (g *Guard) newCheck(cwd string, touches []gate.Touch) *check {
 	c := &check{g: g, budget: maxFiles}
 	if filepath.IsAbs(cwd) {
@@ -705,22 +739,44 @@ func (g *Guard) newCheck(cwd string, touches []gate.Touch) *check {
 	} else {
 		c.lost = true
 	}
+	all := slices.Clone(c.dirs)
 	for _, t := range touches {
 		if !t.Chdir {
 			continue
 		}
+		option := t.From != ""
 		if t.Opaque || t.Text == "" {
-			c.lost = true
+			c.optionLost = c.optionLost || option
+			c.lost = c.lost || !option
 			continue
 		}
-		for _, d := range c.candidates(t.Text) {
-			if filepath.IsAbs(d) && !slices.Contains(c.dirs, d) {
+		if option && len(all)-len(c.dirs) >= maxOptionDirs {
+			c.optionLost = true
+			continue
+		}
+		from := all
+		if option {
+			from = c.dirs
+		}
+		for _, d := range c.resolve(t.Text, from) {
+			if !filepath.IsAbs(d) {
+				continue
+			}
+			if !option && !slices.Contains(c.dirs, d) {
 				c.dirs = append(c.dirs, d)
+			}
+			if !slices.Contains(all, d) {
+				all = append(all, d)
 			}
 		}
 		if len(c.dirs) > maxDirs {
 			c.lost = true
 			break
+		}
+	}
+	for _, d := range all {
+		if !slices.Contains(c.dirs, d) {
+			c.options = append(c.options, d)
 		}
 	}
 	return c
@@ -731,6 +787,11 @@ func (g *Guard) newCheck(cwd string, touches []gate.Touch) *check {
 // after the symlink before it, and resolved after a lexical clean, as Claude
 // Code and pi pass a path.
 func (c *check) candidates(p string) []string {
+	return c.resolve(p, c.dirs)
+}
+
+// resolve is candidates against dirs.
+func (c *check) resolve(p string, dirs []string) []string {
 	if p == "" {
 		return nil
 	}
@@ -738,7 +799,7 @@ func (c *check) candidates(p string) []string {
 	if filepath.IsAbs(p) {
 		abs = []string{p}
 	} else {
-		for _, d := range c.dirs {
+		for _, d := range dirs {
 			abs = append(abs, d+string(filepath.Separator)+p)
 		}
 		if c.lost {
@@ -973,7 +1034,9 @@ func (c *check) matches(pattern, name string) bool {
 // convertBrackets rewrites bash bracket classes into path.Match syntax. Bash
 // reads a `[` with no close as a literal and a `]` first in a class (after an
 // optional `!` or `^`) as a member, where path.Match errors on both and an
-// error would count as a match. A class negated with `!` becomes `^`.
+// error would count as a match. A class negated with `!` becomes `^`. A class
+// holding a POSIX unit, which path.Match cannot read, becomes `?`, a superset
+// of it.
 func convertBrackets(p string) string {
 	var b strings.Builder
 	for i := 0; i < len(p); i++ {
@@ -999,9 +1062,14 @@ func convertBrackets(p string) string {
 		if leadingClose {
 			j++
 		}
-		end := classEnd(p, j)
+		end, unit := classEnd(p, j)
 		if end < 0 {
 			b.WriteString(`\[`)
+			continue
+		}
+		if unit {
+			b.WriteByte('?')
+			i = end
 			continue
 		}
 		b.WriteByte('[')
@@ -1019,8 +1087,9 @@ func convertBrackets(p string) string {
 }
 
 // classEnd is the index of the `]` closing a bracket class whose members
-// start at p[from], reading `[:…:]`, `[.….]` and `[=…=]` as units, or -1.
-func classEnd(p string, from int) int {
+// start at p[from], reading `[:…:]`, `[.….]` and `[=…=]` as units, or -1. It
+// also reports whether the members hold such a unit.
+func classEnd(p string, from int) (end int, unit bool) {
 	for k := from; k < len(p); k++ {
 		switch p[k] {
 		case '\\':
@@ -1029,13 +1098,14 @@ func classEnd(p string, from int) int {
 			if k+1 < len(p) && strings.IndexByte(":.=", p[k+1]) >= 0 {
 				if n := strings.Index(p[k+2:], string(p[k+1])+"]"); n >= 0 {
 					k += n + 3
+					unit = true
 				}
 			}
 		case ']':
-			return k
+			return k, unit
 		}
 	}
-	return -1
+	return -1, false
 }
 
 // convertExtglob reads an extglob group (`@(x)`, `!(x)`) as `*`.
@@ -1106,7 +1176,10 @@ type toolInput struct {
 	contents []string
 	// other are the strings under keys the guard does not know: a path or
 	// content there is as good as one under a known key.
-	other   []string
+	other []string
+	// unread are the strings holding a JSON document past what the walk
+	// reads, judged by their path tokens however long.
+	unread  []string
 	edits   []edit
 	patches []patchFile
 	nodes   int
@@ -1123,19 +1196,28 @@ type edit struct {
 	pi bool
 }
 
-// judged are the strings judged as paths, as they are and trimmed: those
-// under a path key, and the short ones of other. A call that names no path
-// is judged by its content too.
+// judged are the strings judged as paths, as they are and trimmed, with the
+// path tokens each holds: those under a path key, and the short ones of
+// other, and the path tokens of unread. A call that names no path is judged by
+// its content too. A string under a path key also yields each of its fields,
+// since it may pack a list.
 func (in *toolInput) judged() []string {
 	var out []string
-	add := func(s string) {
+	add := func(s string, packed bool) {
 		out = append(out, s)
 		if t := strings.TrimSpace(s); t != s {
 			out = append(out, t)
 		}
+		if len(s) > maxPath {
+			return
+		}
+		out = append(out, gate.PathTokens(s)...)
+		if packed {
+			out = append(out, gate.PathFields(s)...)
+		}
 	}
 	for _, s := range in.paths {
-		add(s)
+		add(s, true)
 	}
 	short := in.other
 	if len(in.paths) == 0 {
@@ -1143,8 +1225,11 @@ func (in *toolInput) judged() []string {
 	}
 	for _, s := range short {
 		if len(s) <= maxPath {
-			add(s)
+			add(s, false)
 		}
+	}
+	for _, s := range in.unread {
+		out = append(out, gate.PathTokens(s)...)
 	}
 	return out
 }
@@ -1157,7 +1242,9 @@ type patchFile struct {
 	update bool
 }
 
-func (in *toolInput) walk(v any, depth int) {
+// walk reads v. embed reports strings headed to paths or other, where a JSON
+// document is read as input; a content or edit text is a file's own text.
+func (in *toolInput) walk(v any, depth int, embed bool) {
 	if in.nodes++; in.nodes > maxNodes || depth > maxDepth {
 		in.truncated = true
 		return
@@ -1167,13 +1254,43 @@ func (in *toolInput) walk(v any, depth int) {
 		in.object(v, depth)
 	case []any:
 		for _, e := range v {
-			in.walk(e, depth+1)
+			in.walk(e, depth+1, embed)
 		}
 	case string:
 		if strings.Contains(v, "*** Begin Patch") {
 			in.patches = append(in.patches, parsePatch(v)...)
 		}
+		if embed {
+			in.embedded(v)
+		}
 	}
+}
+
+// embedded reads the JSON document s holds, if any, with a budget of its own:
+// past it the document is dropped, not the input, and s is judged by its path
+// tokens.
+func (in *toolInput) embedded(s string) {
+	t := strings.TrimSpace(s)
+	if t == "" || (t[0] != '{' && t[0] != '[') {
+		return
+	}
+	var v any
+	if json.Unmarshal([]byte(t), &v) != nil {
+		return
+	}
+	doc := &toolInput{}
+	doc.walk(v, 0, true)
+	if doc.truncated {
+		in.unread = append(in.unread, s)
+		return
+	}
+	in.paths = append(in.paths, doc.paths...)
+	in.contents = append(in.contents, doc.contents...)
+	in.other = append(in.other, doc.other...)
+	in.unread = append(in.unread, doc.unread...)
+	in.edits = append(in.edits, doc.edits...)
+	in.patches = append(in.patches, doc.patches...)
+	in.twice = in.twice || doc.twice
 }
 
 func (in *toolInput) object(m map[string]any, depth int) {
@@ -1185,16 +1302,19 @@ func (in *toolInput) object(m map[string]any, depth int) {
 	taken := in.editsOf(byKey)
 	for _, k := range slices.Sorted(maps.Keys(byKey)) {
 		for _, v := range byKey[k] {
+			embed := false
 			switch {
 			case slices.Contains(taken, k):
 			case slices.Contains(pathKeys, k):
 				in.strings(v, &in.paths, depth+1)
+				embed = true
 			case slices.Contains(contentKeys, k):
 				in.strings(v, &in.contents, depth+1)
 			default:
 				in.strings(v, &in.other, depth+1)
+				embed = true
 			}
-			in.walk(v, depth+1)
+			in.walk(v, depth+1, embed)
 		}
 	}
 }
@@ -1225,7 +1345,9 @@ func (in *toolInput) editsOf(m map[string][]any) (taken []string) {
 	return taken
 }
 
-// strings adds the strings in v, in arrays nested to any depth, to out.
+// strings adds the strings in v, in arrays nested to any depth, to out. An
+// array of several strings under a content or unknown key is also added
+// joined, since a claim can be split across its elements.
 func (in *toolInput) strings(v any, out *[]string, depth int) {
 	switch v := v.(type) {
 	case string:
@@ -1235,8 +1357,15 @@ func (in *toolInput) strings(v any, out *[]string, depth int) {
 			in.truncated = true
 			return
 		}
+		var elems []string
 		for _, e := range v {
 			in.strings(e, out, depth+1)
+			if s, ok := e.(string); ok {
+				elems = append(elems, s)
+			}
+		}
+		if len(elems) >= 2 && out != &in.paths {
+			*out = append(*out, strings.Join(elems, "\n"), strings.Join(elems, ""))
 		}
 	}
 }

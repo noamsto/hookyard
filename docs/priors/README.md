@@ -442,11 +442,66 @@ In a shell command:
   leads into a store dir, a relative `cd` under it with a write is denied when
   the command names a guarded path;
 - `pushd` and `popd` with `+N` or `-N` name a dir the guard cannot tell;
-- naming `PATH`, `BASH_ENV`, `ENV`, `CDPATH` or `IFS` other than as an
-  expansion (or in `let`, `(( ))`, `read`, `mapfile` or `printf -v`), or
-  declaring a nameref, makes the command one that may write. While `IFS` may
-  have changed, the words of an unquoted expansion cannot be told;
-- assigning any `GIT_*` or `LD_*` variable is a write, like assigning `PATH`;
+- naming `PATH`, `BASH_ENV`, `ENV`, `CDPATH`, `IFS`, `BASH_CMDS` or
+  `BASH_ALIASES` other than as an expansion, or declaring a nameref (`-n` of
+  `declare`, `typeset` or `local`; `export -n` unexports, and `readonly -n`
+  declares none), makes the command one that may write; assigning any `GIT_*` or `LD_*` variable is a
+  write, like assigning `PATH`. The name counts in any spelling (quoted,
+  escaped, brace-expanded, ANSI-C-quoted, or built at run time) in a setter's
+  name position (`declare`, `typeset`, `local`, `export` and `readonly`,
+  naked names and a `-n` target included; `read`, `mapfile` and `readarray`,
+  `printf -v`, `getopts`, `wait -p`, `unset`, and a `{var}` redirect), in a
+  rendered word (`PATH`, `BASH_ENV`, `ENV`, `CDPATH` and `IFS` only), and
+  inside arithmetic (`(( ))`, `let`, an index, an expansion's index or slice:
+  `${a[i]}`, `${s:i}`, `${#a[i]}`). Once arithmetic is evaluated anywhere in
+  the command, it also counts in every value the command assigns, not only a
+  name's first (`x='I'"FS=5"; (( x ))`): each assignment, an append joined to
+  the name's last value, a `declare`-family `NAME=value`, what `printf -v`
+  prints, and the heredoc or here-string `read` reads. An opaque word inside
+  arithmetic whose text holds `=`, `++` or `--` (`let "${v^^}FS=0"`) may set
+  any name. While `IFS` may have changed, the words of an unquoted expansion
+  cannot be told;
+- `eval` always reads its arguments as a script, and so does a `sh -c`-style
+  string (`bash`, `sh`, `zsh`, `dash`, `ksh` or `ash` with `-c`). `source`, `.`,
+  an opaque command word and an opaque setter name (`read -r "$name"`) are a
+  setter the guard cannot tell: any protected name may have been set. A
+  variable a setter re-sets is unknown afterwards, so a later `"$n"` after
+  `read n` is an opaque word (for a `declare`-family name only after a
+  value-changing option: `-n`, `-l`, `-u`, `-c`, `-i`, `-a` or `-A`);
+- a command whose `IFS` or `CDPATH` changes anywhere in it is read as if it
+  had changed from the start, so a function body or a trap that runs a word
+  after the setter is read under it. The command is read again until neither
+  changes (at most three reads), within the same parse budget;
+- the value of a writer's option is an operand: `--name=value`, the suffixes
+  of a short-option cluster (a `-name=value` is one, and its `value` counts
+  too), and the word after an option (`env -vC dir`, `sudo -iD dir`, `env --ch
+  dir`) are judged like the writer's other operands. A cluster of more than
+  16 letters is read by the suffixes after its first and last 16, and is also
+  an opaque write and a dir that cannot be told. A value holding shell text is read
+  as a script (`env -u X --split-string='rm -rf .'`, `foo -c'rm -rf .'`), and
+  a value is a dir that the command's relative writes resolve against, from
+  the cwd and every dir the command changes into; only relative writes are
+  judged against it;
+- in a tool's input, a string is also judged by its path tokens, split as
+  the shell reader splits a field; every field of a string under a path key
+  counts (`a,notes`); a JSON document inside a string under a path or unknown
+  key is read as input, with a budget of its own (a content or edit text is a
+  file's own text, not input); past that budget, the string is judged by its
+  first 256 path tokens; a
+  `file:/abs` path is a path; and the elements of an array under a content or
+  unknown key are also joined for the `reviewed` check, so a claim split
+  across them is seen;
+- a POSIX bracket class (`[[:alpha:]]`) in a glob matches any one character;
+- a substitution inside arithmetic is read as the statements it runs, like
+  any other. A setter's subscript, and once arithmetic is evaluated an
+  assigned value holding `$(`, `${` or a backtick, is parsed as an arithmetic
+  expression and read the same way; one that does not parse may set any name,
+  is an opaque write, and the substitutions a scan of its text finds are read
+  as scripts. A `$(( … ))` is arithmetic, not a substitution;
+- a heredoc or here-string to a writer is read per value when it holds a loop
+  variable; the names `claude`, `gh`, `glab` and `crew` as data takers are
+  matched as globs (`~/bin/g?` may be `gh`); an output redirect to a run-time
+  target withdraws data positions;
 - bash `[!…]` globs are read as negated classes, a `]` first in a class as a
   member, and a `[` with no close as a literal (a jq filter `'.[] | …'` names
   no `.attest` dir);
@@ -567,18 +622,35 @@ and the write.
 
 It also does not see these open classes:
 
-- a variable that changes how a word resolves or splits, or which program
-  runs (`PATH`, `IFS`, `CDPATH`, `GIT_*`, `LD_*`), set under a spelled name:
-  quoted, escaped or brace-expanded, through `eval`, a `{var}>` redirect, or a
-  nameref reached indirectly;
-- a wrapper's dir option in a spelling the guard does not parse (a
-  short-option cluster, an abbreviated long option, inside `env -S`, behind a
-  wrapper it does not list), and another runner's glued relative dir
-  (`unshare --wd=dir`, `--directory=dir`, `--prefix=dir`);
-- paths packed into one string: a comma- or newline-separated list, or a JSON
-  document in a string;
-- a `file:` URI with a single slash;
-- a reviewed claim split across the elements of a line array.
+- arithmetic on run-time data (`read x; (( x ))`, `(( $n ))` with `n`
+  unknown, an opaque word whose own text holds no `=`, `++` or `--`), which
+  can name a protected variable;
+- a runner that takes its dir as a positional word (`chroot sub rm ../notes`),
+  and a dir that comes from a config or env file;
+- an opaque option value (`--wd=$X`): it is an opaque write word, not a dir;
+- an opaque word before `printf`'s `-v` or `wait`'s `-p`
+  (`printf "$(echo -v)" IFS Q`), and a glob as a setter's name operand
+  (`read I?? <<< Q`);
+- the `.` in a string that does not parse (`watch 'rm -rf . ('`);
+- an unknown-key string longer than 4096 bytes, which is not judged at all, so
+  a packed list padded past it passes;
+- a data taker's name in another case on a case-insensitive file system
+  (`~/bin/GH` on macOS), and variables an earlier call of a persistent shell
+  set;
+- a value read as arithmetic that the command builds from pieces
+  (`a='a[$'; b='(rm -rf ../notes/facts)]'; x=$a$b; (( x ))`) or appends to an
+  array element or to a value a `declare`-family word, `read` or `printf -v`
+  set (`x=('a[$' b); x[0]+='(…)]'; (( x ))`), and a value that does not parse
+  as arithmetic whose substitutions a quoted paren hides
+  (`x='a[$(echo "(") + $(cd ..; rm -rf no*s)] + 1 a'; (( x ))`): its write is
+  an opaque one, denied only when the command names a guarded path;
+- a JSON document in a tool-input string past its own budget whose store path
+  hides past 256 path tokens, behind JSON escapes (`\/`), or relative to a
+  store cwd;
+- a dir glued after more than 32 letters of a short-option cluster, past the
+  suffixes after its first and last 16 letters, when its name does not name a
+  store as a whole element (`env -v…v…Clonglink rm -rf facts`, a long link
+  into a store).
 
 It over-denies:
 
@@ -597,7 +669,7 @@ It over-denies:
   `for` variable, when the variable is mentioned elsewhere in the command
   (`echo "n=$n"`, a jq filter `.n` read by `jq`), a `$(…)` or unknown
   variable sits beside the loop, the command uses arithmetic anywhere
-  (`$((…))`, `[[ $n -gt 1 ]]`), the loop runs over more than 64 values or
+  (`$((…))`, `[[ $n -gt 1 ]]`, `${a[i]}`), the loop runs over more than 64 values or
   a glob, or the loop sits beside any other command or assignment (`test`,
   `read`, `x=1`);
 - a reader run behind a flagged wrapper (`nice -n 5 git status`) in a store or
@@ -606,7 +678,43 @@ It over-denies:
   `printf -v`, in front of a reader in a store or naming one (`PATH=$PATH:/x
   git status` in a store);
 - a command that mentions `PATH`, `IFS` and the like as a word (`echo "set
-  PATH"`) while it names a store or runs in one;
+  PATH"`) while it names a store or runs in one, and a field whose printf
+  decoding names one; a word inside arithmetic, or (once arithmetic is
+  evaluated) any assigned value, that spells a protected name, `GIT_*` and
+  `LD_*` included, counts as setting it;
+- after `source`, `.`, an `eval` with an opaque argument, `eval ''`,
+  `mapfile -C`, an opaque command word, an opaque setter name
+  (`read -r "$name"`) or an opaque or empty `getopts` option string, unquoted
+  expansions and relative `cd`s are unknown;
+- a writer's option value or glued short-option suffix that names a store, `.`
+  or a dir holding one relative to the cwd (`rsync --exclude=notes`, `foo -o.`
+  from `~`), or that holds shell text, which is read as a script; past 256
+  dirs from option values (in one call or in all) or 32 dirs the command
+  changes into, the relative writes of a command that names a guarded path
+  are unknown, and so is a glued value long enough to pass the parse budget;
+  option dirs never push a later `cd` out; a writer's short-option cluster
+  of more than 16 letters (`-DVERYLONGMACRONAME`) is an opaque write and a
+  dir that cannot be told; each relative write is judged against every option
+  dir, so a command with a few hundred option values (`rsync` with 250
+  `--exclude=`s) can run past the guard's time bound and is denied;
+- a write tool's text under an unknown key (or a content key when the input
+  has no path key) that holds a path token naming a store, a dir holding one
+  or an `.attest` element (an issue comment body naming `~/notes/MEMORY.md`),
+  and a path-key string any token of which names one (`a,notes` from `~`);
+  a store-fact write whose array elements, joined, hold `reviewed`;
+- a glob basename that could match `claude`, `gh`, `glab` or `crew`
+  (`rm -f *`), an option value whose basename is one, and an output redirect
+  to a run-time target withdraw data positions; a writer's heredoc or
+  here-string holding a substitution or an unknown variable is an opaque
+  write;
+- arithmetic anywhere in a command that assigns a value holding `$(`, `${`
+  or a backtick, which may then write, and may set any name when the value
+  does not parse as arithmetic (`x='echo ${y}'`); a setter's subscript that
+  does not parse as arithmetic (`unset 'm[a b]'`), which may set any name;
+- an opaque word inside arithmetic whose text holds `=`, `++` or `--`
+  (`let "i=$1+1"`), which may set any name;
+- a POSIX class in a glob that names a guarded path matches any one
+  character;
 - with `CDPATH` set on the host, a relative `cd` and relative write in a
   command that mentions `MEMORY.md`, `.attest` or a store's name;
 - an unknown tool whose input holds `.`, `..`, `/`, or a word that names a
@@ -631,6 +739,9 @@ It over-denies:
 - prose or patch bodies under an unknown or content key (a PR body, a chat
   message) that hold a path with an `.attest` element, since each short string
   is judged as a path;
+- a JSON document under a path or unknown key past 16384 nodes or 16 levels
+  whose path tokens name a store or a dir holding one (`"/"`), since the
+  string is judged by its tokens instead;
 - an abbreviation of a harmless sed or fd long option.
 
 ## Store repositories
