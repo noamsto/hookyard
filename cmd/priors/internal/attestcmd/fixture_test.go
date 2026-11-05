@@ -87,6 +87,14 @@ func newFixture(t *testing.T) *fixture {
 		t.Skip("sh not installed")
 	}
 	dir := t.TempDir()
+	// The commit attest makes runs under the user's git config, which a
+	// sandboxed build lacks.
+	gitconfig := filepath.Join(dir, "gitconfig")
+	if err := os.WriteFile(gitconfig, []byte("[user]\n\tname = Priors Test\n\temail = priors@example.invalid\n[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", gitconfig)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	f := &fixture{
 		t:           t,
 		A:           attesttest.NewSKEd25519(t),
@@ -125,6 +133,7 @@ func newFixture(t *testing.T) *fixture {
 		PersonalRemote:  f.url,
 		Profile:         "personal",
 		TrustDigest:     hexSum([]byte("trust")),
+		StateDir:        filepath.Join(dir, "state"),
 	}
 	for _, k := range []attesttest.Key{f.A, f.B} {
 		f.cfg.AttestKeys = append(f.cfg.AttestKeys, config.AttestKey{Key: k.PublicKey(), Attestation: []byte("a"), Challenge: []byte("c")})
