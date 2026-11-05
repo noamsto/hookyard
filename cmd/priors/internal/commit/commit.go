@@ -130,15 +130,20 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 	if parent = strings.TrimSpace(parent); err != nil {
 		parent = ""
 	}
-	tree, warning := gatedTree(ctx, dir, parent, func(env []string) (map[string]string, string) {
-		return stage(ctx, dir, env, snapDir, accepted)
+	git := inCheckout(ctx, dir)
+	tree, warning := gatedTree(git, dir, parent, func(env []string) (map[string]string, string) {
+		return stage(git, dir, env, snapDir, accepted)
 	})
 	if warning != "" {
 		return warning
 	}
 	var commit string
 	if tree != "" {
-		if commit, warning = commitTree(ctx, dir, parent, tree, msg); warning != "" {
+		sign, err := signs(ctx, dir)
+		if err != nil {
+			return fmt.Sprintf("nothing committed in %s: %v", dir, err)
+		}
+		if commit, warning = commitTree(ctx, git, dir, parent, tree, msg, sign, nil); warning != "" {
 			return warning
 		}
 	}
@@ -250,13 +255,25 @@ func overlay(dir string, files map[string][]byte) error {
 // parent, the checkout's HEAD, and moves HEAD to the commit. The blobs are the
 // bytes in memory, never the working tree's, and the commit changes only
 // those paths; the caller gates them first (Gate) and holds the store's lock.
-// A HEAD moved off parent fails the commit. It returns the commit, or a
+// A HEAD moved off parent fails the commit. The tree and commit are built over
+// the checkout's objects alone (objectsGit), so parent is read with replace
+// objects off and no checkout config applies. The commit is never signed: a
+// signing program named by the checkout's config would be a second PIN prompt
+// right after the attest's, one an agent controls. It returns the commit, or a
 // warning naming what stopped it; a commit with a warning was made but the
 // checkout's index was not reset to it.
 func Files(ctx context.Context, dir, parent string, files map[string][]byte, msg string) (commit, warning string) {
+	git, err := objectsGit(ctx, dir)
+	if err != nil {
+		return "", fmt.Sprintf("nothing committed in %s: %v", dir, err)
+	}
+	ident, warning := identity(ctx, dir)
+	if warning != "" {
+		return "", warning
+	}
 	beforeStage()
-	tree, warning := gatedTree(ctx, dir, parent, func(env []string) (map[string]string, string) {
-		return stageBytes(ctx, dir, env, files)
+	tree, warning := gatedTree(git, dir, parent, func(env []string) (map[string]string, string) {
+		return stageBytes(git, env, files)
 	})
 	if warning != "" {
 		return "", warning
@@ -264,7 +281,7 @@ func Files(ctx context.Context, dir, parent string, files map[string][]byte, msg
 	if tree == "" {
 		return "", fmt.Sprintf("nothing committed in %s: the files match HEAD", dir)
 	}
-	if commit, warning = commitTree(ctx, dir, parent, tree, msg); warning != "" {
+	if commit, warning = commitTree(ctx, git, dir, parent, tree, msg, false, ident); warning != "" {
 		return "", warning
 	}
 	rels := slices.Sorted(maps.Keys(files))
@@ -283,36 +300,77 @@ var pushProtocol = "ssh"
 // checkout's branch, upstream, remote.*.push and push.default are never read,
 // nor any config that rewrites the URL. The error carries git's reason.
 func PushBranch(ctx context.Context, dir, remote, commit, branch string) error {
-	format, err := runGit(ctx, dir, gitTimeout, nil, "rev-parse", "--show-object-format")
-	if err != nil {
-		return errors.New(gitWarning("git rev-parse", format, err))
-	}
-	if format = strings.TrimSpace(format); format != "sha1" {
-		return fmt.Errorf("the push repo is sha1; this checkout is %s", format)
-	}
-	common, err := runGit(ctx, dir, gitTimeout, nil, "rev-parse", "--path-format=absolute", "--git-common-dir")
-	if err != nil {
-		return errors.New(gitWarning("git rev-parse", common, err))
-	}
-	env, err := pin.ObjectsEnv(strings.TrimSpace(common))
+	git, err := objectsGit(ctx, dir)
 	if err != nil {
 		return err
 	}
-	env = append(env, "GIT_ALLOW_PROTOCOL="+pushProtocol)
-	git := func(timeout time.Duration, args ...string) (string, error) {
-		return runGitExact(ctx, tools.PushGitDir, env, timeout, nil, append(slices.Clone(verify.GitConfigArgs), args...)...)
-	}
-	url, err := git(gitTimeout, "ls-remote", "--get-url", remote)
+	proto := []string{"GIT_ALLOW_PROTOCOL=" + pushProtocol}
+	url, err := git(gitTimeout, proto, nil, "ls-remote", "--get-url", remote)
 	if err != nil {
 		return errors.New(gitWarning("git ls-remote", url, err))
 	}
 	if url = strings.TrimSpace(url); url != remote {
 		return fmt.Errorf("effective push URL %s differs from the pinned %s", url, remote)
 	}
-	if out, err := git(pushTimeout, "push", "-q", "--no-follow-tags", "--recurse-submodules=no", "--no-signed", "--", remote, commit+":refs/heads/"+branch); err != nil {
+	if out, err := git(pushTimeout, proto, nil, "push", "-q", "--no-follow-tags", "--recurse-submodules=no", "--no-signed", "--", remote, commit+":refs/heads/"+branch); err != nil {
 		return errors.New(gitWarning("git push", out, err))
 	}
 	return nil
+}
+
+// gitFunc runs one git command with env added to its environment.
+type gitFunc func(timeout time.Duration, env []string, stdin io.Reader, args ...string) (string, error)
+
+// inCheckout runs git in the checkout at dir, under its config (runGitEnv).
+func inCheckout(ctx context.Context, dir string) gitFunc {
+	return func(timeout time.Duration, env []string, stdin io.Reader, args ...string) (string, error) {
+		return runGitEnv(ctx, dir, env, timeout, stdin, args...)
+	}
+}
+
+// objectsGit runs git over the objects of the checkout at dir alone, from the
+// pinned push git dir in pin.ObjectsEnv's environment: none of the checkout's
+// config, refs, grafts or replace refs reach it.
+func objectsGit(ctx context.Context, dir string) (gitFunc, error) {
+	format, err := runGit(ctx, dir, gitTimeout, nil, "rev-parse", "--show-object-format")
+	if err != nil {
+		return nil, errors.New(gitWarning("git rev-parse", format, err))
+	}
+	if format = strings.TrimSpace(format); format != "sha1" {
+		return nil, fmt.Errorf("the push repo is sha1; this checkout is %s", format)
+	}
+	common, err := runGit(ctx, dir, gitTimeout, nil, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return nil, errors.New(gitWarning("git rev-parse", common, err))
+	}
+	base, err := pin.ObjectsEnv(strings.TrimSpace(common))
+	if err != nil {
+		return nil, err
+	}
+	return func(timeout time.Duration, env []string, stdin io.Reader, args ...string) (string, error) {
+		return runGitExact(ctx, tools.PushGitDir, append(slices.Clone(base), env...), timeout, stdin, append(slices.Clone(verify.GitConfigArgs), args...)...)
+	}, nil
+}
+
+// identity is the author and committer environment for a commit objectsGit
+// makes, from the checkout's user.name and user.email; git config --get runs
+// no program.
+func identity(ctx context.Context, dir string) (env []string, warning string) {
+	var who [2]string
+	for i, key := range []string{"user.name", "user.email"} {
+		out, err := runGit(ctx, dir, gitTimeout, nil, "config", "--get", key)
+		if exitsOne(err) {
+			return nil, fmt.Sprintf("nothing committed in %s: no git identity (user.name/user.email) configured for the store", dir)
+		}
+		if err != nil {
+			return nil, gitWarning("git config", out, err)
+		}
+		who[i] = strings.TrimSpace(out)
+	}
+	return []string{
+		"GIT_AUTHOR_NAME=" + who[0], "GIT_AUTHOR_EMAIL=" + who[1],
+		"GIT_COMMITTER_NAME=" + who[0], "GIT_COMMITTER_EMAIL=" + who[1],
+	}, ""
 }
 
 // leftNote names up to three of the paths a commit left out, content-free.
@@ -338,19 +396,16 @@ var groups = attest.OSGroups
 // prompt cannot hang priors.
 var signTimeout = gitTimeout
 
-// commitTree commits tree on parent and moves HEAD to it, signing as the
-// store's config asks: unlike git commit, commit-tree ignores commit.gpgSign.
-func commitTree(ctx context.Context, dir, parent, tree, msg string) (commit, warning string) {
-	missing, err := unlisted(ctx, dir, tree)
+// commitTree commits tree on parent with git, adding env to its environment,
+// and moves dir's HEAD to it. It signs only when sign is set: unlike git
+// commit, commit-tree ignores commit.gpgSign.
+func commitTree(ctx context.Context, git gitFunc, dir, parent, tree, msg string, sign bool, env []string) (commit, warning string) {
+	missing, err := unlisted(git, tree)
 	switch {
 	case err != nil:
 		return "", fmt.Sprintf("nothing committed in %s: checking the gated tree: %v", dir, err)
 	case len(missing) > 0:
 		return "", fmt.Sprintf("nothing committed in %s: %s would list files the commit lacks: %s", dir, store.IndexFile, strings.Join(missing, ", "))
-	}
-	sign, err := signs(ctx, dir)
-	if err != nil {
-		return "", fmt.Sprintf("nothing committed in %s: %v", dir, err)
 	}
 	args, timeout := []string{"commit-tree", "-m", msg}, gitTimeout
 	if parent != "" {
@@ -359,8 +414,10 @@ func commitTree(ctx context.Context, dir, parent, tree, msg string) (commit, war
 	if sign {
 		// Plain -S lets git pick the key and format from the config.
 		args, timeout = append(args, "-S"), signTimeout
+	} else {
+		args = append([]string{"-c", "commit.gpgSign=false"}, args...)
 	}
-	commit, err = runGit(ctx, dir, timeout, nil, append(args, tree)...)
+	commit, err = git(timeout, env, nil, append(args, tree)...)
 	switch {
 	case err != nil && sign:
 		return "", fmt.Sprintf("nothing committed in %s: signing the commit failed: %s", dir, gitWarning("git commit-tree", commit, err))
@@ -588,8 +645,9 @@ func copyRegular(path, out string) (regular bool, err error) {
 // parent with fill's staging applied, and checks it holds nothing else. fill
 // stages into the index env names and returns each path's staged
 // "<mode> <oid>", or "" for a removal. It returns "" for the tree when that is
-// parent's own tree.
-func gatedTree(ctx context.Context, dir, parent string, fill func(env []string) (gated map[string]string, warning string)) (tree, warning string) {
+// parent's own tree. Every git it runs is git; dir only names the checkout in
+// warnings.
+func gatedTree(git gitFunc, dir, parent string, fill func(env []string) (gated map[string]string, warning string)) (tree, warning string) {
 	tmp, err := os.MkdirTemp("", "priors-index-")
 	if err != nil {
 		return "", fmt.Sprintf("nothing committed in %s: making a private index: %v", dir, err)
@@ -601,19 +659,19 @@ func gatedTree(ctx context.Context, dir, parent string, fill func(env []string) 
 	if parent != "" {
 		seed = []string{"read-tree", parent}
 	}
-	if out, err := runGitEnv(ctx, dir, env, gitTimeout, nil, seed...); err != nil {
+	if out, err := git(gitTimeout, env, nil, seed...); err != nil {
 		return "", gitWarning("git read-tree", out, err)
 	}
 	gated, warning := fill(env)
 	if warning != "" {
 		return "", warning
 	}
-	tree, err = runGitEnv(ctx, dir, env, gitTimeout, nil, "write-tree")
+	tree, err = git(gitTimeout, env, nil, "write-tree")
 	if err != nil {
 		return "", gitWarning("git write-tree", tree, err)
 	}
 	tree = strings.TrimSpace(tree)
-	stray, unchanged, err := checkTree(ctx, dir, parent, tree, gated)
+	stray, unchanged, err := checkTree(git, parent, tree, gated)
 	switch {
 	case err != nil:
 		return "", fmt.Sprintf("nothing committed in %s: checking the gated tree: %v", dir, err)
@@ -628,7 +686,7 @@ func gatedTree(ctx context.Context, dir, parent string, fill func(env []string) 
 // stage puts the snapshot's bytes for accepted into the index env names,
 // never the worktree's, and removes the accepted paths the snapshot lacks. It
 // returns each path's staged "<mode> <oid>", or "" for a removal.
-func stage(ctx context.Context, dir string, env []string, snapDir string, accepted []string) (gated map[string]string, warning string) {
+func stage(git gitFunc, dir string, env []string, snapDir string, accepted []string) (gated map[string]string, warning string) {
 	gated = map[string]string{}
 	var info, removed strings.Builder
 	for _, rel := range accepted {
@@ -648,7 +706,7 @@ func stage(ctx context.Context, dir string, env []string, snapDir string, accept
 		}
 		// Hashed from stdin without --path, so no clean filter rewrites the
 		// gated bytes on their way into the object store.
-		oid, err := runGit(ctx, dir, gitTimeout, bytes.NewReader(raw), "hash-object", "-w", "--stdin")
+		oid, err := git(gitTimeout, nil, bytes.NewReader(raw), "hash-object", "-w", "--stdin")
 		if err != nil {
 			return nil, gitWarning("git hash-object", oid, err)
 		}
@@ -660,12 +718,12 @@ func stage(ctx context.Context, dir string, env []string, snapDir string, accept
 		info.WriteString(gated[rel] + "\t" + rel + "\x00")
 	}
 	if info.Len() > 0 {
-		if out, err := runGitEnv(ctx, dir, env, gitTimeout, strings.NewReader(info.String()), "update-index", "-z", "--index-info"); err != nil {
+		if out, err := git(gitTimeout, env, strings.NewReader(info.String()), "update-index", "-z", "--index-info"); err != nil {
 			return nil, gitWarning("git update-index", out, err)
 		}
 	}
 	if removed.Len() > 0 {
-		if out, err := runGitEnv(ctx, dir, env, gitTimeout, strings.NewReader(removed.String()), "update-index", "--force-remove", "-z", "--stdin"); err != nil {
+		if out, err := git(gitTimeout, env, strings.NewReader(removed.String()), "update-index", "--force-remove", "-z", "--stdin"); err != nil {
 			return nil, gitWarning("git update-index", out, err)
 		}
 	}
@@ -674,18 +732,18 @@ func stage(ctx context.Context, dir string, env []string, snapDir string, accept
 
 // stageBytes puts files' in-memory bytes, as regular non-executable files,
 // into the index env names. It returns each path's staged "<mode> <oid>".
-func stageBytes(ctx context.Context, dir string, env []string, files map[string][]byte) (gated map[string]string, warning string) {
+func stageBytes(git gitFunc, env []string, files map[string][]byte) (gated map[string]string, warning string) {
 	gated = map[string]string{}
 	var info strings.Builder
 	for _, rel := range slices.Sorted(maps.Keys(files)) {
-		oid, err := runGit(ctx, dir, gitTimeout, bytes.NewReader(files[rel]), "hash-object", "-w", "--stdin")
+		oid, err := git(gitTimeout, nil, bytes.NewReader(files[rel]), "hash-object", "-w", "--stdin")
 		if err != nil {
 			return nil, gitWarning("git hash-object", oid, err)
 		}
 		gated[rel] = "100644 " + strings.TrimSpace(oid)
 		info.WriteString(gated[rel] + "\t" + rel + "\x00")
 	}
-	if out, err := runGitEnv(ctx, dir, env, gitTimeout, strings.NewReader(info.String()), "update-index", "-z", "--index-info"); err != nil {
+	if out, err := git(gitTimeout, env, strings.NewReader(info.String()), "update-index", "-z", "--index-info"); err != nil {
 		return nil, gitWarning("git update-index", out, err)
 	}
 	return gated, ""
@@ -693,14 +751,14 @@ func stageBytes(ctx context.Context, dir string, env []string, files map[string]
 
 // checkTree lists the paths where tree differs from parent's tree with gated
 // applied, and reports whether tree is parent's tree unchanged.
-func checkTree(ctx context.Context, dir, parent, tree string, gated map[string]string) (stray []string, unchanged bool, err error) {
+func checkTree(git gitFunc, parent, tree string, gated map[string]string) (stray []string, unchanged bool, err error) {
 	base := map[string]string{}
 	if parent != "" {
-		if base, err = treeEntries(ctx, dir, parent); err != nil {
+		if base, err = treeEntries(git, parent); err != nil {
 			return nil, false, err
 		}
 	}
-	have, err := treeEntries(ctx, dir, tree)
+	have, err := treeEntries(git, tree)
 	if err != nil {
 		return nil, false, err
 	}
@@ -727,8 +785,8 @@ func checkTree(ctx context.Context, dir, parent, tree string, gated map[string]s
 }
 
 // treeEntries maps each path in treeish to its "<mode> <oid>".
-func treeEntries(ctx context.Context, dir, treeish string) (map[string]string, error) {
-	out, err := runGit(ctx, dir, gitTimeout, nil, "ls-tree", "-r", "-z", "--full-tree", treeish)
+func treeEntries(git gitFunc, treeish string) (map[string]string, error) {
+	out, err := git(gitTimeout, nil, nil, "ls-tree", "-r", "-z", "--full-tree", treeish)
 	if err != nil {
 		return nil, errors.New(gitWarning("git ls-tree", out, err))
 	}
@@ -1040,8 +1098,8 @@ func (c classifier) holdsIndexable(dirRel string) bool {
 }
 
 // unlisted returns the files tree's MEMORY.md lists that tree lacks.
-func unlisted(ctx context.Context, dir, tree string) ([]string, error) {
-	out, err := runGit(ctx, dir, gitTimeout, nil, "ls-tree", "-r", "-z", "--full-tree", "--name-only", tree)
+func unlisted(git gitFunc, tree string) ([]string, error) {
+	out, err := git(gitTimeout, nil, nil, "ls-tree", "-r", "-z", "--full-tree", "--name-only", tree)
 	if err != nil {
 		return nil, errors.New(gitWarning("git ls-tree", out, err))
 	}
@@ -1049,7 +1107,7 @@ func unlisted(ctx context.Context, dir, tree string) ([]string, error) {
 	if !slices.Contains(files, store.IndexFile) {
 		return nil, nil
 	}
-	index, err := runGit(ctx, dir, gitTimeout, nil, "cat-file", "blob", tree+":"+store.IndexFile)
+	index, err := git(gitTimeout, nil, nil, "cat-file", "blob", tree+":"+store.IndexFile)
 	if err != nil {
 		return nil, errors.New(gitWarning("git cat-file", index, err))
 	}

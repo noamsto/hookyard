@@ -432,8 +432,12 @@ wrapper that signed other bytes aborts the run with nothing written.
 
 The commit holds only the fact and its `.attest/<name>` entry, built from the
 signed bytes in memory, so a working-tree swap after signing cannot reach it.
-It commits and pushes whatever the `commit` and `push` config keys say,
-because the command is an explicit request to publish. The push goes to the
+The tree is read with replace objects off, and the commit is never signed: a
+signing program named by the checkout's config would be a second PIN prompt
+an agent controls, so a store remote that requires signed commits rejects the
+push (reported as not pushed). It commits and pushes regardless of the
+`commit` and `push` config keys, because the command is an explicit request
+to publish. The push goes to the
 pinned URL's default branch only, never the checkout's branch, upstream or
 push config, and never forced.
 

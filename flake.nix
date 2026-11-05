@@ -165,11 +165,24 @@
                   subPackages=cmd/priors/...
                 '';
                 doInstallCheck = true;
-                installCheckPhase = ''
-                  runHook preInstallCheck
-                  PRIORS_BIN=$out/bin/priors go test -count=1 -v -run '^TestLoaderHardening$' ./cmd/priors/internal/loadercheck
-                  runHook postInstallCheck
-                '';
+                installCheckPhase =
+                  ''
+                    runHook preInstallCheck
+                    PRIORS_BIN=$out/bin/priors go test -count=1 -v -run '^TestLoaderHardening$' ./cmd/priors/internal/loadercheck
+                  ''
+                  # The section check proves layout only; this proves dyld ignores
+                  # DYLD_* for priors. The control fails loudly if the sandbox strips
+                  # DYLD_* everywhere. Output is captured, not piped: pipefail is set
+                  # and priors exits non-zero.
+                  + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+                    ctl=$(DYLD_PRINT_LIBRARIES=1 ${pkgs.coreutils}/bin/true 2>&1 || true)
+                    case $ctl in *dyld*) ;; *) echo "control: dyld ignored DYLD_PRINT_LIBRARIES"; exit 1 ;; esac
+                    got=$(DYLD_PRINT_LIBRARIES=1 $out/bin/priors 2>&1 || true)
+                    case $got in *dyld*) echo "dyld honoured DYLD_PRINT_LIBRARIES for priors"; exit 1 ;; esac
+                  ''
+                  + ''
+                    runHook postInstallCheck
+                  '';
                 meta = {
                   description = "Cross-harness agent memory: markdown fact stores, write gates, tier-1 index and search";
                   mainProgram = "priors";

@@ -379,9 +379,9 @@ func (a *run) publish(ctx context.Context) (commitOid, failed string, err error)
 	}
 	defer unlock()
 
-	files, err := a.writeFiles()
-	if err != nil {
-		return "", "", err
+	files, failed, err := a.writeFiles()
+	if err != nil || failed != "" {
+		return "", failed, err
 	}
 	hook(a.o.afterEntryWrite)
 	if why := commit.Gate(ctx, a.o.Config, a.t.root, a.host, a.o.Rules, a.o.Scanner, files, false); why != "" {
@@ -423,40 +423,64 @@ func (a *run) notPushed(err error) string {
 }
 
 // writeFiles writes the reviewed fact, unless it changed since it was read,
-// and the entry, and returns them as the commit carries them.
-func (a *run) writeFiles() (map[string][]byte, error) {
+// and the entry, and returns them as the commit carries them. A refusal
+// before any write is err; a failure after the fact's write is failed, the
+// line to report.
+func (a *run) writeFiles() (files map[string][]byte, failed string, err error) {
 	root := a.t.root
-	files := map[string][]byte{".attest/" + a.req.Name: a.entry}
+	dir := filepath.Join(root.Path, ".attest")
+	files = map[string][]byte{".attest/" + a.req.Name: a.entry}
+	path, writeFact := a.t.factPath(), false
 	if a.req.Op == attest.OpAttest {
-		path := a.t.factPath()
 		cur, _, err := readFact(path)
 		if err != nil || !bytes.Equal(cur, a.raw) {
-			return nil, errors.New("fact changed since it was read; nothing written")
+			return nil, "", errors.New("fact changed since it was read; nothing written")
 		}
-		if !bytes.Equal(a.newRaw, a.raw) {
+		if writeFact = !bytes.Equal(a.newRaw, a.raw); writeFact {
 			if err := root.CheckWrite(filepath.Dir(path)); err != nil {
-				return nil, err
-			}
-			if err := atomicfile.Write(path, a.newRaw, a.factMode); err != nil {
-				return nil, err
+				return nil, "", err
 			}
 		}
 		files[a.t.entry.Rel] = a.newRaw
 	}
-	dir := filepath.Join(root.Path, ".attest")
 	if err := root.CheckWrite(dir); err != nil {
-		return nil, err
+		return nil, "", err
+	}
+	if writeFact {
+		if err := atomicfile.Write(path, a.newRaw, a.factMode); err != nil {
+			return nil, "", err
+		}
 	}
 	if err := atomicfile.Write(filepath.Join(dir, a.req.Name), a.entry, 0o644); err != nil {
-		return nil, err
+		if writeFact {
+			return nil, fmt.Sprintf("not committed: writing the entry: %v; the edited fact is left in the working tree", err), nil
+		}
+		return nil, "", err
 	}
-	return files, nil
+	return files, "", nil
 }
 
 // checkBlobs reads back what the commit holds: git does not re-hash an object
 // it already has, so a loose object planted at the entry's oid would carry
-// other bytes under the signed entry's name.
+// other bytes under the signed entry's name. It also requires the commit to
+// sit on HEAD and change only the entry and the fact.
 func (a *run) checkBlobs(ctx context.Context, commitOid string) error {
+	parents, err := a.repo.run(ctx, "rev-list", "--parents", "-n", "1", commitOid)
+	if err != nil {
+		return fmt.Errorf("reading the commit: %w", err)
+	}
+	if got := strings.Fields(parents); !slices.Equal(got, []string{commitOid, a.head}) {
+		return errors.New("the commit's parent is not the checkout's HEAD")
+	}
+	changed, err := a.repo.run(ctx, "diff-tree", "--no-commit-id", "-r", "-z", "--name-only", a.head, commitOid)
+	if err != nil {
+		return fmt.Errorf("reading the commit: %w", err)
+	}
+	for rel := range strings.SplitSeq(strings.TrimSuffix(changed, "\x00"), "\x00") {
+		if rel != ".attest/"+a.req.Name && (a.req.Op != attest.OpAttest || rel != a.t.entry.Rel) {
+			return errors.New("the commit changes paths other than the fact and its entry")
+		}
+	}
 	got, ok, err := a.repo.blobAt(ctx, commitOid, ".attest/"+a.req.Name, attest.MaxEntryBytes)
 	if err != nil {
 		return fmt.Errorf("reading the committed entry: %w", err)

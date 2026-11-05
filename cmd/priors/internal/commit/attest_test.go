@@ -2,7 +2,10 @@ package commit
 
 import (
 	"context"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -10,6 +13,7 @@ import (
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/attest/attesttest"
+	"github.com/noamsto/hookyard/cmd/priors/internal/commit/committest"
 )
 
 // attestFixture is setup's checkout with a separate trust root and the
@@ -89,6 +93,7 @@ func TestGateChecksTheEntryWhenNotPresigning(t *testing.T) {
 
 func TestFilesCommitsTheInMemoryBytes(t *testing.T) {
 	fx := setup(t)
+	committest.PinPush(t)
 	rel := "_global/good-fact.md"
 	want := marshal(t, cleanFact("good-fact"))
 	base := head(t, fx.dir())
@@ -120,6 +125,7 @@ func TestFilesCommitsTheInMemoryBytes(t *testing.T) {
 
 func TestFilesStaleParentCommitsNothing(t *testing.T) {
 	fx := setup(t)
+	committest.PinPush(t)
 	stale := head(t, fx.dir())
 	fx.put(t, "_global/moved.md", cleanFact("moved"))
 	fx.commitAll(t, "moves HEAD")
@@ -131,6 +137,105 @@ func TestFilesStaleParentCommitsNothing(t *testing.T) {
 	}
 	if got := head(t, fx.dir()); got != moved {
 		t.Errorf("HEAD moved: %s -> %s", moved, got)
+	}
+}
+
+func TestFilesNeverSigns(t *testing.T) {
+	fx := setup(t)
+	committest.PinPush(t)
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not installed")
+	}
+	marker := filepath.Join(t.TempDir(), "signer-ran")
+	signer := filepath.Join(t.TempDir(), "signer")
+	writeFile(t, signer, []byte("#!"+sh+"\ntouch '"+marker+"'\nexit 1\n"))
+	if err := os.Chmod(signer, 0o755); err != nil { //nolint:gosec // a test executable
+		t.Fatal(err)
+	}
+	git(t, fx.dir(), "config", "commit.gpgsign", "true")
+	git(t, fx.dir(), "config", "gpg.format", "ssh")
+	git(t, fx.dir(), "config", "gpg.ssh.program", signer)
+	git(t, fx.dir(), "config", "user.signingkey", signer)
+	base := head(t, fx.dir())
+
+	c, w := Files(context.Background(), fx.dir(), base, map[string][]byte{"_global/good-fact.md": marshal(t, cleanFact("good-fact"))}, "attest: x #1")
+	if c == "" || w != "" {
+		t.Fatalf("Files = %q, %q, want an unsigned commit", c, w)
+	}
+	if _, err := os.Lstat(marker); !os.IsNotExist(err) {
+		t.Errorf("the checkout's signing program ran: %v", err)
+	}
+	if obj := git(t, fx.dir(), "cat-file", "commit", c); strings.Contains(obj, "\ngpgsig") {
+		t.Errorf("commit is signed:\n%s", obj)
+	}
+}
+
+func TestFilesWithoutIdentityCommitsNothing(t *testing.T) {
+	fx := setup(t)
+	committest.PinPush(t)
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	base := head(t, fx.dir())
+
+	c, w := Files(context.Background(), fx.dir(), base, map[string][]byte{"_global/good-fact.md": marshal(t, cleanFact("good-fact"))}, "attest: x #1")
+	if c != "" || !strings.Contains(w, "no git identity (user.name/user.email) configured for the store") {
+		t.Errorf("Files = %q, %q, want the missing identity named", c, w)
+	}
+	if got := head(t, fx.dir()); got != base {
+		t.Errorf("HEAD moved: %s -> %s", base, got)
+	}
+}
+
+// replaceHead plants refs/replace/<HEAD> pointing at a commit whose tree is
+// HEAD's top-level entries passed through edit.
+func replaceHead(t *testing.T, dir string, edit func(entries []string) []string) {
+	t.Helper()
+	base := head(t, dir)
+	entries := strings.Split(strings.TrimRight(git(t, dir, "ls-tree", base), "\n"), "\n")
+	cmd := exec.Command("git", "-C", dir, "mktree")
+	cmd.Stdin = strings.NewReader(strings.Join(edit(entries), "\n") + "\n")
+	tree, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git mktree: %v", err)
+	}
+	git(t, dir, "replace", base, orphanCommit(t, dir, strings.TrimSpace(string(tree))))
+}
+
+func TestFilesIgnoresReplaceRefs(t *testing.T) {
+	rel := "_global/good-fact.md"
+	tests := []struct {
+		name string
+		edit func(t *testing.T, dir string, entries []string) []string
+	}{
+		{"adds a path", func(t *testing.T, dir string, entries []string) []string {
+			oid := strings.TrimSpace(git(t, dir, "hash-object", "-w", "--stdin"))
+			return append(entries, "100644 blob "+oid+"\tevil.md")
+		}},
+		{"drops a path", func(_ *testing.T, _ string, entries []string) []string {
+			return slices.DeleteFunc(entries, func(e string) bool { return strings.HasSuffix(e, "\t.gitignore") })
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := setup(t)
+			committest.PinPush(t)
+			base := head(t, fx.dir())
+			replaceHead(t, fx.dir(), func(entries []string) []string { return tt.edit(t, fx.dir(), entries) })
+			raw := marshal(t, cleanFact("good-fact"))
+
+			c, w := Files(context.Background(), fx.dir(), base, map[string][]byte{rel: raw}, "attest: x #1")
+			if c == "" {
+				t.Fatalf("Files = %q, %q", c, w)
+			}
+			want := append(strings.Fields(git(t, fx.dir(), "--no-replace-objects", "ls-tree", "-r", "--name-only", base)), rel)
+			slices.Sort(want)
+			if got := strings.Fields(git(t, fx.dir(), "--no-replace-objects", "ls-tree", "-r", "--name-only", c)); !slices.Equal(got, want) {
+				t.Errorf("commit tree = %v, want HEAD's real tree plus %s: %v", got, rel, want)
+			}
+			if got := strings.TrimSpace(git(t, fx.dir(), "--no-replace-objects", "rev-parse", c+"^")); got != base {
+				t.Errorf("parent = %s, want %s", got, base)
+			}
+		})
 	}
 }
 

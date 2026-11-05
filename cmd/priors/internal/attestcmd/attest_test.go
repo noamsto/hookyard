@@ -6,7 +6,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/attest/attesttest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
+	"github.com/noamsto/hookyard/cmd/priors/internal/store"
 	"github.com/noamsto/hookyard/cmd/priors/internal/tools"
 )
 
@@ -685,6 +688,92 @@ func TestAttest(t *testing.T) {
 		}
 		if !strings.Contains(f.out.String(), "op: attest sequence: 2") {
 			t.Errorf("check read the replacement:\n%s", f.out.String())
+		}
+	})
+}
+
+func TestAttestCheckoutTampering(t *testing.T) {
+	t.Run("replace ref on HEAD adding a path", func(t *testing.T) {
+		f := newFixture(t)
+		f.jobOnTrigger = true
+		head := f.head(f.root)
+		want := strings.Fields(gitOut(t, f.root, "", "ls-tree", "-r", "--name-only", head) + "\n.attest/h")
+		slices.Sort(want)
+		evil := gitOut(t, f.root, "", "hash-object", "-w", "--stdin")
+		tree := gitOut(t, f.root, gitOut(t, f.root, "", "ls-tree", head)+"\n100644 blob "+evil+"\tevil.md\n", "mktree")
+		gitOut(t, f.root, "", "replace", head, gitOut(t, f.root, "", "commit-tree", "-m", "fake", "-p", head+"^", tree))
+
+		if code := f.run(f.opts(), attest.OpAttest); code != 0 {
+			t.Fatalf("exit = %d, want 0\n%s", code, f.all())
+		}
+		if got := strings.Fields(gitOut(t, f.remote, "", "ls-tree", "-r", "--name-only", "main")); !slices.Equal(got, want) {
+			t.Errorf("pushed tree = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("signing program in the checkout config", func(t *testing.T) {
+		f := newFixture(t)
+		f.jobOnTrigger = true
+		sh, err := exec.LookPath("sh")
+		if err != nil {
+			t.Skip("sh not installed")
+		}
+		marker, signer := filepath.Join(f.dir, "signer-ran"), filepath.Join(f.dir, "signer")
+		f.writeFile(signer, "#!"+sh+"\ntouch "+shQuote(marker)+"\nexit 1\n", 0o755)
+		for _, kv := range [][2]string{{"commit.gpgsign", "true"}, {"gpg.format", "ssh"}, {"gpg.ssh.program", signer}, {"user.signingkey", signer}} {
+			gitOut(t, f.root, "", "config", kv[0], kv[1])
+		}
+
+		if code := f.run(f.opts(), attest.OpAttest); code != 0 {
+			t.Fatalf("exit = %d, want 0\n%s", code, f.all())
+		}
+		if _, err := os.Lstat(marker); !os.IsNotExist(err) {
+			t.Errorf("the checkout's signing program ran: %v", err)
+		}
+		if obj := gitOut(t, f.remote, "", "cat-file", "commit", "main"); strings.Contains(obj, "\ngpgsig") {
+			t.Errorf("pushed commit is signed:\n%s", obj)
+		}
+	})
+
+	t.Run("commit off HEAD or changing other paths", func(t *testing.T) {
+		f := newFixture(t)
+		head := f.head(f.root)
+		rp, err := newRepo(f.root, filepath.Join(f.root, ".git"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := &run{req: Request{Name: "h", Op: attest.OpAttest}, repo: rp, head: head, t: target{entry: store.Entry{Rel: "facts/h.md"}}}
+		evil := gitOut(t, f.root, "", "hash-object", "-w", "--stdin")
+		tree := gitOut(t, f.root, gitOut(t, f.root, "", "ls-tree", head)+"\n100644 blob "+evil+"\tevil.md\n", "mktree")
+		for want, c := range map[string]string{
+			"paths other than": gitOut(t, f.root, "", "commit-tree", "-m", "x", "-p", head, tree),
+			"parent":           gitOut(t, f.root, "", "commit-tree", "-m", "x", "-p", head+"^", head+"^{tree}"),
+		} {
+			if err := a.checkBlobs(context.Background(), c); err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("checkBlobs = %v, want %q", err, want)
+			}
+		}
+	})
+
+	t.Run("symlinked .attest", func(t *testing.T) {
+		f := newFixture(t)
+		outside := t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(f.root, ".attest")); err != nil {
+			t.Fatal(err)
+		}
+		raw, head, remote := f.factRaw(), f.head(f.root), f.remoteMain()
+
+		if code := f.run(f.opts(), attest.OpAttest); code != 1 {
+			t.Fatalf("exit = %d, want 1\n%s", code, f.all())
+		}
+		if !bytes.Equal(f.factRaw(), raw) {
+			t.Errorf("fact rewritten by a refused run:\n%s", f.all())
+		}
+		if f.head(f.root) != head || f.remoteMain() != remote {
+			t.Error("HEAD or remote moved")
+		}
+		if ents, err := os.ReadDir(outside); err != nil || len(ents) != 0 {
+			t.Errorf("wrote outside the store: %v %v", ents, err)
 		}
 	})
 }
