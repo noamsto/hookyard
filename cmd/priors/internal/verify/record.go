@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
+	"slices"
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/atomicfile"
 	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
@@ -109,6 +111,10 @@ func loadRecord(path string) (*Record, bool, error) {
 	}
 	if r.Version != recordVersion {
 		return nil, false, fmt.Errorf("record: version %d, want %d", r.Version, recordVersion)
+	}
+	if slices.Contains(slices.Collect(maps.Values(r.Names)), nil) ||
+		slices.Contains(slices.Collect(maps.Values(r.Entries)), nil) {
+		return nil, false, errors.New("record: null entry")
 	}
 	if r.Names == nil {
 		r.Names = map[string]*NameState{}

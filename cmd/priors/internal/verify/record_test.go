@@ -237,6 +237,8 @@ func TestRecordRoundTrip(t *testing.T) {
 		"no version":    `{}`,
 		"unknown field": `{"version":1,"extra":true}`,
 		"trailing data": `{"version":1} {"version":1}`,
+		"null name":     `{"version":1,"names":{"n":null}}`,
+		"null entry":    `{"version":1,"entries":{"d":null}}`,
 	} {
 		t.Run("rejects "+name, func(t *testing.T) {
 			p := filepath.Join(dir, "bad.json")

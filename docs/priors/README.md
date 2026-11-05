@@ -131,6 +131,7 @@ priors search <terms...> [--repo R] [--any-repo] [--type T] [--scope S] [--all]
 priors lint [--store S] [--move-flagged] | priors lint --dir D --kind K [--work-org O ...]
 priors index [--text] [--engine claude-code]   # session_start output (envelope on stdin)
 priors index --write         # regenerate every MEMORY.md
+priors verify --store ID --credential KEY   # the verdict job for one store, as priors-verify
 ```
 
 `add` refuses a fact that matches a secret pattern or the scanner, or fails
@@ -311,6 +312,48 @@ half-imported checkout, and commits what it published once, through the
 store's commit gate. It commits on every run, so a commit held back last time
 (`warning: ...` on stderr, exit still 0) is retried. Running it again is safe:
 an imported source reports `unchanged`, by the sha256 of its bytes.
+
+### priors verify
+
+The verdict job of [§4.4](../design/memory-layer.md#44-read-path-three-tiers-one-budget):
+it fetches one store's remote, walks the new commits, and writes the verdict
+file that the index-time checks read. It runs only on a host whose trust file
+classifies as `separate`, as the build-pinned `priors-verify` uid, and only for
+a store the trust file lists with a pinned SSH remote, so a personal host has
+no work job. Anything else exits 1 before any fetch or write.
+
+- Inputs: the trust file (never `config.toml` or the caller's environment),
+  the `--credential` SSH deploy key, and its own state. HTTPS credentials are
+  not supported; a non-SSH pin is refused.
+- State, under `/var/lib/priors/<store id>/` (which deployment creates): the
+  `verdicts` file (0644, written atomically) and `private/` (0700) holding
+  `mirror.git`, `record.json` (0600, the per-name record that never shrinks)
+  and `lock` (a second run exits 1).
+- Budget per run: 300 s for the whole run, 20 s of it reserved for the
+  checkpoint and the verdict write; 50,000 newly walked commits; a 2 GiB
+  mirror. Leftover `tmp_pack` and incomplete objects are deleted each run.
+  A walk cut short saves its prefix and the next run resumes.
+- Status, one of `ok`, `stale-remote` (fetch failed before authentication and
+  the record's last tip is fully walked: verdicts are recomputed over the
+  record), `behind` and `oversize`. `behind` and `oversize` write an empty
+  verdict set. Any failure after gating ends the run `behind`, so pushed
+  content cannot keep an old `reviewed` by making the job error out. Only a
+  failure to write the state dir exits 1.
+- `fetch.fsckObjects` is on, so a pushed malformed object fails the fetch and
+  keeps the store `behind` until the remote is rewritten (residual (d)).
+- Output: one line, `<id>: <status>[: reason]`, never a fact name or path.
+  Exit 0 whenever a status was reached and written, 1 for gating failures.
+- Trigger: systemd socket activation (`Accept=no`). The job accepts and closes
+  pending connections without reading any byte, runs, and runs once more if
+  any arrived meanwhile, so at most one run is queued. Without the socket
+  environment it runs once. launchd is deferred to
+  [#191](https://github.com/noamsto/hookyard/issues/191).
+- `priors trust check` is a stub until
+  [#240](https://github.com/noamsto/hookyard/issues/240):
+  `verify.CheckEvidence` accepts every parsed allowlist key, and the nix module
+  writes an empty allowlist until it can run the check.
+
+Deployment (the account, units, socket and credentials) is #191.
 
 ### Reading the session-start block
 
