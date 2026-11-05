@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode"
 
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -1964,15 +1965,35 @@ func (r *reader) opaqueOperand(a arg, call int, env bool) {
 	if a.text != "" && !strings.ContainsRune(pathBreaks, rune(a.text[len(a.text)-1])) {
 		partial, fields = fields[len(fields)-1], fields[:len(fields)-1]
 	}
+	replaces, named := r.out.replaces, false
 	for _, f := range fields {
 		for _, t := range r.tildeFields(f) {
 			r.target(Target{Text: t, From: a.src, Call: call})
+			named = named || strings.Contains(t, "/") && replacesProgram(t)
 		}
+	}
+	if env {
+		r.out.replaces = replaces || named
 	}
 	if !env {
 		r.opaque(a)
 	} else if a.text != "" {
 		r.opaqueAt(a, strings.Contains(a.text, "/"))
+	}
+	if len(a.text) > 2 && a.text[0] == '-' && a.text[1] != '-' {
+		for k := 2; k < len(a.text) && !r.over(); k++ {
+			if !r.spend(len(a.text) - k) {
+				break
+			}
+			s := arg{text: a.text[k:], src: a.src}
+			r.opaqueAt(s, env && strings.Contains(s.text, "/"))
+			if s.text[0] != '~' {
+				continue
+			}
+			if home, ok := r.tildeHome(PathFields(s.text)[0]); ok {
+				r.opaqueAt(arg{text: home, src: a.src}, env && strings.Contains(home, "/"))
+			}
+		}
 	}
 	if partial == "" {
 		return
@@ -2065,11 +2086,36 @@ func (r *reader) tildeHome(f string) (string, bool) {
 			return "", false
 		}
 		return r.host.Home + rest, true
-	case strings.HasPrefix(user, "+"), strings.HasPrefix(user, "-"), digits(user), r.host.Users == nil:
+	case strings.HasPrefix(user, "+"), strings.HasPrefix(user, "-"), digits(user):
 		return "", false
 	}
-	home, ok := r.host.Users(user)
+	home, ok := r.userHome(user)
 	return home + rest, ok
+}
+
+// userHome is user's home dir by the host, looked up once per reader. A name
+// holding a byte no account name can (`:`, `~`, whitespace, a control byte) is
+// not looked up.
+func (r *reader) userHome(user string) (string, bool) {
+	if r.host.Users == nil || strings.IndexFunc(user, func(c rune) bool {
+		return c == ':' || c == '~' || unicode.IsSpace(c) || unicode.IsControl(c)
+	}) >= 0 {
+		return "", false
+	}
+	if h, ok := r.homes[user]; ok {
+		return h.dir, h.ok
+	}
+	if r.homes == nil {
+		r.homes = map[string]userDir{}
+	}
+	dir, ok := r.host.Users(user)
+	r.homes[user] = userDir{dir, ok}
+	return dir, ok
+}
+
+type userDir struct {
+	dir string
+	ok  bool
 }
 
 // tildeFields are s's fields between pathBreaks, each that starts with ~
@@ -2115,6 +2161,9 @@ func (r *reader) optionValues(words []arg) []string {
 	for _, v := range out {
 		if !strings.HasPrefix(v, "~") {
 			continue
+		}
+		if !r.spend(len(v)) {
+			return nil
 		}
 		if home, ok := r.tildeHome(v); ok {
 			out = append(out, home)

@@ -290,6 +290,7 @@ func TestShellAccessDirs(t *testing.T) {
 		{name: "cdable_vars cd OLDPWD", cmd: "shopt -s cdable_vars; cd OLDPWD", lost: true},
 		{name: "cdable_vars cd BASH_REMATCH", cmd: "shopt -s cdable_vars; cd BASH_REMATCH", lost: true},
 		{name: "cdable_vars cd PATH", cmd: "shopt -s cdable_vars; cd PATH", lost: true},
+		{name: "cdable_vars cd coproc pid", cmd: "shopt -s cdable_vars; coproc d { :; }; cd d_PID", lost: true},
 		{name: "cd built at run time", cmd: "cd \"$(pwd)\"", lost: true},
 		{name: "popd", cmd: "popd; ls", lost: true},
 		{name: "popd then program", cmd: "popd; make", writes: true, lost: true, unresolved: "runs a program in a dir the guard cannot tell"},
@@ -423,6 +424,7 @@ func TestShellAccessWithdrawal(t *testing.T) {
 		{name: "prefix value", cmd: "GIT_WORK_TREE=~/w git checkout -- .", writes: true, targets: []string{"/h/w", "."}},
 		{name: "prefix value to a childless builtin", cmd: "IFS=/ read -r a b < f", writes: true, notTargets: []string{"/"}, unresolved: "feeds read input that may name paths"},
 		{name: "env word value", cmd: "env GIT_DIR=/h/g:/h/k git status", writes: true, targets: []string{"/h/g:/h/k", "/h/g", "/h/k"}, unresolved: "runs git, which the command may have redefined"},
+		{name: "bare env value with an unrendered tail", cmd: "PAGER=cat:$(true) make; cat x", writes: true, notTargets: []string{"x"}, unresolved: `puts "PAGER=cat:$(true)" in a program's environment`},
 		{name: "prefix value built at run time", cmd: "HOME=$HOME/w foo", writes: true, opaque: []string{}, unresolved: `puts "HOME=$HOME/w" in a program's environment`},
 		{name: "host-exported value", cmd: "USER=/h/u; cat y", writes: true, targets: []string{"/h/u"}, unresolved: cat},
 		{name: "allexport value", cmd: "set -a; X=/h/x", writes: true, targets: []string{"/h/x"}, unresolved: "runs set, which the command may have redefined"},
@@ -638,5 +640,18 @@ func TestShellAccessBounded(t *testing.T) {
 				t.Errorf("reading %d bytes allocated %d MiB", len(cmd), alloc>>20)
 			}
 		})
+	}
+}
+
+func TestHomeLookupsCached(t *testing.T) {
+	calls := 0
+	host := accessHost(nil)
+	host.Users = func(name string) (string, bool) {
+		calls++
+		return "/u/" + name, true
+	}
+	ShellAccess(host, "foo -o~alice/a -o~alice/b ~alice/c")
+	if calls != 1 {
+		t.Errorf("Users called %d times, want 1", calls)
 	}
 }

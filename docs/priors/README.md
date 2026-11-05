@@ -821,11 +821,11 @@ It is not a sandbox. It does not see:
   `eval` or `source` loses the dir instead, as `CDPATH` may be set too;
 - an environment value a program runs as code (`PAGER='sh -c …'`), which is
   judged only for the paths it names;
-- a `cd NAME` into a variable a builtin names from another (`coproc NAME`
-  sets `NAME_PID`), which is read like any other name;
 - a `~` or `~user` a modeled writer or reader leaves literal: the
   home-in-place reading covers unknown programs' operands and environment
   values only;
+- a home a program spells with its own token rather than `~` (ssh's `%d` in
+  `-S` or `ControlPath`), which is judged as written;
 - an unknown-key string longer than 4096 bytes, which is not judged at all,
   so a packed list padded past it passes;
 - a variable a shell profile sets, `/proc/<pid>/cwd`, a bind mount, macOS

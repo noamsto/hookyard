@@ -1109,6 +1109,13 @@ func TestStoreWritesStayDenied(t *testing.T) {
 		{name: "source before a cd naming a variable", want: "changes into a dir the guard cannot tell", input: bash("shopt -s cdable_vars; source ./e.sh; cd d && touch new.md")},
 		{name: "unknown program double quoted subscript tilde", want: store, input: bash(`foo a["x"]=~/notes/MEMORY.md`)},
 		{name: "unknown program single quoted subscript tilde", want: store, input: bash(`foo a['x']=~/notes/MEMORY.md`)},
+		{name: "unrendered -o cluster tilde", want: store, input: bash(`foo -o~/no$(true)tes/x`)},
+		{name: "unrendered ssh -S cluster tilde", want: store, input: bash(`ssh -M -S~/no$(true)tes/x host`)},
+		{name: "unrendered -C cluster tilde", want: store, cwd: "elsewhere", input: bash(`foo -C~/no$(true)tes build`)},
+		{name: "unrendered -C cluster ~user", want: store, cwd: "elsewhere", input: bash(`foo -C~alice/no$(true)tes build`)},
+		{name: "unrendered -C cluster relative", want: store, input: bash(`foo -C../no$(true)tes build`)},
+		{name: "unrendered gcc -o cluster tilde", want: store, input: bash(`gcc -o~/no$(true)tes/facts/z.md x.c`)},
+		{name: "compgen -V names a cdable variable", want: "changes into a dir the guard cannot tell", cwd: "elsewhere", input: bash(`shopt -s cdable_vars; compgen -V d -d x; cd d && rm facts/a.md`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			c.tool = "Bash"

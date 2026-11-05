@@ -136,6 +136,8 @@ type reader struct {
 	pre    prepass
 	// named are the bound values by the name they bind, rendered once.
 	named map[string][]boundValue
+	// homes are the ~user lookups made, by user.
+	homes map[string]userDir
 	// withdrawn turns every call into an unknown program (§4.7).
 	withdrawn bool
 	// code is the first opaque-code reason found before the judge.

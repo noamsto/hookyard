@@ -36,7 +36,7 @@ var shellOwn = []string{
 	"PWD", "OLDPWD", "RANDOM", "SRANDOM", "SECONDS", "LINENO", "EPOCHSECONDS", "EPOCHREALTIME",
 	"FUNCNAME", "GROUPS", "HOSTNAME", "HOSTTYPE", "MACHTYPE", "OSTYPE", "PPID", "UID", "EUID",
 	"SHLVL", "SHELLOPTS", "PIPESTATUS", "REPLY", "OPTARG", "OPTIND", "OPTERR", "DIRSTACK",
-	"HISTCMD", "MAPFILE", "COPROC", "IFS", "PS1", "PS2", "PS3", "PS4", "COLUMNS", "LINES",
+	"HISTCMD", "MAPFILE", "COPROC", "COPROC_PID", "IFS", "PS1", "PS2", "PS3", "PS4", "COLUMNS", "LINES",
 }
 
 // bashAssigns reports a name bash assigns whatever the host holds.
@@ -305,10 +305,7 @@ func (a *alt) tilde(user string) bool {
 			}
 		case strings.HasPrefix(user, "+"), strings.HasPrefix(user, "-"), digits(user):
 		default:
-			if a.r.host.Users == nil {
-				return false
-			}
-			home, ok := a.r.host.Users(user)
+			home, ok := a.r.userHome(user)
 			if ok {
 				a.write(home)
 			}
