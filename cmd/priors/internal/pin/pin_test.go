@@ -59,6 +59,18 @@ func repo(t *testing.T, base, url string) string {
 	return base
 }
 
+// legacyFile writes a legacy remote definition under dir's .git/<sub>.
+func legacyFile(t *testing.T, dir, sub string) {
+	t.Helper()
+	d := filepath.Join(dir, ".git", sub)
+	if err := os.MkdirAll(d, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d, "origin"), []byte("URL: "+other+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // subdir makes and returns a directory below dir.
 func subdir(t *testing.T, dir string) string {
 	t.Helper()
@@ -102,6 +114,60 @@ func TestCheck(t *testing.T) {
 		{
 			name:  "no pin, dir nested in a checkout without remotes",
 			setup: func(t *testing.T, base, _ string) string { return subdir(t, repo(t, base, "")) },
+		},
+		{
+			name: "no pin, branch.main.remote is a URL",
+			setup: func(t *testing.T, base, _ string) string {
+				git(t, repo(t, base, ""), "config", "branch.main.remote", other)
+				return base
+			},
+			want: "branch.main.remote is",
+		},
+		{
+			name: "no pin, branch.main.pushRemote is a URL",
+			setup: func(t *testing.T, base, _ string) string {
+				git(t, repo(t, base, ""), "config", "branch.main.pushRemote", other)
+				return base
+			},
+			want: "branch.main.pushremote is",
+		},
+		{
+			name: "no pin, remote.pushDefault set",
+			setup: func(t *testing.T, base, _ string) string {
+				git(t, repo(t, base, ""), "config", "remote.pushDefault", other)
+				return base
+			},
+			want: "remote.pushdefault is",
+		},
+		{
+			name: "no pin, legacy .git/remotes/origin",
+			setup: func(t *testing.T, base, _ string) string {
+				legacyFile(t, repo(t, base, ""), "remotes")
+				return base
+			},
+			want: "legacy remote file remotes/origin",
+		},
+		{
+			name: "no pin, legacy .git/branches/origin",
+			setup: func(t *testing.T, base, _ string) string {
+				legacyFile(t, repo(t, base, ""), "branches")
+				return base
+			},
+			want: "legacy remote file branches/origin",
+		},
+		{
+			name: "no pin, legacy remote reached through a symlink to a subdir",
+			setup: func(t *testing.T, base, _ string) string {
+				r := repo(t, base, "")
+				legacyFile(t, r, "remotes")
+				sub := subdir(t, r)
+				link := filepath.Join(t.TempDir(), "lnk")
+				if err := os.Symlink(sub, link); err != nil {
+					t.Fatal(err)
+				}
+				return link
+			},
+			want: "legacy remote file remotes/origin",
 		},
 		{
 			name: "pin, plain dir", remote: pinned,

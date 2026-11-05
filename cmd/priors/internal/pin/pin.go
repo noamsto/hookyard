@@ -81,6 +81,20 @@ func Check(ctx context.Context, dir, remote string) error {
 		if len(names) > 0 {
 			return fmt.Errorf("%s has remote(s) %s but the trust file pins none", dir, short(strings.Join(names, ", ")))
 		}
+		entries, err := remoteConfig(ctx, dir)
+		if err != nil {
+			return err
+		}
+		if len(entries) > 0 {
+			return fmt.Errorf("%s: %s is %s but the trust file pins none", dir, short(entries[0][0]), short(entries[0][1]))
+		}
+		legacy, err := legacyRemote(ctx, dir)
+		if err != nil {
+			return err
+		}
+		if legacy != "" {
+			return fmt.Errorf("%s has legacy remote file %s but the trust file pins none", dir, short(legacy))
+		}
 		return nil
 	}
 
@@ -112,17 +126,62 @@ func Check(ctx context.Context, dir, remote string) error {
 	}
 	// A branch's remote may name another remote or be a URL itself, and a
 	// pull or push follows it rather than origin.
-	out, err := runGit(ctx, dir, "config", "-z", "--get-regexp", `^(branch\..*\.(remote|pushremote)|remote\.pushdefault)$`)
-	if err != nil && (!errors.As(err, &exit) || exit.ExitCode() != 1) {
-		return fmt.Errorf("%s: %w", dir, gitFailed("config --get-regexp", out, err))
+	entries, err := remoteConfig(ctx, dir)
+	if err != nil {
+		return err
 	}
-	for entry := range strings.SplitSeq(strings.TrimSuffix(out, "\x00"), "\x00") {
-		key, value, _ := strings.Cut(entry, "\n")
-		if key != "" && value != "origin" {
-			return fmt.Errorf("%s: %s is %s, not origin", dir, short(key), short(value))
+	for _, e := range entries {
+		if e[1] != "origin" {
+			return fmt.Errorf("%s: %s is %s, not origin", dir, short(e[0]), short(e[1]))
 		}
 	}
 	return nil
+}
+
+// remoteConfig returns the [key, value] pairs of every branch remote, branch
+// push remote and push default git config holds for the repo holding dir.
+func remoteConfig(ctx context.Context, dir string) ([][2]string, error) {
+	out, err := runGit(ctx, dir, "config", "-z", "--get-regexp", `^(branch\..*\.(remote|pushremote)|remote\.pushdefault)$`)
+	var exit *exec.ExitError
+	if err != nil && (!errors.As(err, &exit) || exit.ExitCode() != 1) {
+		return nil, fmt.Errorf("%s: %w", dir, gitFailed("config --get-regexp", out, err))
+	}
+	var entries [][2]string
+	for entry := range strings.SplitSeq(strings.TrimSuffix(out, "\x00"), "\x00") {
+		key, value, _ := strings.Cut(entry, "\n")
+		if key != "" {
+			entries = append(entries, [2]string{key, value})
+		}
+	}
+	return entries, nil
+}
+
+// legacyRemote returns the first entry of the repo's legacy remotes/ or
+// branches/ directory, which git remote does not reliably cover.
+func legacyRemote(ctx context.Context, dir string) (string, error) {
+	// Absolute, since git prints a path relative to its physical cwd, which a
+	// symlinked dir would make a join against dir resolve elsewhere.
+	out, err := runGit(ctx, dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", dir, gitFailed("rev-parse --git-common-dir", out, err))
+	}
+	common := strings.TrimSuffix(out, "\n")
+	if _, err := os.Stat(common); err != nil {
+		return "", fmt.Errorf("%s: git common dir %s: %w", dir, short(common), err)
+	}
+	for _, sub := range []string{"remotes", "branches"} {
+		entries, err := os.ReadDir(filepath.Join(common, sub))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", dir, err)
+		}
+		if len(entries) > 0 {
+			return filepath.Join(sub, entries[0].Name()), nil
+		}
+	}
+	return "", nil
 }
 
 // remotes lists the remotes git knows for the repo holding dir.

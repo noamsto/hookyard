@@ -51,11 +51,10 @@ urls have git's rewrites (`insteadOf`, `pushInsteadOf`, `pushurl`) applied,
 under the user's git config, so the pin must be the post-rewrite URL and the
 checkout's raw origin must equal it too. Because the check reads the user's
 git config, a user-global `remote.pushDefault` or a globally defined remote
-refuses every pinned store. With no `remote`, a store dir inside a repo that
-has a named remote is refused and nothing is pushed; a remote reached only
-through a URL in `branch.*.remote`, `branch.*.pushRemote` or
-`remote.pushDefault`, or through a legacy `.git/remotes` or `.git/branches`
-file, is not yet caught for an unpinned store (a follow-up).
+refuses every pinned store, and every unpinned store inside a repo. With no `remote`, a store dir inside a repo that
+has a named remote, a `branch.*.remote`, `branch.*.pushRemote` or
+`remote.pushDefault` entry (a URL included), or a legacy `.git/remotes` or
+`.git/branches` file is refused and nothing is pushed.
 A checkout git cannot read (a corrupt `.git/config`, say) is
 refused, not published with a warning. A refused checkout also blocks
 `priors add` to that store's local layer; reads still show the local layer.
