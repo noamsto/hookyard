@@ -1898,9 +1898,11 @@ preconditions, needs no guard.
 It is a tripwire like §4.2's read guard — a small deterministic check of the
 call's paths and text that loads neither the rule set nor a store and sees
 only the tool calls hookyard sees. Within that, it denies what it cannot
-tell, as gate 2 does: a shell command reuses gate 2's literaliser, and a
-write through a path built at run time, a command past its budget, a broken
-config or a guard past 750 ms all deny. A shell write anywhere in a store is
+tell, as gate 2 does. A shell command is judged per simple command: a write
+whose target it cannot resolve is denied when a store is in reach, and shell
+code it cannot read is always denied. The reach definition and the residuals
+live in the README. A command past its budget, a broken config or a guard past
+750 ms also deny. A shell write anywhere in a store is
 denied, since its content cannot be judged; a file tool may write a fact
 that does not claim review. A host with no trust file is inert (R8), and a
 missing user config loads the defaults, since an agent can delete it; a trust

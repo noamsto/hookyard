@@ -37,10 +37,8 @@ const (
 	// maxHops bounds the symlinks one path resolves through, as the kernel's
 	// own limit does.
 	maxHops = 40
-	// maxDirs bounds the dirs a command changes into, and maxOptionDirs those
-	// only a writer's option values name.
-	maxDirs       = 32
-	maxOptionDirs = 256
+	// maxDirs bounds the dirs a command changes into.
+	maxDirs = 32
 	// maxRead bounds a store file read to simulate an edit.
 	maxRead = 4 << 20
 	// maxNodes and maxDepth bound the walk of a tool's JSON input.
@@ -278,17 +276,23 @@ func CallDir(envelopeCWD string, input json.RawMessage) string {
 	return ""
 }
 
+// shell judges a shell call, in order: what the reader cannot read, code it
+// cannot see, a broken config, a write run in a store, each resolved target,
+// each unresolved target's literal prefix, and an unresolved write with a
+// store in reach.
 func (g *Guard) shell(cwd string, texts []string) string {
 	acc := gate.ShellAccess(g.host, texts...)
 	switch {
 	case acc.Unreadable != "":
 		return deny("the command is past what the guard reads (%s)", acc.Unreadable)
+	case acc.Code != "":
+		return deny("the command runs shell code the guard cannot read (%s), so it may write any path", acc.Code)
 	case g.broken != nil && acc.Writes:
 		return g.brokenReason()
 	case g.broken != nil:
 		return ""
 	}
-	c := g.newCheck(cwd, acc.Words)
+	c := g.newCheck(cwd, acc.Dirs, acc.DirLost)
 	if acc.Writes {
 		for _, d := range c.dirs {
 			if r := c.relate(d, shellKinds); r.rel == inside {
@@ -296,38 +300,97 @@ func (g *Guard) shell(cwd string, texts []string) string {
 			}
 		}
 	}
-	involved := g.involves(texts)
-	for _, t := range acc.Words {
-		if t.Chdir {
-			continue
+	unresolved := acc.Unresolved
+	optionLost := false
+	for _, t := range acc.Targets {
+		if c.lost && !filepath.IsAbs(t.Text) && unresolved == "" {
+			unresolved = fmt.Sprintf("writes %q from a dir it changes into at run time", t.Text)
 		}
-		if r := c.shellTouch(t, acc.Writes, involved); r != "" {
+		if r := c.target(t, c.candidates(t.Text)); r != "" {
 			return r
 		}
 	}
-	// A writer's option values may be dirs it runs in, or may not be dirs at
-	// all: only relative writes resolve against them, once every word has been
-	// judged without them, so a denial names the word it would name anyway. A
-	// value that is itself a store is a write already.
-	if len(c.options) == 0 && !c.optionLost {
+	// An unknown program's option value may be a dir it runs in; judged after
+	// every target as given, so a denial names the target itself.
+	for _, t := range acc.Targets {
+		if t.Call == 0 || filepath.IsAbs(t.Text) {
+			continue
+		}
+		dirs, lost := c.optionDirs(t.Call, acc.Options)
+		if lost {
+			optionLost = true
+			if unresolved == "" {
+				unresolved = fmt.Sprintf("writes %q from a dir one of its options may name", t.Text)
+			}
+		}
+		if r := c.target(t, c.resolve(t.Text, dirs)); r != "" {
+			return r
+		}
+	}
+	for _, t := range acc.Opaque {
+		if r := c.prefix(t.Text); r.rel != none {
+			return deny("the command may write through %q, which reaches into %s", t.Text+"…", r.root.label)
+		}
+	}
+	if unresolved == "" {
 		return ""
 	}
-	c.dirs = append(c.dirs, c.options...)
-	c.lost = c.lost || c.optionLost
-	for _, t := range acc.Words {
-		if t.Chdir || !t.Write || filepath.IsAbs(t.Text) {
-			continue
-		}
-		if r := c.shellTouch(t, acc.Writes, involved); r != "" {
-			return r
-		}
+	if c.lost || optionLost {
+		return deny("the command %s, which the guard cannot resolve, and changes into a dir the guard cannot tell", unresolved)
+	}
+	if reach := c.reach(acc.OwnNames, acc.Names, texts); reach != "" {
+		return deny("the command %s, which the guard cannot resolve, and %s", unresolved, reach)
 	}
 	return ""
 }
 
+// optionDirs returns the existing dirs among the option values of a call, as
+// the dirs it may run in, each resolved like a dir the command changes into.
+// lost reports more than maxDirs of them. Each value costs one stat per dir
+// it is relative to.
+func (c *check) optionDirs(call int, options [][]string) (dirs []string, lost bool) {
+	if d, ok := c.options[call]; ok {
+		return d.dirs, d.lost
+	}
+	var found []string
+	seen := map[string]bool{}
+	for _, v := range options[call-1] {
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		paths := []string{v}
+		if !filepath.IsAbs(v) {
+			paths = nil
+			for _, d := range c.dirs {
+				paths = append(paths, filepath.Join(d, v))
+			}
+		}
+		for _, p := range paths {
+			if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+				found = append(found, p)
+			}
+		}
+		if len(found) > maxDirs {
+			lost = true
+			found = nil
+			break
+		}
+	}
+	for _, p := range found {
+		for _, d := range c.candidates(p) {
+			if !slices.Contains(dirs, d) {
+				dirs = append(dirs, d)
+			}
+		}
+	}
+	c.options[call] = optionDirs{dirs, lost}
+	return dirs, lost
+}
+
 // argument names the argument a write was judged from, so a denial tells a
 // false positive's reader which argument was read as the target.
-func argument(t gate.Touch, p string) string {
+func argument(t gate.Target, p string) string {
 	arg := t.From
 	if arg == "" {
 		arg = t.Text
@@ -338,35 +401,16 @@ func argument(t gate.Touch, p string) string {
 	return fmt.Sprintf(" (from the argument %q)", arg)
 }
 
-// shellTouch judges one word of a command that writes when writes is set.
-func (c *check) shellTouch(t gate.Touch, writes, involved bool) string {
-	if t.Opaque {
-		if r := c.prefix(t.Text); r.rel == inside && writes || r.rel == ancestor && t.Write {
-			return deny("the command may write through %q, which reaches into %s", t.Text+"…", r.root.label)
-		}
-		if t.Write && involved {
-			return deny("the command writes through a path it builds at run time, and names a guarded path")
-		}
-		return ""
-	}
-	relative := !filepath.IsAbs(t.Text)
-	if t.Write && relative && c.lost && involved {
-		return deny("the command writes %q from a dir it changes into at run time, and names a guarded path", t.Text)
-	}
-	cands := c.candidates(t.Text)
+// target judges one resolved write target, as each of cands.
+func (c *check) target(t gate.Target, cands []string) string {
 	for _, p := range cands {
-		r := c.relate(p, shellKinds)
-		switch {
-		case r.rel == inside && t.Write:
+		switch r := c.relate(p, shellKinds); r.rel {
+		case inside:
 			return deny("the command writes %s, %s%s", p, describe(r.root, p), argument(t, p))
-		case r.rel == inside && writes:
-			return deny("the command names %s, %s, and may write%s", p, describe(r.root, p), argument(t, p))
-		case r.rel == ancestor && t.Write:
+		case ancestor:
 			return deny("the command may write %s, which holds %s%s", p, r.root.label, argument(t, p))
+		case none:
 		}
-	}
-	if !t.Write {
-		return ""
 	}
 	for _, p := range cands {
 		to, unknown := c.linked(p)
@@ -375,6 +419,55 @@ func (c *check) shellTouch(t gate.Touch, writes, involved bool) string {
 			return deny("the command writes %s, which has hard links the guard cannot match to a store file%s", p, argument(t, p))
 		case len(to) > 0:
 			return deny("the command writes %s, a hard link to %s%s", p, to[0], argument(t, p))
+		}
+	}
+	return ""
+}
+
+// reach names what puts a store in reach of a write the reader cannot
+// resolve, or "" when nothing does: a name of the write's own words that is
+// inside a guarded root, holds one or is a hard link to a guarded file, any
+// other name inside a guarded root or holding one, or a guarded token in the
+// text.
+func (c *check) reach(own, names, texts []string) string {
+	for _, n := range own {
+		cands := c.candidates(n)
+		if r := c.nameReach(cands); r != "" {
+			return r
+		}
+		for _, p := range cands {
+			if !filepath.IsAbs(p) {
+				continue
+			}
+			to, unknown := c.linked(p)
+			switch {
+			case unknown:
+				return fmt.Sprintf("names %s, which has hard links the guard cannot match to a store file", p)
+			case len(to) > 0:
+				return fmt.Sprintf("names %s, a hard link to %s", p, to[0])
+			}
+		}
+	}
+	for _, n := range names {
+		if r := c.nameReach(c.candidates(n)); r != "" {
+			return r
+		}
+	}
+	if c.g.involves(texts) {
+		return "names a guarded path"
+	}
+	return ""
+}
+
+// nameReach names the first of cands inside a guarded root or holding one.
+func (c *check) nameReach(cands []string) string {
+	for _, p := range cands {
+		switch r := c.relate(p, shellKinds); r.rel {
+		case inside:
+			return fmt.Sprintf("names %s, %s", p, describe(r.root, p))
+		case ancestor:
+			return fmt.Sprintf("names %s, which holds %s", p, r.root.label)
+		case none:
 		}
 	}
 	return ""
@@ -427,7 +520,7 @@ func (g *Guard) tool(cwd, name string, input json.RawMessage) string {
 	case in.twice:
 		return deny("the %s input names an edit text more than once, and the guard cannot tell which the tool uses", name)
 	}
-	c := g.newCheck(cwd, nil)
+	c := g.newCheck(cwd, nil, false)
 	for _, pf := range in.patches {
 		for _, p := range pf.paths {
 			if r := c.toolPath(name, p, nil); r != "" {
@@ -706,13 +799,11 @@ func readSmall(p string) (string, error) {
 type check struct {
 	g    *Guard
 	dirs []string
-	// options are the dirs only a writer's option values name, and optionLost
-	// reports one that cannot be told; shell judges relative writes against
-	// them after dirs.
-	options    []string
-	optionLost bool
 	// lost reports a dir the call changes into that cannot be told.
 	lost bool
+	// options are the dirs each unknown program call's option values name,
+	// found once per call.
+	options map[int]optionDirs
 	// linkInfo are the files a hard link could reach, read once; cut reports
 	// a store walk that ran out of budget or could not read a dir.
 	linkInfo []linkTarget
@@ -722,61 +813,35 @@ type check struct {
 	budget int
 }
 
+type optionDirs struct {
+	dirs []string
+	lost bool
+}
+
 type linkTarget struct {
 	info fs.FileInfo
 	path string
 }
 
 // newCheck resolves the dirs a command's relative words may be relative to:
-// cwd and every dir it changes into, each against every dir before it. A dir
-// from a writer's option value (From set) resolves only against dirs, not
-// against other option values, and goes to options. Option dirs have a bound
-// of their own, so many of them cannot hide a later cd.
-func (g *Guard) newCheck(cwd string, touches []gate.Touch) *check {
-	c := &check{g: g, budget: maxFiles}
+// cwd and every dir it changes into, each against every dir before it. lost
+// reports a dir change the reader cannot resolve.
+func (g *Guard) newCheck(cwd string, dirs []string, lost bool) *check {
+	c := &check{g: g, budget: maxFiles, lost: lost, options: map[int]optionDirs{}}
 	if filepath.IsAbs(cwd) {
 		c.dirs = c.candidates(cwd)
 	} else {
 		c.lost = true
 	}
-	all := slices.Clone(c.dirs)
-	for _, t := range touches {
-		if !t.Chdir {
-			continue
-		}
-		option := t.From != ""
-		if t.Opaque || t.Text == "" {
-			c.optionLost = c.optionLost || option
-			c.lost = c.lost || !option
-			continue
-		}
-		if option && len(all)-len(c.dirs) >= maxOptionDirs {
-			c.optionLost = true
-			continue
-		}
-		from := all
-		if option {
-			from = c.dirs
-		}
-		for _, d := range c.resolve(t.Text, from) {
-			if !filepath.IsAbs(d) {
-				continue
-			}
-			if !option && !slices.Contains(c.dirs, d) {
+	for _, dir := range dirs {
+		for _, d := range c.candidates(dir) {
+			if filepath.IsAbs(d) && !slices.Contains(c.dirs, d) {
 				c.dirs = append(c.dirs, d)
-			}
-			if !slices.Contains(all, d) {
-				all = append(all, d)
 			}
 		}
 		if len(c.dirs) > maxDirs {
 			c.lost = true
 			break
-		}
-	}
-	for _, d := range all {
-		if !slices.Contains(c.dirs, d) {
-			c.options = append(c.options, d)
 		}
 	}
 	return c
@@ -900,13 +965,14 @@ func (c *check) relation(p, dir string) relation {
 }
 
 // prefix judges what precedes an opaque word's first opaque part: the dir it
-// ends in, and the element it starts, which the rest continues.
+// ends in, and the element it starts, which the rest continues. An empty
+// prefix starts an element of the cwd.
 func (c *check) prefix(text string) match {
-	if text == "" {
-		return match{}
-	}
 	dir, partial := text, ""
-	if !strings.HasSuffix(text, "/") {
+	switch {
+	case text == "":
+		dir = "."
+	case !strings.HasSuffix(text, "/"):
 		dir, partial = filepath.Dir(text), filepath.Base(text)
 	}
 	best := match{}
@@ -923,7 +989,7 @@ func (c *check) prefix(text string) match {
 				continue
 			}
 			next, _, _ := strings.Cut(filepath.ToSlash(rel), "/")
-			if c.hasPrefix(next, partial) {
+			if best.rel == none && c.hasPrefix(next, partial) {
 				best = match{ancestor, r}
 			}
 		}
@@ -1176,10 +1242,7 @@ type toolInput struct {
 	contents []string
 	// other are the strings under keys the guard does not know: a path or
 	// content there is as good as one under a known key.
-	other []string
-	// unread are the strings holding a JSON document past what the walk
-	// reads, judged by their path tokens however long.
-	unread  []string
+	other   []string
 	edits   []edit
 	patches []patchFile
 	nodes   int
@@ -1198,7 +1261,7 @@ type edit struct {
 
 // judged are the strings judged as paths, as they are and trimmed, with the
 // path tokens each holds: those under a path key, and the short ones of
-// other, and the path tokens of unread. A call that names no path is judged by
+// other. A call that names no path is judged by
 // its content too. A string under a path key also yields each of its fields,
 // since it may pack a list.
 func (in *toolInput) judged() []string {
@@ -1227,9 +1290,6 @@ func (in *toolInput) judged() []string {
 		if len(s) <= maxPath {
 			add(s, false)
 		}
-	}
-	for _, s := range in.unread {
-		out = append(out, gate.PathTokens(s)...)
 	}
 	return out
 }
@@ -1267,8 +1327,7 @@ func (in *toolInput) walk(v any, depth int, embed bool) {
 }
 
 // embedded reads the JSON document s holds, if any, with a budget of its own:
-// past it the document is dropped, not the input, and s is judged by its path
-// tokens.
+// past it the input is past what the guard reads.
 func (in *toolInput) embedded(s string) {
 	t := strings.TrimSpace(s)
 	if t == "" || (t[0] != '{' && t[0] != '[') {
@@ -1281,13 +1340,12 @@ func (in *toolInput) embedded(s string) {
 	doc := &toolInput{}
 	doc.walk(v, 0, true)
 	if doc.truncated {
-		in.unread = append(in.unread, s)
+		in.truncated = true
 		return
 	}
 	in.paths = append(in.paths, doc.paths...)
 	in.contents = append(in.contents, doc.contents...)
 	in.other = append(in.other, doc.other...)
-	in.unread = append(in.unread, doc.unread...)
 	in.edits = append(in.edits, doc.edits...)
 	in.patches = append(in.patches, doc.patches...)
 	in.twice = in.twice || doc.twice
