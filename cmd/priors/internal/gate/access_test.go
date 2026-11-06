@@ -286,6 +286,11 @@ func TestShellAccessDirs(t *testing.T) {
 		{name: "bare cd", cmd: "cd", dirs: []string{"/h"}},
 		{name: "cd root", cmd: "cd /", dirs: []string{"/"}, names: []string{"/"}},
 		{name: "cd dash", cmd: "cd - && touch y", writes: true, lost: true},
+		{name: "cdable_vars cd _", cmd: "shopt -s cdable_vars; cd _", lost: true},
+		{name: "cdable_vars cd OLDPWD", cmd: "shopt -s cdable_vars; cd OLDPWD", lost: true},
+		{name: "cdable_vars cd BASH_REMATCH", cmd: "shopt -s cdable_vars; cd BASH_REMATCH", lost: true},
+		{name: "cdable_vars cd PATH", cmd: "shopt -s cdable_vars; cd PATH", lost: true},
+		{name: "cdable_vars cd coproc pid", cmd: "shopt -s cdable_vars; coproc d { :; }; cd d_PID", lost: true},
 		{name: "cd built at run time", cmd: "cd \"$(pwd)\"", lost: true},
 		{name: "popd", cmd: "popd; ls", lost: true},
 		{name: "popd then program", cmd: "popd; make", writes: true, lost: true, unresolved: "runs a program in a dir the guard cannot tell"},
@@ -419,6 +424,7 @@ func TestShellAccessWithdrawal(t *testing.T) {
 		{name: "prefix value", cmd: "GIT_WORK_TREE=~/w git checkout -- .", writes: true, targets: []string{"/h/w", "."}},
 		{name: "prefix value to a childless builtin", cmd: "IFS=/ read -r a b < f", writes: true, notTargets: []string{"/"}, unresolved: "feeds read input that may name paths"},
 		{name: "env word value", cmd: "env GIT_DIR=/h/g:/h/k git status", writes: true, targets: []string{"/h/g:/h/k", "/h/g", "/h/k"}, unresolved: "runs git, which the command may have redefined"},
+		{name: "bare env value with an unrendered tail", cmd: "PAGER=cat:$(true) make; cat x", writes: true, notTargets: []string{"x"}, unresolved: `puts "PAGER=cat:$(true)" in a program's environment`},
 		{name: "prefix value built at run time", cmd: "HOME=$HOME/w foo", writes: true, opaque: []string{}, unresolved: `puts "HOME=$HOME/w" in a program's environment`},
 		{name: "host-exported value", cmd: "USER=/h/u; cat y", writes: true, targets: []string{"/h/u"}, unresolved: cat},
 		{name: "allexport value", cmd: "set -a; X=/h/x", writes: true, targets: []string{"/h/x"}, unresolved: "runs set, which the command may have redefined"},
@@ -432,6 +438,7 @@ func TestShellAccessWithdrawal(t *testing.T) {
 		{name: "nameref value", cmd: "declare -n r=X; r=/h/x; git status", writes: true, targets: []string{"/h/x"}, unresolved: "runs git, which the command may have redefined"},
 		{name: "default assignment value", cmd: "make; : ${X:=/h/x}", writes: true, targets: []string{"/h/x"}},
 		{name: "value read at run time", cmd: "read -r X; make", writes: true, unresolved: `puts "$X" in a program's environment`},
+		{name: "tilde value naming a program withdraws the allowlist", cmd: "X=~/bin/cat make; cat x", writes: true, targets: []string{"x"}, unresolved: "runs cat, which the command may have redefined"},
 		{name: "value naming a program keeps the allowlist", cmd: "PAGER=cat make; cat x", writes: true, targets: []string{"cat"}, notTargets: []string{"x"}},
 		{name: "value built at run time to a program", cmd: "GH_TOKEN=$(gh auth token) gh pr list", writes: true, opaque: []string{}, unresolved: `puts "GH_TOKEN=$(gh auth token)" in a program's environment`},
 		{name: "prefix value to a special builtin", cmd: "X=/h/x :; Y=/h/y shift", writes: true, targets: []string{"/h/x", "/h/y"}, unresolved: "runs :, which the command may have redefined"},
@@ -633,5 +640,18 @@ func TestShellAccessBounded(t *testing.T) {
 				t.Errorf("reading %d bytes allocated %d MiB", len(cmd), alloc>>20)
 			}
 		})
+	}
+}
+
+func TestHomeLookupsCached(t *testing.T) {
+	calls := 0
+	host := accessHost(nil)
+	host.Users = func(name string) (string, bool) {
+		calls++
+		return "/u/" + name, true
+	}
+	ShellAccess(host, "foo -o~alice/a -o~alice/b ~alice/c")
+	if calls != 1 {
+		t.Errorf("Users called %d times, want 1", calls)
 	}
 }

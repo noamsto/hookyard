@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode"
 
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -1855,14 +1856,14 @@ func (r *reader) unknown(name string, words []arg, f feed) {
 	r.out.writes = true
 	r.out.ran = true
 	call := 0
-	if opts := optionValues(words); len(opts) > 0 {
+	if opts := r.optionValues(words); len(opts) > 0 {
 		r.out.options = append(r.out.options, opts)
 		call = len(r.out.options)
 	}
 	for _, a := range words {
 		switch {
 		case !a.ok:
-			r.opaque(a)
+			r.opaqueOperand(a, call, false)
 		case strings.ContainsAny(a.text, scriptBytes):
 			r.unresolved(fmt.Sprintf("runs %s on inline code", name))
 		default:
@@ -1932,20 +1933,80 @@ func (r *reader) assignValue(as *syntax.Assign, call int) {
 // unknown program's operand, as any of them may read it as a path: the whole
 // value and each field between pathBreaks, from the assignment spelling it.
 // call indexes the option values of the call it belongs to. A value the
-// reader cannot tell is an unresolved write, and no value replaces a
-// program: an allowlisted one reads none as one it runs.
+// reader cannot tell is an unresolved write. A value naming a path in a dir
+// may name a file a program writes and a later call runs, so one that may
+// name an allowlisted program withdraws the allowlist; a bare name names no
+// dir, and an allowlisted program reads it as no program it runs.
 func (r *reader) envValue(v arg, call int) {
 	r.out.writes = true
 	if !v.ok {
 		r.unresolved(fmt.Sprintf("puts %q in a program's environment", v.src))
+		r.opaqueOperand(v, call, true)
 		return
 	}
 	replaces := r.out.replaces
-	r.target(Target{Text: v.text, From: v.src, Call: call})
-	for _, f := range r.tildeFields(v.text) {
+	fields := append([]string{v.text}, r.tildeFields(v.text)...)
+	for _, f := range fields {
 		r.target(Target{Text: f, From: v.src, Call: call})
 	}
-	r.out.replaces = replaces
+	r.out.replaces = replaces || slices.ContainsFunc(fields, func(f string) bool {
+		return strings.Contains(f, "/") && replacesProgram(f)
+	})
+}
+
+// opaqueOperand records an operand or environment value that does not
+// render, from its literal prefix a.text: each complete path field as a
+// target, the trailing partial one as an unresolved write, each also expanded
+// where it starts with ~. An environment value's prefixes replace a program
+// only when they name a dir.
+func (r *reader) opaqueOperand(a arg, call int, env bool) {
+	fields := PathFields(a.text)
+	partial := ""
+	if a.text != "" && !strings.ContainsRune(pathBreaks, rune(a.text[len(a.text)-1])) {
+		partial, fields = fields[len(fields)-1], fields[:len(fields)-1]
+	}
+	replaces, named := r.out.replaces, false
+	for _, f := range fields {
+		for _, t := range r.tildeFields(f) {
+			r.target(Target{Text: t, From: a.src, Call: call})
+			named = named || strings.Contains(t, "/") && replacesProgram(t)
+		}
+	}
+	if !env {
+		r.opaque(a)
+	} else {
+		r.out.replaces = replaces || named
+		if a.text != "" {
+			r.opaqueAt(a, strings.Contains(a.text, "/"))
+		}
+	}
+	if len(a.text) > 2 && a.text[0] == '-' && a.text[1] != '-' {
+		for k := 2; k < len(a.text) && !r.over(); k++ {
+			if !r.spend(len(a.text) - k) {
+				break
+			}
+			s := arg{text: a.text[k:], src: a.src}
+			r.opaqueAt(s, env && strings.Contains(s.text, "/"))
+			if s.text[0] != '~' {
+				continue
+			}
+			if home, ok := r.tildeHome(PathFields(s.text)[0]); ok {
+				r.opaqueAt(arg{text: home, src: a.src}, env && strings.Contains(home, "/"))
+			}
+		}
+	}
+	if partial == "" {
+		return
+	}
+	texts := []string{partial}
+	if strings.HasPrefix(partial, "~") {
+		if home, ok := r.tildeHome(partial); ok {
+			texts = append(texts, home)
+		}
+	}
+	for _, t := range texts {
+		r.opaqueAt(arg{text: t, src: a.src}, env && strings.Contains(t, "/"))
+	}
 }
 
 // boundEnv judges every value the command binds to a name outside the safe
@@ -2010,28 +2071,73 @@ func (r *reader) boundValues(b bound) []boundValue {
 	return out
 }
 
-// tildeFields are s's fields between pathBreaks, each that starts a ~
-// element also with the home in its place, as bash may expand it there. One
-// under a HOME the command may set is an unresolved write.
+// tildeHome is f, which starts with ~, with its tilde-prefix expanded as a
+// program may, and false when none is: ~ under a HOME the command may set is
+// an unresolved write, and ~+, ~- and ~N name dirs no program expands.
+func (r *reader) tildeHome(f string) (string, bool) {
+	user, rest := f[1:], ""
+	if k := strings.IndexByte(user, '/'); k >= 0 {
+		user, rest = user[:k], user[k:]
+	}
+	switch {
+	case user == "":
+		if r.settable("HOME") {
+			r.unresolved(fmt.Sprintf("writes through %q", f))
+			return "", false
+		}
+		return r.host.Home + rest, true
+	case strings.HasPrefix(user, "+"), strings.HasPrefix(user, "-"), digits(user):
+		return "", false
+	}
+	home, ok := r.userHome(user)
+	return home + rest, ok
+}
+
+// userHome is user's home dir by the host, looked up once per reader. A name
+// holding a byte no account name can (`:`, `~`, whitespace, a control byte) is
+// not looked up.
+func (r *reader) userHome(user string) (string, bool) {
+	if r.host.Users == nil || strings.IndexFunc(user, func(c rune) bool {
+		return c == ':' || c == '~' || unicode.IsSpace(c) || unicode.IsControl(c)
+	}) >= 0 {
+		return "", false
+	}
+	if h, ok := r.homes[user]; ok {
+		return h.dir, h.ok
+	}
+	if r.homes == nil {
+		r.homes = map[string]userDir{}
+	}
+	dir, ok := r.host.Users(user)
+	r.homes[user] = userDir{dir, ok}
+	return dir, ok
+}
+
+type userDir struct {
+	dir string
+	ok  bool
+}
+
+// tildeFields are s's fields between pathBreaks, each that starts with ~
+// also with its tilde-prefix expanded, as a program may expand it there.
 func (r *reader) tildeFields(s string) []string {
 	fields := PathFields(s)
 	for _, f := range fields {
-		if f != "~" && !strings.HasPrefix(f, "~/") {
+		if !strings.HasPrefix(f, "~") {
 			continue
 		}
-		if r.settable("HOME") {
-			r.unresolved(fmt.Sprintf("writes through %q", f))
-			continue
+		if home, ok := r.tildeHome(f); ok {
+			fields = append(fields, home)
 		}
-		fields = append(fields, r.host.Home+f[1:])
 	}
 	return fields
 }
 
 // optionValues are the rendered values an unknown program's options may
 // take: a long option's after =, each suffix of a short-option cluster from
-// its third byte, and the word after an option.
-func optionValues(words []arg) []string {
+// its third byte, and the word after an option, each that starts with ~ also
+// expanded.
+func (r *reader) optionValues(words []arg) []string {
 	var out []string
 	for i, a := range words {
 		w := a.text
@@ -2052,13 +2158,24 @@ func optionValues(words []arg) []string {
 			out = append(out, words[i+1].text)
 		}
 	}
+	for _, v := range out {
+		if !strings.HasPrefix(v, "~") {
+			continue
+		}
+		if !r.spend(len(v)) {
+			return nil
+		}
+		if home, ok := r.tildeHome(v); ok {
+			out = append(out, home)
+		}
+	}
 	return slices.DeleteFunc(out, func(v string) bool { return v == "" })
 }
 
 // operandTargets records an unknown program's operand: the whole word, each
 // field between pathBreaks, a long option's value, and each suffix of a
-// short-option cluster from its third byte. call indexes the call's option
-// values.
+// short-option cluster from its third byte, with the first field of one
+// that starts with ~ expanded. call indexes the call's option values.
 func (r *reader) operandTargets(w string, call int) {
 	r.target(Target{Text: w, Call: call})
 	for _, f := range r.tildeFields(w) {
@@ -2071,6 +2188,12 @@ func (r *reader) operandTargets(w string, call int) {
 		for k := 2; k < len(w) && !r.over(); k++ {
 			if r.spend(len(w) - k) {
 				r.target(Target{Text: w[k:], From: w, Call: call})
+				if w[k] != '~' {
+					continue
+				}
+				if home, ok := r.tildeHome(PathFields(w[k:])[0]); ok {
+					r.target(Target{Text: home, From: w, Call: call})
+				}
 			}
 		}
 	}
@@ -2142,17 +2265,31 @@ func (r *reader) cd(name string, args []arg) {
 // besides itself: cdable_vars, which a shopt, a shell's options or the host
 // may set however they spell it, takes it to the variable's value. That is
 // the host's value and each value the command binds to the name; one the
-// reader cannot tell loses the dir. A setter that may set any name makes
-// CDPATH settable, which loses the dir before this.
+// reader cannot tell loses the dir, as does a name bash assigns itself or,
+// unset on the host, a default it assigns. A setter that may set any name
+// makes CDPATH settable, which loses the dir before this.
 func (r *reader) cdable(name string) {
 	if r.out.cdable[name] {
 		return
 	}
 	r.out.cdable[name] = true
-	if r.host.Env != nil {
-		if v, ok := r.host.Env(name); ok && v != "" {
+	if bashAssigns(name) {
+		r.dirLost()
+		return
+	}
+	switch {
+	case name == "HOME":
+		r.dir(arg{text: r.host.Home, ok: true})
+	case r.host.Env != nil:
+		v, ok := r.host.Env(name)
+		if !ok && slices.Contains(bashDefaults, name) {
+			r.dirLost()
+		}
+		if ok && v != "" {
 			r.dir(arg{text: v, ok: true})
 		}
+	case slices.Contains(bashDefaults, name):
+		r.dirLost()
 	}
 	if r.named == nil {
 		r.named = map[string][]boundValue{}

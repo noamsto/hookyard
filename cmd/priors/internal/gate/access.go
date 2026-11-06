@@ -99,19 +99,19 @@ func ShellAccess(host *Host, texts ...string) (acc Access) {
 	if !r.over() {
 		r.prepass()
 	}
-	if !r.over() {
+	// A target or value that may replace an allowlisted program withdraws the
+	// allowlist for the whole command, which only the judge finds. The values
+	// the command binds reach only a program the reader does not model, or any
+	// once the allowlist is withdrawn.
+	for !r.over() {
 		r.judge()
-		// A target that may replace an allowlisted program withdraws the
-		// allowlist for the whole command, which only the judge finds.
-		if r.out.replaces && !r.withdrawn && !r.over() {
-			r.withdrawn = true
-			r.judge()
+		if !r.over() && (r.out.ran || r.withdrawn) {
+			r.boundEnv()
 		}
-	}
-	// The values the command binds reach only a program the reader does not
-	// model, or any once the allowlist is withdrawn.
-	if !r.over() && (r.out.ran || r.withdrawn) {
-		r.boundEnv()
+		if !r.out.replaces || r.withdrawn {
+			break
+		}
+		r.withdrawn = true
 	}
 	if !r.over() {
 		r.collectNames()
@@ -136,6 +136,8 @@ type reader struct {
 	pre    prepass
 	// named are the bound values by the name they bind, rendered once.
 	named map[string][]boundValue
+	// homes are the ~user lookups made, by user.
+	homes map[string]userDir
 	// withdrawn turns every call into an unknown program (§4.7).
 	withdrawn bool
 	// code is the first opaque-code reason found before the judge.
@@ -160,6 +162,7 @@ type out struct {
 	// tell whether it added one.
 	writesUnresolved int
 	dirs             []string
+	dseen            map[string]bool
 	dirLost          bool
 	// cdable are the names whose values a cd operand has added to dirs.
 	cdable     map[string]bool
@@ -384,7 +387,7 @@ func stdinOf(st *syntax.Stmt) (feed, bool) {
 
 // judge classifies every simple command and redirect of every parsed text.
 func (r *reader) judge() {
-	r.out = out{seen: map[Target]bool{}, oseen: map[Target]bool{}, own: map[string]bool{}, cdable: map[string]bool{}}
+	r.out = out{seen: map[Target]bool{}, oseen: map[Target]bool{}, dseen: map[string]bool{}, own: map[string]bool{}, cdable: map[string]bool{}}
 	for _, s := range r.scripts {
 		r.walk(s, func(n syntax.Node, f feed) {
 			switch n := n.(type) {
@@ -455,9 +458,11 @@ func (r *reader) dir(a arg) {
 		r.dirLost()
 		return
 	}
-	if !slices.Contains(r.out.dirs, a.text) {
-		r.out.dirs = append(r.out.dirs, a.text)
+	if r.out.dseen[a.text] {
+		return
 	}
+	r.out.dseen[a.text] = true
+	r.out.dirs = append(r.out.dirs, a.text)
 }
 
 func (r *reader) touches() int {
@@ -527,13 +532,16 @@ func (r *reader) ownName(t string) {
 // opaque records an unresolved write target: its literal prefix, the
 // unresolved write it is, and a replaced program when the name it ends in may
 // be one.
-func (r *reader) opaque(a arg) {
+func (r *reader) opaque(a arg) { r.opaqueAt(a, true) }
+
+// opaqueAt is opaque, replacing a program only when starts allows it.
+func (r *reader) opaqueAt(a arg, starts bool) {
 	src := a.src
 	if !strings.HasPrefix(src, `"`) && !strings.HasPrefix(src, "'") {
 		src = `"` + src + `"`
 	}
 	r.unresolved("writes through " + src)
-	if !r.out.replaces && startsProgram(a.text) {
+	if starts && !r.out.replaces && startsProgram(a.text) {
 		r.out.replaces = true
 	}
 	t := Target{Text: a.text, From: a.src}

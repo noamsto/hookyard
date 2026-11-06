@@ -1077,6 +1077,18 @@ func TestStoreWritesStayDenied(t *testing.T) {
 
 		{name: "cdable_vars to an assigned name", want: store, input: bash("shopt -s cdable_vars; d=$HOME/notes; cd d && touch new.md")},
 		{name: "cdable_vars to a host name", want: store, cwd: "elsewhere", input: bash("shopt -s cdable_vars; cd NOTES; rm facts/a.md")},
+		{name: "cdable_vars to the last argument", want: "changes into a dir the guard cannot tell", cwd: "elsewhere", input: bash(`shopt -s cdable_vars; ls ~/notes; cd _ && rm facts/a.md`)},
+		{name: "cdable_vars to BASH_REMATCH", want: "changes into a dir the guard cannot tell", cwd: "elsewhere", input: bash(`shopt -s cdable_vars; [[ ~/notes =~ .* ]]; cd BASH_REMATCH && rm facts/a.md`)},
+		{name: "cdable_vars to OLDPWD", want: "changes into a dir the guard cannot tell", cwd: "elsewhere", input: bash(`shopt -s cdable_vars; cd OLDPWD && rm facts/a.md`)},
+		{name: "nested shell cdable_vars to BASH_ARGV0", want: "changes into a dir the guard cannot tell", cwd: "elsewhere", input: bash(`bash -O cdable_vars -c 'cd BASH_ARGV0 && rm facts/a.md' "$NOTES"`)},
+		{name: "tilde in an option cluster", want: store, input: bash(`foo -o~/notes/MEMORY.md`)},
+		{name: "tilde in an ssh option cluster", want: store, input: bash(`ssh -M -S~/notes/x host`)},
+		{name: "quoted tilde in a -C cluster", want: store, input: bash(`foo -C'~/notes' build`)},
+		{name: "quoted ~user word", want: store, input: bash(`foo '~alice/notes/MEMORY.md'`)},
+		{name: "ssh option value with ~user", want: store, input: bash(`ssh -o 'UserKnownHostsFile=~alice/notes/MEMORY.md' host`)},
+		{name: "tilde value naming a program", want: store, input: bash(`X=~/bin/cat make; cat ~/notes/MEMORY.md`)},
+		{name: "work tree built by a substitution", want: store, input: bash(`GIT_WORK_TREE=../no$(true)tes git checkout -- .`)},
+		{name: "git dir word built by a substitution", want: store, input: bash(`foo GIT_DIR=../no$(true)tes`)},
 
 		{name: "loop variable exported before", want: store, input: bash("export GIT_WORK_TREE; for GIT_WORK_TREE in ~/notes; do git checkout -- .; done")},
 		{name: "loop variable exported inside", want: store, input: bash("for GIT_WORK_TREE in ~/notes; do export GIT_WORK_TREE; git checkout -- .; done")},
@@ -1097,6 +1109,13 @@ func TestStoreWritesStayDenied(t *testing.T) {
 		{name: "source before a cd naming a variable", want: "changes into a dir the guard cannot tell", input: bash("shopt -s cdable_vars; source ./e.sh; cd d && touch new.md")},
 		{name: "unknown program double quoted subscript tilde", want: store, input: bash(`foo a["x"]=~/notes/MEMORY.md`)},
 		{name: "unknown program single quoted subscript tilde", want: store, input: bash(`foo a['x']=~/notes/MEMORY.md`)},
+		{name: "unrendered -o cluster tilde", want: store, input: bash(`foo -o~/no$(true)tes/x`)},
+		{name: "unrendered ssh -S cluster tilde", want: store, input: bash(`ssh -M -S~/no$(true)tes/x host`)},
+		{name: "unrendered -C cluster tilde", want: store, cwd: "elsewhere", input: bash(`foo -C~/no$(true)tes build`)},
+		{name: "unrendered -C cluster ~user", want: store, cwd: "elsewhere", input: bash(`foo -C~alice/no$(true)tes build`)},
+		{name: "unrendered -C cluster relative", want: store, input: bash(`foo -C../no$(true)tes build`)},
+		{name: "unrendered gcc -o cluster tilde", want: store, input: bash(`gcc -o~/no$(true)tes/facts/z.md x.c`)},
+		{name: "compgen -V names a cdable variable", want: "changes into a dir the guard cannot tell", cwd: "elsewhere", input: bash(`shopt -s cdable_vars; compgen -V d -d x; cd d && rm facts/a.md`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			c.tool = "Bash"

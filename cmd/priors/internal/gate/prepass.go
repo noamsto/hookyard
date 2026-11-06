@@ -218,6 +218,10 @@ func (r *reader) preNode(n syntax.Node, f feed) {
 			name = literal(n.Name)
 		}
 		r.setterName(name)
+		if identifier(name) {
+			r.setRuntime(name)
+			r.setRuntime(name + "_PID")
+		}
 	}
 }
 
@@ -525,6 +529,8 @@ func (r *reader) preCall(ce *syntax.CallExpr, f feed) {
 		r.setRuntime("OPTIND")
 	case "wait":
 		r.readNames(args, "p", "", "p", false)
+	case "compgen":
+		r.readNames(args, "oAGWFCXPSV", "", "V", false)
 	case "unset":
 		for _, a := range args {
 			switch {
