@@ -22,11 +22,11 @@ const (
 	hashLen = 20
 )
 
-var errTooBig = errors.New("object over the size cap")
+var ErrTooBig = errors.New("object over the size cap")
 
-// gitConfigArgs switch off every git feature that reads or writes outside the
+// GitConfigArgs switch off every git feature that reads or writes outside the
 // objects the job fetched.
-var gitConfigArgs = []string{
+var GitConfigArgs = []string{
 	"-c", "core.commitGraph=false",
 	"-c", "gc.auto=0",
 	"-c", "maintenance.auto=false",
@@ -72,7 +72,7 @@ func quote(s string) string {
 }
 
 func (m mirror) cmd(ctx context.Context, args ...string) *exec.Cmd {
-	cmd := tools.Command(ctx, tools.Git, append(append([]string{}, gitConfigArgs...), args...)...)
+	cmd := tools.Command(ctx, tools.Git, append(append([]string{}, GitConfigArgs...), args...)...)
 	cmd.Env = m.env()
 	cmd.Dir = m.private
 	cmd.WaitDelay = time.Second
@@ -119,7 +119,7 @@ type treeEntry struct {
 }
 
 // catFile reads objects through one `git cat-file --batch-command` process
-// started under the context given to newCatFile.
+// started from the command given to newCatFile.
 type catFile struct {
 	cmd *exec.Cmd
 	in  io.WriteCloser
@@ -130,8 +130,7 @@ type catFile struct {
 	attest map[string]map[string]string
 }
 
-func newCatFile(ctx context.Context, m mirror) (*catFile, error) {
-	cmd := m.cmd(ctx, "cat-file", "--batch-command")
+func newCatFile(cmd *exec.Cmd) (*catFile, error) {
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -190,7 +189,7 @@ func (c *catFile) info(oid string) (typ string, size int64, err error) {
 	return c.header("info", oid)
 }
 
-// contents returns the object's bytes, or errTooBig without reading them when
+// contents returns the object's bytes, or ErrTooBig without reading them when
 // it is larger than max.
 func (c *catFile) contents(oid, wantType string, max int64) ([]byte, error) {
 	typ, size, err := c.info(oid)
@@ -201,7 +200,7 @@ func (c *catFile) contents(oid, wantType string, max int64) ([]byte, error) {
 		return nil, fmt.Errorf("object %s is a %s, not a %s", oid, typ, wantType)
 	}
 	if size > max {
-		return nil, errTooBig
+		return nil, ErrTooBig
 	}
 	if _, _, err := c.header("contents", oid); err != nil {
 		return nil, err
@@ -361,3 +360,46 @@ func (c *catFile) lookupPath(rootTree, rel string) (oid string, ok bool, err err
 	}
 	return "", false, nil
 }
+
+// Objects reads a repository's objects through one cat-file --batch-command
+// process, with replace objects as the command's environment sets them.
+type Objects struct{ c *catFile }
+
+// OpenObjects starts cmd, a cat-file --batch-command, and returns the reader
+// over it.
+func OpenObjects(cmd *exec.Cmd) (*Objects, error) {
+	c, err := newCatFile(cmd)
+	if err != nil {
+		return nil, err
+	}
+	return &Objects{c: c}, nil
+}
+
+// Commit returns the commit's root tree and parent ids.
+func (o *Objects) Commit(oid string) (tree string, parents []string, err error) {
+	o.c.resetTrees()
+	return o.c.commit(oid)
+}
+
+// AttestBlob returns the blob id of the regular file .attest/name in tree.
+func (o *Objects) AttestBlob(tree, name string) (string, bool, error) {
+	m, err := o.c.attestEntries(tree)
+	if err != nil {
+		return "", false, err
+	}
+	oid, ok := m[name]
+	return oid, ok, nil
+}
+
+// PathBlob returns the blob id of the regular file at rel in tree.
+func (o *Objects) PathBlob(tree, rel string) (string, bool, error) {
+	return o.c.lookupPath(tree, rel)
+}
+
+// Blob returns the blob's bytes, or ErrTooBig when it exceeds max.
+func (o *Objects) Blob(oid string, max int64) ([]byte, error) {
+	return o.c.blob(oid, max)
+}
+
+// Close ends the cat-file process.
+func (o *Objects) Close() { o.c.close() }

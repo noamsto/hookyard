@@ -37,6 +37,8 @@ var (
 	// toolsDir holds the pinned git, ssh, rg and scanner. Tests run serially,
 	// so they share the scanner.
 	toolsDir string
+	// buildLdflags are the pinning ldflags binPath was built with.
+	buildLdflags []string
 )
 
 const (
@@ -97,7 +99,6 @@ func buildAndRun(m *testing.M) int {
 	}
 	for name, tool := range map[string]struct{ variable, real string }{
 		"git":     {"Git", tools.Git},
-		"ssh":     {"SSH", tools.SSH},
 		"rg":      {"Rg", tools.Rg},
 		"scanner": {"Scanner", ""},
 	} {
@@ -110,12 +111,60 @@ func buildAndRun(m *testing.M) int {
 			return 1
 		}
 	}
+	if err := pinSSH(&ldflags); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	buildLdflags = ldflags
 	binPath = filepath.Join(dir, "priors")
 	if out, err := goBuild(binPath, ldflags...); err != nil {
 		fmt.Fprintf(os.Stderr, "go build: %v\n%s", err, out)
 		return 1
 	}
 	return m.Run()
+}
+
+// pinSSH pins ssh to a wrapper that runs git's remote command locally for
+// ssh://fake/... remotes and defers to the real ssh otherwise, and pins the
+// fake keygen and a dummy FIDO helper.
+func pinSSH(ldflags *[]string) error {
+	keygen := pinnedTool("ssh-keygen")
+	if out, err := exec.Command("go", "build", "-o", keygen, "github.com/noamsto/hookyard/cmd/priors/internal/attest/attesttest/fakekeygen").CombinedOutput(); err != nil {
+		return fmt.Errorf("go build fakekeygen: %w\n%s", err, out)
+	}
+	if err := os.WriteFile(pinnedTool("ssh-sk-helper"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		return err
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		return err
+	}
+	execPath, err := tools.Command(context.Background(), tools.Git, "--exec-path").Output()
+	if err != nil {
+		return fmt.Errorf("git --exec-path: %w", err)
+	}
+	path := strings.Join([]string{strings.TrimSpace(string(execPath)), filepath.Dir(tools.Git), filepath.Dir(sh)}, ":")
+	wrapper := fmt.Sprintf(`#!%[1]s
+for a; do
+	if [ "$a" = fake ]; then
+		for last; do :; done
+		unset GIT_DIR
+		PATH='%[2]s'
+		export PATH
+		exec %[1]s -c "$last"
+	fi
+done
+exec '%[3]s' "$@"
+`, sh, path, tools.SSH)
+	if err := os.WriteFile(pinnedTool("ssh"), []byte(wrapper), 0o755); err != nil {
+		return err
+	}
+	*ldflags = append(*ldflags,
+		fmt.Sprintf("-X %s.SSH=%s", toolsPkg, pinnedTool("ssh")),
+		fmt.Sprintf("-X %s.SSHKeygen=%s", toolsPkg, keygen),
+		fmt.Sprintf("-X %s.SSHSKHelper=%s", toolsPkg, pinnedTool("ssh-sk-helper")),
+	)
+	return nil
 }
 
 const (

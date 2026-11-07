@@ -268,7 +268,7 @@ func (w *walker) entry(name, blob string) (*walkEntry, error) {
 func (w *walker) parse(blob string) (*walkEntry, error) {
 	raw, err := w.cf.blob(blob, attest.MaxEntryBytes)
 	switch {
-	case errors.Is(err, errTooBig):
+	case errors.Is(err, ErrTooBig):
 		return nil, nil
 	case err != nil:
 		return nil, err
@@ -366,7 +366,7 @@ func (w *walker) holds(tree string, t *Tracked) (bool, error) {
 	if !ok {
 		b, err := w.cf.blob(oid, gate.MaxFactBytes)
 		switch {
-		case errors.Is(err, errTooBig):
+		case errors.Is(err, ErrTooBig):
 			return false, nil
 		case err != nil:
 			return false, err

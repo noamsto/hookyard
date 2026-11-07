@@ -67,3 +67,29 @@ func TestSSHKeygenAgrees(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleRoundTrip(t *testing.T) {
+	k := attesttest.NewSKEd25519(t)
+	raw := k.Handle(0x05)
+	if !bytes.HasPrefix(raw, []byte("-----BEGIN OPENSSH PRIVATE KEY-----\n")) {
+		t.Fatalf("handle is not an OpenSSH PEM: %q", raw)
+	}
+	parsed, flags, err := attesttest.ParseHandle(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flags != 0x05 {
+		t.Fatalf("flags = %#x, want 0x05", flags)
+	}
+	if !bytes.Equal(parsed.PublicKey().Marshal(), k.PublicKey().Marshal()) {
+		t.Fatal("parsed public key differs from the original")
+	}
+	lines := attesttest.Entry("s", "n", "facts/n.md", sha, 1, "attest")
+	e, err := attest.ParseEntry(attesttest.Signed(parsed, lines, 0x05, "priors-attest@hookyard"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := attest.VerifyEntry(e, []ssh.PublicKey{k.PublicKey()}, "s", "n"); err != nil {
+		t.Fatal(err)
+	}
+}

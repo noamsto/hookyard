@@ -143,14 +143,46 @@
                     "-X ${tools}.SSHConfig=${sshConfig}"
                     "-X ${tools}.KnownHosts=${knownHosts}"
                     "-X ${tools}.PushGitDir=${pushGitDir}"
+                    "-X ${tools}.SSHKeygen=${pkgs.openssh}/bin/ssh-keygen"
+                    "-X ${tools}.SSHSKHelper=${pkgs.openssh}/libexec/ssh-sk-helper"
                   ]
-                  ++ pkgs.lib.optional (priorsVerifyUid != null) "-X ${attest}.VerifyUID=${toString priorsVerifyUid}";
+                  ++ pkgs.lib.optional (priorsVerifyUid != null) "-X ${attest}.VerifyUID=${toString priorsVerifyUid}"
+                  # dyld runs before main and ignores DYLD_* for a binary
+                  # with a __RESTRICT,__restrict section (memory-layer §4.4).
+                  ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+                    "-linkmode=external"
+                    "-extldflags=-Wl,-sectcreate,__RESTRICT,__restrict,/dev/null"
+                  ];
+                # A static binary has no dynamic loader to read LD_*, which
+                # runs before main where priors can't refuse it (memory-layer §4.4).
+                env = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+                  CGO_ENABLED = 0;
+                };
                 nativeCheckInputs = runtimeDeps;
                 # subPackages alone would test only cmd/priors; the gates,
                 # routing and store live in its internal packages.
                 preCheck = ''
                   subPackages=cmd/priors/...
                 '';
+                doInstallCheck = true;
+                installCheckPhase =
+                  ''
+                    runHook preInstallCheck
+                    PRIORS_BIN=$out/bin/priors go test -count=1 -v -run '^TestLoaderHardening$' ./cmd/priors/internal/loadercheck
+                  ''
+                  # The section check proves layout only; this proves dyld ignores
+                  # DYLD_* for priors. The control fails loudly if the sandbox strips
+                  # DYLD_* everywhere. Output is captured, not piped: pipefail is set
+                  # and priors exits non-zero.
+                  + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+                    ctl=$(DYLD_PRINT_LIBRARIES=1 ${pkgs.coreutils}/bin/true 2>&1 || true)
+                    case $ctl in *dyld*) ;; *) echo "control: dyld ignored DYLD_PRINT_LIBRARIES"; exit 1 ;; esac
+                    got=$(DYLD_PRINT_LIBRARIES=1 $out/bin/priors 2>&1 || true)
+                    case $got in *dyld*) echo "dyld honoured DYLD_PRINT_LIBRARIES for priors"; exit 1 ;; esac
+                  ''
+                  + ''
+                    runHook postInstallCheck
+                  '';
                 meta = {
                   description = "Cross-harness agent memory: markdown fact stores, write gates, tier-1 index and search";
                   mainProgram = "priors";

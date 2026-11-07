@@ -11,6 +11,9 @@ import (
 // VerdictRoot holds each store's verdict file. Set by -ldflags -X.
 var VerdictRoot = "/var/lib/priors"
 
+// TriggerRoot holds each store's trigger socket. Set by -ldflags -X.
+var TriggerRoot = "/var/run/priors"
+
 // VerifyUID is the decimal uid of the verdict job's account, the only owner a
 // verdict file may have. Set by -ldflags -X; empty fails check 1, so an
 // unpinned build never matches any owner.
@@ -31,4 +34,9 @@ func TrustStoreID(cfg config.Config, id route.StoreID) string {
 // VerdictPath is the verdict file of the store with trust-file id storeID.
 func VerdictPath(storeID string) string {
 	return filepath.Join(VerdictRoot, storeID, "verdicts")
+}
+
+// TriggerPath is the trigger socket of the store with trust-file id storeID.
+func TriggerPath(storeID string) string {
+	return filepath.Join(TriggerRoot, storeID+".sock")
 }

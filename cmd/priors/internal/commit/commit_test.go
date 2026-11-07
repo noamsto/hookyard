@@ -1659,9 +1659,9 @@ func TestSeparateHostGateWalksNoHistory(t *testing.T) {
 	}
 	var subs []string
 	for line := range strings.Lines(string(calls)) {
-		// -C <dir> -c core.hooksPath=/dev/null <subcommand> ...
-		if f := strings.Fields(line); len(f) > 4 {
-			subs = append(subs, f[4])
+		// -C <dir> -c core.hooksPath=/dev/null -c core.fsmonitor=false <subcommand> ...
+		if f := strings.Fields(line); len(f) > 6 {
+			subs = append(subs, f[6])
 		}
 	}
 	if !slices.Contains(subs, "ls-tree") {
