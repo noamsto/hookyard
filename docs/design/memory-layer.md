@@ -1166,12 +1166,17 @@ indexes (§4.7) and `.git` dirs and to `priors`'s config and state dirs; the
 trust file, root-owned, needs no guard. It is a tripwire like §4.2's read
 guard: a small deterministic check of the call's paths and text that loads
 neither the rule set nor a store and sees only the tool calls hookyard sees.
-Within that, it denies what it cannot tell, as gate 2 does. A shell command is
-judged per simple command: a write whose target it cannot resolve is denied
-when a store is in reach, and shell code it cannot read is always denied. The
-reach definition and the residuals live in the README. A command past its
-budget, a broken config or a guard past 750 ms also deny. A shell write
-anywhere in a store is denied, since its content cannot be judged. A host with
+Within that, it is advisory: it refuses a shell command only when it can
+resolve a write into a store, the state dir, the config or a dir holding one,
+or when a write it cannot resolve names a path inside one in its own words,
+and it allows a shell command it cannot read. Guard malfunctions (a broken
+config, a shell reader that fails, a guard past 750 ms) still deny. The
+store's git history and the gates of `priors add` are the real check on what
+enters memory. The accepted residuals live in the README; a filesystem
+boundary, a dedicated store user that makes checkouts unwritable to the agent
+([#284](https://github.com/noamsto/hookyard/issues/284)), is the deferred
+stronger option. A shell write anywhere in a store is denied, since its
+content cannot be judged. A host with
 no trust file is inert (R8), and a missing user config loads the defaults,
 since an agent can delete it; a trust file that fails the ownership walk, or a
 trust file or user config that cannot be read, parsed or validated, denies
@@ -1181,7 +1186,7 @@ read within 800 ms, which fails open like a handler past its budget (load on
 the host can cause either). Hard links to any store file or the config, tools
 the guard does not know and pi's path and edit forms are covered, and what it
 does not catch is listed in the [priors
-README](../priors/README.md#write-guard).
+README](../priors/README.md#accepted-residuals).
 
 ### 4.5 Retrieval backend: one interface, three implementations
 

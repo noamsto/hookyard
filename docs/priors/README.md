@@ -405,8 +405,14 @@ manifest; point every `exec` path at the installed binary (`nix build
 
 ### Write guard
 
-The `pre_tool` write guard is a tripwire against an agent editing what it
-must not: it denies a tool call that would write
+The `pre_tool` write guard is an advisory tripwire against an agent editing
+what it must not. It refuses a tool call only when it can resolve a write
+into a store, the state dir or the config, and a shell command it cannot read
+is allowed, with no advisory. The gates of `priors add` and the store's git
+history are the real check on what enters memory. The stronger option, a
+dedicated store user that makes checkouts unwritable to the agent uid, is
+deferred: see [#284](https://github.com/noamsto/hookyard/issues/284). The
+guard denies a tool call that would write
 
 - a store's generated `MEMORY.md` index or its `.git` dir;
 - priors' state dir and its config (the config dir when it is named
@@ -416,8 +422,7 @@ must not: it denies a tool call that would write
 The stores are the ones the trust file pins, so the guard covers every
 configured store. A shell command cannot have its content judged, so a shell
 write anywhere in a store is denied, and so is any write while the command
-runs in a store or changes into one. A write the guard cannot resolve is also
-denied while a store is in reach (below). Paths resolve
+runs in a store or changes into one. Paths resolve
 against the call's cwd and every dir the command changes into, with `..` and
 symlinks resolved as the kernel does, and also with `..` cleaned first, as
 Claude Code and pi clean a file tool's path. A hard link elsewhere to any
@@ -469,7 +474,8 @@ Each simple command, after its wrappers, is one of three kinds:
   `cp`, `mv`, `tee`, `sed -i`, …);
 - unknown program (`make`, `python3 -c …`, `curl -o`, anything with a `/` in
   its name): it writes its operands and its cwd, so it is denied when it runs
-  inside a store (check 4), not when its cwd merely holds one. Each operand with no script
+  inside a store (check 2), not when its cwd merely holds one. Each operand
+  with no script
   byte (whitespace, quotes, `\`, `$`, a backtick, `;&|()<>{}`) is a target as
   a whole word, and so is each path field of it (`key=/abs`, `out:/abs`,
   `a,/abs`, `of=/`), a long option's value and a short cluster's glued
@@ -478,11 +484,12 @@ Each simple command, after its wrappers, is one of three kinds:
   pipe, heredoc or here-string. An operand that does not render is also
   judged by its literal start: its complete path fields are targets, and its
   literal prefix and the part of it after the last `=`, `:`, `,` or other
-  path break are target prefixes under check 6 (`foo GIT_DIR=../no$(true)tes`
-  from a sibling of `~/notes`). Its relative operands also resolve against
-  each of its own option values that names an existing dir (at most 32 per
-  call; past that the command is denied as writing from a dir the guard
-  cannot tell).
+  path break are target prefixes under check 4 (`foo GIT_DIR=~/notes/$x`
+  is denied; `foo GIT_DIR=../no$(true)tes` from a sibling of `~/notes` is
+  allowed, as its prefix only reaches an ancestor). Its relative operands
+  also resolve against each of its own option values that names an existing
+  dir (at most 32 per call; past that the guard stops reading them, and the
+  command is allowed).
 
 A target is a whole word in an output position. A regex, a replacement,
 quoted prose or a data argument of a read-only command is never one, unless
@@ -490,24 +497,34 @@ the allowlist is withdrawn, which turns that command into an unknown program.
 `build/` is the target `<cwd>/build/`, never `/`. A bare `/` is a target only
 as a whole word (`rm -rf /`, `> /`, `cp x /`).
 
-The guard denies when any of these holds, checked in this order:
+The guard denies a shell command when any of these holds, checked in this
+order:
 
-1. the command is past the parse budget, or the reader failed;
-2. the command runs shell code the guard cannot read (opaque code, below):
-   always denied;
-3. the guard's own paths cannot be told (a broken config) and the command
-   writes;
-4. the command writes and its cwd, or a dir it changes into, is inside a
-   store, the state dir or the config;
-5. a resolved target is inside one of those, is a dir holding one
-   (`rm -rf ~`), or is a hard link to a guarded file;
-6. an unresolved target's literal prefix ends in a dir inside one, or in a
-   dir whose next element the prefix can start (`~/$x` from anywhere, `"$x"`
-   from `~`);
-7. some write is unresolved and a store is in reach.
+1. the guard's own paths cannot be told (a broken config) and the command
+   writes, is past the parse budget, or runs code the guard cannot read
+   (opaque code, below);
+2. the command writes and its cwd, or a dir it changes into, is inside a
+   store, the state dir or the config (`git -C <store> commit`,
+   `cd <store> && make`);
+3. a resolved target is inside one of those, is a dir holding one
+   (`rm -rf ~`), or is a hard link to a guarded file. A hard-link walk that runs out
+   of budget denies too, on purpose;
+4. an unresolved target's literal prefix ends in a dir inside one
+   (`> ~/notes/$x`);
+5. a write the guard cannot resolve has own words that name a path inside
+   one, or a hard link to a guarded file. The own words are the call's
+   operands, inline code, sed script, option values, and its heredoc or
+   here-string body (`sed -n 'w ~/notes/facts/a.md'`,
+   `python3 -c "…open('~/notes/x','w')…"` with the path written out).
 
-A command with no unresolved write and no opaque code is judged by checks 1
-to 6 only, target by target. An unresolved write is an unresolved target
+Everything else is allowed. That includes opaque code, a dir change the
+guard cannot tell, a run-time name or a prefix that is only an ancestor of a
+store (`~/no$(x)tes`, `"$x"` from `~`, `https://$c` read as `//`), inline
+code or an option value naming `/`, `~` or `.`, a store name or token
+elsewhere in the command, and a command past the parse budget with a sound
+config. The residuals are listed below.
+
+An unresolved write is an unresolved target
 word of a writer, unknown program or output redirect; an unknown program's
 script-byte operand or fed stdin; a modeled writer behind `xargs` (its
 operands come from stdin); a relative write target, or an unknown program,
@@ -517,34 +534,12 @@ or `fd` with an action (`-delete`, `-exec`, `-ok`, `-fprint`, `-fls`, `-x`,
 on a script file (`bash x.sh`, `sh < f`); `source` and `.`; and a call made an
 unknown program by withdrawal.
 
-A store is in reach of a command when any of these holds:
-
-- R1: a dir change the guard cannot resolve (an opaque `cd` or `pushd`
-  operand, `cd -`, `popd`, `pushd +N`, a relative `cd` while `CDPATH` is set
-  on the host or by the command, a `cd NAME` while the command binds `NAME` a
-  value the guard cannot render (below), a `cd NAME` where `NAME` is a
-  variable bash assigns, an unrecognised flag of any wrapper,
-  a command word holding `=`, an opaque `-C` of git, make or tar, more than 32
-  dirs changed into, or more than 32 option values naming dirs in one call);
-- R2: a reach name resolves inside a store, the state dir or the config, or
-  to a dir holding one. Reach names are every word anywhere in the command
-  (read-only commands, assignment values, option values, redirect targets,
-  heredoc and here-string bodies), as rendered or, when unresolved, by their
-  literal prefix, plus the path tokens inside them and the glued suffix of a
-  short-option cluster. They resolve against the cwd and every dir the
-  command changes into, with `..` and symlinks resolved both ways;
-- R3: the call's text, as given, printf-decoded and with quotes deleted,
-  names `MEMORY.md`, the last two elements of a store root, of the
-  state dir or of the config path, or a store's name as a whole path element.
-
-For an unresolved write, every path field of that call's own words counts
-toward reach: operands, inline code, option values, a sed script, its
-heredoc or here-string body or its stdin script. That includes a bare `/`,
-`.` or `..`, and a name that is a hard link to a guarded file. The prose and
-regexes in other commands' arguments (read-only commands, data) never count a
-bare `/`, unless the allowlist is withdrawn, which turns that command into an
-unknown program; a `/` inside a longer word (`A / B`, `build/`) never counts. A cwd
-above a store is not reach by itself.
+In check 5, a path field of the own words (a word, the path tokens inside it,
+a short cluster's glued suffix) counts when it resolves inside a store, the
+state dir or the config, against the cwd and every dir the command changes
+into, with `..` and symlinks resolved both ways. A bare `/`, `.`, `..` or
+`~`, a name elsewhere in the command, and a store's name or token in the text
+never count: they only reach an ancestor of a store, or are not a write.
 
 A `cd` or `pushd` operand that is a variable name may also change into that
 variable's value, as under `cdable_vars`, whether or not anything visibly sets
@@ -553,16 +548,16 @@ host value and every value the command binds to the name (an assignment, a
 prefix, an `env` or `sudo` word, a `for` item, a declare-family operand,
 `${NAME:=v}`) are dirs changed into too, so `bash -O cdable_vars -c 'cd HOME;
 echo x > notes/MEMORY.md'` is denied. A value bound at run time (`read NAME`)
-or appended to is a dir the guard cannot tell (R1). A name bash assigns
-itself loses the dir (R1), as its run-time value is not the host's: `_`,
-every `BASH*`, `COMP_*` and `READLINE_*` name, and bash's own variables
-(`PWD`, `OLDPWD`, `PIPESTATUS`, `DIRSTACK`, `REPLY`, `OPTARG`, …), so
-`shopt -s cdable_vars; ls ~/notes; cd _ && rm facts/a.md`, `cd BASH_REMATCH`
-and `cd OLDPWD` are denied; so is a name bash assigns only when unset, while
-the host leaves it unset. `HOME` is the host's home.
+or appended to is a dir the guard cannot tell, and so is a name bash assigns
+itself, as its run-time value is not the host's: `_`, every `BASH*`, `COMP_*`
+and `READLINE_*` name, and bash's own variables (`PWD`, `OLDPWD`,
+`PIPESTATUS`, `DIRSTACK`, `REPLY`, `OPTARG`, …), and a name bash assigns only
+when unset, while the host leaves it unset. A dir the guard cannot tell does
+not deny a command: `shopt -s cdable_vars; ls ~/notes; cd _ && rm facts/a.md`
+is an accepted residual (below). `HOME` is the host's home.
 
 Opaque code is shell code the guard cannot read, so it may compute any path.
-It is always denied, wherever the command runs. It is:
+The guard allows it, with no advisory note. It is:
 
 - `eval` with a non-literal argument (a literal one is read as a script);
 - `bash`, `sh`, `zsh`, `dash`, `ksh` or `ash` with `-c` and a non-literal
@@ -624,11 +619,12 @@ withdraws the allowlist, every value it binds to a name is one for the whole
 command, exported or not, as the guard does not track which names end up
 exported: an assignment, an array element, a `for` item, `${NAME:=v}` and a
 declare-family operand. A value read at run time (`read`, `getopts`,
-`printf -v`, `select`) or appended (`NAME+=v`) is an unresolved write under
-check 7; one that does not render is too, and is judged by its literal start
-like an unknown program's operand that does not render
-(`GIT_WORK_TREE=../no$(true)tes git checkout -- .` from a sibling of
-`~/notes` is denied); an empty literal start adds nothing past check 7. A
+`printf -v`, `select`) or appended (`NAME+=v`) is an unresolved write, judged
+only by its own words (check 5); one that does not render is too, and is
+judged by its literal start like an unknown program's operand that does not
+render, under check 4 (`GIT_WORK_TREE=~/notes/$x git checkout -- .` is
+denied; `GIT_WORK_TREE=../no$(true)tes git checkout -- .` from a sibling of
+`~/notes` is allowed, as the prefix only reaches an ancestor of a store). A
 value with a dir part (a `/`) whose basename is or may match an allowlisted
 command name withdraws the allowlist, as it may name a file a program writes
 and a later call runs (`X=~/bin/cat make; cat ~/notes/MEMORY.md`); a bare
@@ -733,22 +729,67 @@ an agent can delete the config and a missing file must not open the guard. A
 trust file that fails the ownership walk, or a trust file or user config
 that cannot be read, parsed or validated (unknown keys, trust-file keys in
 the user config, a bad state dir), denies every call that may write, naming
-the load error. So do a command past the parser's budget, a call whose tool
-input cannot be read, a guard that panics and a guard that runs past 750 ms.
+the load error. With such a broken config a shell command that writes, is
+past the parser's budget or runs code the guard cannot read is denied, since
+the guard cannot tell its own paths, and so is every `git commit`. These
+also deny, with a sound config: a call whose tool input cannot be read, a
+shell command that is neither a string nor a list of strings, a guard that
+panics and a guard that runs past 750 ms. They are guard malfunctions, not
+shell the guard could not read.
 It fails open only where hookyard abstains (a call it does not route, a
 handler that crashes or runs past its budget) and on an envelope priors cannot
 read within 800 ms, which fails open like a handler past its budget. Load on
 the host can cause either.
 
-It is not a sandbox. It does not see:
+The guard emits no advisory note for a command it allows without reading. A
+note on every awk program, jq filter or polling loop is noise, and a note the
+model sees every few commands teaches it to ignore the real refusals.
 
+### Accepted residuals
+
+The guard is not a sandbox. It allows everything it cannot read, and it does
+not see:
+
+- opaque code (above): a non-literal `eval` or `sh -c`, arithmetic over
+  run-time values, a script piped to a shell; text the parser cannot parse,
+  past the statements before the error; and a command past the parse budget
+  or the reader fallback;
 - a store path the command computes (`${HOME%%h*}`, `dirname`, `base64 -d`, a
-  file's content, a script file) through an unresolved write run from a cwd
-  outside every store;
-- an unknown program's own behaviour (Makefiles, scripts, config it reads), a
-  path an interpreter assembles from pieces, an archive or patch unpacked
-  from a cwd that holds a store, and an opaque option value that is a dir
+  file's content, a script file) through an unresolved write whose own words
+  do not name it;
+- a write whose target has a run-time name, or a literal prefix that is only
+  an ancestor of a store (`> ~/no$(x)tes`, `"$x"` from `~`, `https://$c` read
+  as `//`);
+- a dir change the guard cannot tell (an opaque `cd` operand, `cd -`, `popd`,
+  an unrecognised wrapper flag, a command word holding `=`), more than 32
+  dirs changed into, and more than 32 option values naming dirs in one call;
+- a `cd NAME` through a name bash sets (`_`, `BASH_REMATCH`, `OLDPWD`,
+  `BASH_ARGV0`), or into a value `NAME` got outside the command's text (a
+  shell profile, an earlier call, a script file a shell runs); a value set
+  through `eval` or `source` is not tracked either;
+- a run-time name bound without a value (`{d}>` redirects, `(( d = $$ ))`,
+  `let d=5`);
+- option words handed to a name-setting builtin that do not render
+  (`compgen $(echo -V) d`, `wait $(echo -p) d`), a short cluster's suffix or
+  an option value built at run time, and an opaque option value that is a dir
   (`--wd=$X`: it is not read as one);
+- a value that does not render at all, which never withdraws the allowlist
+  (`PAGER=$(echo ~/bin/cat) make`);
+- a `~user` cut by an unrendered part, and a `~` or `~user` a modeled writer
+  or reader leaves literal: the home-in-place reading covers unknown
+  programs' operands and environment values only;
+- `set -k`, `set -o keyword` and `bash -k`, which turn operands into
+  assignments;
+- a write through `/proc/self/fd/N`, or through `/proc/<pid>/fd`, `cwd` or
+  `root`, and a bind mount;
+- a home a program spells with its own token rather than `~` (ssh's `%d` in
+  `-S` or `ControlPath`), which is judged as written;
+- inline code or an option value that names the root, the home dir or the
+  cwd, an ancestor of a store: an awk `system()` or a python
+  `shutil.rmtree` of `/` is allowed;
+- an unknown program's own behaviour (Makefiles, scripts, config it reads), a
+  path an interpreter assembles from pieces, and an archive or patch unpacked
+  from a cwd that holds a store;
 - state an earlier call of a persistent shell left (`PATH`, functions,
   aliases, variables, `CDPATH`, the dir stack, a replaced or shadowed
   allowlisted program, a replaced `gh` or `crew`);
@@ -757,24 +798,15 @@ It is not a sandbox. It does not see:
   global `core.hooksPath`, `core.fsmonitor` and `core.pager`, gh's browser, an
   rg config file;
 - `gh … --web`, which launches a browser while run as a reader;
-- `git add`, `git commit`, `git fetch` and `git push` run in or on a store,
-  and any other git reader's writes to git's own index, objects and refs
-  (these count as git reading);
-- a `cd NAME` into a value `NAME` got outside the command's text (a shell
-  profile, an earlier call, a script file a shell runs); a value set through
-  `eval` or `source` loses the dir instead, as `CDPATH` may be set too;
+- `git add`, `git fetch` and `git push` run in or on a store, and any other
+  git reader's writes to git's own index, objects and refs (these count as
+  git reading); `git commit` is a write, so it is refused in a store;
 - an environment value a program runs as code (`PAGER='sh -c …'`), which is
   judged only for the paths it names;
-- a `~` or `~user` a modeled writer or reader leaves literal: the
-  home-in-place reading covers unknown programs' operands and environment
-  values only;
-- a home a program spells with its own token rather than `~` (ssh's `%d` in
-  `-S` or `ControlPath`), which is judged as written;
 - an unknown-key string longer than 4096 bytes, which is not judged at all,
   so a packed list padded past it passes;
-- a variable a shell profile sets, `/proc/<pid>/cwd`, a bind mount, macOS
-  Unicode normalization, and a data name in another case on a
-  case-insensitive file system;
+- a variable a shell profile sets, macOS Unicode normalization, and a data
+  name in another case on a case-insensitive file system;
 - an MCP tool named like a read, with no write verb, that writes, and an MCP
   tool that runs a command under a key other than `command` (a
   process-interaction tool's `input`);
@@ -783,52 +815,46 @@ It is not a sandbox. It does not see:
   crashes or runs past its budget, and a race that swaps a path between the
   check and the write.
 
+What the guard refuses stays on the near side of these: a write it can
+resolve, and an unresolved write whose own words name a store path. The
+stronger option, a dedicated store user that makes the checkouts unwritable
+to the agent uid, is tracked in
+[#284](https://github.com/noamsto/hookyard/issues/284).
+
 It over-denies:
 
-- opaque code anywhere in a command, wherever it runs, a store or not (an
-  arithmetic read of a `while read`-fed value, a `$(…)` command word);
-- an unresolved write while a store is in reach: any whole-word `/`, `.` or
-  `..` that reaches an ancestor of a store, or a store's name anywhere in the
-  call's text. This includes an inline program or remote script holding a
-  standalone `/`, `.` or `..` (`python3 -c 'print(1 / 2)'`);
-- a `claude` prompt, or any unknown program's operand, holding a standalone
-  `.`, `/` or `..` from a dir that holds a store (`claude -p "check ."` from
-  `~`);
-- a shell write to a store fact, and a write that may name a dir holding a store
-  (`cmake ..` from a dir directly under one, `foo .` or `cp x .` from `~`);
+- a shell write to a store fact, and any write while running in a store,
+  `git commit` included;
+- a write that may name a dir holding a store (`cmake ..` from a dir directly
+  under one, `foo .` or `cp x .` from `~`), and an ancestor target
+  (`cp x ~/`, `rm -rf ~`);
 - an unknown program's operand or cluster suffix that names a store or a dir
   holding one (`foo .` from `~`), including a packed operand after `=`, `:`
   or `,` even when it is a remote path (`host:/…`);
-- a command word that holds `=`, which is an unknown program with a dir the
-  guard cannot tell, while a program path with a space is an ordinary unknown
-  program;
 - a read-only command given a flag outside its list, which is judged as an
-  unknown program: `awk '$1 > 5'`, `awk '/a|b/'` and `awk '{print "a@b"}'` (any
-  `>`, `|` or `@` in an awk program), `sort -T`, `gh pr checkout`;
-- an associative-array subscript, which is read as arithmetic;
-- a name that no value tracking can resolve: `d=/tmp/x; rm -rf "$d"` is
-  unresolved and denied from `~`;
-- a command that withdraws the allowlist and names a store path: any exported
-  or host-environment name outside the safe set (`GIT_PAGER=cat git log`),
-  and any `PATH`, `IFS` or `BASH_ENV` assignment;
+  unknown program, so its operands are targets: `awk '$1 > 5' f` is allowed,
+  `awk '$1 > 5' ~/notes/facts/a.md` is not, and neither is `sort -T`
+  naming a store or `gh pr checkout` run in one;
+- a read of a store file through an inline-code program (an awk program with
+  `>` in it, `python3 -c`) given a store fact as an operand;
+- a command that withdraws the allowlist and names a store path as a resolved
+  target: any exported or host-environment name outside the safe set
+  (`GIT_PAGER=cat git log ~/notes/MEMORY.md`), and any `PATH`, `IFS` or
+  `BASH_ENV` assignment;
 - an environment assignment value that names a store or a dir holding one,
   even when the program ignores it (`PATH=~:$PATH x` from anywhere);
 - any value the command binds that names a store or a dir holding one, once
   it runs an unknown program or withdraws the allowlist, exported or not
-  (`d=~; make`), and one it reads at run time while a store is in reach;
+  (`d=~; make`);
 - a quoted `~` or `~user` in an unknown program's operand, a cluster suffix
   or an option value, read with the home in place too (`foo '~/notes/x'`,
   `foo '~alice/notes/x'`, `foo -o'~/notes/x'`);
 - an environment value naming a path whose basename is an allowlisted
   command, which withdraws the allowlist even when nothing writes it
   (`X=~/bin/cat make; cat ~/notes/MEMORY.md`);
-- a `cd NAME` into a dir literally named like a variable bash assigns
-  (`cd PWD`, `cd _`), which loses the dir;
 - a `cd NAME` where `NAME` is a host variable, or one the command binds,
   which also changes into its value with `cdable_vars` off (`cd NOTES; rm
   facts/a.md` from anywhere, when `$NOTES` is a store);
-- any write while running in a store, and a reader run behind a flagged
-  wrapper that the table does not know;
 - an unknown tool whose input holds `.`, `..`, `/`, or a word that names a
   store or a dir holding one relative to the cwd (`{"repo":"notes"}` from
   `~`), though the delegation tools (`subagent`, `task`, `agent`) are reads, so
