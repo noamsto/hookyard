@@ -406,9 +406,10 @@ manifest; point every `exec` path at the installed binary (`nix build
 ### Write guard
 
 The `pre_tool` write guard is an advisory tripwire against an agent editing
-what it must not. It refuses a tool call only when it can resolve a write
-into a store, the state dir or the config, and a shell command it cannot read
-is allowed, with no advisory. The gates of `priors add` and the store's git
+what it must not. It refuses a call only when it can resolve a write into a
+store, the state dir, the config or a dir holding one, or when a write it
+cannot resolve names such a path in its own words; a shell command it cannot
+read is allowed, with no advisory. The gates of `priors add` and the store's git
 history are the real check on what enters memory. The stronger option, a
 dedicated store user that makes checkouts unwritable to the agent uid, is
 deferred: see [#284](https://github.com/noamsto/hookyard/issues/284). The
@@ -488,8 +489,8 @@ Each simple command, after its wrappers, is one of three kinds:
   is denied; `foo GIT_DIR=../no$(true)tes` from a sibling of `~/notes` is
   allowed, as its prefix only reaches an ancestor). Its relative operands
   also resolve against each of its own option values that names an existing
-  dir (at most 32 per call; past that the guard stops reading them, and the
-  command is allowed).
+  dir (at most 32 per call; past that the guard stops resolving operands
+  against them, which is not a denial).
 
 A target is a whole word in an output position. A regex, a replacement,
 quoted prose or a data argument of a read-only command is never one, unless
@@ -500,9 +501,10 @@ as a whole word (`rm -rf /`, `> /`, `cp x /`).
 The guard denies a shell command when any of these holds, checked in this
 order:
 
-1. the guard's own paths cannot be told (a broken config) and the command
-   writes, is past the parse budget, or runs code the guard cannot read
-   (opaque code, below);
+1. the shell reader fails (it panics), whatever the config; or the guard's own
+   paths cannot be told (a broken config) and the command writes, is past the
+   parse budget, or runs code the guard cannot read (opaque code, below). A
+   command past the parse budget is denied only with a broken config;
 2. the command writes and its cwd, or a dir it changes into, is inside a
    store, the state dir or the config (`git -C <store> commit`,
    `cd <store> && make`);
@@ -520,7 +522,7 @@ order:
 Everything else is allowed. That includes opaque code, a dir change the
 guard cannot tell, a run-time name or a prefix that is only an ancestor of a
 store (`~/no$(x)tes`, `"$x"` from `~`, `https://$c` read as `//`), inline
-code or an option value naming `/`, `~` or `.`, a store name or token
+code naming `/`, `~` or `.`, a store name or token
 elsewhere in the command, and a command past the parse budget with a sound
 config. The residuals are listed below.
 
@@ -733,8 +735,8 @@ the load error. With such a broken config a shell command that writes, is
 past the parser's budget or runs code the guard cannot read is denied, since
 the guard cannot tell its own paths, and so is every `git commit`. These
 also deny, with a sound config: a call whose tool input cannot be read, a
-shell command that is neither a string nor a list of strings, a guard that
-panics and a guard that runs past 750 ms. They are guard malfunctions, not
+shell command that is neither a string nor a list of strings, a shell reader
+that panics, a guard that panics and a guard that runs past 750 ms. They are guard malfunctions, not
 shell the guard could not read.
 It fails open only where hookyard abstains (a call it does not route, a
 handler that crashes or runs past its budget) and on an envelope priors cannot
@@ -752,8 +754,7 @@ not see:
 
 - opaque code (above): a non-literal `eval` or `sh -c`, arithmetic over
   run-time values, a script piped to a shell; text the parser cannot parse,
-  past the statements before the error; and a command past the parse budget
-  or the reader fallback;
+  past the statements before the error; and a command past the parse budget;
 - a store path the command computes (`${HOME%%h*}`, `dirname`, `base64 -d`, a
   file's content, a script file) through an unresolved write whose own words
   do not name it;
@@ -761,8 +762,10 @@ not see:
   an ancestor of a store (`> ~/no$(x)tes`, `"$x"` from `~`, `https://$c` read
   as `//`);
 - a dir change the guard cannot tell (an opaque `cd` operand, `cd -`, `popd`,
-  an unrecognised wrapper flag, a command word holding `=`), more than 32
-  dirs changed into, and more than 32 option values naming dirs in one call;
+  an unrecognised wrapper flag, a command word holding `=`); past 32
+  resolved candidate dirs (about six nested relative `cd`s) later relative
+  dir changes are not followed, while an absolute `cd` still is; and more
+  than 32 option values naming dirs in one call;
 - a `cd NAME` through a name bash sets (`_`, `BASH_REMATCH`, `OLDPWD`,
   `BASH_ARGV0`), or into a value `NAME` got outside the command's text (a
   shell profile, an earlier call, a script file a shell runs); a value set
@@ -784,8 +787,8 @@ not see:
   `root`, and a bind mount;
 - a home a program spells with its own token rather than `~` (ssh's `%d` in
   `-S` or `ControlPath`), which is judged as written;
-- inline code or an option value that names the root, the home dir or the
-  cwd, an ancestor of a store: an awk `system()` or a python
+- inline code that names the root, the home dir or the cwd, an ancestor of a
+  store: an awk `system()` or a python
   `shutil.rmtree` of `/` is allowed;
 - an unknown program's own behaviour (Makefiles, scripts, config it reads), a
   path an interpreter assembles from pieces, and an archive or patch unpacked

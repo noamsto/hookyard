@@ -453,6 +453,7 @@ func TestShellAllows(t *testing.T) {
 	sb := newSandbox(t)
 	for _, c := range []call{
 		{name: "project write", input: bash("echo x > ~/work/notes.md")},
+		{name: "past the parse budget and not writing", input: bash(strings.Repeat("$(", 300) + "true" + strings.Repeat(")", 300))},
 		{name: "sibling store name", input: bash("echo x > ~/notes-old/MEMORY.md")},
 		{name: "store name prefix", input: bash("mkdir -p ~/notesx && echo x > ~/notesx/f")},
 		{name: "posix class glob in project", input: bash("rm -f ~/work/[[:alpha:]]*.o")},
@@ -745,6 +746,8 @@ func TestBrokenDeniesWrites(t *testing.T) {
 	}{
 		{"Bash", bash("echo x > ~/work/f"), true},
 		{"Bash", bash("ls ~/work"), false},
+		{"Bash", bash("git commit -m x"), true},
+		{"Bash", bash(strings.Repeat("$(", 300) + "true" + strings.Repeat(")", 300)), true},
 		{"Write", sb.input(map[string]any{"file_path": "@H/work/f", "content": "x"}), true},
 		{"Read", sb.input(map[string]any{"file_path": "@H/work/a.md"}), false},
 	} {
@@ -977,6 +980,8 @@ func TestProvenStoreWritesDenied(t *testing.T) {
 		{name: "sed w into a fact", want: "cannot resolve, and names", input: bash(`sed -n 'w @H/notes/facts/a.md' f`)},
 		{name: "write into a leftover attest dir", want: "inside the personal store", input: bash(`touch ~/notes/.attest/e9`)},
 		{name: "opaque name inside the store", want: "reaches into the personal store", input: bash(`echo x > ~/notes/facts/$(date +%s).md`)},
+		{name: "literal cd into the store after many relative cds", want: "runs in", input: bash(`cd x1; cd x2; cd x3; cd x4; cd x5; cd x6; cd ~/notes; echo x > MEMORY.md`)},
+		{name: "literal cd into the store after many relative cds then rm", want: "runs in", input: bash(`cd x1; cd x2; cd x3; cd x4; cd x5; cd x6; cd ~/notes; rm facts/a.md`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			c.tool = "Bash"

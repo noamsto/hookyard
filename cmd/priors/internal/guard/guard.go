@@ -3,7 +3,9 @@
 // priors' state or config. It reads
 // the call and the paths on disk, loads neither the rule set nor a store, and
 // sees only the calls hookyard sees. It refuses only the writes it can resolve
-// into a store or priors' own paths; what it cannot read it allows.
+// into a store or priors' own paths: a shell command it cannot read is
+// allowed, while tool input it cannot read, a reader failure, and any call
+// under a broken config that may write or cannot be read are still denied.
 package guard
 
 import (
@@ -245,18 +247,22 @@ func CallDir(envelopeCWD string, input json.RawMessage) string {
 	return ""
 }
 
-// shell judges a shell call, in order: a broken config (any call that may
-// write is refused), a write run in a store, each resolved target, each
-// option value that may be the dir a target is relative to, each unresolved
-// target's literal prefix that reaches into a store, and, for a write the
-// reader cannot resolve, the words it names that are inside a store or are a
-// hard link to a store file. A command the guard cannot read is allowed: the
-// guard is an advisory tripwire that refuses only what it can resolve into a
-// store (#288).
+// shell judges a shell call, in order: a reader failure (the shell reader
+// panicked, denied whatever the config), a broken config (a call that may
+// write or cannot be read is refused), a write run in a store, each resolved
+// target, each option value that may be the dir a target is relative to, each
+// unresolved target's literal prefix that reaches into a store, and, for a
+// write the reader cannot resolve, the words it names that are inside a store
+// or are a hard link to a store file. A command past the parse budget is
+// allowed under a sound config: the guard is an advisory tripwire that
+// refuses only what it can resolve into a store (#288).
 func (g *Guard) shell(cwd string, texts []string) string {
 	acc := gate.ShellAccess(g.host, texts...)
+	if acc.Unreadable == "fallback" {
+		return deny("the command is past what the guard reads (%s)", acc.Unreadable)
+	}
 	if g.broken != nil {
-		if acc.Writes || acc.Unreadable != "" || acc.Code != "" {
+		if acc.Writes || acc.Unreadable != "" {
 			return g.brokenReason()
 		}
 		return ""
@@ -550,7 +556,9 @@ type linkTarget struct {
 
 // newCheck resolves the dirs a command's relative words may be relative to:
 // cwd and every dir it changes into, each against every dir before it. lost
-// reports a dir change the reader cannot resolve.
+// reports a dir change the reader cannot resolve. Past maxDirs candidates it
+// is set too, and later relative dirs, which multiply the candidates, are not
+// followed; an absolute dir still is, as it adds only its own candidates.
 func (g *Guard) newCheck(cwd string, dirs []string, lost bool) *check {
 	c := &check{g: g, budget: maxFiles, lost: lost, options: map[int][]string{}}
 	if filepath.IsAbs(cwd) {
@@ -559,6 +567,12 @@ func (g *Guard) newCheck(cwd string, dirs []string, lost bool) *check {
 		c.lost = true
 	}
 	for _, dir := range dirs {
+		if len(c.dirs) > maxDirs {
+			c.lost = true
+			if !filepath.IsAbs(dir) {
+				continue
+			}
+		}
 		for _, d := range c.candidates(dir) {
 			if filepath.IsAbs(d) && !slices.Contains(c.dirs, d) {
 				c.dirs = append(c.dirs, d)
@@ -566,7 +580,6 @@ func (g *Guard) newCheck(cwd string, dirs []string, lost bool) *check {
 		}
 		if len(c.dirs) > maxDirs {
 			c.lost = true
-			break
 		}
 	}
 	return c
@@ -676,37 +689,22 @@ func (c *check) relation(p, dir string) relation {
 	return ancestor
 }
 
-// prefix judges what precedes an opaque word's first opaque part: the dir it
-// ends in, and the element it starts, which the rest continues. An empty
-// prefix starts an element of the cwd.
+// prefix reports the first match inside a root for the dir an opaque word's
+// literal prefix ends in. An empty prefix is the cwd.
 func (c *check) prefix(text string) match {
-	dir, partial := text, ""
+	dir := text
 	switch {
 	case text == "":
 		dir = "."
 	case !strings.HasSuffix(text, "/"):
-		dir, partial = filepath.Dir(text), filepath.Base(text)
+		dir = filepath.Dir(text)
 	}
-	best := match{}
 	for _, d := range c.candidates(dir) {
 		if m := c.relate(d, shellKinds); m.rel == inside {
 			return m
 		}
-		for _, r := range c.g.roots {
-			if !slices.Contains(shellKinds, r.kind) || !c.within(r.path, d) || r.path == d {
-				continue
-			}
-			rel, err := filepath.Rel(d, r.path)
-			if err != nil {
-				continue
-			}
-			next, _, _ := strings.Cut(filepath.ToSlash(rel), "/")
-			if best.rel == none && c.hasPrefix(next, partial) {
-				best = match{ancestor, r}
-			}
-		}
 	}
-	return best
+	return match{}
 }
 
 // linked returns the guarded files p is a hard link to. unknown is set when p
@@ -768,13 +766,6 @@ func (c *check) within(p, dir string) bool {
 	}
 	rel, err := filepath.Rel(dir, p)
 	return err == nil && filepath.IsLocal(rel)
-}
-
-func (c *check) hasPrefix(s, prefix string) bool {
-	if c.g.fold {
-		s, prefix = strings.ToLower(s), strings.ToLower(prefix)
-	}
-	return strings.HasPrefix(s, prefix)
 }
 
 // matches reports whether the glob element pattern may match name; a pattern
