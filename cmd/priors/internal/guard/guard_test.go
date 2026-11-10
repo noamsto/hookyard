@@ -181,10 +181,10 @@ func (sb sandbox) run(t *testing.T, c call) string {
 func TestShellDenies(t *testing.T) {
 	sb := newSandbox(t)
 	for _, c := range []call{
-		{name: "redirect into attest", want: "/notes/.attest/e2, inside an .attest dir", input: bash("echo x > ~/notes/.attest/e2")},
+		{name: "redirect into a leftover attest dir", want: "/notes/.attest/e2, inside the personal store", input: bash("echo x > ~/notes/.attest/e2")},
 		{name: "append to index", want: "/notes/MEMORY.md, inside the personal store", input: bash("echo x >> $HOME/notes/MEMORY.md")},
 		{name: "fact by shell", want: "/notes/facts/a.md, inside the personal store", input: bash(`printf x > "@H/notes/facts/a.md"`)},
-		{name: "rm attest", want: "/notes/.attest, an .attest dir", input: bash("rm -rf ~/notes/.attest")},
+		{name: "rm attest", want: "/notes/.attest, inside the personal store", input: bash("rm -rf ~/notes/.attest")},
 		{name: "state dir", want: "/provenance/s1, inside priors' state dir", input: bash("echo x > ~/.local/state/priors/provenance/s1")},
 		{name: "config file", want: "/config.toml, inside priors' config dir", input: bash("rm ~/.config/priors/config.toml")},
 		{name: "ancestor of config", want: "which holds priors' config dir", input: bash("rm -rf ~/.config")},
@@ -193,7 +193,6 @@ func TestShellDenies(t *testing.T) {
 		{name: "rm dot from home", want: "which holds the personal store", cwd: ".", input: bash("rm -rf .")},
 		{name: "var from env", want: "/notes/MEMORY.md, inside the personal store", input: bash("echo x > $NOTES/MEMORY.md")},
 		{name: "tilde user", want: "/notes/MEMORY.md, inside the personal store", input: bash("echo x > ~alice/notes/MEMORY.md")},
-		{name: "attest by name elsewhere", want: "/srv/other/.attest/e, inside an .attest dir", input: bash("touch /srv/other/.attest/e")},
 
 		// Path traversal.
 		{name: "dotdot", want: "/notes/MEMORY.md, inside the personal store", input: bash("echo x > ~/work/../notes/MEMORY.md")},
@@ -206,9 +205,9 @@ func TestShellDenies(t *testing.T) {
 
 		// Symlinked dirs.
 		{name: "symlinked store", want: "/notes/MEMORY.md, inside the personal store", input: bash("echo x > ~/link/MEMORY.md")},
-		{name: "relative symlink", want: "/notes/.attest/e2, inside an .attest dir", input: bash("echo x > rel/e2")},
+		{name: "relative symlink", want: "/notes/.attest/e2, inside the personal store", input: bash("echo x > rel/e2")},
 		{name: "symlink chain", want: "/notes/.git/config, inside the personal store", input: bash("echo x > chain/.git/config")},
-		{name: "dangling symlink", want: "/notes/.attest/new, inside an .attest dir", input: bash("echo x > dang")},
+		{name: "dangling symlink", want: "/notes/.attest/new, inside the personal store", input: bash("echo x > dang")},
 		{name: "symlinked store dir", want: "/notes, the personal store", input: bash("cp x ~/link/")},
 
 		// Relative paths from a cwd in the store.
@@ -222,29 +221,27 @@ func TestShellDenies(t *testing.T) {
 		{name: "git -C", want: "and runs in", input: bash("git -C ~/notes checkout -- .")},
 		{name: "git work tree", want: "and runs in", input: bash("git --work-tree=../notes reset --hard")},
 		{name: "make -C", want: "and runs in", input: bash("make -C ~/notes")},
-		{name: "cd unknown then involved write", want: ".attest/e, inside an .attest dir", input: bash(`cd "$(git rev-parse --show-toplevel)"; echo x > .attest/e`)},
+		{name: "cd unknown then involved write", want: `.attest/e" from a dir it changes into at run time`, input: bash(`cd "$(git rev-parse --show-toplevel)"; echo x > .attest/e`)},
 		{name: "tar -C ancestor", want: "which holds the personal store", input: bash("tar -xf a.tar -C ~")},
 		{name: "env -C", want: "runs in", input: bash("env -C ~/notes touch x")},
 		{name: "cd through symlink lookup", want: "cannot resolve, and changes into a dir the guard cannot tell", input: bash(`cd "$(ls -d ~/link)" && touch x`)},
 
 		// Quoting and escaping.
 		{name: "double quotes", want: "/notes/MEMORY.md, inside the personal store", input: bash(`echo x > ~/"notes"/MEMORY.md`)},
-		{name: "split quotes", want: "/notes/.attest/e, inside an .attest dir", input: bash(`echo x > ~/'no'"tes"/.att''est/e`)},
+		{name: "split quotes", want: "/notes/.attest/e, inside the personal store", input: bash(`echo x > ~/'no'"tes"/.att''est/e`)},
 		{name: "backslashes", want: "/notes/MEMORY.md, inside the personal store", input: bash(`echo x > ~/no\tes/MEMORY\.md`)},
-		{name: "ansi c", want: "/work/.attest/e, inside an .attest dir", input: bash(`echo x > ~/work/$'\x2eattest'/e`)},
 		{name: "braces", want: "/notes/facts/n.md, inside the personal store", input: bash("echo x | tee ~/{work,notes}/facts/n.md")},
 		{name: "case folded token", want: "cannot resolve, and names a guarded path", caseFoldedWant: "inside the personal store", input: bash(`echo x > "$(echo ~/NOTES/memory.md | tr A-Z a-z)"`)},
 		{name: "assigned variable", want: "which reaches into the personal store", input: bash("N=notes; echo x > ~/$N/MEMORY.md")},
 		{name: "default expansion", want: "cannot resolve, and names a guarded path", input: bash("echo x > ${HOME:-/x}/notes/MEMORY.md")},
 		{name: "extglob", want: "/+(no)tes/f, inside the personal store", input: bash("shopt -s extglob; echo x > ~/+(no)tes/f")},
-		{name: "dot glob attest", want: "/work/.a*, an .attest dir", input: bash("rm -rf ~/work/.a*")},
 		{name: "negated class rm", want: "/[!q]otes, inside the personal store", input: bash("rm -rf ~/[!q]otes")},
 		{name: "negated class redirect", want: "/[!q]otes/MEMORY.md, inside the personal store", input: bash("echo x > ~/[!q]otes/MEMORY.md")},
 
 		// Wrappers.
 		{name: "sudo tee", want: "/notes/MEMORY.md, inside the personal store", input: bash("echo x | sudo tee ~/notes/MEMORY.md")},
-		{name: "env cp", want: "/notes/.attest, an .attest dir", input: bash("env X=1 cp a ~/notes/.attest/")},
-		{name: "nice timeout mv", want: "/notes/.attest/y, inside an .attest dir", input: bash("nice -n 5 timeout 5 mv x ~/notes/.attest/y")},
+		{name: "env cp", want: "/notes/.attest, inside the personal store", input: bash("env X=1 cp a ~/notes/.attest/")},
+		{name: "nice timeout mv", want: "/notes/.attest/y, inside the personal store", input: bash("nice -n 5 timeout 5 mv x ~/notes/.attest/y")},
 		{name: "bash -c", want: "/notes/MEMORY.md, inside the personal store", input: bash(`bash -c 'echo x > ~/notes/MEMORY.md'`)},
 		{name: "sh -c double", want: "shell code the guard cannot read", input: bash(`sh -c "rm -rf $HOME/notes/facts"`)},
 		{name: "eval", want: "/notes/MEMORY.md, inside the personal store", input: bash(`eval "rm ~/notes/MEMORY.md"`)},
@@ -291,7 +288,6 @@ func TestShellDenies(t *testing.T) {
 		{name: "opaque involved", want: "which holds the personal store", input: bash(`echo x > "$(printf '%s/notes/MEMORY.md' ~)"`)},
 		{name: "variable from substitution", want: "cannot resolve, and names a guarded path", input: bash("d=$(git rev-parse --show-toplevel); echo x > $d/MEMORY.md")},
 		{name: "store name element", want: "cannot resolve, and names a guarded path", input: bash(`cp x "$(git rev-parse --show-toplevel)/../notes/f"`)},
-		{name: "printf escaped token", want: "cannot resolve, and names ", input: bash(`echo x > "$(printf '\x2eattest/e')"`)},
 		{name: "unparsable", want: "shell code the guard cannot read", input: bash("( ; echo x > ~/notes/facts/a.md")},
 
 		// Hard links.
@@ -314,8 +310,6 @@ func TestShellDenies(t *testing.T) {
 		{name: "awk code on dot from home", want: "which holds", cwd: ".", input: bash(`awk 'BEGIN{system("rm -rf ./")}'`)},
 		{name: "php code on dot from home", want: "which holds", cwd: ".", input: bash(`php -r 'system("rm -rf ./");'`)},
 		{name: "known writer on root", want: "which holds", input: bash(`rm -rf /`)},
-		{name: "bracket with a leading close attest", want: "an .attest dir", input: bash(`rm -rf ~/work/.att[]e]st`)},
-		{name: "negated bracket with a leading close attest", want: "an .attest dir", input: bash(`rm -rf ~/work/.atte[!]x]t`)},
 		{name: "quoted glob piped to shell", want: "shell code the guard cannot read", input: bash(`echo 'rm -rf ~/work/.a*' | bash`)},
 		{name: "function renaming a writer", want: "which holds the personal store", cwd: ".", input: bash(`z() { rm -rf "$1"; }; z .`)},
 		{name: "function defined after its use", want: "which holds the personal store", cwd: ".", input: bash(`trap 'z .' EXIT; z() { rm -rf "$1"; }`)},
@@ -377,7 +371,7 @@ func TestShellDenies(t *testing.T) {
 		{name: "trap body runs a renamed crew", want: "which holds the personal store", cwd: ".", input: bash(`trap 'crew reply x .' EXIT; alias crew=rm`)},
 
 		// Finite for-loop variables.
-		{name: "loop value as a write target", want: "inside an .attest dir", cwd: ".", input: bash(`for f in a .attest/x; do touch "$f"; done`)},
+		{name: "loop value as a write target", want: "which reaches into the personal store", cwd: ".", input: bash(`for f in a .attest/x; do touch "$f"; done`)},
 		{name: "loop value as the command word", want: "shell code the guard cannot read", input: bash(`for c in rm cat; do $c ~/notes/MEMORY.md; done`)},
 		{name: "printf -v before a subshell loop", want: "which holds the personal store", cwd: ".", input: bash(`printf -v n %s%s cr ew; (for n in 1 2; do :; done); cp /bin/rm ~/bin/$n; crew reply x .`)},
 		{name: "indirect arithmetic default after a skipped loop", want: "shell code the guard cannot read", cwd: ".", input: bash(`read -r x < f; false && for n in a b; do :; done; (( ${!x:=rew} )); cp /bin/rm ~/bin/c$n; crew reply x .`)},
@@ -394,7 +388,7 @@ func TestShellDenies(t *testing.T) {
 		{name: "sed label then w", want: "inside the personal store", input: bash(`sed ':a;w @H/notes/x' f`)},
 		{name: "sed label space then w", want: "inside the personal store", input: bash(`sed ':x w @H/notes/x' f`)},
 		{name: "sed branch space then w", want: "inside the personal store", input: bash(`sed 'b x w @H/notes/x` + "\n" + `:x' f`)},
-		{name: "sed label hides continued w on bsd", want: "an .attest dir", input: bash(`sed ':x;/\` + "\n" + `w @H/notes/.attest/e\` + "\n" + `/p' f`)},
+		{name: "sed label hides continued w on bsd", want: "inside the personal store", input: bash(`sed ':x;/\` + "\n" + `w @H/notes/.attest/e\` + "\n" + `/p' f`)},
 		{name: "sed append text", want: "/notes/MEMORY.md, inside the personal store", input: bash(`sed '1a eww' ~/notes/MEMORY.md`)},
 
 		// Input the guard cannot read.
@@ -411,7 +405,7 @@ func TestShellDenies(t *testing.T) {
 		{name: "python shutil relative store name", want: "cannot resolve, and names ", cwd: ".", input: bash(`python3 -c 'import shutil; shutil.rmtree("notes")'`)},
 		{name: "node rmSync relative store name", want: "cannot resolve, and names ", cwd: ".", input: bash(`node -e 'require("fs").rmSync("notes",{recursive:true})'`)},
 		{name: "sed w hardlink operand", want: "a hard link to", cwd: "work", input: bash(`sed -n 'w hard' f`)},
-		{name: "sed w symlink attest operand", want: "an .attest dir", cwd: "work", input: bash(`sed -n 'w rel' f`)},
+		{name: "sed w symlink attest operand", want: "inside the personal store", cwd: "work", input: bash(`sed -n 'w rel' f`)},
 		{name: "python glued out root", want: "which holds", cwd: ".", input: bash(`python3 tool.py --out=/`)},
 		{name: "python short glued out root", want: "which holds", cwd: ".", input: bash(`python3 tool.py -o/`)},
 		{name: "subtoken renamed interpreter heredoc", want: "which holds", cwd: ".", input: bash("python3 -c 'import shutil,os;shutil.copy(\"/bin/sh\",os.getenv(\"HOME\")+\"/bin/python3\")'; env python3 <<EOF\nrm -rf .\nEOF")},
@@ -484,7 +478,6 @@ func TestShellDenies(t *testing.T) {
 
 		// POSIX classes in a glob.
 		{name: "posix class rm", want: "inside the personal store", input: bash("rm -rf ~/note[[:alpha:]]")},
-		{name: "posix class attest", want: "an .attest dir", input: bash("touch /srv/other/.[[:alpha:]]ttest/e")},
 
 		// A writer's option values, glued or in the next word.
 		{name: "env cluster chdir", want: "runs in", cwd: ".", input: bash(`env -vCnotes touch MEMORY.md`)},
@@ -577,6 +570,9 @@ func TestShellAllows(t *testing.T) {
 		{name: "store name prefix", input: bash("mkdir -p ~/notesx && echo x > ~/notesx/f")},
 		{name: "posix class glob in project", input: bash("rm -f ~/work/[[:alpha:]]*.o")},
 		{name: "attest prefix name", input: bash("touch ~/work/sub/.attestation/y")},
+		{name: "attest dir elsewhere", input: bash("touch /srv/other/.attest/e")},
+		{name: "attest dir by glob elsewhere", input: bash("rm -rf ~/work/.a*")},
+		{name: "text naming an attest dir", input: bash("echo see .attest/ > ~/work/a.md")},
 		{name: "index name elsewhere", input: bash("echo x > MEMORY.md")},
 		{name: "cat store", input: bash("cat ~/notes/MEMORY.md")},
 		{name: "grep store", input: bash("grep -r foo ~/notes | head")},
@@ -690,16 +686,13 @@ func TestShellAllows(t *testing.T) {
 
 func TestToolDenies(t *testing.T) {
 	sb := newSandbox(t)
-	reviewed := "---\nname: n\nmetadata:\n  confidence: reviewed\n---\nbody\n"
 	for _, c := range []call{
-		{name: "write attest", want: "/notes/.attest/e2, inside an .attest dir", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/notes/.attest/e2", "content": "x"})},
 		{name: "write index", want: "/notes/MEMORY.md, the personal store's generated index", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/notes/MEMORY.md", "content": "x"})},
 		{name: "write git", want: "/hooks/pre-commit, inside the personal store's git dir", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/notes/.git/hooks/pre-commit", "content": "x"})},
 		{name: "write state", want: "/provenance/s, inside priors' state dir", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/.local/state/priors/provenance/s", "content": "x"})},
 		{name: "write config dir", want: "/rules.toml, inside priors' config dir", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/.config/priors/rules.toml", "content": "x"})},
-		{name: "write ancestor", want: "which holds the personal store's attest entries", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/notes", "content": "x"})},
+		{name: "write ancestor", want: "which holds the personal store's generated index", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/notes", "content": "x"})},
 		{name: "symlinked dir", want: "/notes/MEMORY.md, the personal store's generated index", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/link/MEMORY.md", "content": "x"})},
-		{name: "dangling symlink", want: "/notes/.attest/new, inside an .attest dir", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/dang", "content": "x"})},
 		{name: "traversal", want: "/notes/.git/config, inside the personal store's git dir", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/../notes/.git/config", "content": "x"})},
 		{name: "relative in store", want: "/notes/MEMORY.md, the personal store's generated index", cwd: "notes", tool: "Write", input: sb.input(map[string]any{"file_path": "MEMORY.md", "content": "x"})},
 		{name: "relative past symlink", want: "/notes/MEMORY.md, the personal store's generated index", tool: "Write", input: sb.input(map[string]any{"file_path": "rel/../MEMORY.md", "content": "x"})},
@@ -710,48 +703,22 @@ func TestToolDenies(t *testing.T) {
 		{name: "hard link to a git object", want: "a hard link to", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/hobj", "content": "x"})},
 		{name: "hard link to the config target", want: "a hard link to", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/hcfg", "content": "x"})},
 		{name: "config symlink target", want: "/dotfiles/priors.toml, priors' config file", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/dotfiles/priors.toml", "content": "x"})},
-		{name: "hard link to a fact reviewed", want: "/work/hardfact claiming confidence: reviewed", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/hardfact", "content": reviewed})},
-		{name: "hard link to a fact edit to reviewed", want: "/work/hardfact claiming confidence: reviewed", tool: "Edit", input: sb.input(map[string]any{"file_path": "@H/work/hardfact", "old_string": "unverified", "new_string": "reviewed"})},
-		{name: "hard link to a fact patch", want: "/work/hardfact claiming confidence: reviewed", tool: "Write", input: sb.input(map[string]any{"input": "*** Begin Patch\n*** Update File: @H/work/hardfact\n@@\n-  confidence: unverified\n+  confidence: reviewed\n*** End Patch"})},
 		{name: "edit index", want: "/notes/MEMORY.md, the personal store's generated index", tool: "Edit", input: sb.input(map[string]any{"file_path": "@H/notes/MEMORY.md", "old_string": "a", "new_string": "b"})},
-		{name: "reviewed fact", want: "/facts/n.md claiming confidence: reviewed", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/notes/facts/n.md", "content": reviewed})},
-		{name: "reviewed yaml escape", want: "/facts/n.md claiming confidence: reviewed", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/notes/facts/n.md", "content": "---\nname: n\nmetadata:\n  confidence: \"re\\x76iewed\"\n---\n"})},
-		{name: "reviewed unparsable", want: "/facts/n.md claiming confidence: reviewed", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/notes/facts/n.md", "content": "---\r\nconfidence: Reviewed\r\n"})},
-		{name: "edit to reviewed", want: "/facts/b.md claiming confidence: reviewed", tool: "Edit", input: sb.input(map[string]any{"file_path": "@H/notes/facts/b.md", "old_string": "unverified", "new_string": "reviewed"})},
-		{name: "edit joins reviewed", want: "/facts/a.md claiming confidence: reviewed", tool: "Edit", input: sb.input(map[string]any{"file_path": "@H/notes/facts/a.md", "old_string": "xx", "new_string": ""})},
-		{name: "multi edit", want: "/facts/b.md claiming confidence: reviewed", tool: "MultiEdit", input: sb.input(map[string]any{"file_path": "@H/notes/facts/b.md", "edits": []any{
-			map[string]any{"old_string": "unverified", "new_string": "re"},
-			map[string]any{"old_string": "re\n", "new_string": "reviewed\n"},
-		}})},
-		{name: "pi edit", want: "/facts/b.md claiming confidence: reviewed", tool: "edit", input: sb.input(map[string]any{"path": "@H/notes/facts/b.md", "edits": []any{
-			map[string]any{"oldText": "unverified", "newText": "reviewed"},
-		}})},
-		{name: "symlinked edit", want: "/facts/b.md claiming confidence: reviewed", tool: "Edit", input: sb.input(map[string]any{"file_path": "@H/link/facts/b.md", "old_string": "unverified", "new_string": "reviewed"})},
 		{name: "notebook in state", want: "/n.ipynb, inside priors' state dir", tool: "NotebookEdit", input: sb.input(map[string]any{"notebook_path": "@H/.local/state/priors/n.ipynb", "new_source": "x"})},
-		{name: "unknown move tool", want: "/notes/.attest/e1, inside an .attest dir", tool: "mcp__fs__move", input: sb.input(map[string]any{"source": "@H/notes/.attest/e1", "destination": "@H/work/e1"})},
 		{name: "unknown tool command", want: "the command writes", tool: "mcp__exec", input: bash("echo x > ~/notes/MEMORY.md")},
-		{name: "patch add attest", want: "/notes/.attest/e9, inside an .attest dir", tool: "Write", input: sb.input(map[string]any{"input": "*** Begin Patch\n*** Add File: @H/notes/.attest/e9\n+x\n*** End Patch"})},
-		{name: "patch reviewed", want: "/facts/b.md claiming confidence: reviewed", tool: "Write", input: sb.input(map[string]any{"input": "*** Begin Patch\n*** Update File: @H/notes/facts/b.md\n@@\n-  confidence: unverified\n+  confidence: reviewed\n*** End Patch"})},
-		{name: "patch joins", want: "/facts/a.md claiming confidence: reviewed", tool: "Write", input: sb.input(map[string]any{"input": "*** Begin Patch\n*** Update File: @H/notes/facts/a.md\n@@\n-  confidence: rexxviewed\n+  confidence: re\\\n*** End Patch"})},
-		{name: "patch move into attest", want: "/notes/.attest/a, inside an .attest dir", tool: "Write", input: sb.input(map[string]any{"input": "*** Begin Patch\n*** Update File: @H/work/a.md\n*** Move to: @H/notes/.attest/a\n*** End Patch"})},
 
 		// Tools and keys beyond Claude's own.
 		{name: "unknown path key", want: "/notes/MEMORY.md, the personal store's generated index", cwd: "notes", tool: "mcp__serena__create_text_file", input: sb.input(map[string]any{"relative_path": "MEMORY.md", "content": "x"})},
 		{name: "unknown path key camel", want: "/notes/MEMORY.md, the personal store's generated index", cwd: "notes", tool: "mcp__jetbrains__create_new_file", input: sb.input(map[string]any{"pathInProject": "MEMORY.md", "text": "x"})},
 		{name: "unknown path key in array", want: "/notes/MEMORY.md, the personal store's generated index", cwd: "notes", tool: "mcp__fs__create_many", input: sb.input(map[string]any{"names": []any{"MEMORY.md"}, "content": "x"})},
-		{name: "unknown content key", want: "/facts/n.md claiming confidence: reviewed", tool: "mcp__fs__write_file", input: sb.input(map[string]any{"path": "@H/notes/facts/n.md", "new_content": reviewed})},
 		{name: "unknown tool by name", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__fs__search_and_replace", input: sb.input(map[string]any{"path": "@H/notes/MEMORY.md"})},
 		{name: "cursor search replace", want: "/notes/MEMORY.md, the personal store's generated index", tool: "search_replace", input: sb.input(map[string]any{"file_path": "@H/notes/MEMORY.md", "old_string": "a", "new_string": "b"})},
 		{name: "edit text named twice", want: "names an edit text more than once", tool: "Edit", input: sb.input(map[string]any{"file_path": "@H/work/a.md", "old_string": "a", "oldString": "b", "new_string": "c"})},
 
 		// Strings the guard must read wherever they sit.
 		{name: "nested path array", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__batch", input: sb.input(map[string]any{"files": []any{[]any{"~/notes/MEMORY.md", "x"}}})},
-		{name: "nested array under unknown key", want: "/notes/.attest/e, inside an .attest dir", tool: "mcp__x__batch", input: sb.input(map[string]any{"x": []any{[]any{"~/notes/.attest/e"}}})},
-		{name: "nested content array", want: "/facts/n.md claiming confidence: reviewed", tool: "mcp__fs__write_many", input: sb.input(map[string]any{"path": "@H/notes/facts/n.md", "contents": []any{[]any{reviewed}}})},
-		{name: "newline in unknown key", want: "/facts/z\n.md claiming confidence: reviewed", cwd: "notes", tool: "mcp__serena__create_text_file", input: sb.input(map[string]any{"relative_path": "facts/z\n.md", "content": reviewed})},
 		{name: "newline in state path", want: "inside priors' state dir", tool: "mcp__fs__create_doc", input: sb.input(map[string]any{"uri": "@H/.local/state/priors/local/personal/z\n.md"})},
 		{name: "padded path", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__fs__create_doc", input: sb.input(map[string]any{"uri": " @H/notes/MEMORY.md\t"})},
-		{name: "content key without a path", want: "inside an .attest dir", tool: "mcp__srv__do", input: sb.input(map[string]any{"text": "~/notes/.attest/e"})},
 		{name: "edits of strings", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__do", input: sb.input(map[string]any{"edits": []any{"~/notes/MEMORY.md"}})},
 		{name: "old string without a pair", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__do", input: sb.input(map[string]any{"old_string": "~/notes/MEMORY.md"})},
 
@@ -766,34 +733,6 @@ func TestToolDenies(t *testing.T) {
 		{name: "pi file url", want: "/notes/MEMORY.md, the personal store's generated index", tool: "write", input: sb.input(map[string]any{"path": "file://@H/notes/MEMORY.md", "content": "x"})},
 		{name: "pi file url localhost", want: "/notes/MEMORY.md, the personal store's generated index", tool: "write", input: sb.input(map[string]any{"path": "file://localhost@H/notes/MEMORY.md", "content": "x"})},
 		{name: "pi file url escaped", want: "/notes/MEMORY.md, the personal store's generated index", tool: "write", input: sb.input(map[string]any{"path": "file://@H/notes/%4DEMORY.md", "content": "x"})},
-		{name: "pi file url attest", want: "/notes/.attest/e1, inside an .attest dir", tool: "write", input: sb.input(map[string]any{"path": "file://@H/notes/.attest/e1", "content": "x"})},
-		{name: "pi tilde reviewed fact", want: "/facts/n.md claiming confidence: reviewed", tool: "write", input: sb.input(map[string]any{"path": "~/notes/facts/n.md", "content": reviewed})},
-		{name: "pi at reviewed fact", want: "/facts/n.md claiming confidence: reviewed", tool: "write", input: sb.input(map[string]any{"path": "@@H/notes/facts/n.md", "content": reviewed})},
-
-		// Edits the tool applies against the original, or on a normalised copy.
-		{name: "pi edit fuzzy", want: "/facts/b.md claiming confidence: reviewed", tool: "edit", input: sb.input(map[string]any{"path": "@H/notes/facts/b.md", "edits": []any{
-			map[string]any{"oldText": "  confidence: unverified  ", "newText": "  confidence: reviewed"},
-		}})},
-		{name: "pi edit top level fuzzy", want: "/facts/b.md claiming confidence: reviewed", tool: "edit", input: sb.input(map[string]any{"path": "@H/notes/facts/b.md", "oldText": "  confidence: unverified  ", "newText": "  confidence: reviewed"})},
-		{name: "pi multi edit", want: "new text may leave", tool: "edit", input: sb.input(map[string]any{"path": "@H/notes/facts/c.md", "edits": []any{
-			map[string]any{"oldText": "unverified", "newText": "reviewed"},
-			map[string]any{"oldText": "reviewed", "newText": "checked"},
-		}})},
-		{name: "pi edit risky new text", want: "new text may leave", tool: "edit", input: sb.input(map[string]any{"path": "@H/notes/facts/b.md", "edits": []any{
-			map[string]any{"oldText": "body", "newText": "&a"},
-			map[string]any{"oldText": "name: b", "newText": "name: *a"},
-		}})},
-		{name: "multi edit approximated at original positions", want: "/facts/c.md claiming confidence: reviewed", tool: "MultiEdit", input: sb.input(map[string]any{"file_path": "@H/notes/facts/c.md", "edits": []any{
-			map[string]any{"old_string": "unverified", "new_string": "reviewed"},
-			map[string]any{"old_string": "reviewed", "new_string": "checked"},
-		}})},
-		{name: "pi edits at original positions", want: "/facts/s.md claiming confidence: reviewed", tool: "edit", input: sb.input(map[string]any{"path": "@H/notes/facts/s.md", "edits": []any{
-			map[string]any{"oldText": "X ", "newText": "re"},
-			map[string]any{"oldText": "re", "newText": ""},
-		}})},
-		{name: "pi edit fuzzy join", want: "/facts/f.md claiming confidence: reviewed", tool: "edit", input: sb.input(map[string]any{"path": "@H/notes/facts/f.md", "edits": []any{
-			map[string]any{"oldText": "\"x\"", "newText": ""},
-		}})},
 
 		// Paths packed in one string, JSON in a string, other file forms.
 		{name: "packed paths comma", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__do", input: sb.input(map[string]any{"paths": "@H/work/a,@H/notes/MEMORY.md"})},
@@ -809,7 +748,6 @@ func TestToolDenies(t *testing.T) {
 		{name: "deep json in a string", want: "past what the guard reads", tool: "mcp__x__do", input: sb.input(map[string]any{"args": strings.Repeat("[", 20) + `"@H/notes/MEMORY.md"` + strings.Repeat("]", 20)})},
 		{name: "file url with one slash", want: "/notes/MEMORY.md, the personal store's generated index", tool: "Write", input: sb.input(map[string]any{"file_path": "file:@H/notes/MEMORY.md", "content": "x"})},
 		{name: "file url with one slash in a uri", want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__x__do", input: sb.input(map[string]any{"uri": "file:@H/notes/MEMORY.md"})},
-		{name: "claim split across lines", want: "/facts/b.md claiming confidence: reviewed", tool: "mcp__x__write", input: sb.input(map[string]any{"path": "@H/notes/facts/b.md", "lines": []any{"---", "name: b", "metadata:", "  confidence: \"re\\", "viewed\"", "---", "body"}})},
 		{name: "posix class write", want: "/MEMORY.md, the personal store's generated index", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/note[[:alpha:]]/MEMORY.md", "content": "x"})},
 
 		// Input the guard cannot read.
@@ -826,7 +764,7 @@ func TestToolDenies(t *testing.T) {
 // times, since a map read picks one at random.
 func TestToolDuplicateKeys(t *testing.T) {
 	sb := newSandbox(t)
-	c := call{want: "/notes/.attest/e1, inside an .attest dir", tool: "mcp__filesystem__write_file", input: sb.input(map[string]any{"path": "@H/notes/.attest/e1", "Path": "/tmp/safe"})}
+	c := call{want: "/notes/MEMORY.md, the personal store's generated index", tool: "mcp__filesystem__write_file", input: sb.input(map[string]any{"path": "@H/notes/MEMORY.md", "Path": "/tmp/safe"})}
 	for range 20 {
 		wantDenied(t, c, sb.run(t, c))
 	}
@@ -838,6 +776,21 @@ func TestToolAllows(t *testing.T) {
 		{name: "project write", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/b.md", "content": "confidence: reviewed"})},
 		{name: "sibling store", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/notes-old/MEMORY.md", "content": "x"})},
 		{name: "attestation dir", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/sub/.attestation/y", "content": "x"})},
+
+		// #289: attestation is gone, so `reviewed` is a plain label and
+		// .attest names no guarded root.
+		{name: "reviewed fact", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/notes/facts/n.md", "content": "---\nname: n\nmetadata:\n  confidence: reviewed\n---\nbody\n"})},
+		{name: "reviewed yaml escape", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/notes/facts/n.md", "content": "---\nname: n\nmetadata:\n  confidence: \"re\\x76iewed\"\n---\n"})},
+		{name: "reviewed through a hard link", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/hardfact", "content": "---\nname: b\nmetadata:\n  confidence: reviewed\n---\nbody\n"})},
+		{name: "edit to reviewed", tool: "Edit", input: sb.input(map[string]any{"file_path": "@H/notes/facts/b.md", "old_string": "unverified", "new_string": "reviewed"})},
+		{name: "pi edit to reviewed", tool: "edit", input: sb.input(map[string]any{"path": "@H/notes/facts/b.md", "edits": []any{
+			map[string]any{"oldText": "unverified", "newText": "reviewed"},
+		}})},
+		{name: "patch to reviewed", tool: "Write", input: sb.input(map[string]any{"input": "*** Begin Patch\n*** Update File: @H/notes/facts/b.md\n@@\n-  confidence: unverified\n+  confidence: reviewed\n*** End Patch"})},
+		{name: "write into a leftover attest dir", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/notes/.attest/e2", "content": "x"})},
+		{name: "write an attest dir elsewhere", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/.attest/e", "content": "x"})},
+		{name: "content key naming an attest dir", tool: "mcp__srv__do", input: sb.input(map[string]any{"text": "~/work/.attest/e"})},
+		{name: "free text naming an attest dir", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/b.md", "content": "entries live in .attest/ dirs"})},
 		{name: "unreviewed fact", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/notes/facts/n.md", "content": "---\nname: n\nmetadata:\n  confidence: unverified\n---\nThe PR was reviewed.\n"})},
 		{name: "unreviewed fact through a hard link", tool: "Write", input: sb.input(map[string]any{"file_path": "@H/work/hardfact", "content": "---\nname: b\nmetadata:\n  confidence: unverified\n---\nmore\n"})},
 		{name: "benign edit", tool: "Edit", input: sb.input(map[string]any{"file_path": "@H/notes/facts/b.md", "old_string": "body", "new_string": "more body"})},

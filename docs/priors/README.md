@@ -14,8 +14,8 @@ It lives in this repo as `cmd/priors`, but it is not router code: it is an
 
 ### Trust file
 
-`/etc/priors/trust.toml` holds the host's profile, org lists, work-name floor,
-`trust_root` and each store's id, path and remote. The path is fixed in the build: no flag, env
+`/etc/priors/trust.toml` holds the host's profile, org lists, work-name floor
+and each store's id, path and remote. The path is fixed in the build: no flag, env
 var or user config overrides it. The nix-config module writes it via
 `environment.etc`.
 
@@ -24,7 +24,6 @@ profile       = "work"                        # the host kind: "work" or "person
 work_orgs     = ["github.com/your-work-org"]  # host/owner; required on every host
 personal_orgs = ["github.com/you"]
 work_names    = ["build.corp.internal"]       # floor for the work-name scan; config.toml can only add
-trust_root    = "owner-admin"                 # only "separate" turns attestation on
 [stores.personal]
 id     = "you-priors"                         # [a-z0-9-]{1,64}
 path   = "/home/you/memory/personal"          # absolute; no ~/ expansion
@@ -34,6 +33,12 @@ id     = "work-priors"                        # only on a work profile
 path   = "/home/you/memory/work"
 remote = "git@github.com:your-work-org/priors.git"
 ```
+
+`trust_root` and `attest_keys` are deprecated and ignored: attestation was
+removed (#289), so neither key does anything and a trust file that still has
+them loads. The one exception is `trust_root = "separate"`, which is rejected
+with an "attestation was removed" error, since a host that set it expected a
+protection that no longer exists. Drop both keys.
 
 Before reading, `priors` walks the path as traversed, symlinks and their
 targets included. Every component must be owned by root, each directory
@@ -78,7 +83,7 @@ authenticate it.
 # push         = false  # needs an upstream on origin set once (git push -u origin <branch>); after a failed push, git push by hand to resume
 ```
 
-`profile`, `work_orgs`, `personal_orgs`, `trust_root`, `stores`,
+`profile`, `work_orgs`, `personal_orgs`, `trust_root`, `attest_keys`, `stores`,
 `personal_store` or `work_store` in `config.toml` is an error naming the trust
 file.
 
@@ -130,7 +135,6 @@ priors search <terms...> [--repo R] [--any-repo] [--type T] [--scope S] [--all]
 priors lint [--store S] [--move-flagged] | priors lint --dir D --kind K [--work-org O ...]
 priors index [--text] [--engine claude-code]   # session_start output (envelope on stdin)
 priors index --write         # regenerate every MEMORY.md
-priors verify --store ID --credential KEY   # the verdict job for one store, as priors-verify
 ```
 
 `add` refuses a fact that matches a secret pattern or the scanner, or fails
@@ -312,156 +316,17 @@ store's commit gate. It commits on every run, so a commit held back last time
 (`warning: ...` on stderr, exit still 0) is retried. Running it again is safe:
 an imported source reports `unchanged`, by the sha256 of its bytes.
 
-### priors verify
+### Confidence labels
 
-The verdict job of [§4.4](../design/memory-layer.md#44-read-path-three-tiers-one-budget):
-it fetches one store's remote, walks the new commits, and writes the verdict
-file that the index-time checks read. It runs only on a host whose trust file
-classifies as `separate`, as the build-pinned `priors-verify` uid, and only for
-a store the trust file lists with a pinned SSH remote, so a personal host has
-no work job. Gating also needs at least one allowlist key that passes the
-evidence check (so with the module's empty allowlist the job exits 1), an
-absolute `--credential`, an existing `/var/lib/priors/<id>/` and a `private/`
-of mode 0700. Anything else exits 1 before any fetch or write.
-
-- Inputs: the trust file (never `config.toml` or the caller's environment),
-  the `--credential` SSH deploy key, and its own state. HTTPS credentials are
-  not supported. Only the ssh transport is allowed
-  (`GIT_ALLOW_PROTOCOL=ssh`), so a non-SSH pin, including a
-  `<transport>::<address>` one, is refused.
-- State, under `/var/lib/priors/<store id>/` (which deployment creates): the
-  `verdicts` file (0644, written atomically) and `private/` (0700) holding
-  `mirror.git`, `record.json` (0600, the per-name record that never shrinks)
-  and `lock` (a second run exits 1).
-- Budget per run: 300 s for the whole run, 20 s of it reserved for the
-  checkpoint and the verdict write; 50,000 newly walked commits; a 2 GiB
-  mirror. Leftover `tmp_pack` and incomplete objects are deleted each run.
-  A walk cut short saves its prefix and the next run resumes.
-- Status, one of `ok`, `stale-remote` (fetch failed before authentication and
-  the record's last tip is fully walked: verdicts are recomputed over the
-  record), `behind` and `oversize`. A fetch failure counts as before
-  authentication only when ssh (run with `LogLevel=VERBOSE`) never logged
-  `Authenticated to` and stderr matches a fixed ssh pre-auth message; anything
-  else is `behind`, so text in pushed objects cannot fake a refused
-  connection. `behind` and `oversize` write a header-only verdicts file once a
-  fetch has ever succeeded; before that, or with an unreadable record, any old
-  verdicts file is deleted and none is written. Any failure after gating ends
-  the run `behind`, so pushed content cannot keep an old `reviewed` by making
-  the job error out.
-- Crash safety: a run leaves a `private/running` marker until it finishes, and
-  the next run first deletes the verdicts file, so a run that died never leaves
-  old verdicts standing for 24 h. An error writing the record or verdicts also
-  deletes the old verdicts file. Fact blobs larger than the maximum fact size
-  never hold for check 8 (the attestation lapses); the job never reads them
-  whole.
-- `fetch.fsckObjects` is on, so a pushed malformed object fails the fetch and
-  keeps the store `behind` until the remote is rewritten (residual (d)).
-- Output: one line, `<id>: <status>[: reason]`, never a fact name or path.
-  Exit 1 for gating failures and for a failure to write the state dir,
-  otherwise 0.
-- Trigger: systemd socket activation (`Accept=no`). The job accepts and closes
-  pending connections without reading any byte, runs, and runs once more if
-  any arrived meanwhile, so at most one run is queued. Each queued run
-  re-reads the trust file and re-runs gating, so a trust-file change poked
-  during a run takes effect on the queued run. It prints one line per run and
-  the exit code is the last run's. Without the socket environment it runs
-  once. launchd is deferred to
-  [#191](https://github.com/noamsto/hookyard/issues/191).
-- `priors trust check` is a stub until
-  [#240](https://github.com/noamsto/hookyard/issues/240):
-  `verify.CheckEvidence` accepts every parsed allowlist key, and the nix module
-  writes an empty allowlist until it can run the check.
-
-Deployment (the account, units, socket and credentials) is #191.
-
-### priors attest
-
-Marks a fact `reviewed` for the store's verdict job. It signs an attest entry
-with your FIDO key, commits the fact and its entry, pushes them to the pinned
-remote's default branch, pokes the job's trigger socket and waits up to 60 s
-for the job's verdict.
-
-```
-priors attest [-f <key handle>] [--store personal|work] <name>
-priors attest --revoke [-f <key handle>] [--store personal|work] <name>
-priors attest --check [--store personal|work] <name> <entry sha256> <commit>
-```
-
-- `-f` defaults to `~/.ssh/id_ed25519_sk`, with the home directory read from
-  the password database, never `$HOME`. The handle's public key must be an
-  `sk-ssh-ed25519@openssh.com` or `sk-ecdsa-sha2-nistp256@openssh.com` key on
-  the allowlist, or attest refuses before signing.
-- `--store` picks the store when the name is in both checkouts, or (for
-  `--check`) when no fact of that name exists any more. Otherwise the store is
-  the one whose checkout holds a live fact of that name.
-- `--revoke` signs an `op: revoke` entry for the highest-sequence signed entry
-  of that name. It needs no fact file and does not touch it.
-- Run it as `/run/current-system/sw/bin/priors`, the path the deployment
-  controls, not whatever `priors` your `PATH` finds first.
-
-Order of operations; every refusal exits 1 and writes nothing:
-
-1. Refuse if any environment variable starts with `LD_` or `DYLD_`.
-2. Load the trust file and classify the host. Attestation off (not a
-   `separate` host, or no key enrolled) refuses, before any fetch, render or
-   signature.
-3. Refuse without a terminal (`/dev/tty` must open) and without an allowlisted
-   key handle. The PIN is read only from the controlling terminal; `ssh-keygen`
-   would otherwise fall back to reading the PIN from stdin, which is the payload.
-4. Find the fact and its store. The store must pin an SSH remote. Refuse when
-   the checkout has `info/grafts` or a `shallow` file, or fails the pin check.
-5. Fetch the remote's default branch with a clean git environment (no user or
-   system config, the checkout's refs and replace objects ignored). Refuse
-   unless `HEAD` descends from that tip.
-6. Walk `HEAD`'s history for earlier entries of the name and number the new
-   one one above the highest sequence seen, counting `superseded` lines in the
-   job's verdict file too.
-7. For an attest, run the commit gate over the edited fact before signing, so
-   a fact the commit would refuse never costs a touch.
-8. Print the fact and the payload with control, bidi, zero-width and other
-   invisible characters escaped as `\u{XXXX}`, then sign.
-9. Take the store lock, write the fact and entry, run the commit gate again
-   and commit, check the committed blobs against the signed bytes, push, poke
-   the trigger socket and wait.
-
-Signing runs the build-pinned `ssh-keygen` with an environment of exactly
-`PATH`, `HOME`, `LANG=C` and `SSH_SK_HELPER` (the pinned `ssh-sk-helper`). The
-payload goes over a pipe and never touches the file system. The signature is
-parsed and verified against the allowlist before anything is written, so a
-wrapper that signed other bytes aborts the run with nothing written.
-
-The commit holds only the fact and its `.attest/<name>` entry, built from the
-signed bytes in memory, so a working-tree swap after signing cannot reach it.
-The tree is read with replace objects off, and the commit is never signed: a
-signing program named by the checkout's config would be a second PIN prompt
-an agent controls, so a store remote that requires signed commits rejects the
-push (reported as not pushed). It commits and pushes regardless of the
-`commit` and `push` config keys, because the command is an explicit request
-to publish. The push goes to the
-pinned URL's default branch only, never the checkout's branch, upstream or
-push config, and never forced.
-
-It prints `<name> <entry sha256> <commit>`, then one of four outcomes:
-
-| Outcome | Exit | What to do |
-|---|---|---|
-| in effect | 0 | Nothing. |
-| observed but not in effect | 1 | `superseded`: re-run the same command; if it is still superseded, re-attest under a new name. `lapsed`: re-attest. Anything else: re-run. |
-| pushed, not yet observed | 1 | The job has not walked the entry yet. Run the printed `priors attest --check` line later. |
-| not pushed | 1 | The commit or push failed (the commit exists only locally; the attest reads proposed everywhere). Fix the reason given and re-run. |
-
-A config error exits 2.
-
-`--check` re-reports a pushed entry and signs, writes, commits and pushes
-nothing. It refuses unless the entry at `<commit>` hashes to
-`<entry sha256>` and passes the entry checks (4 to 6), then classifies once
-against the current verdict file without waiting.
-
-The trigger socket is `/var/run/priors/<store id>.sock`, fixed with the
-deployment ([#191](https://github.com/noamsto/hookyard/issues/191)). If it is
-unreachable, attest says so and the job's timer picks the entry up. The Linux
-binary is static and the darwin one is built restricted, so `LD_*` and
-`DYLD_*` never reach it.
+`confidence` is `proposed` or `reviewed`. `priors add` always writes
+`proposed`. `reviewed` is an ordinary label with no check behind it: anyone who
+can write a fact file can set it, and no signature, verdict or other check
+vouches for it. Every reader shows the stored value as it is. Earlier versions
+had a `priors verify` verdict job and a `priors attest` command that backed
+`reviewed` with a signed entry. Both were removed (#289), since `priors` is a
+single-owner tool for same-uid agents and the mechanism was never deployed. A
+leftover `.attest/` directory in a store is ignored by `lint`, the readers,
+`index` and the commit.
 
 ### Reading the session-start block
 
@@ -496,7 +361,6 @@ Markers only in `priors list` rows:
 - `flags:`: why a gate flagged the fact.
 - `verified never`: `verified` is null, as an import leaves it. `priors add`
   stamps today's date.
-- `reviewed · `: the fact is attested.
 - stale: `priors list --stale` shows facts never verified or not verified for
   90 days.
 
@@ -512,9 +376,7 @@ with `priors show <name>`; its `list --flagged` row ends in its `flags:`. To
 drop it, `gtrash put` its file under the local layer
 (`$XDG_STATE_HOME/priors/local/<store>/<repo>/`). To keep it, there is no
 supported publish-after-review path: a fresh `priors add` runs every gate
-again and publishes only if they pass, and a fact claims `reviewed` only
-through attestation (`trust_root = "separate"`), which the write guard keeps
-agents from writing. `priors lint --move-flagged` goes the other way: it
+again and publishes only if they pass. `priors lint --move-flagged` goes the other way: it
 moves checkout facts that trip a content or size gate into the local layer.
 
 ## Wire it into hookyard
@@ -535,17 +397,14 @@ manifest; point every `exec` path at the installed binary (`nix build
   runs `priors add` itself. It gives up at its 750 ms deadline, and a call
   it gave up on is left unmarked: a lost mark fails as gate 2 describes. It
   is also the write guard (see below), and denies a call that would write
-  what only priors or attestation writes.
+  what only priors writes.
 
 ### Write guard
 
 The `pre_tool` write guard is a tripwire against an agent editing what it
 must not: it denies a tool call that would write
 
-- a store's attest entries (`.attest/`, and any path with an `.attest`
-  element), its generated `MEMORY.md` index or its `.git` dir;
-- a store fact so that it claims `confidence: reviewed`, judged on the
-  content a Write sends and on the file as an Edit would leave it;
+- a store's generated `MEMORY.md` index or its `.git` dir;
 - priors' state dir and its config (the config dir when it is named
   `priors`, else the config file);
 - any dir holding one of these (`rm -rf ~`).
@@ -558,26 +417,19 @@ denied while a store is in reach (below). Paths resolve
 against the call's cwd and every dir the command changes into, with `..` and
 symlinks resolved as the kernel does, and also with `..` cleaned first, as
 Claude Code and pi clean a file tool's path. A hard link elsewhere to any
-store file (a fact, `.git/config`, the index, an attest entry; the walk covers
+store file (a fact, `.git/config`, the index; the walk covers
 every store file, `.git/objects` included) or to the config file is caught: a
-file tool's write through a link to a fact is judged for a reviewed claim like
-a write to the fact itself, and a shell write through any such link is denied.
+shell write through any such link is denied.
 The config file is guarded itself, so the target of a symlinked config is
 covered.
 
 Every tool that is not a read or a shell (an MCP server's tool, say, and the
 known file tools too) has the strings under keys the guard does not know
 judged, at any depth, as paths relative to the call's cwd, up to 4096 bytes,
-as given and trimmed. Those strings also count as content for the reviewed
-check. A string under a content key is judged as a path too when the input
-names no path under a path key. Keys that differ only in case, `_` or `-` all
-count. A leading `@`, `~` and `~/`,
+as given and trimmed. A string under a content key is judged as a path too
+when the input names no path under a path key. Keys that differ only in case,
+`_` or `-` all count. A leading `@`, `~` and `~/`,
 `file://` URIs and Unicode spaces in a path are read the way pi reads them.
-An edit through pi's `edit` whose new text holds `reviewed`, `\`, `!` or `*`
-in a store fact is denied, since pi matches fuzzily and applies every edit
-against the original file. The file as each edit would leave it is also
-judged, under Claude's sequential matching and under pi's all-at-once,
-fuzzy-normalized matching.
 
 A shell command is judged one simple command at a time, in every text the
 reader parses: each stage of a pipeline, each command of a loop, a `&&` list,
@@ -644,8 +496,7 @@ The guard denies when any of these holds, checked in this order:
 4. the command writes and its cwd, or a dir it changes into, is inside a
    store, the state dir or the config;
 5. a resolved target is inside one of those, is a dir holding one
-   (`rm -rf ~`), names an `.attest` element (a glob counts when it can match
-   one), or is a hard link to a guarded file;
+   (`rm -rf ~`), or is a hard link to a guarded file;
 6. an unresolved target's literal prefix ends in a dir inside one, or in a
    dir whose next element the prefix can start (`~/$x` from anywhere, `"$x"`
    from `~`);
@@ -679,7 +530,7 @@ A store is in reach of a command when any of these holds:
   short-option cluster. They resolve against the cwd and every dir the
   command changes into, with `..` and symlinks resolved both ways;
 - R3: the call's text, as given, printf-decoded and with quotes deleted,
-  names `.attest`, `MEMORY.md`, the last two elements of a store root, of the
+  names `MEMORY.md`, the last two elements of a store root, of the
   state dir or of the config path, or a store's name as a whole path element.
 
 For an unresolved write, every path field of that call's own words counts
@@ -979,16 +830,10 @@ It over-denies:
   `~`);
 - a write tool's text under an unknown key (or a content key when the input
   has no path key) that holds a path token naming a store, a dir holding one
-  or an `.attest` element (an issue comment body naming `~/notes/MEMORY.md`),
+  (an issue comment body naming `~/notes/MEMORY.md`),
   and a path-key string any token of which names one (`a,notes` from `~`);
-  a store-fact write whose array elements, joined, hold `reviewed`;
-- a file tool writing a store fact whose other fields (an instructions or
-  description field) hold the word `reviewed`; and, from a cwd inside a
-  store, an unknown tool whose input holds the word `reviewed` anywhere;
 - an MCP read tool outside the list that names a store's `.git`
   (`read_multiple_files`);
-- a pi edit to a fact whose new text holds `reviewed`, `\`, `!` or `*`,
-  markdown emphasis included;
 - an embedded JSON document in a tool input that is past its budget.
 
 ## Store repositories

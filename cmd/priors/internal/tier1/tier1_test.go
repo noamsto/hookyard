@@ -12,7 +12,6 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
@@ -68,11 +67,11 @@ func newEnv(t *testing.T) env {
 }
 
 func (e env) assemble(s route.Session) (string, []string) {
-	return Assemble(context.Background(), s, e.cfg, e.rules, attest.ForHost(e.cfg), Options{})
+	return Assemble(context.Background(), s, e.cfg, e.rules, Options{})
 }
 
 func (e env) assembleClaude(s route.Session, nativeDir string, budget int) string {
-	out, _ := assemble(context.Background(), s, e.cfg, e.rules, attest.ForHost(e.cfg), Options{Claude: true, NativeMemDir: nativeDir}, budget)
+	out, _ := assemble(context.Background(), s, e.cfg, e.rules, Options{Claude: true, NativeMemDir: nativeDir}, budget)
 	return out
 }
 
@@ -605,7 +604,7 @@ func TestCancelledContext(t *testing.T) {
 	seedStores(t, e)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if out, _ := Assemble(ctx, workSession, e.cfg, e.rules, attest.ForHost(e.cfg), Options{}); out != "" {
+	if out, _ := Assemble(ctx, workSession, e.cfg, e.rules, Options{}); out != "" {
 		t.Errorf("out = %q, want empty", out)
 	}
 }

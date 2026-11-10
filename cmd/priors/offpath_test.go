@@ -26,17 +26,13 @@ func offPathFact(name, repo, typ string) fact.Fact {
 	return f
 }
 
-// writeOffPathTrust is writeTrust with an optional trust_root line before the
-// store tables.
-func (sb *sandbox) writeOffPathTrust(trustRoot string) {
+// writeOffPathTrust writes a trust file that pins no remotes.
+func (sb *sandbox) writeOffPathTrust() {
 	sb.t.Helper()
 	lines := []string{
 		fmt.Sprintf("profile = %q", sb.profile),
 		`work_orgs = ["github.com/factify-inc"]`,
 		`personal_orgs = ["github.com/noamsto"]`,
-	}
-	if trustRoot != "" {
-		lines = append(lines, fmt.Sprintf("trust_root = %q", trustRoot))
 	}
 	lines = append(lines, "[stores.personal]", `id = "personal-test"`, fmt.Sprintf("path = %q", sb.personal))
 	if sb.profile == "work" {
@@ -65,22 +61,16 @@ func (l *offPathLog) run(label, stdin string, args ...string) {
 }
 
 func TestOffPath(t *testing.T) {
-	for _, trustRoot := range []string{"", "owner-admin"} {
-		for _, profile := range []string{"personal", "work"} {
-			name := "no-trust-root-" + profile
-			if trustRoot != "" {
-				name = trustRoot + "-" + profile
-			}
-			t.Run(name, func(t *testing.T) {
-				checkOffPath(t, name, profile, trustRoot)
-			})
-		}
+	for _, profile := range []string{"personal", "work"} {
+		t.Run(profile, func(t *testing.T) {
+			checkOffPath(t, profile)
+		})
 	}
 }
 
-func checkOffPath(t *testing.T, name, profile, trustRoot string) {
+func checkOffPath(t *testing.T, profile string) {
 	sb := newSandbox(t, profile)
-	sb.writeOffPathTrust(trustRoot)
+	sb.writeOffPathTrust()
 	remote, repoName, store := personalRemote, "demo", sb.personal
 	if profile == "work" {
 		remote, repoName, store = workRemote, "app", sb.work
@@ -125,7 +115,7 @@ func checkOffPath(t *testing.T, name, profile, trustRoot string) {
 	l.run("lint (with violations)", "", "lint")
 	l.run("list (with violations)", "", "list", "--cwd", repo)
 
-	golden := filepath.Join("testdata", "offpath", name+".golden")
+	golden := filepath.Join("testdata", "offpath", profile+".golden")
 	got := l.out.String()
 	if *update {
 		if err := os.MkdirAll(filepath.Dir(golden), 0o755); err != nil {

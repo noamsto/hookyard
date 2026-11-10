@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
@@ -77,7 +76,6 @@ func cmdList(args []string, s streams) int {
 	wantRepo := cmp.Or(*repo, sess.Repo)
 	now := time.Now()
 
-	v := attest.ForHost(cfg)
 	var rows []string
 	skipped := 0
 	roots, refused := readRoots(ctx, cfg, sess, s)
@@ -98,13 +96,12 @@ func cmdList(args []string, s streams) int {
 				s.errf("excluded %s/%s: rule %s\n", root.Store, e.Rel, strings.Join(ids, ","))
 				continue
 			}
-			rows = append(rows, listRow(e, v.Reviewed(e)))
+			rows = append(rows, listRow(e))
 		}
 	}
 	if len(rows) > 0 {
 		s.outText(sanitize.Fence(sanitize.Header("list"), strings.Join(rows, "\n"), sanitize.NewDelimiter()))
 	}
-	printReports(s, v)
 	// A skipped file or refused checkout makes the listing incomplete, so exit
 	// non-zero even when some rows printed; a redaction exclusion is reported
 	// and does not.
@@ -153,24 +150,11 @@ func visibleEntries(root store.Root, sess route.Session, repo string, s streams)
 	}), skipped
 }
 
-func printReports(s streams, v *attest.Verifier) {
-	for _, r := range v.Reports() {
-		s.errln(r)
-	}
-}
-
-// reviewedMark leads a verified fact's row, before the store name, which no
-// fact controls: a description can neither forge it nor truncate it away.
-const reviewedMark = "reviewed · "
-
-func listRow(e store.Entry, reviewed bool) string {
+func listRow(e store.Entry) string {
 	f := e.Fact
 	where := string(e.Root.Store)
 	if e.Root.Kind == store.KindLocal {
 		where += " local"
-	}
-	if reviewed {
-		where = reviewedMark + where
 	}
 	verified := cmp.Or(f.Metadata.Verified, "never")
 	row := fmt.Sprintf("%s %s — %s — verified %s — %s", where, e.Rel, f.Metadata.Type, verified, f.Description)
@@ -221,18 +205,8 @@ func cmdShow(args []string, s streams) int {
 		s.errf("excluded %s/%s: rule %s\n", e.Root.Store, e.Rel, strings.Join(ids, ","))
 		return 1
 	}
-	// An unverified claim of review is never printed as one.
-	shown := e.Raw
-	v := attest.ForHost(cfg)
-	if attest.Claims(e.Fact) && !v.Reviewed(e) {
-		if shown, err = fact.WithConfidence(e.Raw, "proposed"); err != nil {
-			s.errln("show:", err)
-			return 1
-		}
-	}
-	printReports(s, v)
 	header := sanitize.Header(string(e.Root.Store) + " store · " + e.Rel)
-	s.outText(sanitize.Fence(header, sanitize.Text(string(shown)), sanitize.NewDelimiter()))
+	s.outText(sanitize.Fence(header, sanitize.Text(string(e.Raw)), sanitize.NewDelimiter()))
 	return 0
 }
 

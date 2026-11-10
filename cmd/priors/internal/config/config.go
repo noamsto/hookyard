@@ -21,22 +21,10 @@ type Config struct {
 	Profile      string   `toml:"-"`
 	WorkOrgs     []string `toml:"-"`
 	PersonalOrgs []string `toml:"-"`
-	// PersonalStoreID and WorkStoreID are the trust file's store ids, which
-	// name a store in attestation; they are not route.StoreID kinds.
+	// PersonalStoreID and WorkStoreID are the trust file's store ids; they are
+	// not route.StoreID kinds.
 	PersonalStoreID string `toml:"-"`
 	WorkStoreID     string `toml:"-"`
-	// TrustRoot is kept verbatim; only "separate" turns attestation on. A
-	// non-string scalar or array in the trust file reads as empty, which is off.
-	TrustRoot string `toml:"-"`
-	// TrustRootLabel names trust_root for the attestation-off message:
-	// "absent", a string verbatim, or any other value as TOML writes it.
-	TrustRootLabel string `toml:"-"`
-	// AttestKeys is the attestation allowlist; empty means no fact reads
-	// reviewed.
-	AttestKeys []AttestKey `toml:"-"`
-	// TrustDigest is the lowercase hex sha256 of the trust file's bytes as
-	// this run read them, which a verdict file must name.
-	TrustDigest string `toml:"-"`
 	// The stores' checkout paths and pinned remotes, also from the trust file;
 	// an empty remote pins none.
 	PersonalStore  string `toml:"-"`
@@ -138,9 +126,7 @@ func loadTrustFile(trustPath string, fsys StatFS) (trust, error) {
 // floor; loadWith unions the user's additions on top.
 func (c *Config) applyTrust(t trust, fsys StatFS) {
 	c.Profile, c.WorkOrgs, c.PersonalOrgs = t.Profile, t.WorkOrgs, t.PersonalOrgs
-	c.TrustRoot, _ = t.TrustRoot.(string)
 	c.workNames = t.WorkNames
-	c.TrustRootLabel, c.AttestKeys, c.TrustDigest = t.rootLabel, t.keys, t.digest
 	c.fsys = fsys
 	c.PersonalStoreID, c.PersonalStore, c.PersonalRemote = t.Stores.Personal.ID, t.Stores.Personal.Path, t.Stores.Personal.Remote
 	if w := t.Stores.Work; w != nil {

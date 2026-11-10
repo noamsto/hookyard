@@ -1,10 +1,6 @@
 package config
 
 import (
-	"bytes"
-	"crypto/ed25519"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -15,8 +11,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"golang.org/x/crypto/ssh"
 )
 
 type fakeEntry struct {
@@ -74,7 +68,7 @@ const validTrust = `
 profile       = "work"
 work_orgs     = ["github.com/Factify-Inc"]
 personal_orgs = ["GitHub.com/noamsto"]
-trust_root    = "separate"
+trust_root    = "owner-admin"
 
 [stores.personal]
 id   = "noamsto-priors"
@@ -188,8 +182,8 @@ func TestCheckTrustPath(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			for walk, check := range map[string]func(StatFS, string) (string, error){
-				"checkTrustPath":          checkTrustPath,
-				"CheckOwnedPath(nil uid)": func(f StatFS, p string) (string, error) { return CheckOwnedPath(f, p, nil) },
+				"checkTrustPath": checkTrustPath,
+				"CheckOwnedPath": CheckOwnedPath,
 			} {
 				f := etcFS()
 				if tc.edit != nil {
@@ -209,126 +203,6 @@ func TestCheckTrustPath(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-const (
-	verifyUID   = 990
-	storeDir    = "/var/lib/priors/s1"
-	verdictPath = storeDir + "/verdicts"
-)
-
-// verdictFS holds a verdict file and its store dir owned by verifyUID under
-// root-owned 0755 dirs.
-func verdictFS() fakeFS {
-	return fakeFS{
-		"/":               dir(0o755),
-		"/var":            dir(0o755),
-		"/var/lib":        dir(0o755),
-		"/var/lib/priors": dir(0o755),
-		storeDir:          fakeEntry{uid: verifyUID, mode: fs.ModeDir | 0o755},
-		verdictPath:       fakeEntry{uid: verifyUID, mode: 0o644, data: "v"},
-	}
-}
-
-func TestCheckOwnedPathWithALeafUID(t *testing.T) {
-	cases := []struct {
-		name string
-		edit func(f fakeFS)
-		// want is the resolved path, or with wantErr the error's substring.
-		want    string
-		wantErr bool
-	}{
-		{name: "leaf-owned store dir and file", want: verdictPath},
-		{name: "read-only file", edit: func(f fakeFS) {
-			f[verdictPath] = fakeEntry{uid: verifyUID, mode: 0o444}
-		}, want: verdictPath},
-		{name: "group-writable file", edit: func(f fakeFS) {
-			f[verdictPath] = fakeEntry{uid: verifyUID, mode: 0o664}
-		}, want: verdictPath + " is writable by group or others", wantErr: true},
-		{name: "world-writable file", edit: func(f fakeFS) {
-			f[verdictPath] = fakeEntry{uid: verifyUID, mode: 0o646}
-		}, want: verdictPath + " is writable by group or others", wantErr: true},
-		{name: "file owned by another uid", edit: func(f fakeFS) {
-			f[verdictPath] = fakeEntry{uid: 1000, mode: 0o644}
-		}, want: verdictPath + " is owned by uid 1000, not uid 990", wantErr: true},
-		{name: "root-owned file", edit: func(f fakeFS) {
-			f[verdictPath] = file("v")
-		}, want: verdictPath + " is owned by uid 0, not uid 990", wantErr: true},
-		{name: "root-owned store dir", edit: func(f fakeFS) {
-			f[storeDir] = dir(0o755)
-		}, want: storeDir + " is owned by uid 0, not uid 990", wantErr: true},
-		{name: "group-writable store dir", edit: func(f fakeFS) {
-			f[storeDir] = fakeEntry{uid: verifyUID, mode: fs.ModeDir | 0o775}
-		}, want: storeDir + " is writable by group or others", wantErr: true},
-		{name: "sticky world-writable store dir", edit: func(f fakeFS) {
-			f[storeDir] = fakeEntry{uid: verifyUID, mode: fs.ModeDir | fs.ModeSticky | 0o777}
-		}, want: storeDir + " is writable by group or others", wantErr: true},
-		{name: "parent owned by the leaf uid", edit: func(f fakeFS) {
-			f["/var/lib/priors"] = fakeEntry{uid: verifyUID, mode: fs.ModeDir | 0o755}
-		}, want: "/var/lib/priors is owned by uid 990, not root", wantErr: true},
-		{name: "world-writable parent", edit: func(f fakeFS) {
-			f["/var/lib/priors"] = dir(0o777)
-		}, want: "/var/lib/priors is writable by group or others", wantErr: true},
-		{name: "sticky world-writable parent", edit: func(f fakeFS) {
-			f["/var/lib/priors"] = dir(fs.ModeSticky | 0o777)
-		}, want: verdictPath},
-		{name: "root-owned symlink to the store dir", edit: func(f fakeFS) {
-			f["/srv"] = dir(0o755)
-			f["/srv/s1"] = f[storeDir]
-			f["/srv/s1/verdicts"] = f[verdictPath]
-			f[storeDir] = link("/srv/s1")
-		}, want: "/srv/s1/verdicts"},
-		{name: "symlink above owned by a non-root uid", edit: func(f fakeFS) {
-			f["/srv"] = dir(0o755)
-			f["/srv/priors"] = dir(0o755)
-			f["/srv/priors/s1"] = f[storeDir]
-			f["/srv/priors/s1/verdicts"] = f[verdictPath]
-			f["/var/lib/priors"] = fakeEntry{uid: verifyUID, mode: fs.ModeSymlink | 0o777, target: "/srv/priors"}
-		}, want: "/var/lib/priors is owned by uid 990, not root", wantErr: true},
-		{name: "symlink in the store dir", edit: func(f fakeFS) {
-			f[storeDir+"/real"] = f[verdictPath]
-			f[verdictPath] = link("real")
-		}, want: storeDir + " is owned by uid 990, not root", wantErr: true},
-		{name: "store dir reached back through dot-dot", edit: func(f fakeFS) {
-			f[storeDir+"/sub"] = fakeEntry{uid: verifyUID, mode: fs.ModeDir | 0o755}
-			f[verdictPath] = link("sub/../verdicts.real")
-			f[storeDir+"/verdicts.real"] = fakeEntry{uid: verifyUID, mode: 0o644}
-		}, want: "is owned by uid 990, not root", wantErr: true},
-		{name: "directory in place of the file", edit: func(f fakeFS) {
-			f[verdictPath] = fakeEntry{uid: verifyUID, mode: fs.ModeDir | 0o755}
-		}, want: verdictPath + " is not a regular file", wantErr: true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			f := verdictFS()
-			if tc.edit != nil {
-				tc.edit(f)
-			}
-			uid := uint32(verifyUID)
-
-			got, err := CheckOwnedPath(f, verdictPath, &uid)
-
-			if tc.wantErr {
-				if err == nil || !strings.Contains(err.Error(), tc.want) {
-					t.Errorf("CheckOwnedPath = %q, %v; want an error containing %q", got, err, tc.want)
-				}
-				return
-			}
-			if err != nil || got != tc.want {
-				t.Errorf("CheckOwnedPath = %q, %v; want %q", got, err, tc.want)
-			}
-		})
-	}
-}
-
-func TestCheckOwnedPathWithALeafUIDKeepsNotExist(t *testing.T) {
-	f := verdictFS()
-	delete(f, verdictPath)
-	uid := uint32(verifyUID)
-
-	if _, err := CheckOwnedPath(f, verdictPath, &uid); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("err = %v, want fs.ErrNotExist", err)
 	}
 }
 
@@ -450,9 +324,7 @@ func TestReadTrust(t *testing.T) {
 			Profile:      "work",
 			WorkOrgs:     []string{"github.com/factify-inc"},
 			PersonalOrgs: []string{"github.com/noamsto"},
-			TrustRoot:    "separate",
-			digest:       sha256Hex(validTrust),
-			rootLabel:    "separate",
+			TrustRoot:    "owner-admin",
 		}
 		want.Stores.Personal = &trustStore{ID: "noamsto-priors", Path: "/m/personal"}
 		want.Stores.Work = &trustStore{ID: "factify-priors", Path: "/m/work"}
@@ -492,11 +364,8 @@ func TestReadTrust(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Stores.Work != nil || got.PersonalOrgs != nil || got.TrustRoot != nil || got.keys != nil {
+		if got.Stores.Work != nil || got.PersonalOrgs != nil || got.TrustRoot != nil || got.AttestKeys != nil {
 			t.Errorf("readTrust = %+v, want no work store, personal orgs, trust_root or attest keys", got)
-		}
-		if got.rootLabel != "absent" {
-			t.Errorf("rootLabel = %q, want absent", got.rootLabel)
 		}
 	})
 
@@ -529,73 +398,75 @@ func TestReadTrust(t *testing.T) {
 	})
 }
 
-func sha256Hex(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:])
-}
-
-// skKeyLine is an authorized_keys line, with a comment, for a fresh
-// sk-ssh-ed25519 key.
-func skKeyLine(t *testing.T) (string, ssh.PublicKey) {
-	t.Helper()
-	pub, _, err := ed25519.GenerateKey(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	key, err := ssh.ParsePublicKey(ssh.Marshal(struct {
-		Type        string
-		Key         []byte
-		Application string
-	}{ssh.KeyAlgoSKED25519, pub, "ssh:"}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(key)), "\n") + " owner@token", key
-}
-
 const personalTrust = "profile = \"personal\"\nwork_orgs = [\"github.com/w\"]\n\n[stores.personal]\nid = \"p\"\npath = \"/m/p\"\n"
 
+// attestEntry is one [[attest_keys]] table as the removed attestation schema
+// wrote it; trust files generated for that schema must still load.
 func attestEntry(key, attestation, challenge string) string {
 	return fmt.Sprintf("\n[[attest_keys]]\nkey = %q\nattestation = %q\nchallenge = %q\n", key, attestation, challenge)
 }
 
-func TestReadTrustAttestKeys(t *testing.T) {
-	sk, skKey := skKeyLine(t)
-	edPub, _, err := ed25519.GenerateKey(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	edKey, err := ssh.NewPublicKey(edPub)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ed := strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(edKey)), "\n")
-
-	f := etcFS()
-	f[etcTrust] = file(personalTrust + attestEntry(sk, "YXR0ZXN0", "Y2hhbA==") + attestEntry(ed, "AAE=", "/w=="))
-	got, err := readTrust(f, etcTrust)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if len(got.keys) != 2 {
-		t.Fatalf("keys = %+v, want 2", got.keys)
-	}
-	for i, want := range []struct {
-		key                    ssh.PublicKey
-		attestation, challenge []byte
-	}{
-		{skKey, []byte("attest"), []byte("chal")},
-		{edKey, []byte{0, 1}, []byte{0xff}},
+// TestReadTrustIgnoresAttestKeys pins D2 of #289: attest_keys is deprecated,
+// accepted in any shape and never validated.
+func TestReadTrustIgnoresAttestKeys(t *testing.T) {
+	for name, body := range map[string]string{
+		"scalar":         "attest_keys = \"x\"\n" + personalTrust,
+		"array":          "attest_keys = [\"a\", \"b\"]\n" + personalTrust,
+		"tables":         personalTrust + attestEntry("ssh-ed25519 AAAA", "YXR0ZXN0", "Y2hhbA=="),
+		"two tables":     personalTrust + attestEntry("k1", "a", "b") + attestEntry("k2", "c", "d"),
+		"malformed":      personalTrust + attestEntry("", "not base64!", ""),
+		"extra sub-keys": personalTrust + attestEntry("k", "a", "b") + "comment = \"x\"\n",
 	} {
-		k := got.keys[i]
-		if !bytes.Equal(k.Key.Marshal(), want.key.Marshal()) || k.Key.Type() != want.key.Type() {
-			t.Errorf("keys[%d].Key = %s, want %s", i, ssh.MarshalAuthorizedKey(k.Key), ssh.MarshalAuthorizedKey(want.key))
-		}
-		if !bytes.Equal(k.Attestation, want.attestation) || !bytes.Equal(k.Challenge, want.challenge) {
-			t.Errorf("keys[%d] = %q, %q; want %q, %q", i, k.Attestation, k.Challenge, want.attestation, want.challenge)
-		}
+		t.Run(name, func(t *testing.T) {
+			f := etcFS()
+			f[etcTrust] = file(body)
+			got, err := readTrust(f, etcTrust)
+			if err != nil {
+				t.Fatalf("readTrust: %v, want the deprecated attest_keys ignored", err)
+			}
+			if got.Profile != "personal" || got.Stores.Personal == nil {
+				t.Errorf("readTrust = %+v, want the rest of the file read", got)
+			}
+		})
 	}
+}
+
+// TestReadTrustTrustRoot pins D1 of #289: trust_root is ignored unless it is
+// "separate", which fails with a message naming the removal.
+func TestReadTrustTrustRoot(t *testing.T) {
+	for name, line := range map[string]string{
+		"absent":      "",
+		"owner-admin": "trust_root = \"owner-admin\"\n",
+		"other text":  "trust_root = \"whatever\"\n",
+		"true":        "trust_root = true\n",
+		"array":       "trust_root = [\"a\"]\n",
+		"table":       "trust_root = {a = 1}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := etcFS()
+			f[etcTrust] = file(line + personalTrust)
+			if _, err := readTrust(f, etcTrust); err != nil {
+				t.Errorf("readTrust: %v, want it to load", err)
+			}
+		})
+	}
+
+	t.Run("tables", func(t *testing.T) {
+		f := etcFS()
+		f[etcTrust] = file(personalTrust + "\n[[trust_root]]\na = 1\n")
+		if _, err := readTrust(f, etcTrust); err != nil {
+			t.Errorf("readTrust: %v, want it to load", err)
+		}
+	})
+
+	t.Run("separate", func(t *testing.T) {
+		f := etcFS()
+		f[etcTrust] = file("trust_root = \"separate\"\n" + personalTrust)
+		_, err := readTrust(f, etcTrust)
+		if err == nil || !strings.Contains(err.Error(), "attestation was removed") {
+			t.Errorf("readTrust = %v, want an error containing %q", err, "attestation was removed")
+		}
+	})
 }
 
 func TestLoadTrustReadsOnlyTheTrustFile(t *testing.T) {
@@ -605,12 +476,11 @@ func TestLoadTrustReadsOnlyTheTrustFile(t *testing.T) {
 	}
 	t.Setenv("PRIORS_CONFIG", user)
 
-	sk, skKey := skKeyLine(t)
 	body := strings.NewReplacer(
 		`id   = "noamsto-priors"`, "id   = \"noamsto-priors\"\nremote = \"git@h:p.git\"",
 		`id   = "factify-priors"`, "id   = \"factify-priors\"\nremote = \"git@h:w.git\"",
-		`trust_root    = "separate"`, "trust_root    = \"separate\"\nwork_names    = [\"acme\"]",
-	).Replace(validTrust) + attestEntry(sk, "YXR0ZXN0", "Y2hhbA==")
+		`trust_root    = "owner-admin"`, "trust_root    = \"owner-admin\"\nwork_names    = [\"acme\"]",
+	).Replace(validTrust) + attestEntry("ssh-ed25519 AAAA", "YXR0ZXN0", "Y2hhbA==")
 	f := etcFS()
 	f[etcTrust] = file(body)
 
@@ -618,8 +488,8 @@ func TestLoadTrustReadsOnlyTheTrustFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Profile != "work" || got.TrustRoot != "separate" || got.TrustRootLabel != "separate" || got.TrustDigest != sha256Hex(body) {
-		t.Errorf("profile, trust root, digest = %q, %q, %q, %q", got.Profile, got.TrustRoot, got.TrustRootLabel, got.TrustDigest)
+	if got.Profile != "work" {
+		t.Errorf("profile = %q", got.Profile)
 	}
 	if !reflect.DeepEqual(got.WorkOrgs, []string{"github.com/factify-inc"}) || !reflect.DeepEqual(got.PersonalOrgs, []string{"github.com/noamsto"}) {
 		t.Errorf("orgs = %v, %v", got.WorkOrgs, got.PersonalOrgs)
@@ -628,9 +498,6 @@ func TestLoadTrustReadsOnlyTheTrustFile(t *testing.T) {
 		got.WorkStoreID != "factify-priors" || got.WorkStore != "/m/work" || got.WorkRemote != "git@h:w.git" {
 		t.Errorf("stores = %+v", got)
 	}
-	if len(got.AttestKeys) != 1 || !bytes.Equal(got.AttestKeys[0].Key.Marshal(), skKey.Marshal()) {
-		t.Errorf("AttestKeys = %+v", got.AttestKeys)
-	}
 	if want := []string{"acme"}; !reflect.DeepEqual(got.WorkNames(), want) {
 		t.Errorf("WorkNames() = %v, want exactly the floor %v", got.WorkNames(), want)
 	}
@@ -638,37 +505,5 @@ func TestLoadTrustReadsOnlyTheTrustFile(t *testing.T) {
 	_, err = loadTrust("/etc/priors/absent.toml", etcFS())
 	if !errors.Is(err, ErrNoTrust) {
 		t.Errorf("missing trust file: %v, want ErrNoTrust", err)
-	}
-}
-
-func TestReadTrustRejectsAMalformedAttestKey(t *testing.T) {
-	sk, _ := skKeyLine(t)
-	rejected := map[string]struct{ entry, want string }{
-		"missing attestation":  {"\n[[attest_keys]]\nkey = \"" + sk + "\"\nchallenge = \"YQ==\"\n", "attest_keys[0].attestation is required"},
-		"missing challenge":    {"\n[[attest_keys]]\nkey = \"" + sk + "\"\nattestation = \"YQ==\"\n", "attest_keys[0].challenge is required"},
-		"missing key":          {"\n[[attest_keys]]\nattestation = \"YQ==\"\nchallenge = \"YQ==\"\n", "attest_keys[0].key is required"},
-		"empty key":            {attestEntry("", "YQ==", "YQ=="), "attest_keys[0].key is required"},
-		"empty attestation":    {attestEntry(sk, "", "YQ=="), "attest_keys[0].attestation is required"},
-		"empty challenge":      {attestEntry(sk, "YQ==", ""), "attest_keys[0].challenge is required"},
-		"bad base64":           {attestEntry(sk, "not base64!", "YQ=="), "attest_keys[0].attestation: illegal base64"},
-		"unpadded base64":      {attestEntry(sk, "YQ==", "YQ"), "attest_keys[0].challenge: illegal base64"},
-		"non-canonical base64": {attestEntry(sk, "YR==", "YQ=="), "attest_keys[0].attestation: illegal base64"},
-		"unparsable key":       {attestEntry("sk-ssh-ed25519@openssh.com AAAA", "YQ==", "YQ=="), "attest_keys[0].key: ssh: no key found"},
-		"trailing line":        {attestEntry(sk+"\ngarbage", "YQ==", "YQ=="), "attest_keys[0].key must be one line"},
-		"leading line":         {attestEntry("garbage\n"+sk, "YQ==", "YQ=="), "attest_keys[0].key must be one line"},
-		"carriage return":      {attestEntry(sk+"\rgarbage", "YQ==", "YQ=="), "attest_keys[0].key must be one line"},
-		"options":              {attestEntry("restrict "+sk, "YQ==", "YQ=="), "attest_keys[0].key has options"},
-		"unknown field":        {attestEntry(sk, "YQ==", "YQ==") + "comment = \"x\"\n", "unknown keys: attest_keys.comment"},
-		"second entry":         {attestEntry(sk, "YQ==", "YQ==") + attestEntry(sk, "YQ==", "%"), "attest_keys[1].challenge: illegal base64"},
-	}
-	for name, c := range rejected {
-		t.Run(name, func(t *testing.T) {
-			f := etcFS()
-			f[etcTrust] = file(personalTrust + c.entry)
-			_, err := readTrust(f, etcTrust)
-			if err == nil || !strings.Contains(err.Error(), c.want) {
-				t.Errorf("readTrust(%q) = %v, want an error containing %q", c.entry, err, c.want)
-			}
-		})
 	}
 }

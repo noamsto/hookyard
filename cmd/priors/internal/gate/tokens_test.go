@@ -19,7 +19,7 @@ func TestPathTokens(t *testing.T) {
 		{in: "build/ a/b", tokens: []string{"build/", "a/b"}, fields: []string{"build/", "a/b"}},
 		{in: "A / B", tokens: []string{"/"}, fields: []string{"A", "/", "B"}},
 		{in: "a b\nnotes", tokens: nil, fields: []string{"a", "b", "notes"}},
-		{in: "x .attest", tokens: []string{".attest"}, fields: []string{"x", ".attest"}},
+		{in: "x .attest", tokens: nil, fields: []string{"x", ".attest"}},
 		{in: "", tokens: nil, fields: nil},
 	} {
 		if got := PathTokens(c.in); !slices.Equal(got, c.tokens) {
