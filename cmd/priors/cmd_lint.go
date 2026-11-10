@@ -32,8 +32,12 @@ func cmdLint(args []string, s streams) int {
 	fs.Var(&workOrgs, "work-org", "work org (host/owner) the personal store must not name, added to the configured work_orgs (repeatable)")
 	fs.Var(&workNames, "work-name", "work name the personal store must not use, added to the configured work_names (repeatable)")
 	moveFlagged := fs.Bool("move-flagged", false, "move checkout facts that trip a content or size gate into the local layer")
+	since := fs.String("since", "", "deprecated and ignored: the attest entry check it fed was removed")
 	if _, code, ok := parseFlags(fs, args); !ok {
 		return code
+	}
+	if *since != "" {
+		s.errln("warning: lint --since is deprecated and ignored: priors attestation was removed")
 	}
 
 	ctx := context.Background()

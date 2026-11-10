@@ -137,6 +137,10 @@ priors index [--text] [--engine claude-code]   # session_start output (envelope 
 priors index --write         # regenerate every MEMORY.md
 ```
 
+`priors lint --since` is a deprecated no-op: it only fed the removed attest
+entry check, and is still accepted, with a warning, so store CI written for
+it keeps passing.
+
 `add` refuses a fact that matches a secret pattern or the scanner, or fails
 the lint, and exits 1. Otherwise it prints one line and exits 0:
 

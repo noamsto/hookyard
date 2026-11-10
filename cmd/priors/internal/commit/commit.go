@@ -44,17 +44,6 @@ const (
 	waitDelay = time.Second
 )
 
-// GitConfigArgs switch off every git feature that reads or writes outside the
-// objects a push transfers: it prefixes the push's git runs.
-var GitConfigArgs = []string{
-	"-c", "core.commitGraph=false",
-	"-c", "gc.auto=0",
-	"-c", "maintenance.auto=false",
-	"-c", "fetch.writeCommitGraph=false",
-	"-c", "core.hooksPath=/dev/null",
-	"-c", "core.fsmonitor=false",
-}
-
 // Checkout commits root's dirty files with msg, and pushes when configured,
 // if root is a git work tree's top level and every dirty path passes the
 // gates; otherwise it stages nothing. The caller holds the store's lock. It
@@ -335,7 +324,7 @@ func push(ctx context.Context, dir, remote, parent, commit string) (warning stri
 	if url = strings.TrimSpace(url); url != remote {
 		return refuse("effective push URL %s differs from the pinned %s", url, remote)
 	}
-	if _, err := runGitExact(ctx, tools.PushGitDir, env, pushTimeout, nil, append(slices.Clone(GitConfigArgs), "push", "-q", "--no-follow-tags", "--recurse-submodules=no", "--no-signed", "--force-with-lease="+mergeRef+":"+parent, "--", remote, commit+":"+mergeRef)...); err != nil {
+	if _, err := runGitExact(ctx, tools.PushGitDir, env, pushTimeout, nil, "push", "-q", "--no-follow-tags", "--recurse-submodules=no", "--no-signed", "--force-with-lease="+mergeRef+":"+parent, "--", remote, commit+":"+mergeRef); err != nil {
 		return refuse("git push failed: %v", err)
 	}
 	// The push from the pinned git dir leaves the checkout's tracking ref behind,

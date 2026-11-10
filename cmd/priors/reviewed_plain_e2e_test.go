@@ -71,6 +71,15 @@ func TestReviewedLintIgnoresLeftoverAttestDir(t *testing.T) {
 	if res.stdout != "" || res.stderr != "" {
 		t.Errorf("lint --dir printed stdout %q stderr %q, want nothing", res.stdout, res.stderr)
 	}
+
+	// Store CI copied from the old example still passes --since: it is
+	// accepted and ignored, with a warning.
+	res = sb.run("", "lint", "--dir", sb.personal, "--kind", "personal", "--since", "HEAD~1")
+	wantExit(t, res, 0)
+	wantContains(t, "lint --since stderr", res.stderr, "--since is deprecated and ignored")
+	if res.stdout != "" {
+		t.Errorf("lint --since printed stdout %q, want nothing", res.stdout)
+	}
 }
 
 func TestReviewedListAndSearchShowTheStoredLabel(t *testing.T) {

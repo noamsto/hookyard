@@ -26,13 +26,17 @@ func offPathFact(name, repo, typ string) fact.Fact {
 	return f
 }
 
-// writeOffPathTrust writes a trust file that pins no remotes.
-func (sb *sandbox) writeOffPathTrust() {
+// writeOffPathTrust writes a trust file that pins no remotes, with an optional
+// trust_root line (deprecated and ignored since #289) before the store tables.
+func (sb *sandbox) writeOffPathTrust(trustRoot string) {
 	sb.t.Helper()
 	lines := []string{
 		fmt.Sprintf("profile = %q", sb.profile),
 		`work_orgs = ["github.com/factify-inc"]`,
 		`personal_orgs = ["github.com/noamsto"]`,
+	}
+	if trustRoot != "" {
+		lines = append(lines, fmt.Sprintf("trust_root = %q", trustRoot))
 	}
 	lines = append(lines, "[stores.personal]", `id = "personal-test"`, fmt.Sprintf("path = %q", sb.personal))
 	if sb.profile == "work" {
@@ -61,16 +65,24 @@ func (l *offPathLog) run(label, stdin string, args ...string) {
 }
 
 func TestOffPath(t *testing.T) {
-	for _, profile := range []string{"personal", "work"} {
-		t.Run(profile, func(t *testing.T) {
-			checkOffPath(t, profile)
-		})
+	// trust_root is ignored, so an absent key and "owner-admin" must give the
+	// same bytes as each other for a profile.
+	for _, trustRoot := range []string{"", "owner-admin"} {
+		for _, profile := range []string{"personal", "work"} {
+			name := "no-trust-root-" + profile
+			if trustRoot != "" {
+				name = trustRoot + "-" + profile
+			}
+			t.Run(name, func(t *testing.T) {
+				checkOffPath(t, profile, trustRoot)
+			})
+		}
 	}
 }
 
-func checkOffPath(t *testing.T, profile string) {
+func checkOffPath(t *testing.T, profile, trustRoot string) {
 	sb := newSandbox(t, profile)
-	sb.writeOffPathTrust()
+	sb.writeOffPathTrust(trustRoot)
 	remote, repoName, store := personalRemote, "demo", sb.personal
 	if profile == "work" {
 		remote, repoName, store = workRemote, "app", sb.work
