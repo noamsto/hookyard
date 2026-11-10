@@ -406,8 +406,8 @@ func attestEntry(key, attestation, challenge string) string {
 	return fmt.Sprintf("\n[[attest_keys]]\nkey = %q\nattestation = %q\nchallenge = %q\n", key, attestation, challenge)
 }
 
-// TestReadTrustIgnoresAttestKeys pins D2 of #289: attest_keys is deprecated,
-// accepted in any shape and never validated.
+// TestReadTrustIgnoresAttestKeys: attest_keys is deprecated, accepted in any
+// shape and never validated.
 func TestReadTrustIgnoresAttestKeys(t *testing.T) {
 	for name, body := range map[string]string{
 		"scalar":         "attest_keys = \"x\"\n" + personalTrust,
@@ -431,8 +431,8 @@ func TestReadTrustIgnoresAttestKeys(t *testing.T) {
 	}
 }
 
-// TestReadTrustTrustRoot pins D1 of #289: trust_root is ignored unless it is
-// "separate", which fails with a message naming the removal.
+// TestReadTrustTrustRoot: trust_root is ignored unless it is "separate", which
+// fails with a message naming the removal.
 func TestReadTrustTrustRoot(t *testing.T) {
 	for name, line := range map[string]string{
 		"absent":      "",

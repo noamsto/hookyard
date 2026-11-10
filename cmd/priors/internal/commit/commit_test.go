@@ -251,9 +251,8 @@ func TestCommitsDeletion(t *testing.T) {
 	committest.AssertHeadIndexInTree(t, fx.dir())
 }
 
-// TestCommitsAReviewedFact pins #289: confidence: reviewed is a plain label,
-// so a hand-written self-reviewed fact commits like any other (it used to be
-// refused as unattested-review).
+// TestCommitsAReviewedFact: confidence: reviewed is a plain label, so a
+// hand-written self-reviewed fact commits like any other.
 func TestCommitsAReviewedFact(t *testing.T) {
 	fx := setup(t)
 	f := cleanFact("reviewed-fact")

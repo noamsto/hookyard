@@ -246,8 +246,8 @@ func TestLoadIgnoresAttestKeys(t *testing.T) {
 	}
 }
 
-// TestLoadTrustRoot pins D1 of #289: trust_root is deprecated and ignored, and
-// only "separate" (which asked for attestation) fails.
+// TestLoadTrustRoot: trust_root is deprecated and ignored; only "separate"
+// (which asked for attestation) fails.
 func TestLoadTrustRoot(t *testing.T) {
 	isolate(t)
 	for name, c := range map[string]struct{ line, wantErr string }{
