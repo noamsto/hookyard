@@ -831,7 +831,8 @@ It over-denies:
   wrapper that the table does not know;
 - an unknown tool whose input holds `.`, `..`, `/`, or a word that names a
   store or a dir holding one relative to the cwd (`{"repo":"notes"}` from
-  `~`);
+  `~`), though the delegation tools (`subagent`, `task`, `agent`) are reads, so
+  their prompt text is not judged;
 - a write tool's text under an unknown key (or a content key when the input
   has no path key) that holds a path token naming a store, a dir holding one
   (an issue comment body naming `~/notes/MEMORY.md`),
