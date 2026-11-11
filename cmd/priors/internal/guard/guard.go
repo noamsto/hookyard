@@ -1,6 +1,6 @@
 // Package guard is priors' pre_tool write guard (§4.4): a tripwire that denies
-// an agent's tool call when it would write a store's attest entries, index or
-// git dir, a confidence: reviewed claim, or priors' state or config. It reads
+// an agent's tool call when it would write a store's index or git dir, or
+// priors' state or config. It reads
 // the call and the paths on disk, loads neither the rule set nor a store, and
 // sees only the calls hookyard sees. Where it cannot tell, it denies.
 package guard
@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"maps"
 	"net/url"
@@ -21,31 +20,21 @@ import (
 	"slices"
 	"strings"
 	"syscall"
-	"unicode"
 
-	"golang.org/x/text/unicode/norm"
-
-	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
-	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
 )
 
 const (
-	attestDir = ".attest"
 	// maxHops bounds the symlinks one path resolves through, as the kernel's
 	// own limit does.
 	maxHops = 40
 	// maxDirs bounds the dirs a command changes into.
 	maxDirs = 32
-	// maxRead bounds a store file read to simulate an edit.
-	maxRead = 4 << 20
 	// maxNodes and maxDepth bound the walk of a tool's JSON input.
 	maxNodes = 1 << 14
 	maxDepth = 16
-	// maxEntries bounds the attest entries read to match a hard link.
-	maxEntries = 4096
 	// maxFiles bounds the store files walked to match a hard link.
 	maxFiles = 1 << 16
 	// maxPath bounds a string under an unknown key that is judged as a path.
@@ -57,9 +46,8 @@ type kind int
 
 const (
 	// kindStore is a whole checkout: a shell may not write in it, a file tool
-	// may write a fact without a reviewed claim.
+	// may write a fact.
 	kindStore kind = iota
-	kindAttest
 	kindIndex
 	kindGit
 	kindState
@@ -71,7 +59,7 @@ var (
 	// write's content cannot be told, so a whole store is guarded.
 	shellKinds = []kind{kindStore, kindState, kindConfig}
 	// toolKinds are the roots a file tool may not write in.
-	toolKinds = []kind{kindAttest, kindIndex, kindGit, kindState, kindConfig}
+	toolKinds = []kind{kindIndex, kindGit, kindState, kindConfig}
 	// readTools never write a file.
 	readTools = []string{
 		"lsp",
@@ -99,12 +87,6 @@ var (
 		"patch", "insert", "append", "upload", "push", "commit", "merge",
 		"save", "add", "download", "export", "copy", "send", "run", "exec", "interact", "kill", "start", "stop", "install",
 	}
-	// fuzzy folds what pi's edit forgives when its old text is not found.
-	fuzzy = strings.NewReplacer(
-		"\u2018", "'", "\u2019", "'", "\u201a", "'", "\u201b", "'",
-		"\u201c", `"`, "\u201d", `"`, "\u201e", `"`, "\u201f", `"`,
-		"\u2010", "-", "\u2011", "-", "\u2012", "-", "\u2013", "-", "\u2014", "-", "\u2015", "-", "\u2212", "-",
-	)
 )
 
 // Store is one checkout the trust file pins.
@@ -142,8 +124,6 @@ type Guard struct {
 	roots []root
 	// links are the guarded files a hard link elsewhere could reach.
 	links []string
-	// attests are the attest dirs whose entries a hard link could reach.
-	attests []string
 	// stores are the resolved store roots, whose files a hard link could reach.
 	stores []string
 	host   *gate.Host
@@ -160,15 +140,13 @@ type Guard struct {
 
 // New returns a guard over p, rendering shell paths in host.
 func New(p Paths, host *gate.Host) *Guard {
-	g := &Guard{host: host, fold: runtime.GOOS == "darwin", tokens: []string{attestDir, strings.ToLower(store.IndexFile)}}
+	g := &Guard{host: host, fold: runtime.GOOS == "darwin", tokens: []string{strings.ToLower(store.IndexFile)}}
 	for _, s := range p.Stores {
 		label := "the " + s.Name + " store"
 		g.add(s.Path, kindStore, label)
-		g.add(filepath.Join(s.Path, attestDir), kindAttest, label+"'s attest entries")
 		g.add(filepath.Join(s.Path, store.IndexFile), kindIndex, label+"'s generated index")
 		g.add(filepath.Join(s.Path, ".git"), kindGit, label+"'s git dir")
 		g.links = append(g.links, filepath.Join(s.Path, store.IndexFile))
-		g.attests = append(g.attests, filepath.Join(s.Path, attestDir))
 		res := filepath.Clean(s.Path)
 		if r, ok := physical(res); ok {
 			res = r
@@ -523,26 +501,22 @@ func (g *Guard) tool(cwd, name string, input json.RawMessage) string {
 	c := g.newCheck(cwd, nil, false)
 	for _, pf := range in.patches {
 		for _, p := range pf.paths {
-			if r := c.toolPath(name, p, nil); r != "" {
-				return r
-			}
-			if r := c.patch(name, p, pf); r != "" {
+			if r := c.toolPath(name, p); r != "" {
 				return r
 			}
 		}
 	}
 	for _, p := range paths {
-		if r := c.toolPath(name, p, in); r != "" {
+		if r := c.toolPath(name, p); r != "" {
 			return r
 		}
 	}
 	return ""
 }
 
-// toolPath judges one path a file tool names, and the content in writes it
-// to a store file, or a hard link to one. in is nil for a patch, judged by
-// patch.
-func (c *check) toolPath(name, p string, in *toolInput) string {
+// toolPath judges one path a file tool names, or a hard link to a guarded
+// file.
+func (c *check) toolPath(name, p string) string {
 	cands := c.toolCandidates(p)
 	for _, cand := range cands {
 		r := c.relate(cand, toolKinds)
@@ -563,17 +537,6 @@ func (c *check) toolPath(name, p string, in *toolInput) string {
 			if r := c.relate(t, toolKinds); r.rel == inside {
 				return deny("%s would write %s, a hard link to %s, %s", name, cand, t, describe(r.root, t))
 			}
-		}
-	}
-	if in == nil {
-		return ""
-	}
-	for _, cand := range cands {
-		if !c.storeFile(cand) {
-			continue
-		}
-		if r := c.reviewed(name, cand, in); r != "" {
-			return r
 		}
 	}
 	return ""
@@ -635,163 +598,6 @@ func describe(r root, p string) string {
 		return r.label
 	}
 	return "inside " + r.label
-}
-
-// reviewed denies a write that leaves a store file claiming confidence:
-// reviewed: the full content, or the file as each edit would leave it.
-func (c *check) reviewed(name, p string, in *toolInput) string {
-	const claim = "%s would leave %s claiming confidence: reviewed, which only attestation writes"
-	if slices.ContainsFunc(in.contents, reviewedClaim) || slices.ContainsFunc(in.other, reviewedClaim) {
-		return deny(claim, name, p)
-	}
-	if len(in.edits) == 0 {
-		return ""
-	}
-	if slices.ContainsFunc(in.edits, func(e edit) bool { return e.pi && yamlRisk(e.new, true) }) {
-		return deny("%s's new text may leave %s claiming confidence: reviewed, which only attestation writes", name, p)
-	}
-	base, err := readSmall(p)
-	if err != nil {
-		return deny("%s edits %s, which the guard cannot read to check the edit: %v", name, p, err)
-	}
-	first, all := base, base
-	for _, e := range in.edits {
-		if e.old == "" {
-			first, all = e.new, e.new
-			continue
-		}
-		if !e.all {
-			first = strings.Replace(first, e.old, e.new, 1)
-		}
-		all = strings.ReplaceAll(all, e.old, e.new)
-		if e.all {
-			first = strings.ReplaceAll(first, e.old, e.new)
-		}
-	}
-	// pi applies every edit against the original file, on a normalised copy
-	// when an old text is not found as it is.
-	if reviewedClaim(first) || reviewedClaim(all) ||
-		reviewedClaim(splice(base, in.edits, func(s string) string { return s })) ||
-		reviewedClaim(splice(fuzzyText(base), in.edits, fuzzyText)) {
-		return deny(claim, name, p)
-	}
-	return ""
-}
-
-// splice is base with each edit applied at the first occurrence of its old
-// text in base, as read through fold; an edit whose text is missing or
-// overlaps an earlier one is skipped, and one without old text replaces the
-// whole file.
-func splice(base string, edits []edit, fold func(string) string) string {
-	type span struct {
-		from, to int
-		new      string
-	}
-	var spans []span
-	for _, e := range edits {
-		if e.old == "" {
-			return e.new
-		}
-		old := fold(e.old)
-		i := strings.Index(base, old)
-		if old == "" || i < 0 || slices.ContainsFunc(spans, func(s span) bool { return i < s.to && i+len(old) > s.from }) {
-			continue
-		}
-		spans = append(spans, span{i, i + len(old), e.new})
-	}
-	slices.SortFunc(spans, func(a, b span) int { return a.from - b.from })
-	var b strings.Builder
-	at := 0
-	for _, s := range spans {
-		b.WriteString(base[at:s.from])
-		b.WriteString(s.new)
-		at = s.to
-	}
-	b.WriteString(base[at:])
-	return b.String()
-}
-
-// fuzzyText is s as pi's edit compares it when an old text is not found:
-// NFKC, no trailing white space on a line, and quotes and dashes folded.
-func fuzzyText(s string) string {
-	lines := strings.Split(norm.NFKC.String(strings.ReplaceAll(s, "\r\n", "\n")), "\n")
-	for i, l := range lines {
-		lines[i] = strings.TrimRightFunc(l, func(r rune) bool { return unicode.IsSpace(r) || r == '\ufeff' })
-	}
-	return fuzzy.Replace(strings.Join(lines, "\n"))
-}
-
-// reviewedClaim reports a text that claims review as priors reads a fact, or,
-// when it is no fact, one that holds the word at all.
-func reviewedClaim(text string) bool {
-	if f, err := fact.Parse([]byte(text)); err == nil {
-		return attest.Claims(f)
-	}
-	return strings.Contains(strings.ToLower(text), "reviewed")
-}
-
-// patch judges a patch's change to a store file, or a hard link to one. A new
-// file's content is read as a fact. A change to an existing one is judged by
-// its lines, since the guard does not apply hunks: an added line that holds the
-// word, or an escape, tag or alias that could spell it, or a file that already
-// holds any of them (a deleted line can join what is left), is denied.
-func (c *check) patch(name, p string, pf patchFile) string {
-	cands := c.toolCandidates(p)
-	if !slices.ContainsFunc(cands, c.storeFile) {
-		return ""
-	}
-	const claim = "%s may leave %s claiming confidence: reviewed, which only attestation writes"
-	added := strings.Join(pf.added, "\n")
-	if !pf.update {
-		if reviewedClaim(added) {
-			return deny(claim, name, p)
-		}
-		return ""
-	}
-	if yamlRisk(added, true) {
-		return deny(claim, name, p)
-	}
-	for _, cand := range cands {
-		base, err := readSmall(cand)
-		if err != nil {
-			return deny("%s patches %s, which the guard cannot read to check the patch: %v", name, cand, err)
-		}
-		if yamlRisk(base, false) {
-			return deny(claim, name, p)
-		}
-	}
-	return ""
-}
-
-// yamlRisk reports text holding the word reviewed, an escape or a tag, and
-// with alias an alias as well.
-func yamlRisk(text string, alias bool) bool {
-	risky := `\!`
-	if alias {
-		risky += "*"
-	}
-	return strings.Contains(strings.ToLower(text), "reviewed") || strings.ContainsAny(text, risky)
-}
-
-// readSmall reads a file of at most maxRead bytes; a missing one is empty.
-func readSmall(p string) (string, error) {
-	f, err := os.Open(p) //nolint:gosec // a store file the call names, read to judge the call
-	if errors.Is(err, fs.ErrNotExist) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = f.Close() }()
-	var b bytes.Buffer
-	n, err := b.ReadFrom(io.LimitReader(f, maxRead+1))
-	if err != nil {
-		return "", err
-	}
-	if n > maxRead {
-		return "", fmt.Errorf("larger than %d bytes", maxRead)
-	}
-	return b.String(), nil
 }
 
 // check is one call's view of the guard: the dirs its relative paths resolve
@@ -867,11 +673,6 @@ func (c *check) resolve(p string, dirs []string) []string {
 		for _, d := range dirs {
 			abs = append(abs, d+string(filepath.Separator)+p)
 		}
-		if c.lost {
-			// A path relative to a dir that cannot be told still names
-			// .attest by its elements.
-			abs = append(abs, p)
-		}
 	}
 	var out []string
 	for _, a := range abs {
@@ -903,18 +704,10 @@ type match struct {
 	root root
 }
 
-// relate reports whether p is inside a root of kinds, or holds one, or
-// names an .attest dir by its elements; a glob matches what it may expand to.
+// relate reports whether p is inside a root of kinds, or holds one; a glob
+// matches what it may expand to.
 func (c *check) relate(p string, kinds []kind) match {
 	g := c.g
-	elems := strings.Split(filepath.ToSlash(p), "/")
-	for i, e := range elems {
-		// A glob element matches a dot name only when it starts with a dot,
-		// as bash globs do without dotglob.
-		if c.same(e, attestDir) || glob(e) && strings.HasPrefix(e, ".") && c.matches(e, attestDir) {
-			return match{inside, root{path: strings.Join(elems[:i+1], "/"), label: "an .attest dir", kind: kindAttest}}
-		}
-	}
 	best := match{}
 	for _, r := range g.roots {
 		if !slices.Contains(kinds, r.kind) {
@@ -997,12 +790,6 @@ func (c *check) prefix(text string) match {
 	return best
 }
 
-// storeFile reports a path inside a store, or a hard link to one of its files.
-func (c *check) storeFile(p string) bool {
-	to, _ := c.linked(p)
-	return c.relate(p, []kind{kindStore}).rel == inside || len(to) > 0
-}
-
 // linked returns the guarded files p is a hard link to. unknown is set when p
 // has other links and the store walk ran out of budget before matching one.
 func (c *check) linked(p string) (to []string, unknown bool) {
@@ -1034,15 +821,6 @@ func (c *check) links() []linkTarget {
 	for _, p := range c.g.links {
 		add(p)
 	}
-	for _, dir := range c.g.attests {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries[:min(len(entries), maxEntries)] {
-			add(filepath.Join(dir, e.Name()))
-		}
-	}
 	for _, dir := range c.g.stores {
 		_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 			switch {
@@ -1071,13 +849,6 @@ func (c *check) within(p, dir string) bool {
 	}
 	rel, err := filepath.Rel(dir, p)
 	return err == nil && filepath.IsLocal(rel)
-}
-
-func (c *check) same(a, b string) bool {
-	if c.g.fold {
-		return strings.EqualFold(a, b)
-	}
-	return a == b
 }
 
 func (c *check) hasPrefix(s, prefix string) bool {
@@ -1235,28 +1006,20 @@ func physical(p string) (string, bool) {
 	return cur, true
 }
 
-// toolInput is what a file tool's input names: paths, full contents, edits
-// and patches.
+// toolInput is what a file tool's input names: paths, full contents and
+// patches.
 type toolInput struct {
 	paths    []string
 	contents []string
 	// other are the strings under keys the guard does not know: a path or
 	// content there is as good as one under a known key.
 	other   []string
-	edits   []edit
 	patches []patchFile
 	nodes   int
 	// twice reports an edit text a call names under two keys that normalise
 	// alike.
 	twice     bool
 	truncated bool
-}
-
-type edit struct {
-	old, new string
-	all      bool
-	// pi is an edit in pi's form, oldText and newText.
-	pi bool
 }
 
 // judged are the strings judged as paths, as they are and trimmed, with the
@@ -1297,9 +1060,7 @@ func (in *toolInput) judged() []string {
 // patchFile is one file a Codex-style patch changes.
 type patchFile struct {
 	// paths are the file and, for a move, where it goes.
-	paths  []string
-	added  []string
-	update bool
+	paths []string
 }
 
 // walk reads v. embed reports strings headed to paths or other, where a JSON
@@ -1346,7 +1107,6 @@ func (in *toolInput) embedded(s string) {
 	in.paths = append(in.paths, doc.paths...)
 	in.contents = append(in.contents, doc.contents...)
 	in.other = append(in.other, doc.other...)
-	in.edits = append(in.edits, doc.edits...)
 	in.patches = append(in.patches, doc.patches...)
 	in.twice = in.twice || doc.twice
 }
@@ -1381,11 +1141,8 @@ func (in *toolInput) object(m map[string]any, depth int) {
 // Pi's oldText and newText. It returns the keys the edits it read take, which
 // are neither paths nor contents.
 func (in *toolInput) editsOf(m map[string][]any) (taken []string) {
-	for _, pair := range []struct {
-		old, new string
-		pi       bool
-	}{{"oldstring", "newstring", false}, {"oldtext", "newtext", true}} {
-		olds, news := m[pair.old], m[pair.new]
+	for _, pair := range [][2]string{{"oldstring", "newstring"}, {"oldtext", "newtext"}} {
+		olds, news := m[pair[0]], m[pair[1]]
 		if len(olds) > 1 || len(news) > 1 {
 			in.twice = true
 			continue
@@ -1393,11 +1150,10 @@ func (in *toolInput) editsOf(m map[string][]any) (taken []string) {
 		if len(olds) == 0 || len(news) == 0 {
 			continue
 		}
-		old, ok1 := olds[0].(string)
-		nw, ok2 := news[0].(string)
+		_, ok1 := olds[0].(string)
+		_, ok2 := news[0].(string)
 		if ok1 && ok2 {
-			in.edits = append(in.edits, edit{old: old, new: nw, all: slices.Contains(m["replaceall"], any(true)), pi: pair.pi})
-			taken = append(taken, pair.old, pair.new, "replaceall")
+			taken = append(taken, pair[0], pair[1], "replaceall")
 		}
 	}
 	return taken
@@ -1428,8 +1184,7 @@ func (in *toolInput) strings(v any, out *[]string, depth int) {
 	}
 }
 
-// parsePatch reads the files a patch in Codex's apply_patch format changes,
-// with the lines it adds to each.
+// parsePatch reads the files a patch in Codex's apply_patch format changes.
 func parsePatch(text string) []patchFile {
 	var files []patchFile
 	var cur *patchFile
@@ -1440,15 +1195,13 @@ func parsePatch(text string) []patchFile {
 			files = append(files, patchFile{paths: []string{strings.TrimPrefix(line, "*** Add File: ")}})
 			cur = &files[len(files)-1]
 		case strings.HasPrefix(line, "*** Update File: "):
-			files = append(files, patchFile{paths: []string{strings.TrimPrefix(line, "*** Update File: ")}, update: true})
+			files = append(files, patchFile{paths: []string{strings.TrimPrefix(line, "*** Update File: ")}})
 			cur = &files[len(files)-1]
 		case strings.HasPrefix(line, "*** Delete File: "):
-			files = append(files, patchFile{paths: []string{strings.TrimPrefix(line, "*** Delete File: ")}, update: true})
+			files = append(files, patchFile{paths: []string{strings.TrimPrefix(line, "*** Delete File: ")}})
 			cur = &files[len(files)-1]
 		case strings.HasPrefix(line, "*** Move to: ") && cur != nil:
 			cur.paths = append(cur.paths, strings.TrimPrefix(line, "*** Move to: "))
-		case strings.HasPrefix(line, "+") && cur != nil:
-			cur.added = append(cur.added, line[1:])
 		}
 	}
 	return files

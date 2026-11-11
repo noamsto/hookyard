@@ -13,7 +13,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
@@ -38,14 +37,14 @@ type Options struct {
 }
 
 // Assemble is the tier-1 injection for session s, and what it skipped (never
-// the skipped text itself), then v's attestation reports. It returns "" when
-// there is nothing to inject or ctx is done.
-func Assemble(ctx context.Context, s route.Session, cfg config.Config, rules gate.Rules, v *attest.Verifier, opts Options) (text string, reports []string) {
-	return assemble(ctx, s, cfg, rules, v, opts, Budget)
+// the skipped text itself). It returns "" when there is nothing to inject or
+// ctx is done.
+func Assemble(ctx context.Context, s route.Session, cfg config.Config, rules gate.Rules, opts Options) (text string, reports []string) {
+	return assemble(ctx, s, cfg, rules, opts, Budget)
 }
 
-func assemble(ctx context.Context, s route.Session, cfg config.Config, rules gate.Rules, v *attest.Verifier, opts Options, budget int) (text string, reports []string) {
-	a := assembler{ctx: ctx, session: s, rules: rules, verifier: v}
+func assemble(ctx context.Context, s route.Session, cfg config.Config, rules gate.Rules, opts Options, budget int) (text string, reports []string) {
+	a := assembler{ctx: ctx, session: s, rules: rules}
 	grouped := opts.Claude && opts.NativeMemDir != ""
 	if grouped {
 		a.native = nativeIndex(ctx, opts.NativeMemDir)
@@ -55,7 +54,7 @@ func assemble(ctx context.Context, s route.Session, cfg config.Config, rules gat
 	for _, id := range route.ReadStores(s, cfg) {
 		entries := a.storeEntries(id, cfg)
 		if ctx.Err() != nil {
-			return "", a.allReports()
+			return "", a.reports
 		}
 		var lines []string
 		if grouped {
@@ -70,7 +69,7 @@ func assemble(ctx context.Context, s route.Session, cfg config.Config, rules gat
 		body := strings.Join(lines, "\n") + "\n"
 		blocks = append(blocks, sanitize.Fence(sanitize.Header(string(id)+" store"), body, sanitize.NewDelimiter()))
 	}
-	return strings.Join(blocks, "\n"), a.allReports()
+	return strings.Join(blocks, "\n"), a.reports
 }
 
 // entry is one indexed fact: its index line and what the grouped layout sorts
@@ -88,14 +87,7 @@ type assembler struct {
 	session route.Session
 	rules   gate.Rules
 	reports []string
-	// verifier judges each indexed fact that claims review; the index shows no
-	// verdict, so only its reports reach the output.
-	verifier *attest.Verifier
-	native   native
-}
-
-func (a *assembler) allReports() []string {
-	return append(a.reports, a.verifier.Reports()...)
+	native  native
 }
 
 func (a *assembler) reportf(format string, args ...any) {
@@ -163,7 +155,6 @@ func (a *assembler) rootEntries(root store.Root, applies func(rel string, f fact
 			a.reportf("excluded %s/%s: rule %s", root.Store, rel, strings.Join(ids, ","))
 			continue
 		}
-		a.verifier.Reviewed(store.Entry{Root: root, Rel: rel, Fact: f, Raw: raw})
 		rendered := root.IndexLines([]store.Entry{{Root: root, Rel: rel, Fact: f}})
 		if len(rendered) == 0 {
 			continue

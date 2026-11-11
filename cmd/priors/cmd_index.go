@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/commit"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
@@ -251,7 +250,7 @@ func assembleIndex(ctx context.Context, cfgPath, cwd, engine string) hookResult 
 	if home, err := os.UserHomeDir(); err == nil && opts.Claude {
 		opts.NativeMemDir = nativeMemDir(ctx, id.cwd, home)
 	}
-	text, reports := tier1.Assemble(ctx, sessionAt(ctx, id.cwd, cfg), cfg, rules, attest.ForHost(cfg), opts)
+	text, reports := tier1.Assemble(ctx, sessionAt(ctx, id.cwd, cfg), cfg, rules, opts)
 	return hookResult{text: text, reports: reports}
 }
 

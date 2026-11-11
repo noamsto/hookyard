@@ -26,8 +26,8 @@ func offPathFact(name, repo, typ string) fact.Fact {
 	return f
 }
 
-// writeOffPathTrust is writeTrust with an optional trust_root line before the
-// store tables.
+// writeOffPathTrust writes a trust file that pins no remotes, with an optional
+// trust_root line (deprecated and ignored since #289) before the store tables.
 func (sb *sandbox) writeOffPathTrust(trustRoot string) {
 	sb.t.Helper()
 	lines := []string{
@@ -65,6 +65,8 @@ func (l *offPathLog) run(label, stdin string, args ...string) {
 }
 
 func TestOffPath(t *testing.T) {
+	// trust_root is ignored, so an absent key and "owner-admin" must give the
+	// same bytes as each other for a profile.
 	for _, trustRoot := range []string{"", "owner-admin"} {
 		for _, profile := range []string{"personal", "work"} {
 			name := "no-trust-root-" + profile
@@ -72,13 +74,13 @@ func TestOffPath(t *testing.T) {
 				name = trustRoot + "-" + profile
 			}
 			t.Run(name, func(t *testing.T) {
-				checkOffPath(t, name, profile, trustRoot)
+				checkOffPath(t, profile, trustRoot)
 			})
 		}
 	}
 }
 
-func checkOffPath(t *testing.T, name, profile, trustRoot string) {
+func checkOffPath(t *testing.T, profile, trustRoot string) {
 	sb := newSandbox(t, profile)
 	sb.writeOffPathTrust(trustRoot)
 	remote, repoName, store := personalRemote, "demo", sb.personal
@@ -125,7 +127,7 @@ func checkOffPath(t *testing.T, name, profile, trustRoot string) {
 	l.run("lint (with violations)", "", "lint")
 	l.run("list (with violations)", "", "list", "--cwd", repo)
 
-	golden := filepath.Join("testdata", "offpath", name+".golden")
+	golden := filepath.Join("testdata", "offpath", profile+".golden")
 	got := l.out.String()
 	if *update {
 		if err := os.MkdirAll(filepath.Dir(golden), 0o755); err != nil {

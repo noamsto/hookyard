@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 	"github.com/noamsto/hookyard/cmd/priors/internal/sanitize"
 	"github.com/noamsto/hookyard/cmd/priors/internal/search"
@@ -67,17 +66,12 @@ func cmdSearch(args []string, s streams) int {
 	if len(hits) == 0 {
 		return 0
 	}
-	v := attest.ForHost(cfg)
 	lines := make([]string, len(hits))
 	for i, h := range hits {
 		e := h.Entry
 		row := fmt.Sprintf("%s/%s — %s — %s", e.Root.Store, e.Rel, e.Fact.Name, e.Fact.Description)
-		if v.Reviewed(e) {
-			row = reviewedMark + row
-		}
 		lines[i] = sanitize.Line(row, sanitize.IndexLineMax)
 	}
-	printReports(s, v)
 	header := sanitize.Header("search: " + strings.Join(terms, " "))
 	s.outText(sanitize.Fence(header, strings.Join(lines, "\n"), sanitize.NewDelimiter()))
 	return 0

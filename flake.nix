@@ -76,7 +76,7 @@
         };
 
         packages = let
-          vendorHash = "sha256-rYu/tFPCYZduffFHAdj2TkopZU+Y6fkPLxinLgZ4nn4=";
+          vendorHash = "sha256-7WjrSgJ3hDpt+YTUZpmB5O6iWnQEw/trYARrbmGFWDg=";
           hookyard = pkgs.buildGoModule {
             pname = "hookyard";
             version = "0.1.0";
@@ -97,7 +97,6 @@
           # (docs/design/memory-layer.md §5).
           priors = let
             tools = "github.com/noamsto/hookyard/cmd/priors/internal/tools";
-            attest = "github.com/noamsto/hookyard/cmd/priors/internal/attest";
             # The tests exec these; the binary gets them as pinned paths.
             runtimeDeps = [pkgs.git pkgs.ripgrep pkgs.betterleaks pkgs.openssh];
             # The push runs ssh with -F and UserKnownHostsFile pointing here,
@@ -123,10 +122,10 @@
               [ssh.github.com]:443 ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
             '';
           in
-            pkgs.lib.makeOverridable ({
-              # nix-config sets the priors-verify account's uid (memory-layer §4.4).
-              priorsVerifyUid ? null,
-            }:
+            # Takes no arguments. Priors attestation was removed (#289), so the
+            # old priorsVerifyUid override is accepted and ignored: a
+            # nix-config that still passes it keeps evaluating.
+            pkgs.lib.makeOverridable (_:
               pkgs.buildGoModule {
                 pname = "priors";
                 version = "0.1.0";
@@ -143,10 +142,7 @@
                     "-X ${tools}.SSHConfig=${sshConfig}"
                     "-X ${tools}.KnownHosts=${knownHosts}"
                     "-X ${tools}.PushGitDir=${pushGitDir}"
-                    "-X ${tools}.SSHKeygen=${pkgs.openssh}/bin/ssh-keygen"
-                    "-X ${tools}.SSHSKHelper=${pkgs.openssh}/libexec/ssh-sk-helper"
                   ]
-                  ++ pkgs.lib.optional (priorsVerifyUid != null) "-X ${attest}.VerifyUID=${toString priorsVerifyUid}"
                   # dyld runs before main and ignores DYLD_* for a binary
                   # with a __RESTRICT,__restrict section (memory-layer §4.4).
                   ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [

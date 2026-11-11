@@ -2,10 +2,7 @@ package commit
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,8 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/noamsto/hookyard/cmd/priors/internal/attest"
-	"github.com/noamsto/hookyard/cmd/priors/internal/attest/attesttest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/commit/committest"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
@@ -256,6 +251,24 @@ func TestCommitsDeletion(t *testing.T) {
 	committest.AssertHeadIndexInTree(t, fx.dir())
 }
 
+// TestCommitsAReviewedFact: confidence: reviewed is a plain label, so a
+// hand-written self-reviewed fact commits like any other.
+func TestCommitsAReviewedFact(t *testing.T) {
+	fx := setup(t)
+	f := cleanFact("reviewed-fact")
+	f.Metadata.Confidence = "reviewed"
+	fx.put(t, "_global/reviewed-fact.md", f)
+	fx.index(t)
+
+	if w := fx.checkout(t); w != "" {
+		t.Fatalf("warning = %q, want a clean commit", w)
+	}
+	if !slices.Contains(lsFiles(t, fx.dir()), "_global/reviewed-fact.md") {
+		t.Error("the reviewed fact was not committed")
+	}
+	committest.AssertHeadIndexInTree(t, fx.dir())
+}
+
 func TestNothingDirtyIsNoCommit(t *testing.T) {
 	fx := setup(t)
 	before := head(t, fx.dir())
@@ -304,11 +317,6 @@ func TestRefusesUngatedPaths(t *testing.T) {
 			f.Metadata.Flags = []string{"provenance:external"}
 			fx.put(t, "_global/flagged-fact.md", f)
 		}, "_global/flagged-fact.md", false, ""},
-		{"self-reviewed fact", func(t *testing.T, fx fixture) {
-			f := cleanFact("reviewed-fact")
-			f.Metadata.Confidence = "reviewed"
-			fx.put(t, "_global/reviewed-fact.md", f)
-		}, "_global/reviewed-fact.md", false, ""},
 		{"unparsable fact", func(t *testing.T, fx fixture) {
 			writeFile(t, filepath.Join(fx.dir(), "_global", "broken.md"), []byte("no frontmatter\n"))
 		}, "_global/broken.md", false, "frontmatter"},
@@ -1366,404 +1374,37 @@ func TestPushRefusesDetachedHead(t *testing.T) {
 	}
 }
 
-type fakeGroups map[int]string
-
-func (g fakeGroups) Gids() ([]int, error)         { return slices.Collect(maps.Keys(g)), nil }
-func (g fakeGroups) Name(gid int) (string, error) { return g[gid], nil }
-
-func withGroups(t *testing.T, g attest.GroupSource) {
-	t.Helper()
-	old := groups
-	groups = g
-	t.Cleanup(func() { groups = old })
-}
-
-const (
-	testStoreID = "personal-test"
-	// upUV is an sk signature's flags with user presence and verification.
-	upUV       = 0x05
-	revRel     = "_global/rev-fact.md"
-	revEntry   = ".attest/rev-fact"
-	badArmour  = "-----BEGIN SSH SIGNATURE-----\nZ2FyYmFnZQ==\n-----END SSH SIGNATURE-----\n"
-	attestNote = "left uncommitted, not fact files: "
-)
-
-// separate makes fx a separate-trust-root host in no privileged group, with
-// the returned key allowlisted: attestation is on.
-func separate(t *testing.T, fx fixture) (fixture, attesttest.Key) {
-	t.Helper()
-	key := attesttest.NewSKEd25519(t)
-	fx.cfg.TrustRoot, fx.cfg.TrustRootLabel = "separate", "separate"
-	fx.cfg.PersonalStoreID = testStoreID
-	fx.cfg.AttestKeys = []config.AttestKey{{Key: key.PublicKey()}}
-	withGroups(t, fakeGroups{100: "users"})
-	return fx, key
-}
-
-func reviewedFact(name string) fact.Fact {
-	f := cleanFact(name)
-	f.Metadata.Confidence = "reviewed"
-	return f
-}
-
-// entry is key's signed entry for the fact name at rel whose bytes are raw.
-func entry(key attesttest.Key, name, rel string, raw []byte, op string, flags byte) []byte {
-	sum := sha256.Sum256(raw)
-	return attesttest.Signed(key, attesttest.Entry(testStoreID, name, rel, hex.EncodeToString(sum[:]), 1, op), flags, attest.Namespace)
-}
-
-// putReviewed writes the reviewed fact rev-fact and returns its bytes.
-func (fx fixture) putReviewed(t *testing.T) []byte {
-	t.Helper()
-	raw := marshal(t, reviewedFact("rev-fact"))
-	writeFile(t, filepath.Join(fx.dir(), filepath.FromSlash(revRel)), raw)
-	return raw
-}
-
-func (fx fixture) putAttest(t *testing.T, rel string, b []byte) {
-	t.Helper()
-	writeFile(t, filepath.Join(fx.dir(), filepath.FromSlash(rel)), b)
-}
-
-func (fx fixture) commitAll(t *testing.T, msg string) {
-	t.Helper()
-	git(t, fx.dir(), "add", "-A")
-	git(t, fx.dir(), "commit", "-q", "-m", msg)
-}
-
-func lastCommit(t *testing.T, dir string) []string {
-	t.Helper()
-	return strings.Fields(git(t, dir, "log", "-1", "--name-only", "--format="))
-}
-
-// assertNothingCommitted checks HEAD is before and the good fact planted
-// alongside reached neither the index nor a commit.
-func assertNothingCommitted(t *testing.T, fx fixture, before string) {
-	t.Helper()
-	if head(t, fx.dir()) != before {
-		t.Error("HEAD moved")
-	}
-	if s := staged(t, fx.dir()); s != "" {
-		t.Errorf("staged %q, want nothing", s)
-	}
-	if slices.Contains(lsFiles(t, fx.dir()), "_global/good-fact.md") {
-		t.Error("the good fact was staged alongside a refused path")
-	}
-	committest.AssertHeadIndexInTree(t, fx.dir())
-}
-
-func TestSeparateHostCommitsReviewedFactWithItsEntry(t *testing.T) {
-	fx, key := separate(t, setup(t))
-	raw := fx.putReviewed(t)
-	fx.putAttest(t, revEntry, entry(key, "rev-fact", revRel, raw, "attest", upUV))
-	fx.index(t)
-
-	if w := fx.checkout(t); w != "" {
-		t.Fatalf("warning = %q", w)
-	}
-	if got, want := lastCommit(t, fx.dir()), []string{revEntry, "MEMORY.md", revRel}; !slices.Equal(got, want) {
-		t.Errorf("commit files = %v, want %v", got, want)
-	}
-	if out := git(t, fx.dir(), "status", "--porcelain"); out != "" {
-		t.Errorf("checkout still dirty: %q", out)
-	}
-	committest.AssertHeadIndexInTree(t, fx.dir())
-}
-
-func TestSeparateHostAcceptsReviewedFactWhoseEntryIsInHead(t *testing.T) {
-	fx, key := separate(t, setup(t))
-	raw := marshal(t, reviewedFact("rev-fact"))
-	fx.putAttest(t, revEntry, entry(key, "rev-fact", revRel, raw, "attest", upUV))
-	fx.commitAll(t, "entry")
-	fx.putReviewed(t)
-	fx.index(t)
-
-	if w := fx.checkout(t); w != "" {
-		t.Fatalf("warning = %q", w)
-	}
-	if got, want := lastCommit(t, fx.dir()), []string{"MEMORY.md", revRel}; !slices.Equal(got, want) {
-		t.Errorf("commit files = %v, want %v", got, want)
-	}
-}
-
-func TestSeparateHostUnbornStoreAcceptsReviewedFactWithEntry(t *testing.T) {
-	fx, key := separate(t, unborn(t))
-	raw := fx.putReviewed(t)
-	fx.putAttest(t, revEntry, entry(key, "rev-fact", revRel, raw, "attest", upUV))
-	fx.index(t)
-
-	if w, want := fx.checkout(t), attestNote+".gitignore in "+fx.dir(); w != want {
-		t.Fatalf("warning = %q, want %q", w, want)
-	}
-	files := lsFiles(t, fx.dir())
-	for _, want := range []string{revEntry, revRel} {
-		if !slices.Contains(files, want) {
-			t.Errorf("committed files %v lack %s", files, want)
-		}
-	}
-	if head(t, fx.dir()) == "" {
-		t.Error("no commit made")
-	}
-}
-
-func TestSeparateHostRefusesUnattestedReview(t *testing.T) {
-	tests := []struct {
-		name  string
-		entry func(t *testing.T, key attesttest.Key, raw []byte) []byte
+// TestLeavesLeftoverAttestDirOut pins #289: .attest/ is no longer special, so
+// a dirty file under it is left out of the commit like any other dot directory
+// and named in the note, whatever it holds, while the gated fact beside it
+// commits.
+func TestLeavesLeftoverAttestDirOut(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		body string
 	}{
-		{"no entry", nil},
-		{"entry for other bytes", func(t *testing.T, key attesttest.Key, raw []byte) []byte {
-			return entry(key, "rev-fact", revRel, []byte("other bytes\n"), "attest", upUV)
-		}},
-		{"entry for another path", func(t *testing.T, key attesttest.Key, raw []byte) []byte {
-			return entry(key, "rev-fact", "_global/other.md", raw, "attest", upUV)
-		}},
-		{"entry for another store", func(t *testing.T, key attesttest.Key, raw []byte) []byte {
-			sum := sha256.Sum256(raw)
-			return attesttest.Signed(key, attesttest.Entry("work-test", "rev-fact", revRel, hex.EncodeToString(sum[:]), 1, "attest"), upUV, attest.Namespace)
-		}},
-		{"revoke entry", func(t *testing.T, key attesttest.Key, raw []byte) []byte {
-			return entry(key, "rev-fact", revRel, raw, "revoke", upUV)
-		}},
-		{"unsigned entry", func(t *testing.T, key attesttest.Key, raw []byte) []byte {
-			sum := sha256.Sum256(raw)
-			return append(attesttest.Entry(testStoreID, "rev-fact", revRel, hex.EncodeToString(sum[:]), 1, "attest"), badArmour...)
-		}},
-		{"key not on the allowlist", func(t *testing.T, key attesttest.Key, raw []byte) []byte {
-			return entry(attesttest.NewSKEd25519(t), "rev-fact", revRel, raw, "attest", upUV)
-		}},
-		{"no user verification", func(t *testing.T, key attesttest.Key, raw []byte) []byte {
-			return entry(key, "rev-fact", revRel, raw, "attest", 0x01)
-		}},
-	}
-	for _, tt := range tests {
+		{"garbage", "jotted\n"},
+		{"entry-shaped", "-----BEGIN SSH SIGNATURE-----\nZ2FyYmFnZQ==\n-----END SSH SIGNATURE-----\n"},
+	} {
 		t.Run(tt.name, func(t *testing.T) {
-			fx, key := separate(t, setup(t))
-			before := head(t, fx.dir())
-			raw := fx.putReviewed(t)
-			if tt.entry != nil {
-				fx.putAttest(t, revEntry, tt.entry(t, key, raw))
-			}
-			fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
+			fx := setup(t)
+			writeFile(t, filepath.Join(fx.dir(), ".attest", "x"), []byte(tt.body))
+			f := cleanFact("reviewed-fact")
+			f.Metadata.Confidence = "reviewed"
+			fx.put(t, "_global/reviewed-fact.md", f)
 			fx.index(t)
 
-			w := fx.checkout(t)
-			if !strings.Contains(w, revRel+" (unattested-review") {
-				t.Errorf("warning = %q, want %s refused as unattested-review", w, revRel)
-			}
-			assertNothingCommitted(t, fx, before)
-		})
-	}
-}
-
-func TestSeparateHostCommitsStandaloneRevoke(t *testing.T) {
-	fx, key := separate(t, setup(t))
-	fx.putAttest(t, ".attest/gone-fact", entry(key, "gone-fact", "_global/gone-fact.md", []byte("old bytes\n"), "revoke", upUV))
-
-	if w := fx.checkout(t); w != "" {
-		t.Fatalf("warning = %q", w)
-	}
-	if got, want := lastCommit(t, fx.dir()), []string{".attest/gone-fact"}; !slices.Equal(got, want) {
-		t.Errorf("commit files = %v, want %v", got, want)
-	}
-}
-
-func TestSeparateHostRefusesBadAttestPaths(t *testing.T) {
-	tests := []struct {
-		name  string
-		plant func(t *testing.T, fx fixture, key attesttest.Key)
-		path  string
-		why   string
-		// also is another refusal the warning must hold.
-		also string
-		leak string
-	}{
-		{"malformed entry", func(t *testing.T, fx fixture, key attesttest.Key) {
-			fx.putAttest(t, ".attest/junk", []byte("jotted notes\n"))
-		}, ".attest/junk", "attest entry malformed", "", "jotted"},
-		{"entry under another file name", func(t *testing.T, fx fixture, key attesttest.Key) {
-			fx.putAttest(t, ".attest/junk", entry(key, "other", "_global/other.md", []byte("x\n"), "revoke", upUV))
-		}, ".attest/junk", "check 6", "", ""},
-		{"nested entry", func(t *testing.T, fx fixture, key attesttest.Key) {
-			fx.putAttest(t, ".attest/a/b", entry(key, "b", "_global/b.md", []byte("x\n"), "revoke", upUV))
-		}, ".attest/a/b", "attest entry not directly in .attest", "", ""},
-		{"symlinked entry", func(t *testing.T, fx fixture, key attesttest.Key) {
-			if err := os.MkdirAll(filepath.Join(fx.dir(), ".attest"), 0o755); err != nil { //nolint:gosec // test fixture
-				t.Fatal(err)
-			}
-			if err := os.Symlink("/etc/passwd", filepath.Join(fx.dir(), ".attest", "x")); err != nil {
-				t.Fatal(err)
-			}
-		}, ".attest/x", "not a regular file", "", "root"},
-		{"deleted entry", func(t *testing.T, fx fixture, key attesttest.Key) {
-			fx.putAttest(t, ".attest/x", entry(key, "x", "_global/x.md", []byte("x\n"), "revoke", upUV))
-			fx.commitAll(t, "entry")
-			if err := os.Remove(filepath.Join(fx.dir(), ".attest", "x")); err != nil {
-				t.Fatal(err)
-			}
-		}, ".attest/x", "attest entry deleted", "", ""},
-		{"ignored entry", func(t *testing.T, fx fixture, key attesttest.Key) {
-			writeFile(t, filepath.Join(fx.dir(), ".git", "info", "exclude"), []byte(revEntry+"\n"))
-			raw := fx.putReviewed(t)
-			fx.putAttest(t, revEntry, entry(key, "rev-fact", revRel, raw, "attest", upUV))
-		}, revEntry, "attest entry ignored by git", revRel + " (unattested-review", ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fx, key := separate(t, setup(t))
-			tt.plant(t, fx, key)
-			before := head(t, fx.dir())
-			fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
-			fx.index(t)
-
-			w := fx.checkout(t)
-			if !strings.Contains(w, tt.path+" ("+tt.why) {
-				t.Errorf("warning = %q, want %s refused (%s)", w, tt.path, tt.why)
-			}
-			if tt.also != "" && !strings.Contains(w, tt.also) {
-				t.Errorf("warning = %q, want it to hold %q", w, tt.also)
-			}
-			if tt.leak != "" && strings.Contains(w, tt.leak) {
-				t.Errorf("warning %q repeats the file's content", w)
-			}
-			assertNothingCommitted(t, fx, before)
-		})
-	}
-}
-
-func TestSeparateHostGateWalksNoHistory(t *testing.T) {
-	fx, key := separate(t, setup(t))
-	raw := marshal(t, reviewedFact("rev-fact"))
-	fx.putAttest(t, revEntry, entry(key, "rev-fact", revRel, raw, "attest", upUV))
-	fx.commitAll(t, "entry")
-	fx.putReviewed(t)
-	fx.putAttest(t, ".attest/gone-fact", entry(key, "gone-fact", "_global/gone-fact.md", []byte("old\n"), "revoke", upUV))
-	fx.index(t)
-
-	tmp := t.TempDir()
-	log, wrapper := filepath.Join(tmp, "git.log"), filepath.Join(tmp, "git")
-	writeFile(t, wrapper, fmt.Appendf(nil, "#!/bin/sh\nprintf '%%s\\n' \"$*\" >> '%s'\nexec '%s' \"$@\"\n", log, tools.Git))
-	if err := os.Chmod(wrapper, 0o755); err != nil { //nolint:gosec // a test executable
-		t.Fatal(err)
-	}
-	old := tools.Git
-	tools.Git = wrapper
-	t.Cleanup(func() { tools.Git = old })
-
-	if w := fx.checkout(t); w != "" {
-		t.Fatalf("warning = %q", w)
-	}
-	calls, err := os.ReadFile(log) //nolint:gosec // the test's own log
-	if err != nil {
-		t.Fatal(err)
-	}
-	var subs []string
-	for line := range strings.Lines(string(calls)) {
-		// -C <dir> -c core.hooksPath=/dev/null -c core.fsmonitor=false <subcommand> ...
-		if f := strings.Fields(line); len(f) > 6 {
-			subs = append(subs, f[6])
-		}
-	}
-	if !slices.Contains(subs, "ls-tree") {
-		t.Errorf("git calls %v: the wrapper did not see the gate", subs)
-	}
-	for _, s := range []string{"log", "rev-list"} {
-		if slices.Contains(subs, s) {
-			t.Errorf("git calls %v include %s", subs, s)
-		}
-	}
-}
-
-// offHosts are the hosts where attestation is off for the gate.
-var offHosts = []struct {
-	name string
-	set  func(t *testing.T, fx fixture) (fixture, attesttest.Key)
-}{
-	{"owner-admin", func(t *testing.T, fx fixture) (fixture, attesttest.Key) {
-		fx, key := separate(t, fx)
-		fx.cfg.TrustRoot, fx.cfg.TrustRootLabel = "owner-admin", "owner-admin"
-		return fx, key
-	}},
-	{"separate without keys", func(t *testing.T, fx fixture) (fixture, attesttest.Key) {
-		fx, key := separate(t, fx)
-		fx.cfg.AttestKeys = nil
-		return fx, key
-	}},
-	{"separate in wheel", func(t *testing.T, fx fixture) (fixture, attesttest.Key) {
-		fx, key := separate(t, fx)
-		withGroups(t, fakeGroups{100: "users", 10: "wheel"})
-		return fx, key
-	}},
-}
-
-func TestOffHostRefusesReviewedFactAsV0(t *testing.T) {
-	for _, host := range offHosts {
-		t.Run(host.name, func(t *testing.T) {
-			fx, key := host.set(t, setup(t))
-			before := head(t, fx.dir())
-			raw := fx.putReviewed(t)
-			fx.putAttest(t, revEntry, entry(key, "rev-fact", revRel, raw, "attest", upUV))
-			fx.index(t)
-
-			want := fmt.Sprintf("nothing committed in %s: not gated for the store: %s (unattested-review); %s%s", fx.dir(), revRel, attestNote, revEntry)
+			want := fmt.Sprintf("left uncommitted, not fact files: .attest/x in %s", fx.dir())
 			if w := fx.checkout(t); w != want {
 				t.Errorf("warning = %q, want %q", w, want)
 			}
-			if head(t, fx.dir()) != before {
-				t.Error("HEAD moved")
+			files := strings.Fields(git(t, fx.dir(), "log", "-1", "--name-only", "--format="))
+			if want := []string{"MEMORY.md", "_global/reviewed-fact.md"}; !slices.Equal(files, want) {
+				t.Errorf("commit files = %v, want %v", files, want)
+			}
+			if git(t, fx.dir(), "status", "--porcelain", "--untracked-files=all", "--", ".attest/x") == "" {
+				t.Error(".attest/x is no longer dirty")
 			}
 		})
-	}
-}
-
-func TestOffHostLeavesAttestChangesOut(t *testing.T) {
-	changes := []struct {
-		name  string
-		plant func(t *testing.T, fx fixture, key attesttest.Key)
-		noted bool
-	}{
-		{"new", func(t *testing.T, fx fixture, key attesttest.Key) {
-			fx.putAttest(t, ".attest/x", []byte("jotted\n"))
-		}, true},
-		{"changed", func(t *testing.T, fx fixture, key attesttest.Key) {
-			fx.putAttest(t, ".attest/x", entry(key, "x", "_global/x.md", []byte("x\n"), "revoke", upUV))
-			fx.commitAll(t, "entry")
-			fx.putAttest(t, ".attest/x", []byte("jotted\n"))
-		}, true},
-		{"deleted", func(t *testing.T, fx fixture, key attesttest.Key) {
-			fx.putAttest(t, ".attest/x", entry(key, "x", "_global/x.md", []byte("x\n"), "revoke", upUV))
-			fx.commitAll(t, "entry")
-			if err := os.Remove(filepath.Join(fx.dir(), ".attest", "x")); err != nil {
-				t.Fatal(err)
-			}
-		}, true},
-		{"ignored", func(t *testing.T, fx fixture, key attesttest.Key) {
-			writeFile(t, filepath.Join(fx.dir(), ".git", "info", "exclude"), []byte(".attest/x\n"))
-			fx.putAttest(t, ".attest/x", []byte("jotted\n"))
-		}, false},
-	}
-	for _, host := range offHosts {
-		for _, ch := range changes {
-			t.Run(host.name+"/"+ch.name, func(t *testing.T) {
-				fx, key := host.set(t, setup(t))
-				ch.plant(t, fx, key)
-				fx.put(t, "_global/good-fact.md", cleanFact("good-fact"))
-				fx.index(t)
-
-				want := ""
-				if ch.noted {
-					want = fmt.Sprintf("%s.attest/x in %s", attestNote, fx.dir())
-				}
-				if w := fx.checkout(t); w != want {
-					t.Errorf("warning = %q, want %q", w, want)
-				}
-				if got, want := lastCommit(t, fx.dir()), []string{"MEMORY.md", "_global/good-fact.md"}; !slices.Equal(got, want) {
-					t.Errorf("commit files = %v, want %v", got, want)
-				}
-				if ch.noted && git(t, fx.dir(), "status", "--porcelain", "--untracked-files=all", "--", ".attest/x") == "" {
-					t.Error(".attest/x is no longer dirty")
-				}
-			})
-		}
 	}
 }

@@ -9,12 +9,12 @@ func PathFields(s string) []string {
 }
 
 // PathTokens returns the path-like tokens in s: runs between pathBreaks that
-// hold a slash, start with ~ or name .attest. A token starting with - is also
-// taken from its first slash or ~ on, as `-o/path` glues one to a flag.
+// hold a slash or start with ~. A token starting with - is also taken from
+// its first slash or ~ on, as `-o/path` glues one to a flag.
 func PathTokens(s string) []string {
 	out := []string{}
 	for _, t := range PathFields(s) {
-		if !strings.ContainsAny(t, "/~") && !strings.Contains(t, ".attest") {
+		if !strings.ContainsAny(t, "/~") {
 			continue
 		}
 		if k := strings.IndexAny(t, "/~"); k > 0 && t[0] == '-' {

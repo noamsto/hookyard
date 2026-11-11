@@ -10,8 +10,6 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-
-	"golang.org/x/crypto/ssh"
 )
 
 func writeConfig(t *testing.T, body string) string {
@@ -56,7 +54,7 @@ func trustBody(personal, work string) string {
 profile       = %q
 work_orgs     = ["github.com/Factify-Inc"]
 personal_orgs = ["GitHub.com/noamsto"]
-trust_root    = "separate"
+trust_root    = "owner-admin"
 
 [stores.personal]
 id = "personal-test"
@@ -145,7 +143,6 @@ func TestLoadFullSample(t *testing.T) {
 		PersonalOrgs:    []string{"github.com/noamsto"},
 		PersonalStoreID: "personal-test",
 		WorkStoreID:     "work-test",
-		TrustRoot:       "separate",
 		PersonalStore:   filepath.Join(home, "memory/personal"),
 		WorkStore:       filepath.Join(home, "memory/work"),
 		PersonalRemote:  "git@example.com:p.git",
@@ -157,8 +154,6 @@ func TestLoadFullSample(t *testing.T) {
 		SSHConfig:       filepath.Join(home, "ssh_config"),
 		Commit:          &no,
 		Push:            true,
-		TrustDigest:     sha256Hex(body),
-		TrustRootLabel:  "separate",
 		fsys:            fakeRoot{},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -224,44 +219,62 @@ func TestFSIsTheTrustFileSource(t *testing.T) {
 	}
 }
 
-func TestLoadCopiesAttestKeys(t *testing.T) {
+// TestLoadIgnoresAttestKeys pins that a trust file generated for the removed
+// attestation schema (#289) still loads: scalar attest_keys and the
+// [[attest_keys]] tables are accepted and ignored.
+func TestLoadIgnoresAttestKeys(t *testing.T) {
 	isolate(t)
-	sk, key := skKeyLine(t)
-
-	got, err := load(writeConfig(t, sample), writeTrust(t, trustBody("/m/personal", "/m/work")+attestEntry(sk, "YQ==", "Yg==")), fakeRoot{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if len(got.AttestKeys) != 1 {
-		t.Fatalf("AttestKeys = %+v, want one", got.AttestKeys)
-	}
-	k := got.AttestKeys[0]
-	if !reflect.DeepEqual(k.Key.Marshal(), key.Marshal()) || string(k.Attestation) != "a" || string(k.Challenge) != "b" {
-		t.Errorf("AttestKeys[0] = %s %q %q, want %s \"a\" \"b\"", ssh.MarshalAuthorizedKey(k.Key), k.Attestation, k.Challenge, sk)
+	for name, extra := range map[string]string{
+		"scalar": "attest_keys = \"x\"\n",
+		"tables": attestEntry("ssh-ed25519 AAAA", "YQ==", "Yg=="),
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := trustBody("/m/personal", "/m/work")
+			if name == "scalar" {
+				body = extra + body
+			} else {
+				body += extra
+			}
+			got, err := load(writeConfig(t, sample), writeTrust(t, body), fakeRoot{})
+			if err != nil {
+				t.Fatalf("load: %v, want the deprecated attest_keys ignored", err)
+			}
+			if got.Profile != "work" || got.PersonalStore != "/m/personal" {
+				t.Errorf("Config = %+v, want the rest of the trust file applied", got)
+			}
+		})
 	}
 }
 
+// TestLoadTrustRoot: trust_root is deprecated and ignored; only "separate"
+// (which asked for attestation) fails.
 func TestLoadTrustRoot(t *testing.T) {
 	isolate(t)
-	for name, c := range map[string]struct{ line, want, label string }{
-		"separate":   {`trust_root = "separate"`, "separate", "separate"},
-		"absent":     {"", "", "absent"},
-		"bool":       {"trust_root = true", "", "true"},
-		"int":        {"trust_root = 1", "", "1"},
-		"array":      {`trust_root = ["a"]`, "", `["a"]`},
-		"table":      {`trust_root = {a = 1}`, "", "a table"},
-		"tables":     {"[[trust_root]]\na = 1", "", "an array of tables"},
-		"other text": {`trust_root = "owner-admin"`, "owner-admin", "owner-admin"},
+	for name, c := range map[string]struct{ line, wantErr string }{
+		"owner-admin": {`trust_root = "owner-admin"`, ""},
+		"absent":      {"", ""},
+		"bool":        {"trust_root = true", ""},
+		"int":         {"trust_root = 1", ""},
+		"array":       {`trust_root = ["a"]`, ""},
+		"table":       {`trust_root = {a = 1}`, ""},
+		"tables":      {"[[trust_root]]\na = 1", ""},
+		"other text":  {`trust_root = "whatever"`, ""},
+		"separate":    {`trust_root = "separate"`, "attestation was removed"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			body := strings.Replace(trustBody("/m/personal", "/m/work"), `trust_root    = "separate"`, c.line, 1)
+			body := strings.Replace(trustBody("/m/personal", "/m/work"), `trust_root    = "owner-admin"`, c.line, 1)
 			got, err := load(writeConfig(t, sample), writeTrust(t, body), fakeRoot{})
+			if c.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+					t.Errorf("load = %v, want an error containing %q", err, c.wantErr)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.TrustRoot != c.want || got.TrustRootLabel != c.label {
-				t.Errorf("TrustRoot, TrustRootLabel = %q, %q; want %q, %q", got.TrustRoot, got.TrustRootLabel, c.want, c.label)
+			if got.Profile != "work" {
+				t.Errorf("Profile = %q, want work", got.Profile)
 			}
 		})
 	}
