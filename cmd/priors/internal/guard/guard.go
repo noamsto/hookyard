@@ -76,7 +76,7 @@ var (
 	readTools = []string{
 		"lsp",
 		"read", "grep", "glob", "ls", "find", "view_image", "webfetch", "websearch", "web_fetch",
-		"web_search", "todowrite", "todoread", "task", "agent", "notebookread", "exitplanmode",
+		"web_search", "todowrite", "todoread", "task", "agent", "subagent", "notebookread", "exitplanmode",
 		"enterplanmode", "bashoutput", "killshell", "toolsearch", "skill", "askuserquestion",
 	}
 	// pathKeys and contentKeys are a file tool's input keys, lowercased with
