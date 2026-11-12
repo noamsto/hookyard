@@ -425,7 +425,7 @@ func TestShellDenies(t *testing.T) {
 		{name: "extglob-named data taker", want: "which holds the personal store", cwd: ".", input: bash(`cp /bin/rm ~/bin/!(x); gh pr view 1 --jq .`)},
 		{name: "redirect to an opaque target", want: "which holds the personal store", cwd: ".", input: bash(`cat /bin/rm > ~/bin/g$(echo h); gh pr view 1 --jq .`)},
 
-		// An unresolved target from a dir holding a store.
+		// A write from a dir holding a store.
 		{name: "loop redirect before a gh filter from home", want: "which holds the personal store", cwd: ".", input: bash(`for n in a b; do echo x > ~/work/$n.log; done; gh pr view 1 --jq .`)},
 
 		// A prefix PATH assignment before a reader of a store.
@@ -943,7 +943,8 @@ func TestStoreWritesStayDenied(t *testing.T) {
 	}
 }
 
-// These are the commands the owner saw refused on 2026-11-09/10 (#288), none of which writes near a store.
+// TestOwnerRefusalsAllowed: commands an earlier guard refused that write
+// nowhere near a store.
 func TestOwnerRefusalsAllowed(t *testing.T) {
 	sb := newSandbox(t)
 	for _, c := range []call{
@@ -963,7 +964,6 @@ func TestOwnerRefusalsAllowed(t *testing.T) {
 	}
 }
 
-// TestProvenStoreWritesDenied holds the writes whose store target the guard can prove.
 func TestProvenStoreWritesDenied(t *testing.T) {
 	sb := newSandbox(t)
 	const store = "inside the personal store"

@@ -253,9 +253,8 @@ func CallDir(envelopeCWD string, input json.RawMessage) string {
 // target, each option value that may be the dir a target is relative to, each
 // unresolved target's literal prefix that reaches into a store, and, for a
 // write the reader cannot resolve, the words it names that are inside a store
-// or are a hard link to a store file. A command past the parse budget is
-// allowed under a sound config: the guard is an advisory tripwire that
-// refuses only what it can resolve into a store (#288).
+// or are a hard link to a store file. Anything else, a command past the
+// parse budget included, is allowed under a sound config.
 func (g *Guard) shell(cwd string, texts []string) string {
 	acc := gate.ShellAccess(g.host, texts...)
 	if acc.Unreadable == "fallback" {
@@ -558,7 +557,7 @@ type linkTarget struct {
 // cwd and every dir it changes into, each against every dir before it. lost
 // reports a dir change the reader cannot resolve. Past maxDirs candidates it
 // is set too, and later relative dirs, which multiply the candidates, are not
-// followed; an absolute dir still is, as it adds only its own candidates.
+// followed; an absolute dir still is.
 func (g *Guard) newCheck(cwd string, dirs []string, lost bool) *check {
 	c := &check{g: g, budget: maxFiles, lost: lost, options: map[int][]string{}}
 	if filepath.IsAbs(cwd) {
