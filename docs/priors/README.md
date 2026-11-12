@@ -406,10 +406,12 @@ manifest; point every `exec` path at the installed binary (`nix build
 ### Write guard
 
 The `pre_tool` write guard is an advisory tripwire against an agent editing
-what it must not. It refuses a call only when it can resolve a write into a
-store, the state dir, the config or a dir holding one, or when a write it
-cannot resolve names such a path in its own words; a shell command it cannot
-read is allowed, with no advisory. The gates of `priors add` and the store's git
+what it must not. It refuses a shell command only when it can resolve a
+write into a store, the state dir, the config or a dir holding one, or when a
+write it cannot resolve names a path inside one in its own words; a shell
+command it cannot read is allowed, with no advisory. Guard malfunctions (a
+broken config, a shell reader that fails, unreadable tool input, a guard past
+750 ms) still deny. The gates of `priors add` and the store's git
 history are the real check on what enters memory. The stronger option, a
 dedicated store user that makes checkouts unwritable to the agent uid, is
 deferred: see [#284](https://github.com/noamsto/hookyard/issues/284). The
@@ -762,10 +764,13 @@ not see:
   an ancestor of a store (`> ~/no$(x)tes`, `"$x"` from `~`, `https://$c` read
   as `//`);
 - a dir change the guard cannot tell (an opaque `cd` operand, `cd -`, `popd`,
-  an unrecognised wrapper flag, a command word holding `=`); past 32
-  resolved candidate dirs (about six nested relative `cd`s) later relative
-  dir changes are not followed, while an absolute `cd` still is; and more
-  than 32 option values naming dirs in one call;
+  an unrecognised wrapper flag, a command word holding `=`), and more than 32
+  option values naming dirs in one call;
+- a dir change past the guard's dir cap: it follows at most 32 candidate
+  dirs, and relative `cd`s multiply them (about six nested ones fill it), so
+  a later relative `cd` is not followed even into a store, as in
+  `cd x1; …; cd x6; cd ~; cd notes; rm MEMORY.md`; an absolute `cd` past the
+  cap still is;
 - a `cd NAME` through a name bash sets (`_`, `BASH_REMATCH`, `OLDPWD`,
   `BASH_ARGV0`), or into a value `NAME` got outside the command's text (a
   shell profile, an earlier call, a script file a shell runs); a value set
