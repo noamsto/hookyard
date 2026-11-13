@@ -16,7 +16,7 @@ type Host struct {
 	Users func(string) (string, bool)
 }
 
-// Access is what a shell command may write, and what it names.
+// Access is what a shell command may write.
 type Access struct {
 	// Writes reports some call not known to only read, or an output redirect
 	// to a file.
@@ -34,8 +34,6 @@ type Access struct {
 	Unresolved string
 	// Code names the first shell code the reader cannot see, "" if none.
 	Code string
-	// Names are every path a word of the command may name, deduplicated.
-	Names []string
 	// OwnNames are the fields of the words of each call that is an
 	// unresolved write, and of its heredoc or here-string: every run between
 	// pathBreaks, / . and .. included, as that call may write any of them.
@@ -74,7 +72,7 @@ var (
 // statement collects what the command sets; then every simple command is
 // classified on its own: read-only, a modeled writer with exact targets, or an
 // unknown program that writes its operands. Code the reader cannot see, writes
-// it cannot resolve, and every path any word names are reported for the guard.
+// it cannot resolve are reported for the guard.
 func ShellAccess(host *Host, texts ...string) (acc Access) {
 	defer func() {
 		if recover() != nil {
@@ -90,7 +88,6 @@ func ShellAccess(host *Host, texts ...string) (acc Access) {
 		cache:  map[*syntax.Word]rendered{},
 		braced: map[*syntax.Word]bool{},
 		values: map[*syntax.Word]bool{},
-		names:  map[string]bool{},
 	}
 	r.pre.init()
 	for _, text := range texts {
@@ -112,9 +109,6 @@ func ShellAccess(host *Host, texts ...string) (acc Access) {
 			break
 		}
 		r.withdrawn = true
-	}
-	if !r.over() {
-		r.collectNames()
 	}
 	return r.result()
 }
@@ -143,8 +137,6 @@ type reader struct {
 	// code is the first opaque-code reason found before the judge.
 	code       string
 	out        out
-	names      map[string]bool
-	nameList   []string
 	unreadable string
 }
 
@@ -466,7 +458,7 @@ func (r *reader) dir(a arg) {
 }
 
 func (r *reader) touches() int {
-	return len(r.out.targets) + len(r.out.opaque) + len(r.out.ownList) + len(r.nameList)
+	return len(r.out.targets) + len(r.out.opaque) + len(r.out.ownList)
 }
 
 // target records a resolved write target.
@@ -556,89 +548,6 @@ func (r *reader) opaqueAt(a arg, starts bool) {
 	r.out.opaque = append(r.out.opaque, t)
 }
 
-// collectNames records the reach names (§3.1) of every word of every parsed
-// text.
-func (r *reader) collectNames() {
-	for _, s := range r.scripts {
-		r.text = s.text
-		for _, st := range s.stmts {
-			walkBounded(st, func(n syntax.Node) bool {
-				if !r.spend(1) {
-					return false
-				}
-				if w, ok := n.(*syntax.Word); ok {
-					rw := r.render(w, true)
-					for _, f := range rw.fields {
-						r.name(f, true)
-					}
-					for _, p := range rw.opaque {
-						r.name(p, true)
-					}
-					for _, c := range rw.chunks {
-						r.name(c, false)
-					}
-				}
-				return !r.over()
-			})
-		}
-		if r.over() {
-			return
-		}
-	}
-}
-
-// name records s, when whole, and the paths inside it: the suffixes of a
-// short-option cluster from its third byte, and its path tokens with $HOME
-// and ~ expanded, as it is and printf-decoded. A token that is only / names
-// nothing unless it is the whole word.
-func (r *reader) name(s string, whole bool) {
-	if s == "" {
-		return
-	}
-	if whole {
-		r.addName(s)
-		if len(s) > 2 && s[0] == '-' && s[1] != '-' {
-			for k := 2; k < len(s) && !r.over(); k++ {
-				if r.spend(len(s) - k) {
-					r.subName(s[k:])
-				}
-			}
-		}
-	}
-	home := r.host.Home
-	for _, d := range Decodings(s) {
-		if !r.spend(len(d)) {
-			return
-		}
-		for _, t := range PathTokens(strings.NewReplacer("${HOME}", home, "$HOME", home).Replace(d)) {
-			if t == "~" || strings.HasPrefix(t, "~/") {
-				t = home + t[1:]
-			}
-			r.subName(t)
-		}
-	}
-}
-
-// subName records a path token inside a word, unless it is only slashes
-// (`//` in a jq or awk program).
-func (r *reader) subName(t string) {
-	if strings.Trim(t, "/") != "" {
-		r.addName(t)
-	}
-}
-
-func (r *reader) addName(t string) {
-	if r.names[t] {
-		return
-	}
-	if r.touches() >= maxTouches {
-		r.fail("budget")
-		return
-	}
-	r.names[t] = true
-	r.nameList = append(r.nameList, t)
-}
-
 func (r *reader) result() Access {
 	o := r.out
 	acc := Access{
@@ -649,7 +558,6 @@ func (r *reader) result() Access {
 		DirLost:    o.dirLost,
 		Unresolved: o.unresolved,
 		Code:       r.code,
-		Names:      r.nameList,
 		OwnNames:   o.ownList,
 		Options:    o.options,
 		Unreadable: r.unreadable,

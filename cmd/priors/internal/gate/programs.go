@@ -33,7 +33,8 @@ var (
 	scriptShells = []string{"bash", "sh", "zsh", "dash", "ksh", "ash"}
 	awks         = []string{"awk", "gawk", "mawk", "nawk"}
 	// gitReaders leave the work tree as it is: they read, or write only git's
-	// own index, objects and refs.
+	// own index, objects and refs. commit is listed for its option checks but
+	// classify treats it as a write in its repo.
 	gitReaders = []string{
 		"status", "log", "show", "diff", "ls-files", "ls-tree", "rev-parse", "cat-file", "grep",
 		"blame", "shortlog", "describe", "rev-list", "show-ref", "for-each-ref", "merge-base",
@@ -467,7 +468,13 @@ func classify(name string, args []arg) verdict {
 		return verdict{}
 	case "git":
 		texts, heads := strs(args)
-		if gitReads(texts, heads) || gitWorktree(texts) {
+		if gitReads(texts, heads) {
+			if sub, _ := gitSub(texts); sub < len(texts) && texts[sub] == "commit" {
+				return verdict{kind: writeKind}
+			}
+			return verdict{}
+		}
+		if gitWorktree(texts) {
 			return verdict{}
 		}
 		return unknown

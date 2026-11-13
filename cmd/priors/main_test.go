@@ -2075,8 +2075,10 @@ func TestPreToolWriteGuard(t *testing.T) {
 	sb.repo(personalRemote)
 	shell, _ := json.Marshal(map[string]string{"command": "echo x > " + filepath.Join(sb.personal, "MEMORY.md")})
 	write, _ := json.Marshal(map[string]string{"file_path": filepath.Join(sb.personal, "MEMORY.md"), "content": "x"})
+	commit, _ := json.Marshal(map[string]string{"command": "git -C " + sb.personal + " commit -m x"})
 	for _, tt := range []struct{ tool, input, want string }{
 		{"Bash", string(shell), "inside the personal store"},
+		{"Bash", string(commit), "runs in"},
 		{"Write", string(write), "the personal store's generated index"},
 	} {
 		res := sb.run(sb.toolEnvelope("pre_tool", "sess-1", tt.tool, tt.input, `null`))
@@ -2088,6 +2090,9 @@ func TestPreToolWriteGuard(t *testing.T) {
 	sb.toolCall("pre_tool", "sess-1", "Write", fmt.Sprintf(`{"file_path":%q,"content":"x"}`, filepath.Join(sb.dir, "notes.md")))
 	sb.toolCall("pre_tool", "sess-1", "Write", fmt.Sprintf(`{"file_path":%q,"content":"---\nname: n\nmetadata:\n  confidence: reviewed\n---\nbody\n"}`, filepath.Join(sb.personal, "demo", "n.md")))
 	sb.toolCall("pre_tool", "sess-1", "Write", fmt.Sprintf(`{"file_path":%q,"content":"x"}`, filepath.Join(sb.personal, ".attest", "e")))
+
+	poll, _ := json.Marshal(map[string]string{"command": `for i in $(seq 1 60); do echo "$((i*15))s"; sleep 15; done`})
+	sb.toolCall("pre_tool", "sess-1", "Bash", string(poll))
 }
 
 // TestPreToolWriteGuardBrokenConfig: a config the guard cannot load denies

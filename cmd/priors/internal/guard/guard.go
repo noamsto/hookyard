@@ -2,7 +2,10 @@
 // an agent's tool call when it would write a store's index or git dir, or
 // priors' state or config. It reads
 // the call and the paths on disk, loads neither the rule set nor a store, and
-// sees only the calls hookyard sees. Where it cannot tell, it denies.
+// sees only the calls hookyard sees. It refuses only the writes it can resolve
+// into a store or priors' own paths: a shell command it cannot read is
+// allowed, while tool input it cannot read, a reader failure, and any call
+// under a broken config that may write or cannot be read are still denied.
 package guard
 
 import (
@@ -77,7 +80,6 @@ var (
 	}
 	contentKeys = []string{"content", "contents", "codeedit", "newsource", "text", "newstring", "newtext"}
 	keyNorm     = strings.NewReplacer("_", "", "-", "")
-	quotes      = strings.NewReplacer(`"`, "", "'", "", `\`, "")
 	// mcpReads are the patterns the last segment of an MCP tool's name matches
 	// when it reads, and writeVerbs the words that make one a write all the
 	// same.
@@ -127,10 +129,6 @@ type Guard struct {
 	// stores are the resolved store roots, whose files a hard link could reach.
 	stores []string
 	host   *gate.Host
-	// tokens are the lowercased texts, and names the lowercased path
-	// elements, whose mention in a command makes a write through a path it
-	// builds at run time a write to a guarded root.
-	tokens, names []string
 	// fold compares paths without case, as the file system does.
 	fold bool
 	// broken is why the paths are unknown: the guard then denies every call
@@ -140,7 +138,7 @@ type Guard struct {
 
 // New returns a guard over p, rendering shell paths in host.
 func New(p Paths, host *gate.Host) *Guard {
-	g := &Guard{host: host, fold: runtime.GOOS == "darwin", tokens: []string{strings.ToLower(store.IndexFile)}}
+	g := &Guard{host: host, fold: runtime.GOOS == "darwin"}
 	for _, s := range p.Stores {
 		label := "the " + s.Name + " store"
 		g.add(s.Path, kindStore, label)
@@ -152,7 +150,6 @@ func New(p Paths, host *gate.Host) *Guard {
 			res = r
 		}
 		g.stores = append(g.stores, res)
-		g.names = append(g.names, strings.ToLower(filepath.Base(s.Path)))
 	}
 	if p.State != "" {
 		g.add(p.State, kindState, "priors' state dir")
@@ -176,7 +173,7 @@ func Broken(err error, host *gate.Host) *Guard {
 	return &Guard{host: host, broken: err}
 }
 
-// add guards p as given and resolved, and its last two elements as a token.
+// add guards p as given and resolved.
 func (g *Guard) add(p string, k kind, label string) {
 	p = filepath.Clean(p)
 	forms := []string{p}
@@ -185,10 +182,6 @@ func (g *Guard) add(p string, k kind, label string) {
 	}
 	for _, f := range forms {
 		g.roots = append(g.roots, root{path: f, label: label, kind: k})
-		if k != kindStore && k != kindState && k != kindConfig {
-			continue
-		}
-		g.tokens = append(g.tokens, strings.ToLower(filepath.Join(filepath.Base(filepath.Dir(f)), filepath.Base(f))))
 	}
 }
 
@@ -254,20 +247,23 @@ func CallDir(envelopeCWD string, input json.RawMessage) string {
 	return ""
 }
 
-// shell judges a shell call, in order: what the reader cannot read, code it
-// cannot see, a broken config, a write run in a store, each resolved target,
-// each unresolved target's literal prefix, and an unresolved write with a
-// store in reach.
+// shell judges a shell call, in order: a reader failure (the shell reader
+// panicked, denied whatever the config), a broken config (a call that may
+// write or cannot be read is refused), a write run in a store, each resolved
+// target, each option value that may be the dir a target is relative to, each
+// unresolved target's literal prefix that reaches into a store, and, for a
+// write the reader cannot resolve, the words it names that are inside a store
+// or are a hard link to a store file. Anything else, a command past the
+// parse budget included, is allowed under a sound config.
 func (g *Guard) shell(cwd string, texts []string) string {
 	acc := gate.ShellAccess(g.host, texts...)
-	switch {
-	case acc.Unreadable != "":
+	if acc.Unreadable == "fallback" {
 		return deny("the command is past what the guard reads (%s)", acc.Unreadable)
-	case acc.Code != "":
-		return deny("the command runs shell code the guard cannot read (%s), so it may write any path", acc.Code)
-	case g.broken != nil && acc.Writes:
-		return g.brokenReason()
-	case g.broken != nil:
+	}
+	if g.broken != nil {
+		if acc.Writes || acc.Unreadable != "" {
+			return g.brokenReason()
+		}
 		return ""
 	}
 	c := g.newCheck(cwd, acc.Dirs, acc.DirLost)
@@ -278,12 +274,7 @@ func (g *Guard) shell(cwd string, texts []string) string {
 			}
 		}
 	}
-	unresolved := acc.Unresolved
-	optionLost := false
 	for _, t := range acc.Targets {
-		if c.lost && !filepath.IsAbs(t.Text) && unresolved == "" {
-			unresolved = fmt.Sprintf("writes %q from a dir it changes into at run time", t.Text)
-		}
 		if r := c.target(t, c.candidates(t.Text)); r != "" {
 			return r
 		}
@@ -294,43 +285,56 @@ func (g *Guard) shell(cwd string, texts []string) string {
 		if t.Call == 0 || filepath.IsAbs(t.Text) {
 			continue
 		}
-		dirs, lost := c.optionDirs(t.Call, acc.Options)
-		if lost {
-			optionLost = true
-			if unresolved == "" {
-				unresolved = fmt.Sprintf("writes %q from a dir one of its options may name", t.Text)
-			}
-		}
-		if r := c.target(t, c.resolve(t.Text, dirs)); r != "" {
+		if r := c.target(t, c.resolve(t.Text, c.optionDirs(t.Call, acc.Options))); r != "" {
 			return r
 		}
 	}
 	for _, t := range acc.Opaque {
-		if r := c.prefix(t.Text); r.rel != none {
+		if r := c.prefix(t.Text); r.rel == inside {
 			return deny("the command may write through %q, which reaches into %s", t.Text+"…", r.root.label)
 		}
 	}
-	if unresolved == "" {
+	if acc.Unresolved == "" {
 		return ""
 	}
-	if c.lost || optionLost {
-		return deny("the command %s, which the guard cannot resolve, and changes into a dir the guard cannot tell", unresolved)
+	if reach := c.ownReach(acc.OwnNames); reach != "" {
+		return deny("the command %s, which the guard cannot resolve, and %s", acc.Unresolved, reach)
 	}
-	if reach := c.reach(acc.OwnNames, acc.Names, texts); reach != "" {
-		return deny("the command %s, which the guard cannot resolve, and %s", unresolved, reach)
+	return ""
+}
+
+// ownReach names the first of the unresolved write's own words that is inside
+// a guarded root or is a hard link to a guarded file, or "" when none is.
+func (c *check) ownReach(own []string) string {
+	for _, n := range own {
+		for _, p := range c.candidates(n) {
+			if r := c.relate(p, shellKinds); r.rel == inside {
+				return fmt.Sprintf("names %s, %s", p, describe(r.root, p))
+			}
+			if !filepath.IsAbs(p) {
+				continue
+			}
+			to, unknown := c.linked(p)
+			switch {
+			case unknown:
+				return fmt.Sprintf("names %s, which has hard links the guard cannot match to a store file", p)
+			case len(to) > 0:
+				return fmt.Sprintf("names %s, a hard link to %s", p, to[0])
+			}
+		}
 	}
 	return ""
 }
 
 // optionDirs returns the existing dirs among the option values of a call, as
 // the dirs it may run in, each resolved like a dir the command changes into.
-// lost reports more than maxDirs of them. Each value costs one stat per dir
-// it is relative to.
-func (c *check) optionDirs(call int, options [][]string) (dirs []string, lost bool) {
+// More than maxDirs of them yield none. Each value costs one stat per dir it
+// is relative to.
+func (c *check) optionDirs(call int, options [][]string) []string {
 	if d, ok := c.options[call]; ok {
-		return d.dirs, d.lost
+		return d
 	}
-	var found []string
+	var found, dirs []string
 	seen := map[string]bool{}
 	for _, v := range options[call-1] {
 		if seen[v] {
@@ -350,7 +354,6 @@ func (c *check) optionDirs(call int, options [][]string) (dirs []string, lost bo
 			}
 		}
 		if len(found) > maxDirs {
-			lost = true
 			found = nil
 			break
 		}
@@ -362,8 +365,8 @@ func (c *check) optionDirs(call int, options [][]string) (dirs []string, lost bo
 			}
 		}
 	}
-	c.options[call] = optionDirs{dirs, lost}
-	return dirs, lost
+	c.options[call] = dirs
+	return dirs
 }
 
 // argument names the argument a write was judged from, so a denial tells a
@@ -400,80 +403,6 @@ func (c *check) target(t gate.Target, cands []string) string {
 		}
 	}
 	return ""
-}
-
-// reach names what puts a store in reach of a write the reader cannot
-// resolve, or "" when nothing does: a name of the write's own words that is
-// inside a guarded root, holds one or is a hard link to a guarded file, any
-// other name inside a guarded root or holding one, or a guarded token in the
-// text.
-func (c *check) reach(own, names, texts []string) string {
-	for _, n := range own {
-		cands := c.candidates(n)
-		if r := c.nameReach(cands); r != "" {
-			return r
-		}
-		for _, p := range cands {
-			if !filepath.IsAbs(p) {
-				continue
-			}
-			to, unknown := c.linked(p)
-			switch {
-			case unknown:
-				return fmt.Sprintf("names %s, which has hard links the guard cannot match to a store file", p)
-			case len(to) > 0:
-				return fmt.Sprintf("names %s, a hard link to %s", p, to[0])
-			}
-		}
-	}
-	for _, n := range names {
-		if r := c.nameReach(c.candidates(n)); r != "" {
-			return r
-		}
-	}
-	if c.g.involves(texts) {
-		return "names a guarded path"
-	}
-	return ""
-}
-
-// nameReach names the first of cands inside a guarded root or holding one.
-func (c *check) nameReach(cands []string) string {
-	for _, p := range cands {
-		switch r := c.relate(p, shellKinds); r.rel {
-		case inside:
-			return fmt.Sprintf("names %s, %s", p, describe(r.root, p))
-		case ancestor:
-			return fmt.Sprintf("names %s, which holds %s", p, r.root.label)
-		case none:
-		}
-	}
-	return ""
-}
-
-// involves reports a text naming a guarded root or the guarded names, as it
-// is, with printf escapes decoded, and with its quotes deleted. A store's
-// own name counts only as a whole path element, so a store named `work`
-// leaves `network` alone.
-func (g *Guard) involves(texts []string) bool {
-	for _, text := range texts {
-		for _, dec := range gate.Decodings(text) {
-			for _, d := range []string{dec, quotes.Replace(dec)} {
-				d = strings.ToLower(d)
-				if slices.ContainsFunc(g.tokens, func(t string) bool { return strings.Contains(d, t) }) {
-					return true
-				}
-				if slices.ContainsFunc(strings.FieldsFunc(d, elementBreak), func(e string) bool { return slices.Contains(g.names, e) }) {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
-func elementBreak(r rune) bool {
-	return strings.ContainsRune(" \t\n\r\v\f\"'`;&|()<>{}=,:$/\\", r)
 }
 
 func (g *Guard) tool(cwd, name string, input json.RawMessage) string {
@@ -609,7 +538,7 @@ type check struct {
 	lost bool
 	// options are the dirs each unknown program call's option values name,
 	// found once per call.
-	options map[int]optionDirs
+	options map[int][]string
 	// linkInfo are the files a hard link could reach, read once; cut reports
 	// a store walk that ran out of budget or could not read a dir.
 	linkInfo []linkTarget
@@ -619,11 +548,6 @@ type check struct {
 	budget int
 }
 
-type optionDirs struct {
-	dirs []string
-	lost bool
-}
-
 type linkTarget struct {
 	info fs.FileInfo
 	path string
@@ -631,15 +555,23 @@ type linkTarget struct {
 
 // newCheck resolves the dirs a command's relative words may be relative to:
 // cwd and every dir it changes into, each against every dir before it. lost
-// reports a dir change the reader cannot resolve.
+// reports a dir change the reader cannot resolve. Past maxDirs candidates it
+// is set too, and later relative dirs, which multiply the candidates, are not
+// followed; an absolute dir still is.
 func (g *Guard) newCheck(cwd string, dirs []string, lost bool) *check {
-	c := &check{g: g, budget: maxFiles, lost: lost, options: map[int]optionDirs{}}
+	c := &check{g: g, budget: maxFiles, lost: lost, options: map[int][]string{}}
 	if filepath.IsAbs(cwd) {
 		c.dirs = c.candidates(cwd)
 	} else {
 		c.lost = true
 	}
 	for _, dir := range dirs {
+		if len(c.dirs) > maxDirs {
+			c.lost = true
+			if !filepath.IsAbs(dir) {
+				continue
+			}
+		}
 		for _, d := range c.candidates(dir) {
 			if filepath.IsAbs(d) && !slices.Contains(c.dirs, d) {
 				c.dirs = append(c.dirs, d)
@@ -647,7 +579,6 @@ func (g *Guard) newCheck(cwd string, dirs []string, lost bool) *check {
 		}
 		if len(c.dirs) > maxDirs {
 			c.lost = true
-			break
 		}
 	}
 	return c
@@ -757,37 +688,22 @@ func (c *check) relation(p, dir string) relation {
 	return ancestor
 }
 
-// prefix judges what precedes an opaque word's first opaque part: the dir it
-// ends in, and the element it starts, which the rest continues. An empty
-// prefix starts an element of the cwd.
+// prefix reports the first match inside a root for the dir an opaque word's
+// literal prefix ends in. An empty prefix is the cwd.
 func (c *check) prefix(text string) match {
-	dir, partial := text, ""
+	dir := text
 	switch {
 	case text == "":
 		dir = "."
 	case !strings.HasSuffix(text, "/"):
-		dir, partial = filepath.Dir(text), filepath.Base(text)
+		dir = filepath.Dir(text)
 	}
-	best := match{}
 	for _, d := range c.candidates(dir) {
 		if m := c.relate(d, shellKinds); m.rel == inside {
 			return m
 		}
-		for _, r := range c.g.roots {
-			if !slices.Contains(shellKinds, r.kind) || !c.within(r.path, d) || r.path == d {
-				continue
-			}
-			rel, err := filepath.Rel(d, r.path)
-			if err != nil {
-				continue
-			}
-			next, _, _ := strings.Cut(filepath.ToSlash(rel), "/")
-			if best.rel == none && c.hasPrefix(next, partial) {
-				best = match{ancestor, r}
-			}
-		}
 	}
-	return best
+	return match{}
 }
 
 // linked returns the guarded files p is a hard link to. unknown is set when p
@@ -849,13 +765,6 @@ func (c *check) within(p, dir string) bool {
 	}
 	rel, err := filepath.Rel(dir, p)
 	return err == nil && filepath.IsLocal(rel)
-}
-
-func (c *check) hasPrefix(s, prefix string) bool {
-	if c.g.fold {
-		s, prefix = strings.ToLower(s), strings.ToLower(prefix)
-	}
-	return strings.HasPrefix(s, prefix)
 }
 
 // matches reports whether the glob element pattern may match name; a pattern

@@ -35,8 +35,6 @@ type accessCase struct {
 	lost       bool
 	unresolved string
 	code       string
-	names      []string
-	notNames   []string
 	own        []string
 	notOwn     []string
 }
@@ -85,16 +83,6 @@ func (c accessCase) check(t *testing.T) {
 	if acc.Code != c.code {
 		t.Errorf("Code = %q, want %q", acc.Code, c.code)
 	}
-	for _, n := range c.names {
-		if !slices.Contains(acc.Names, n) {
-			t.Errorf("name %q missing from %q", n, acc.Names)
-		}
-	}
-	for _, n := range c.notNames {
-		if slices.Contains(acc.Names, n) {
-			t.Errorf("name %q unexpected in %q", n, acc.Names)
-		}
-	}
 	for _, n := range c.own {
 		if !slices.Contains(acc.OwnNames, n) {
 			t.Errorf("own name %q missing from %q", n, acc.OwnNames)
@@ -116,7 +104,7 @@ func runAccess(t *testing.T, cases []accessCase) {
 
 func TestShellAccessReadOnly(t *testing.T) {
 	runAccess(t, []accessCase{
-		{name: "cat", cmd: "cat ~/a", names: []string{"/h/a"}, notTargets: []string{"/h/a"}},
+		{name: "cat", cmd: "cat ~/a", notTargets: []string{"/h/a"}},
 		{name: "sink redirect", cmd: "cat a > /dev/null 2>&1"},
 		{name: "fd dup", cmd: "echo x >&2; echo y 2>&-"},
 		{name: "printf -v", cmd: "printf -v x %s y"},
@@ -142,7 +130,7 @@ func TestShellAccessReadOnly(t *testing.T) {
 		{name: "awk comparison", cmd: "awk '$1 > 5' f", writes: true, unresolved: "runs awk on inline code"},
 		{name: "awk alternation", cmd: "awk '/a|b/' f", writes: true, unresolved: "runs awk on inline code"},
 		{name: "awk system", cmd: "awk '{system(\"x\")}' f", writes: true, unresolved: "runs awk on inline code"},
-		{name: "awk include", cmd: `awk '@include "/tmp/a.awk"' f`, writes: true, targets: []string{"f"}, unresolved: "runs awk on inline code", names: []string{"/tmp/a.awk"}},
+		{name: "awk include", cmd: `awk '@include "/tmp/a.awk"' f`, writes: true, targets: []string{"f"}, unresolved: "runs awk on inline code"},
 		{name: "gawk output flag", cmd: "gawk -o/h/notes/x '{print}' f", writes: true, targets: []string{"/h/notes/x"}, unresolved: "runs gawk on inline code"},
 		{name: "rg", cmd: "rg -i -A3 --type go foo src"},
 		{name: "rg preprocessor", cmd: "rg --pre=x foo", writes: true, targets: []string{"x"}},
@@ -162,10 +150,10 @@ func TestShellAccessReadOnly(t *testing.T) {
 		{name: "git worktree list", cmd: "git worktree list --porcelain"},
 		{name: "git worktree add", cmd: "git worktree add ../x", writes: true, targets: []string{"../x"}},
 		{name: "git writer", cmd: "git checkout -- .", writes: true, targets: []string{"."}},
-		{name: "git commit message", cmd: "git commit -am 'update /h/store/M'", notTargets: []string{"/h/store/M"}},
-		{name: "git commit heredoc message", cmd: "git commit -m \"$(cat <<'EOF'\nfix MEMORY.md\nEOF\n)\""},
+		{name: "git commit message", cmd: "git commit -am 'update /h/store/M'", writes: true, notTargets: []string{"/h/store/M"}},
+		{name: "git commit heredoc message", cmd: "git commit -m \"$(cat <<'EOF'\nfix MEMORY.md\nEOF\n)\"", writes: true},
+		{name: "git commit in dir", cmd: "git -C /s commit -m x", writes: true, dirs: []string{"/s"}},
 		{name: "gh view", cmd: "gh pr view 1 --jq '.a // .b'"},
-		{name: "gh create with prose", cmd: `gh repo create owner/repo --private --description "A / B / C"`, notNames: []string{"/"}},
 		{name: "gh body heredoc", cmd: "gh pr create --title t --body \"$(cat <<'EOF'\nfix /h/store/M\nEOF\n)\""},
 		{name: "gh checkout", cmd: "gh pr checkout 1", writes: true},
 		{name: "gh download dir", cmd: "gh release download v1 -D /h/x", writes: true, targets: []string{"/h/x"}},
@@ -178,7 +166,7 @@ func TestShellAccessReadOnly(t *testing.T) {
 		{name: "read loop", cmd: `while read l; do echo "$l"; done < f`},
 		{name: "mapfile", cmd: "mapfile -t -d , x < f; shift; sleep 1"},
 		{name: "builtin redirect", cmd: "read x > /h/out", writes: true, targets: []string{"/h/out"}},
-		{name: "regex text is a name", cmd: `nix path-info x | sed -E 's|.*/nix/store/[a-z0-9]{32}-||' | sort`, writes: true, names: []string{".*/nix/store/[a-z0-9]"}},
+		{name: "regex text is a name", cmd: `nix path-info x | sed -E 's|.*/nix/store/[a-z0-9]{32}-||' | sort`, writes: true},
 	})
 }
 
@@ -187,7 +175,7 @@ func TestShellAccessWriters(t *testing.T) {
 		{name: "redirect", cmd: "echo x > ~/a", writes: true, targets: []string{"/h/a"}},
 		{name: "redirect fd variable", cmd: "echo x {fd}>/h/f", writes: true, targets: []string{"/h/f"}},
 		{name: "process substitution target", cmd: "ls > >(tee /h/x)", writes: true, targets: []string{"/h/x"}, notTargets: []string{"/dev/fd/63"}},
-		{name: "trailing slash is one target", cmd: "rm -rf build/", writes: true, targets: []string{"build/"}, notTargets: []string{"/"}, notNames: []string{"/"}},
+		{name: "trailing slash is one target", cmd: "rm -rf build/", writes: true, targets: []string{"build/"}, notTargets: []string{"/"}},
 		{name: "host variable", cmd: "cp a $S/b", writes: true, targets: []string{"a", "/h/store/b"}},
 		{name: "tilde user", cmd: "rm ~bob/x ~eve/x", writes: true, targets: []string{"/u/bob/x", "~eve/x"}},
 		{name: "glued target dir", cmd: "cp -tDIR a", writes: true, targets: []string{"DIR", "a"}},
@@ -235,7 +223,7 @@ func TestShellAccessUnknownPrograms(t *testing.T) {
 			name: "packed operands", cmd: "foo key=/abs out:/abs a,/abs --out=/x -o../x of=/", writes: true,
 			targets: []string{"key=/abs", "/abs", "/x", "../x", "/"},
 		},
-		{name: "inline code", cmd: `python3 -c "open('/h/a','w')"`, writes: true, notTargets: []string{"/h/a"}, unresolved: "runs python3 on inline code", names: []string{"/h/a"}},
+		{name: "inline code", cmd: `python3 -c "open('/h/a','w')"`, writes: true, notTargets: []string{"/h/a"}, unresolved: "runs python3 on inline code"},
 		{name: "piped input", cmd: "cat x | foo", writes: true, unresolved: "feeds foo input that may name paths"},
 		{name: "file input", cmd: "foo < in", writes: true, unresolved: "feeds foo input that may name paths"},
 		{name: "null input", cmd: "foo < /dev/null", writes: true},
@@ -284,7 +272,7 @@ func TestShellAccessDirs(t *testing.T) {
 	runAccess(t, []accessCase{
 		{name: "cd", cmd: "cd ~/x && touch y", writes: true, dirs: []string{"/h/x"}, targets: []string{"y"}},
 		{name: "bare cd", cmd: "cd", dirs: []string{"/h"}},
-		{name: "cd root", cmd: "cd /", dirs: []string{"/"}, names: []string{"/"}},
+		{name: "cd root", cmd: "cd /", dirs: []string{"/"}},
 		{name: "cd dash", cmd: "cd - && touch y", writes: true, lost: true},
 		{name: "cdable_vars cd _", cmd: "shopt -s cdable_vars; cd _", lost: true},
 		{name: "cdable_vars cd OLDPWD", cmd: "shopt -s cdable_vars; cd OLDPWD", lost: true},
@@ -449,19 +437,6 @@ func TestShellAccessWithdrawal(t *testing.T) {
 		{name: "builtin export appended value", cmd: "builtin export X+=/x", writes: true, unresolved: `puts "X+=/x" in a program's environment`},
 		{name: "declare operand that does not render", cmd: `export "$v"; foo`, writes: true, unresolved: `puts "\"$v\"" in a program's environment`},
 		{name: "declare flags and names bind nothing", cmd: "export -x X; foo", writes: true, notTargets: []string{"-x", "X"}},
-	})
-}
-
-func TestShellAccessNames(t *testing.T) {
-	runAccess(t, []accessCase{
-		{name: "prose", cmd: `echo "A / B"`, names: []string{"A / B"}, notNames: []string{"/"}},
-		{name: "whole-word root", cmd: "echo /", names: []string{"/"}},
-		{name: "cluster suffix", cmd: "foo -o../x", writes: true, names: []string{"../x"}},
-		{name: "trailing slash", cmd: "rm -rf build/", writes: true, names: []string{"build/"}, notNames: []string{"/"}},
-		{name: "home in a quoted word", cmd: `echo '$HOME/notes' '~/x'`, names: []string{"/h/notes", "/h/x"}},
-		{name: "printf escapes", cmd: `printf '\x2fh\x2fnotes'`, names: []string{"/h/notes"}},
-		{name: "literal parts of an unresolved word", cmd: `x=1; echo "$x/notes/a"`, names: []string{"/notes/a"}},
-		{name: "assignment values and heredocs", cmd: "d=/h/notes; cat <<EOF\n/h/state/x\nEOF", names: []string{"/h/notes", "/h/state/x"}},
 	})
 }
 

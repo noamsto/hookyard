@@ -108,16 +108,6 @@ func optionWrites() string {
 	return strings.Join(calls, "; ")
 }
 
-// manyOptionDirs is an unknown program given one more option value naming an
-// existing dir than the guard resolves, then a relative operand.
-func manyOptionDirs() string {
-	cmd := "foo"
-	for i := range maxDirs + 1 {
-		cmd += " --d=" + strings.Repeat("./", i) + "sub"
-	}
-	return cmd + " x"
-}
-
 func bash(cmd string) string {
 	b, _ := json.Marshal(map[string]string{"command": cmd})
 	return string(b)
@@ -134,9 +124,6 @@ type call struct {
 	// want is a piece of the deny reason that names the rule the case
 	// exercises; the allow tables leave it empty.
 	want string
-	// caseFoldedWant replaces want on a case-insensitive filesystem, where the
-	// folded path resolves to the store and a precise store rule denies it first.
-	caseFoldedWant string
 	// cwd is relative to the home; "" is ~/work.
 	cwd   string
 	tool  string
@@ -155,18 +142,6 @@ func wantDenied(t *testing.T, c call, reason string) {
 	case !strings.Contains(reason, c.want):
 		t.Errorf("denied %s %s by another rule\n got: %s\nwant: ...%s...", c.tool, c.input, reason, c.want)
 	}
-}
-
-// caseInsensitiveFS reports whether the test's temp dir resolves an upper-cased
-// name to a file written in lower case, as macOS's default APFS does.
-func caseInsensitiveFS(t *testing.T) bool {
-	t.Helper()
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "probe"), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, err := os.Stat(filepath.Join(dir, "PROBE"))
-	return err == nil
 }
 
 func (sb sandbox) run(t *testing.T, c call) string {
@@ -221,19 +196,14 @@ func TestShellDenies(t *testing.T) {
 		{name: "git -C", want: "and runs in", input: bash("git -C ~/notes checkout -- .")},
 		{name: "git work tree", want: "and runs in", input: bash("git --work-tree=../notes reset --hard")},
 		{name: "make -C", want: "and runs in", input: bash("make -C ~/notes")},
-		{name: "cd unknown then involved write", want: `.attest/e" from a dir it changes into at run time`, input: bash(`cd "$(git rev-parse --show-toplevel)"; echo x > .attest/e`)},
 		{name: "tar -C ancestor", want: "which holds the personal store", input: bash("tar -xf a.tar -C ~")},
 		{name: "env -C", want: "runs in", input: bash("env -C ~/notes touch x")},
-		{name: "cd through symlink lookup", want: "cannot resolve, and changes into a dir the guard cannot tell", input: bash(`cd "$(ls -d ~/link)" && touch x`)},
 
 		// Quoting and escaping.
 		{name: "double quotes", want: "/notes/MEMORY.md, inside the personal store", input: bash(`echo x > ~/"notes"/MEMORY.md`)},
 		{name: "split quotes", want: "/notes/.attest/e, inside the personal store", input: bash(`echo x > ~/'no'"tes"/.att''est/e`)},
 		{name: "backslashes", want: "/notes/MEMORY.md, inside the personal store", input: bash(`echo x > ~/no\tes/MEMORY\.md`)},
 		{name: "braces", want: "/notes/facts/n.md, inside the personal store", input: bash("echo x | tee ~/{work,notes}/facts/n.md")},
-		{name: "case folded token", want: "cannot resolve, and names a guarded path", caseFoldedWant: "inside the personal store", input: bash(`echo x > "$(echo ~/NOTES/memory.md | tr A-Z a-z)"`)},
-		{name: "assigned variable", want: "which reaches into the personal store", input: bash("N=notes; echo x > ~/$N/MEMORY.md")},
-		{name: "default expansion", want: "cannot resolve, and names a guarded path", input: bash("echo x > ${HOME:-/x}/notes/MEMORY.md")},
 		{name: "extglob", want: "/+(no)tes/f, inside the personal store", input: bash("shopt -s extglob; echo x > ~/+(no)tes/f")},
 		{name: "negated class rm", want: "/[!q]otes, inside the personal store", input: bash("rm -rf ~/[!q]otes")},
 		{name: "negated class redirect", want: "/[!q]otes/MEMORY.md, inside the personal store", input: bash("echo x > ~/[!q]otes/MEMORY.md")},
@@ -243,7 +213,6 @@ func TestShellDenies(t *testing.T) {
 		{name: "env cp", want: "/notes/.attest, inside the personal store", input: bash("env X=1 cp a ~/notes/.attest/")},
 		{name: "nice timeout mv", want: "/notes/.attest/y, inside the personal store", input: bash("nice -n 5 timeout 5 mv x ~/notes/.attest/y")},
 		{name: "bash -c", want: "/notes/MEMORY.md, inside the personal store", input: bash(`bash -c 'echo x > ~/notes/MEMORY.md'`)},
-		{name: "sh -c double", want: "shell code the guard cannot read", input: bash(`sh -c "rm -rf $HOME/notes/facts"`)},
 		{name: "eval", want: "/notes/MEMORY.md, inside the personal store", input: bash(`eval "rm ~/notes/MEMORY.md"`)},
 		{name: "find delete", want: "/notes, the personal store", input: bash("find ~/notes -name '*.md' -delete")},
 		{name: "sed -i", want: "/notes/MEMORY.md, inside the personal store", input: bash("sed -i s/a/b/ ~/notes/MEMORY.md")},
@@ -270,9 +239,6 @@ func TestShellDenies(t *testing.T) {
 		{name: "bare redirect", want: "/notes/MEMORY.md, inside the personal store", input: bash("> ~/notes/MEMORY.md")},
 		{name: "group redirect", want: "/notes/MEMORY.md, inside the personal store", input: bash("{ echo x; } > ~/notes/MEMORY.md")},
 		{name: "function body", want: "/notes/MEMORY.md, inside the personal store", input: bash("f() { echo x > ~/notes/MEMORY.md; }; f")},
-		{name: "script piped to shell", want: "shell code the guard cannot read", input: bash(`echo "rm ~/notes/MEMORY.md" | bash`)},
-		{name: "format piped to shell", want: "shell code the guard cannot read", input: bash(`printf 'rm %s/notes/MEMORY.md' ~ | sh`)},
-		{name: "path piped to interpreter", want: "cannot resolve, and names ", input: bash(`echo ~/notes/MEMORY.md | python3 -c "import sys; open(sys.stdin.read().strip(),'w')"`)},
 		{name: "symlink listing to xargs", want: "/notes, the personal store", input: bash("ls ~/link/ | xargs rm")},
 
 		// Options and wrappers that read as something else.
@@ -288,7 +254,6 @@ func TestShellDenies(t *testing.T) {
 		{name: "git fetch abbreviated upload-pack", want: "and runs in", input: bash("git -C ~/notes fetch --upload=x origin")},
 		{name: "git grep clustered open-files", want: "and runs in", input: bash("git -C ~/notes grep -iOx y")},
 		{name: "fd clustered exec", want: "/notes, the personal store", input: bash("fd . ~/notes -Hx touch")},
-		{name: "cdpath cd", want: "cannot resolve, and changes into a dir the guard cannot tell", input: bash("CDPATH=~ cd notes && touch x")},
 		{name: "exported PATH", want: "/notes/MEMORY.md, inside the personal store", input: bash("export PATH=/tmp/evil:$PATH; cat ~/notes/MEMORY.md")},
 		{name: "exported BASH_ENV", want: "/notes/MEMORY.md, inside the personal store", input: bash("export BASH_ENV=/tmp/x; cat ~/notes/MEMORY.md")},
 		{name: "printf -v PATH", want: "/notes/MEMORY.md, inside the personal store", input: bash("printf -v PATH /tmp/evil; cat ~/notes/MEMORY.md")},
@@ -296,11 +261,7 @@ func TestShellDenies(t *testing.T) {
 
 		// Paths built at run time.
 		{name: "opaque under store", want: "notes/…\", which reaches into the personal store", input: bash("echo x > ~/notes/$(echo MEMORY.md)")},
-		{name: "opaque partial element", want: "/no…\", which reaches into the personal store", input: bash("echo x > ~/no$(echo tes)/f")},
 		{name: "opaque involved", want: "which holds the personal store", input: bash(`echo x > "$(printf '%s/notes/MEMORY.md' ~)"`)},
-		{name: "variable from substitution", want: "cannot resolve, and names a guarded path", input: bash("d=$(git rev-parse --show-toplevel); echo x > $d/MEMORY.md")},
-		{name: "store name element", want: "cannot resolve, and names a guarded path", input: bash(`cp x "$(git rev-parse --show-toplevel)/../notes/f"`)},
-		{name: "unparsable", want: "shell code the guard cannot read", input: bash("( ; echo x > ~/notes/facts/a.md")},
 
 		// Hard links.
 		{name: "hard link", want: "a hard link to", input: bash("echo x > ~/work/hard")},
@@ -319,33 +280,23 @@ func TestShellDenies(t *testing.T) {
 		{name: "unknown program on home", want: "which holds", input: bash(`foo ~`)},
 		{name: "unknown program on parent", want: "which holds", cwd: "notes-old", input: bash(`foo ..`)},
 		{name: "interpreter on dot from home", want: "which holds", cwd: ".", input: bash(`python3 x.py .`)},
-		{name: "awk code on dot from home", want: "which holds", cwd: ".", input: bash(`awk 'BEGIN{system("rm -rf ./")}'`)},
-		{name: "php code on dot from home", want: "which holds", cwd: ".", input: bash(`php -r 'system("rm -rf ./");'`)},
 		{name: "known writer on root", want: "which holds", input: bash(`rm -rf /`)},
-		{name: "quoted glob piped to shell", want: "shell code the guard cannot read", input: bash(`echo 'rm -rf ~/work/.a*' | bash`)},
 		{name: "function renaming a writer", want: "which holds the personal store", cwd: ".", input: bash(`z() { rm -rf "$1"; }; z .`)},
 		{name: "function defined after its use", want: "which holds the personal store", cwd: ".", input: bash(`trap 'z .' EXIT; z() { rm -rf "$1"; }`)},
 		{name: "alias renaming a writer", want: "which holds the personal store", cwd: ".", input: bash("shopt -s expand_aliases\nalias z=rm\nz -rf .")},
 		{name: "hash renaming a writer", want: "which holds the personal store", cwd: ".", input: bash(`hash -p /bin/rm z; z -rf .`)},
 		{name: "opaque writer name", want: "which holds the personal store", cwd: ".", input: bash(`busybox $(printf rm) -rf .`)},
-		{name: "opaque command word", want: "shell code the guard cannot read", cwd: ".", input: bash(`$(printf rm) -rf .`)},
 		{name: "upper-case writer", want: "which holds the personal store", cwd: ".", input: bash(`RM -rf .`)},
 		{name: "versioned interpreter", want: "which holds the personal store", cwd: ".", input: bash(`python3.12 x.py .`)},
-		{name: "unparsable string naming a writer", want: "which holds the personal store", cwd: ".", input: bash(`tmux new-window 'find ./ -delete (true)'`)},
-		{name: "unparsable remote string naming a writer", want: "which holds the personal store", cwd: ".", input: bash(`ssh localhost 'chmod -R 000 ./ (true)'`)},
-		{name: "unparsable watch string", want: "which holds the personal store", cwd: ".", input: bash(`watch 'rm -rf ./ ('`)},
 		{name: "unknown program on dot from home", want: "which holds the personal store", cwd: ".", input: bash(`foo .`)},
 		{name: "BASH_CMDS renaming a writer", want: "which holds the personal store", cwd: ".", input: bash(`BASH_CMDS[z]=/bin/rm; z -rf .`)},
 		{name: "PATH renaming a writer", want: "which holds the personal store", cwd: ".", input: bash(`PATH=~/evil:$PATH; z -rf .`)},
 		{name: "symlink renaming a writer", want: "which holds the personal store", cwd: ".", input: bash(`ln -s /bin/rm ~/bin/z; z -rf .`)},
 		{name: "mixed-case writer", want: "which holds the personal store", cwd: ".", input: bash(`Rm -rf .`)},
 		{name: "wrapped upper-case writer", want: "which holds the personal store", cwd: ".", input: bash(`caffeinate RM -rf .`)},
-		{name: "gdb shell string with a split name", want: "which holds the personal store", cwd: ".", input: bash(`gdb -batch -ex 'shell r""m -rf ./ (true)'`)},
 		{name: "env unset before a renamed writer", want: "which holds the personal store", cwd: ".", input: bash(`env -u X z -rf .`)},
 		{name: "env unset before claude on dot", want: "which holds the personal store", cwd: ".", input: bash(`env -u X claude .`)},
 		{name: "claude mcp command on dot", want: "which holds the personal store", cwd: ".", input: bash(`claude mcp add x -- rm -rf .`)},
-		{name: "claude mcp quoted command on dot", want: "which holds the personal store", cwd: ".", input: bash(`claude mcp add x -- sh -c 'rm -rf . && true'`)},
-		{name: "claude double dash quoted command on dot", want: "which holds the personal store", cwd: ".", input: bash(`claude -p x -- sh -c 'rm -rf . && true'`)},
 		{name: "claude argument substitution", want: "which holds the personal store", cwd: ".", input: bash(`claude -p "x" "$(rm -rf .)"`)},
 
 		// Data-position allowlist probes: a known data-taker renamed, or its
@@ -372,9 +323,9 @@ func TestShellDenies(t *testing.T) {
 		{name: "alias renaming claude", want: "which holds the personal store", cwd: ".", input: bash(`alias claude=rm; claude -p .`)},
 		{name: "function renaming claude", want: "which holds the personal store", cwd: ".", input: bash(`claude() { rm -rf "$1"; }; claude -p /`)},
 		{name: "BASH_CMDS renaming gh", want: "which holds the personal store", cwd: ".", input: bash(`BASH_CMDS[gh]=/bin/rm; gh api x -q /`)},
-		{name: "printf -v BASH_CMDS renaming crew", want: "shell code the guard cannot read", input: bash(`printf -v 'BASH_CMDS[crew]' %s /bin/rm; crew reply x ~/notes/MEMORY.md`)},
+		{name: "printf -v BASH_CMDS renaming crew", want: "/notes/MEMORY.md, inside the personal store", input: bash(`printf -v 'BASH_CMDS[crew]' %s /bin/rm; crew reply x ~/notes/MEMORY.md`)},
 		{name: "quote-split declare BASH_CMDS", want: "which holds the personal store", cwd: ".", input: bash(`declare "BASH_CMD""S[zzq]=/bin/rm"; zzq -rf .`)},
-		{name: "quote-split printf -v BASH_CMDS", want: "shell code the guard cannot read", cwd: ".", input: bash(`printf -v "BASH_CMD"S"[zzr]" %s /bin/rm; zzr -rf .`)},
+		{name: "quote-split printf -v BASH_CMDS", want: "which holds the personal store", cwd: ".", input: bash(`printf -v "BASH_CMD"S"[zzr]" %s /bin/rm; zzr -rf .`)},
 		{name: "hash renaming crew", want: "which holds the personal store", cwd: ".", input: bash(`hash -p /bin/rm crew; crew reply x .`)},
 		{name: "symlink renaming crew", want: "which holds the personal store", cwd: ".", input: bash(`ln -sf /bin/rm ~/bin/crew; crew reply x .`)},
 		{name: "copy renaming gh", want: "which holds the personal store", cwd: ".", input: bash(`cp /bin/rm ~/bin/gh; gh api x -q /`)},
@@ -383,13 +334,11 @@ func TestShellDenies(t *testing.T) {
 		{name: "trap body runs a renamed crew", want: "which holds the personal store", cwd: ".", input: bash(`trap 'crew reply x .' EXIT; alias crew=rm`)},
 
 		// Finite for-loop variables.
-		{name: "loop value as a write target", want: "which reaches into the personal store", cwd: ".", input: bash(`for f in a .attest/x; do touch "$f"; done`)},
-		{name: "loop value as the command word", want: "shell code the guard cannot read", input: bash(`for c in rm cat; do $c ~/notes/MEMORY.md; done`)},
 		{name: "printf -v before a subshell loop", want: "which holds the personal store", cwd: ".", input: bash(`printf -v n %s%s cr ew; (for n in 1 2; do :; done); cp /bin/rm ~/bin/$n; crew reply x .`)},
-		{name: "indirect arithmetic default after a skipped loop", want: "shell code the guard cannot read", cwd: ".", input: bash(`read -r x < f; false && for n in a b; do :; done; (( ${!x:=rew} )); cp /bin/rm ~/bin/c$n; crew reply x .`)},
-		{name: "assignment index after a skipped loop", want: "shell code the guard cannot read", cwd: ".", input: bash(`read -r x < f; false && for n in a b; do :; done; a[x]=1; cp /bin/rm ~/bin/c$n; crew reply x .`)},
+		{name: "indirect arithmetic default after a skipped loop", want: "which holds the personal store", cwd: ".", input: bash(`read -r x < f; false && for n in a b; do :; done; (( ${!x:=rew} )); cp /bin/rm ~/bin/c$n; crew reply x .`)},
+		{name: "assignment index after a skipped loop", want: "which holds the personal store", cwd: ".", input: bash(`read -r x < f; false && for n in a b; do :; done; a[x]=1; cp /bin/rm ~/bin/c$n; crew reply x .`)},
 		{name: "read of a glob-named variable after a skipped loop", want: "which holds the personal store", cwd: ".", input: bash(`false && for n in a b; do :; done; read ? < f; cp /bin/rm ~/bin/c$n; crew reply x .`)},
-		{name: "xtrace prompt default after a skipped loop", want: "shell code the guard cannot read", cwd: ".", input: bash(`read -r x < f; false && for n in a b; do :; done; PS4='${!x:=rew}'; set -x; :; set +x; cp /bin/rm ~/bin/c$n; crew reply x .`)},
+		{name: "xtrace prompt default after a skipped loop", want: "which holds the personal store", cwd: ".", input: bash(`read -r x < f; false && for n in a b; do :; done; PS4='${!x:=rew}'; set -x; :; set +x; cp /bin/rm ~/bin/c$n; crew reply x .`)},
 
 		// sed scripts read as programs.
 		{name: "sed s w flag with e", want: "inside the personal store", input: bash(`sed 's/e/x/w @H/notes/facts/a.md' f`)},
@@ -405,32 +354,19 @@ func TestShellDenies(t *testing.T) {
 
 		// Input the guard cannot read.
 		{name: "malformed command", want: "neither a string nor a list of strings", input: `{"command":5}`},
-		{name: "oversized command", want: "past what the guard reads", input: bash("echo x > ~/work/" + strings.Repeat("a", 1<<18))},
 
 		// Base-denied commands stay denied.
-		{name: "sed e command root", want: "which holds", cwd: ".", input: bash(`sed -n '1e rm -rf /' f`)},
-		{name: "lua execute root", want: "which holds", cwd: ".", input: bash(`lua -e 'os.execute("rm -rf /")'`)},
-		{name: "node execSync root", want: "which holds", cwd: ".", input: bash(`node -e 'require("child_process").execSync("rm -rf /")'`)},
-		{name: "python rmtree root", want: "which holds", cwd: ".", input: bash(`python3 -c 'import shutil; shutil.rmtree("/", ignore_errors=True)'`)},
 		{name: "sed e command relative store name", want: "cannot resolve, and names ", cwd: ".", input: bash(`sed -n '1e rm -rf notes' f`)},
-		{name: "sed e cd relative store name", want: "cannot resolve, and names ", cwd: "work", input: bash(`sed -n '1e cd .. && rm -rf notes' f`)},
 		{name: "python shutil relative store name", want: "cannot resolve, and names ", cwd: ".", input: bash(`python3 -c 'import shutil; shutil.rmtree("notes")'`)},
 		{name: "node rmSync relative store name", want: "cannot resolve, and names ", cwd: ".", input: bash(`node -e 'require("fs").rmSync("notes",{recursive:true})'`)},
 		{name: "sed w hardlink operand", want: "a hard link to", cwd: "work", input: bash(`sed -n 'w hard' f`)},
 		{name: "sed w symlink attest operand", want: "inside the personal store", cwd: "work", input: bash(`sed -n 'w rel' f`)},
 		{name: "python glued out root", want: "which holds", cwd: ".", input: bash(`python3 tool.py --out=/`)},
 		{name: "python short glued out root", want: "which holds", cwd: ".", input: bash(`python3 tool.py -o/`)},
-		{name: "subtoken renamed interpreter heredoc", want: "which holds", cwd: ".", input: bash("python3 -c 'import shutil,os;shutil.copy(\"/bin/sh\",os.getenv(\"HOME\")+\"/bin/python3\")'; env python3 <<EOF\nrm -rf .\nEOF")},
-		{name: "env-built store path in awk", want: "cannot resolve, and names a guarded path", cwd: ".", input: bash(`awk 'BEGIN{system("rm -rf " ENVIRON["HOME"] "/notes")}'`)},
-		{name: "env-built store path in python", want: "cannot resolve, and names a guarded path", cwd: ".", input: bash(`python3 -c 'import os; os.system("rm -rf " + os.environ["HOME"] + "/notes")'`)},
-		{name: "awk program system root wipe", want: "which holds", cwd: ".", input: bash(`awk 'BEGIN{system("rm -rf /")}'`)},
-		{name: "ssh remote script root wipe", want: "which holds", cwd: ".", input: bash(`ssh localhost 'rm -rf / (true)'`)},
-		{name: "nested interpreter heredoc on dot", want: "which holds", cwd: ".", input: bash("cp /bin/sh ~/bin/python3; python3 <<EOF\npython3 <<EOF2\nrm -rf .\nEOF2\nEOF")},
 		{name: "tar glued chdir root", want: "which holds", cwd: ".", input: bash(`tar -C/ -xf a.tar`)},
 		{name: "tar long directory root", want: "which holds", cwd: ".", input: bash(`tar --directory=/ -xf a.tar`)},
 		{name: "cp glued target root", want: "which holds", cwd: ".", input: bash(`cp -rt/ x`)},
 		{name: "cp long target-directory root", want: "which holds", cwd: ".", input: bash(`cp --target-directory=/ x`)},
-		{name: "python cleans to root", want: "which holds", cwd: ".", input: bash(`python3 -c 'open("/home/..","w")'`)},
 		{name: "posix order sed file operand", want: "inside the personal store", cwd: "work", input: bash(`POSIXLY_CORRECT=1 sed -i --follow-symlinks s/a/b/ -e P`)},
 		{name: "env posix order sed file operand", want: "inside the personal store", cwd: "work", input: bash(`env POSIXLY_CORRECT=1 sed -i --follow-symlinks s/a/b/ -e P`)},
 
@@ -440,53 +376,16 @@ func TestShellDenies(t *testing.T) {
 		{name: "ansi-c declared PATH", want: "/notes/MEMORY.md, inside the personal store", input: bash(`declare $'\x50ATH'=/tmp/x; cat ~/notes/MEMORY.md`)},
 		{name: "quote-split exported LD_PRELOAD", want: "/notes/MEMORY.md, inside the personal store", input: bash(`export "LD_"PRELOAD=/tmp/x.so; cat ~/notes/MEMORY.md`)},
 		{name: "quote-split exported GIT_DIR", want: "/notes/MEMORY.md, inside the personal store", input: bash(`export "GIT_"DIR=/tmp/x; cat ~/notes/MEMORY.md`)},
-		{name: "quote-split declared IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; declare 'I'FS=Q; rm -rf $d`)},
-		{name: "printf -v built IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; v=IF; printf -v ${v}S Q; rm -rf $d`)},
-		{name: "redirect variable IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; exec {IFS}>/tmp/f; rm -rf $d`)},
-		{name: "eval escaped IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; eval I\FS=Q; rm -rf $d`)},
-		{name: "opaque declare nameref to IFS", want: "shell code the guard cannot read", input: bash(`d=/tmpQ$HOME/notes; n=declare; $n -n r=I""FS; r=Q; rm -rf $d`)},
-		{name: "brace-built exported IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; export {I,}FS=Q; rm -rf $d`)},
-		{name: "quote-split local IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; local "I"FS=Q; rm -rf $d`)},
-		{name: "getopts escaped IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; getopts a I\FS; rm -rf $d`)},
-		{name: "wait -p escaped IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; wait -p I\FS; rm -rf $d`)},
-		{name: "source may set IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; source /tmp/x; rm -rf $d`)},
-		{name: "quote-split readonly IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; readonly I""FS=Q; rm -rf $d`)},
-		{name: "read escaped IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; read I\FS < /tmp/f; rm -rf $d`)},
-		{name: "eval IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; eval IFS=Q; rm -rf $d`)},
-		{name: "quoted typeset IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; typeset "IFS"=Q; rm -rf $d`)},
 		{name: "quote-split exported CDPATH", want: "which holds the personal store", input: bash(`export "CD"PATH=~; cd notes && touch MEMORY.md`)},
 		{name: "quote-split declared CDPATH", want: "which holds the personal store", input: bash(`declare 'CD'PATH=~; cd notes && touch MEMORY.md`)},
-		{name: "quote-split exported CDPATH elsewhere", want: "cannot resolve, and changes into a dir the guard cannot tell", input: bash(`export "CD"PATH=@H/elsewhere; cd notes && touch MEMORY.md`)},
 		{name: "BASH_CMDS renaming a reader", want: "/notes/MEMORY.md, inside the personal store", input: bash(`BASH_CMDS[ls]=/bin/rm; ls ~/notes/MEMORY.md`)},
 		{name: "read before a data position", want: "which holds the personal store", cwd: ".", input: bash(`n=1; { read n; cp /tmp/evil "$n"; } < f; gh pr view 1 --jq .`)},
 
 		// Setters read after the words they change, and arithmetic.
-		{name: "function body before a quote-split IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; f(){ rm -rf $d; }; declare 'I'FS=Q; f`)},
-		{name: "trap body before a quote-split IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; trap 'rm -rf $d' EXIT; declare 'I'FS=Q`)},
 		{name: "function body before a quote-split CDPATH", want: "which holds the personal store", input: bash(`f(){ cd notes && touch MEMORY.md; }; export "CD"PATH=~; f`)},
 		{name: "function body before a default CDPATH", want: "which holds the personal store", input: bash(`f(){ cd notes && touch MEMORY.md; }; : ${CDPATH:=~}; f`)},
-		{name: "function body before an eval IFS", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; f(){ rm -rf $d; }; eval I\FS=Q; f`)},
-		{name: "function body before a source", want: "cannot resolve, and names a guarded path", input: bash(`d=/tmpQ$HOME/notes; f(){ rm -rf $d; }; source /tmp/x; f`)},
-		{name: "arithmetic target built IFS", want: "shell code the guard cannot read", input: bash(`v=IF; (( ${v}S = 5 )); d=/tmp5$HOME/notes; rm -rf $d`)},
-		{name: "let quote-split IFS", want: "cannot resolve, and names a guarded path", input: bash(`let "I""FS=5"; d=/tmp5$HOME/notes; rm -rf $d`)},
-		{name: "arithmetic value sets IFS", want: "shell code the guard cannot read", input: bash(`x='I'"FS=5"; (( x )); d=/tmp5$HOME/notes; rm -rf $d`)},
-		{name: "integer value sets IFS", want: "shell code the guard cannot read", input: bash(`declare -i n; n='I'FS=5; d=/tmp5$HOME/notes; rm -rf $d`)},
-		{name: "opaque arithmetic target", want: "shell code the guard cannot read", input: bash(`n=$(echo I""FS); (( $n = 5 )); d=/tmp5$HOME/notes; rm -rf $d`)},
-		{name: "arithmetic value substitution", want: "shell code the guard cannot read", input: bash(`x='a[$(rm -rf ~/notes)]'; (( x ))`)},
-		{name: "read subscript substitution", want: "shell code the guard cannot read", cwd: ".", input: bash(`read 'a[$(rm -rf .)]'`)},
-		{name: "arithmetic substitution", want: "shell code the guard cannot read", cwd: ".", input: bash(`(( $(rm -rf .) ))`)},
-		{name: "arithmetic expansion value substitution", want: "shell code the guard cannot read", cwd: ".", input: bash(`x='a[$(rm -rf .)]'; echo $(( x ))`)},
-		{name: "CDPATH set only under the re-read IFS", want: "shell code the guard cannot read", input: bash(`c=exportQCDPATH=$HOME; f(){ cd notes && touch zz; }; g(){ $c; }; read I\FS <<< Q; g; f`)},
-		{name: "arithmetic reads a later assigned value", want: "shell code the guard cannot read", input: bash(`x=0; x='a[$(rm -rf ../notes/facts)]'; (( x ))`)},
-		{name: "arithmetic reads a printf -v value", want: "shell code the guard cannot read", input: bash(`printf -v x %s 'a[$(cd ..; rm -rf no*s)]'; (( x ))`)},
-		{name: "expansion index value substitution", want: "shell code the guard cannot read", input: bash(`a=(1); x='a[$(rm -rf ../notes/facts)]'; echo ${a[x]}`)},
-		{name: "expansion slice value substitution", want: "shell code the guard cannot read", input: bash(`s=abc; x='a[$(rm -rf ../notes/facts)]'; echo ${s:x}`)},
-		{name: "expansion length index value substitution", want: "shell code the guard cannot read", input: bash(`a=(1); x='a[$(rm -rf ../notes/facts)]'; echo ${#a[x]}`)},
-		{name: "quoted paren beside an arithmetic substitution", want: "shell code the guard cannot read", input: bash(`(( $(echo "(") + $(cd ..; rm -rf no*s) ))`)},
-		{name: "quoted paren beside a value substitution", want: "shell code the guard cannot read", input: bash(`x='a[$(echo "(") + $(cd ..; rm -rf no*s)]'; (( x ))`)},
-		{name: "let of a case-changed IFS", want: "shell code the guard cannot read", input: bash(`v=i; let "${v^^}FS=0"; y=/nonexist0../notes; rm -rf $y`)},
-		{name: "default IFS inside arithmetic", want: "cannot resolve, and names a guarded path", input: bash(`(( ${IFS:=0} )); y=/nonexist0../notes; rm -rf $y`)},
-		{name: "let of an indirect IFS", want: "shell code the guard cannot read", input: bash(`v=I; r=v; let "${!r}FS=0"; y=/nonexist0../notes; rm -rf $y`)},
+		{name: "arithmetic substitution", want: "which holds the personal store", cwd: ".", input: bash(`(( $(rm -rf .) ))`)},
+		{name: "quoted paren beside an arithmetic substitution", want: "/no*s, inside the personal store", input: bash(`(( $(echo "(") + $(cd ..; rm -rf no*s) ))`)},
 
 		// POSIX classes in a glob.
 		{name: "posix class rm", want: "inside the personal store", input: bash("rm -rf ~/note[[:alpha:]]")},
@@ -510,7 +409,6 @@ func TestShellDenies(t *testing.T) {
 		{name: "writer option before a store path names it", want: "the command writes", input: bash(`rm -rf ~/notes/x`)},
 		{name: "writer option before a relative store path names it", want: `(from the argument "notes/x")`, cwd: ".", input: bash(`rm -rf notes/x`)},
 		{name: "env glued split string", want: "which holds the personal store", cwd: ".", input: bash(`env -u X --split-string='rm -rf .'`)},
-		{name: "glued c script", want: "which holds the personal store", cwd: ".", input: bash(`foo -c'rm -rf .'`)},
 		{name: "cluster past the suffix bound", want: "the personal store", cwd: ".", input: bash(`env -vvvvvvvvvvvvvvvvvvvvCnotes rm -rf facts`)},
 		{name: "cluster past the suffix bound after cd", want: "the personal store", input: bash(`cd .. && env -vvvvvvvvvvvvvvvvvvvvCnotes rm -rf facts`)},
 		// A dir or script in a word of its own is read already.
@@ -522,49 +420,26 @@ func TestShellDenies(t *testing.T) {
 		{name: "env separate split string", want: "which holds the personal store", cwd: ".", input: bash(`env -u X --split-string 'rm -rf .'`)},
 
 		// Heredoc bodies, glob names and redirect targets read at run time.
-		{name: "loop heredoc to a shell per value", want: "shell code the guard cannot read", input: bash("for d in work notes; do bash <<EOF\nrm -rf ~/$d\nEOF\ndone")},
-		{name: "opaque here-string to a shell", want: "shell code the guard cannot read", input: bash(`bash <<< "$(cat /tmp/s)"; echo notes`)},
 		{name: "glob-named data taker", want: "which holds the personal store", cwd: ".", input: bash(`cp /bin/rm ~/bin/g?; gh pr view 1 --jq .`)},
 		{name: "bracket-named data taker", want: "which holds the personal store", cwd: ".", input: bash(`cp /bin/rm ~/bin/[g]h; gh pr view 1 --jq .`)},
 		{name: "extglob-named data taker", want: "which holds the personal store", cwd: ".", input: bash(`cp /bin/rm ~/bin/!(x); gh pr view 1 --jq .`)},
 		{name: "redirect to an opaque target", want: "which holds the personal store", cwd: ".", input: bash(`cat /bin/rm > ~/bin/g$(echo h); gh pr view 1 --jq .`)},
 
-		// Over-denials of the default-deny rule: opaque code, an unresolved
-		// target from a dir holding a store, withdrawal.
-		{name: "exported and local values written from home", want: "which reaches into the personal store", cwd: ".", input: bash(`export d=/tmp/x; local f=/tmp/y; rm -rf "$d" "$f"`)},
-		{name: "c-style loop to an unknown bound then cat of a store", want: "shell code the guard cannot read", input: bash(`n=$1; for ((i=0; i<$n; i++)); do echo $i; done; cat ~/notes/MEMORY.md`)},
+		// A write from a dir holding a store.
 		{name: "loop redirect before a gh filter from home", want: "which holds the personal store", cwd: ".", input: bash(`for n in a b; do echo x > ~/work/$n.log; done; gh pr view 1 --jq .`)},
-		{name: "loop heredoc to a shell before a gh filter from home", want: "shell code the guard cannot read", cwd: ".", input: bash("for f in a b; do sh <<EOF\necho $f\nEOF\ndone; gh pr view 1 --jq .")},
 
-		// An inline program, remote script or prompt holding a standalone /, .
-		// or .. names it, as the call may write it.
-		{name: "unparsed string naming dot is not a path", want: "which holds the personal store", cwd: ".", input: bash(`watch 'rm -rf . ('`)},
+		// A prefix PATH assignment before a reader of a store.
 		{name: "prefix PATH before a reader of a store", want: "/notes/MEMORY.md, inside the personal store", input: bash(`PATH=/x cat ~/notes/MEMORY.md`)},
 		{name: "prefix PATH before a builtin", want: "/notes/MEMORY.md, inside the personal store", input: bash(`PATH=/x true; cat ~/notes/MEMORY.md`)},
-		{name: "claude prompt with a dot", want: "which holds the personal store", cwd: ".", input: bash(`claude -p "check the build ." --tools=Bash`)},
-		{name: "env unset before a claude prompt", want: "which holds the personal store", cwd: ".", input: bash(`env -u A -u B claude -p "check . now"`)},
-		{name: "timeout before a claude prompt", want: "which holds the personal store", cwd: ".", input: bash(`timeout 5 claude -p "check ."`)},
-		{name: "claude prompt with a model from home", want: "which holds the personal store", cwd: ".", input: bash(`claude -p "fix ." --model opus`)},
-		{name: "unknown program on a spaced slash", want: "names /, which holds the personal store", input: bash(`foo "a / b"`)},
-		{name: "PATH before crew body", want: "names /, which holds the personal store", input: bash(`PATH=~/evil:$PATH; crew reply x "a / b"`)},
-		{name: "python inline spaced slash", want: "names /, which holds the personal store", input: bash(`python3 -c 'x = "a / b"'`)},
-		{name: "python heredoc slash string", want: "names /, which holds the personal store", input: bash("python3 - <<EOF\nsep = \"/\"\nEOF")},
-		{name: "python rmtree root from a project", want: "names /, which holds the personal store", input: bash(`python3 -c 'import shutil; shutil.rmtree("/")'`)},
-		{name: "sed e command root from a project", want: "names /, which holds the personal store", input: bash(`sed -n '1e rm -rf /' f`)},
-		{name: "remote script parent from a project", want: "which holds the personal store", input: bash(`ssh localhost 'rm -rf ..'`)},
 
 		// An unknown program's option value naming a dir it may run in.
 		{name: "glued option dir", want: "/notes/MEMORY.md, inside the personal store", cwd: ".", input: bash(`foo -Cwork rm ../notes/MEMORY.md`)},
 		{name: "option dir as the next word", want: "/notes/x, inside the personal store", cwd: ".", input: bash(`foo -C work rm ../notes/x`)},
 		{name: "option dir holding a hard link", want: "a hard link to", cwd: "elsewhere", input: bash(`foo --dir=../work touch hard`)},
-		{name: "too many option dirs", want: "changes into a dir the guard cannot tell", input: bash(manyOptionDirs())},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.linuxOnly && runtime.GOOS != "linux" {
 				t.Skipf("%s has no such path", runtime.GOOS)
-			}
-			if c.caseFoldedWant != "" && caseInsensitiveFS(t) {
-				c.want = c.caseFoldedWant
 			}
 			if c.tool == "" {
 				c.tool = "Bash"
@@ -578,6 +453,7 @@ func TestShellAllows(t *testing.T) {
 	sb := newSandbox(t)
 	for _, c := range []call{
 		{name: "project write", input: bash("echo x > ~/work/notes.md")},
+		{name: "past the parse budget and not writing", input: bash(strings.Repeat("$(", 300) + "true" + strings.Repeat(")", 300))},
 		{name: "sibling store name", input: bash("echo x > ~/notes-old/MEMORY.md")},
 		{name: "store name prefix", input: bash("mkdir -p ~/notesx && echo x > ~/notesx/f")},
 		{name: "posix class glob in project", input: bash("rm -f ~/work/[[:alpha:]]*.o")},
@@ -870,6 +746,8 @@ func TestBrokenDeniesWrites(t *testing.T) {
 	}{
 		{"Bash", bash("echo x > ~/work/f"), true},
 		{"Bash", bash("ls ~/work"), false},
+		{"Bash", bash("git commit -m x"), true},
+		{"Bash", bash(strings.Repeat("$(", 300) + "true" + strings.Repeat(")", 300)), true},
 		{"Write", sb.input(map[string]any{"file_path": "@H/work/f", "content": "x"}), true},
 		{"Read", sb.input(map[string]any{"file_path": "@H/work/a.md"}), false},
 	} {
@@ -981,7 +859,6 @@ func TestRedesignDenies(t *testing.T) {
 	sb := newSandbox(t)
 	const (
 		store    = "inside the personal store"
-		unread   = "shell code the guard cannot read"
 		pastRead = "past what the guard reads"
 	)
 	nested := `{"path":"@H\/notes\/MEMORY.md","pad":` + strings.Repeat("[", 18) + strings.Repeat("]", 18) + `}`
@@ -996,27 +873,16 @@ func TestRedesignDenies(t *testing.T) {
 		{name: "tool arguments nested past the read depth", want: pastRead, tool: "mcp__x__do", input: sb.input(map[string]any{"arguments": nested})},
 		{name: "tool note behind 300 decoy tokens", want: "the personal store", tool: "mcp__x__do", input: sb.input(map[string]any{"note": decoys + " @H/notes/MEMORY.md"})},
 
-		{name: "arith var built from concatenated assignments", want: unread, input: bash(`a='a[$'; b='(rm -rf ../notes/facts)]'; x=$a$b; (( x ))`)},
-		{name: "arith var built from array element append", want: unread, input: bash(`x=('a[$' b); x[0]+='(rm -rf ../notes/facts)]'; (( x ))`)},
-		{name: "arith var built from exported append", want: unread, input: bash(`export 'x=a[$'; x+='(rm -rf ../notes/facts)]'; (( x ))`)},
-		{name: "arith var with quoted paren in substitution", want: unread, input: bash(`x='a[$(echo "(") + $(cd ..; rm -rf no*s)] + 1 a'; (( x ))`)},
-
 		{name: "env option cluster run in the store via link", want: "runs in", cwd: ".", input: bash("env -" + long + "Clink rm -rf facts")},
 		{name: "unknown command option cluster with link", want: "the personal store", cwd: ".", input: bash("foo -" + long + "Clink rm -rf facts")},
 
-		{name: "positional in arithmetic after set --", want: unread, input: bash(`set -- 'a[$(rm -rf ../notes)]'; (( $1 ))`)},
-		{name: "positional in arithmetic in a function", want: unread, input: bash(`f() { (( $1 )); }; f 'a[$(rm -rf ../notes)]'`)},
-		{name: "read into a literal variable name", want: unread, input: bash(`read 'a[$(rm -rf ../notes)]' <<< x`)},
-		{name: "PS4 substitution via env", want: unread, input: bash(`env SHELLOPTS=xtrace PS4='$(rm -rf ../notes)' bash -c true`)},
-		{name: "BASH_FUNC import", want: unread, input: bash(`env 'BASH_FUNC_cat%%=() { rm -rf ../notes; }' bash -c 'cat x'`)},
+		{name: "positional in arithmetic in a function", want: "runs f on inline code, which the guard cannot resolve, and names", input: bash(`f() { (( $1 )); }; f 'a[$(rm -rf ../notes)]'`)},
+		{name: "PS4 substitution via env", want: "/notes, the personal store", input: bash(`env SHELLOPTS=xtrace PS4='$(rm -rf ../notes)' bash -c true`)},
 
 		{name: "packed key=path operand", want: "the personal store", input: bash("foo key=@H/notes/x")},
 		{name: "packed out:path operand", want: "the personal store", input: bash("foo out:@H/notes/x")},
 		{name: "packed comma path operand", want: "the personal store", input: bash("foo a,@H/notes/x")},
 		{name: "gawk -o packed path", want: "the personal store", input: bash("gawk -o@H/notes/x '{print}' f")},
-		{name: "awk @include of a written file", want: "the guard cannot resolve", input: bash(`printf 'BEGIN{system("rm -rf ../notes")}' > /tmp/a.awk; awk '@include "/tmp/a.awk"' f`)},
-
-		{name: "300 nested command substitutions", want: "past what the guard reads (budget)", input: bash(strings.Repeat("$(", 300) + "x" + strings.Repeat(")", 300))},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if c.tool == "" {
@@ -1032,10 +898,7 @@ func TestRedesignDenies(t *testing.T) {
 // a child reads as a path, and a cd cdable_vars resolves.
 func TestStoreWritesStayDenied(t *testing.T) {
 	sb := newSandbox(t)
-	const (
-		store   = "the personal store"
-		guarded = "names a guarded path"
-	)
+	const store = "the personal store"
 	for _, c := range []call{
 		{name: "dd of= tilde", want: store, input: bash("dd if=/dev/zero of=~/notes/MEMORY.md")},
 		{name: "unknown program name= tilde", want: store, input: bash("foo out=~/notes/MEMORY.md")},
@@ -1047,29 +910,19 @@ func TestStoreWritesStayDenied(t *testing.T) {
 		{name: "prefix git dir from HOME", want: store, input: bash("GIT_DIR=$HOME/notes/.git git reset --hard")},
 		{name: "exported work tree", want: store, input: bash("export GIT_WORK_TREE=~/notes; git checkout -- .")},
 		{name: "prefix DESTDIR", want: store, input: bash("DESTDIR=~/notes make install")},
-		{name: "prefix HOME from HOME", want: "the guard cannot resolve", input: bash("HOME=$HOME/notes foo")},
 
 		{name: "cdable_vars to an assigned name", want: store, input: bash("shopt -s cdable_vars; d=$HOME/notes; cd d && touch new.md")},
 		{name: "cdable_vars to a host name", want: store, cwd: "elsewhere", input: bash("shopt -s cdable_vars; cd NOTES; rm facts/a.md")},
-		{name: "cdable_vars to the last argument", want: "changes into a dir the guard cannot tell", cwd: "elsewhere", input: bash(`shopt -s cdable_vars; ls ~/notes; cd _ && rm facts/a.md`)},
-		{name: "cdable_vars to BASH_REMATCH", want: "changes into a dir the guard cannot tell", cwd: "elsewhere", input: bash(`shopt -s cdable_vars; [[ ~/notes =~ .* ]]; cd BASH_REMATCH && rm facts/a.md`)},
-		{name: "cdable_vars to OLDPWD", want: "changes into a dir the guard cannot tell", cwd: "elsewhere", input: bash(`shopt -s cdable_vars; cd OLDPWD && rm facts/a.md`)},
-		{name: "nested shell cdable_vars to BASH_ARGV0", want: "changes into a dir the guard cannot tell", cwd: "elsewhere", input: bash(`bash -O cdable_vars -c 'cd BASH_ARGV0 && rm facts/a.md' "$NOTES"`)},
 		{name: "tilde in an option cluster", want: store, input: bash(`foo -o~/notes/MEMORY.md`)},
 		{name: "tilde in an ssh option cluster", want: store, input: bash(`ssh -M -S~/notes/x host`)},
 		{name: "quoted tilde in a -C cluster", want: store, input: bash(`foo -C'~/notes' build`)},
 		{name: "quoted ~user word", want: store, input: bash(`foo '~alice/notes/MEMORY.md'`)},
 		{name: "ssh option value with ~user", want: store, input: bash(`ssh -o 'UserKnownHostsFile=~alice/notes/MEMORY.md' host`)},
 		{name: "tilde value naming a program", want: store, input: bash(`X=~/bin/cat make; cat ~/notes/MEMORY.md`)},
-		{name: "work tree built by a substitution", want: store, input: bash(`GIT_WORK_TREE=../no$(true)tes git checkout -- .`)},
-		{name: "git dir word built by a substitution", want: store, input: bash(`foo GIT_DIR=../no$(true)tes`)},
 
 		{name: "loop variable exported before", want: store, input: bash("export GIT_WORK_TREE; for GIT_WORK_TREE in ~/notes; do git checkout -- .; done")},
 		{name: "loop variable exported inside", want: store, input: bash("for GIT_WORK_TREE in ~/notes; do export GIT_WORK_TREE; git checkout -- .; done")},
 		{name: "loop git dir", want: store, input: bash("export GIT_DIR; for GIT_DIR in ~/notes/.git; do git reset --hard; done")},
-		{name: "loop HOME", want: guarded, input: bash("for HOME in ~/notes; do export HOME; git config --global a.b c; done")},
-		{name: "nameref to an exported name", want: guarded, input: bash("declare -n r=GIT_WORK_TREE; export GIT_WORK_TREE; r=~/notes; git checkout -- .")},
-		{name: "local nameref in a function", want: guarded, input: bash("f() { local -n r=GIT_WORK_TREE; r=~/notes; }; export GIT_WORK_TREE; f; git checkout -- .")},
 		{name: "nested shell -a", want: store, input: bash("bash -a -c 'GIT_WORK_TREE=~/notes; git checkout -- .'")},
 		{name: "nested shell -ac", want: store, input: bash("bash -ac 'GIT_WORK_TREE=~/notes; git checkout -- .'")},
 		{name: "nested shell -o allexport", want: store, input: bash("bash -o allexport -c 'GIT_WORK_TREE=~/notes; git checkout -- .'")},
@@ -1080,16 +933,55 @@ func TestStoreWritesStayDenied(t *testing.T) {
 		{name: "prefix value named by a nested cd", want: store, input: bash("d=~/notes bash -O cdable_vars -c 'cd d && touch new.md'")},
 		{name: "env value named by a nested cd", want: store, input: bash("env d=~/notes bash -O cdable_vars -c 'cd d && touch new.md'")},
 		{name: "prefix value to cd naming it", want: store, input: bash("shopt -s cdable_vars; d=~/notes cd d && touch new.md")},
-		{name: "source before a cd naming a variable", want: "changes into a dir the guard cannot tell", input: bash("shopt -s cdable_vars; source ./e.sh; cd d && touch new.md")},
 		{name: "unknown program double quoted subscript tilde", want: store, input: bash(`foo a["x"]=~/notes/MEMORY.md`)},
 		{name: "unknown program single quoted subscript tilde", want: store, input: bash(`foo a['x']=~/notes/MEMORY.md`)},
-		{name: "unrendered -o cluster tilde", want: store, input: bash(`foo -o~/no$(true)tes/x`)},
-		{name: "unrendered ssh -S cluster tilde", want: store, input: bash(`ssh -M -S~/no$(true)tes/x host`)},
-		{name: "unrendered -C cluster tilde", want: store, cwd: "elsewhere", input: bash(`foo -C~/no$(true)tes build`)},
-		{name: "unrendered -C cluster ~user", want: store, cwd: "elsewhere", input: bash(`foo -C~alice/no$(true)tes build`)},
-		{name: "unrendered -C cluster relative", want: store, input: bash(`foo -C../no$(true)tes build`)},
-		{name: "unrendered gcc -o cluster tilde", want: store, input: bash(`gcc -o~/no$(true)tes/facts/z.md x.c`)},
-		{name: "compgen -V names a cdable variable", want: "changes into a dir the guard cannot tell", cwd: "elsewhere", input: bash(`shopt -s cdable_vars; compgen -V d -d x; cd d && rm facts/a.md`)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			c.tool = "Bash"
+			wantDenied(t, c, sb.run(t, c))
+		})
+	}
+}
+
+// TestOwnerRefusalsAllowed: commands an earlier guard refused that write
+// nowhere near a store.
+func TestOwnerRefusalsAllowed(t *testing.T) {
+	sb := newSandbox(t)
+	for _, c := range []call{
+		{name: "git -C a dir set by an assignment", input: bash(`W=@H/elsewhere; git -C $W status; git ls-remote origin refs/heads/x`)},
+		{name: "polling loop with arithmetic", input: bash(`for i in $(seq 1 60); do echo "$((i*15))s"; sleep 15; done`)},
+		{name: "inline awk and tr pipeline", input: bash(`awk '$3 ~ /19:21:(1[1-9]|[2-5][0-9])/' f | tr -s ' '`)},
+		{name: "jq alternative operator beside a url built in a loop", input: bash(`H=abc; for c in a.example b.example; do curl -sS "https://$c/$H.narinfo" | jq -r '.x // "-"'; done`)},
+		{name: "https url in a curl write-out format", input: bash(`for c in https://a.example https://b.example; do for h in s7 5i; do curl -sS -m 20 -o /dev/null -w "$c $h %{http_code}\n" "$c/$h.narinfo"; done; done`)},
+		{name: "drv assignment echoed and used", input: bash(`cd @H/work; nix eval --json .#x.outputs 2>/dev/null; echo; D=$(nix eval --raw .#x.drvPath 2>/dev/null); echo "drv=$D"; for c in https://a.example https://b.example; do for h in s7 5i; do curl -sS -m 20 "$c/$h.narinfo" -o /dev/null -w "$c $h %{http_code}\n"; done; done; echo '--- restricted dry-run'; nix build --dry-run --option substituters https://a.example "$D^*" 2>&1 | cut -c1-160 | head -12`)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			c.tool = "Bash"
+			if r := sb.run(t, c); r != "" {
+				t.Errorf("denied %s: %s", c.input, r)
+			}
+		})
+	}
+}
+
+func TestProvenStoreWritesDenied(t *testing.T) {
+	sb := newSandbox(t)
+	const store = "inside the personal store"
+	for _, c := range []call{
+		{name: "redirect into a fact", want: store, input: bash(`echo x > ~/notes/facts/n.md`)},
+		{name: "append to the index", want: store, input: bash(`echo x >> ~/notes/MEMORY.md`)},
+		{name: "cp into a fact", want: store, input: bash(`cp /tmp/x ~/notes/facts/n.md`)},
+		{name: "mv into a fact", want: store, input: bash(`mv /tmp/x ~/notes/facts/n.md`)},
+		{name: "rm a fact", want: store, input: bash(`rm ~/notes/facts/a.md`)},
+		{name: "sed -i a fact", want: store, input: bash(`sed -i s/a/b/ ~/notes/facts/a.md`)},
+		{name: "tee into a fact", want: store, input: bash(`echo x | tee ~/notes/facts/n.md`)},
+		{name: "git -C store commit", want: "runs in", input: bash(`git -C ~/notes commit -m x`)},
+		{name: "git commit after cd into the store", want: "runs in", input: bash(`cd ~/notes && git commit -am x`)},
+		{name: "sed w into a fact", want: "cannot resolve, and names", input: bash(`sed -n 'w @H/notes/facts/a.md' f`)},
+		{name: "write into a leftover attest dir", want: "inside the personal store", input: bash(`touch ~/notes/.attest/e9`)},
+		{name: "opaque name inside the store", want: "reaches into the personal store", input: bash(`echo x > ~/notes/facts/$(date +%s).md`)},
+		{name: "literal cd into the store after many relative cds", want: "runs in", input: bash(`cd x1; cd x2; cd x3; cd x4; cd x5; cd x6; cd ~/notes; echo x > MEMORY.md`)},
+		{name: "literal cd into the store after many relative cds then rm", want: "runs in", input: bash(`cd x1; cd x2; cd x3; cd x4; cd x5; cd x6; cd ~/notes; rm facts/a.md`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			c.tool = "Bash"
