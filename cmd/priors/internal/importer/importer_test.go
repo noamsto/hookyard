@@ -19,6 +19,7 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
+	"github.com/noamsto/hookyard/cmd/priors/internal/lint"
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
 	"github.com/noamsto/hookyard/cmd/priors/internal/tools/toolstest"
@@ -1437,6 +1438,107 @@ func TestInRunFlaggedFactThatPublishesLaterDoesNotLinkASetAsideSibling(t *testin
 	}
 	fx.wantNotInCheckout(t, "a-linker", "b-sibling")
 	fx.checkoutCommits(t)
+}
+
+// TestTopLevelTypeAndOriginSessionIdAreImported pins #294: a Claude memory file
+// with only top-level type and originSessionId, and no metadata block, imports
+// with those keys normalised.
+func TestTopLevelTypeAndOriginSessionIdAreImported(t *testing.T) {
+	fx := setup(t, "personal")
+	mem := fx.memDir(repo(t, personalRemote))
+	text := "---\nname: terse-comments\ndescription: no narration in comments\ntype: feedback\n" +
+		"originSessionId: ee0ce2d3-1111-4444-8888-0123456789ab\n---\n\nSay what the code cannot say.\n"
+	writeFile(t, filepath.Join(mem, "terse-comments.md"), text)
+	lines := fx.run(t, false)
+	wantLines(t, lines, []string{"published personal "})
+	for _, l := range lines {
+		if strings.Contains(l, "must be one of") {
+			t.Errorf("top-level type was refused: %s", l)
+		}
+	}
+
+	b, err := os.ReadFile(filepath.Join(fx.cfg.PersonalStore, "demo", "terse-comments.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := fact.Parse(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := f.Metadata
+	if m.Type != "feedback" {
+		t.Errorf("type = %q, want feedback", m.Type)
+	}
+	if m.OriginSessionID != "ee0ce2d3-1111-4444-8888-0123456789ab" {
+		t.Errorf("originSessionId = %q", m.OriginSessionID)
+	}
+	if p := m.Provenance; p == nil || p.Session != "ee0ce2d3-1111-4444-8888-0123456789ab" {
+		t.Errorf("provenance = %+v", p)
+	}
+	if !strings.Contains(f.Body, "Say what the code cannot say.") {
+		t.Errorf("body = %q", f.Body)
+	}
+}
+
+// TestNestedMetadataWinsOverTopLevelKeys pins the fallback's precedence: a
+// nested metadata value is not overwritten by a conflicting top-level one.
+func TestNestedMetadataWinsOverTopLevelKeys(t *testing.T) {
+	fx := setup(t, "personal")
+	mem := fx.memDir(repo(t, personalRemote))
+	text := "---\nname: both-layouts\ndescription: nested metadata wins\ntype: feedback\n" +
+		"originSessionId: top-session\nmetadata:\n  node_type: memory\n  type: project\n  originSessionId: nested-session\n---\n\nNested.\n"
+	writeFile(t, filepath.Join(mem, "both-layouts.md"), text)
+	wantLines(t, fx.run(t, false), []string{"published personal "})
+
+	b, err := os.ReadFile(filepath.Join(fx.cfg.PersonalStore, "demo", "both-layouts.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := fact.Parse(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := f.Metadata
+	if m.Type != "project" {
+		t.Errorf("type = %q, want project", m.Type)
+	}
+	if m.OriginSessionID != "nested-session" {
+		t.Errorf("originSessionId = %q, want nested-session", m.OriginSessionID)
+	}
+	if p := m.Provenance; p == nil || p.Session != "nested-session" {
+		t.Errorf("provenance = %+v", p)
+	}
+}
+
+// TestStoreFormatStillRequiresNestedType pins that the fallback stays in the
+// importer's native reader: a store-shaped file with a top-level type still
+// parses to no type and still trips lint.
+func TestStoreFormatStillRequiresNestedType(t *testing.T) {
+	b := []byte("---\nname: subject\ndescription: a subject\ntype: feedback\n---\n\nBody.\n")
+	f, err := fact.Parse(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Metadata.Type != "" {
+		t.Errorf("fact.Parse type = %q, want empty", f.Metadata.Type)
+	}
+	findings := lint.FactRules(store.Entry{Rel: "demo/subject.md", Fact: f, Raw: b}, gate.Rules{})
+	found := slices.ContainsFunc(findings, func(finding lint.Finding) bool { return finding.Rule == "type" })
+	if !found {
+		t.Errorf("lint findings %v have no type finding", findings)
+	}
+
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "demo", "subject.md"), string(b))
+	entries, walkErrs := store.Root{Path: dir}.Walk()
+	if len(walkErrs) != 0 {
+		t.Fatalf("walk errors = %v", walkErrs)
+	}
+	for _, e := range entries {
+		if e.Rel == "demo/subject.md" && e.Fact.Metadata.Type != "" {
+			t.Errorf("walked type = %q, want empty", e.Fact.Metadata.Type)
+		}
+	}
 }
 
 func TestInRunByteDuplicateOrder(t *testing.T) {
