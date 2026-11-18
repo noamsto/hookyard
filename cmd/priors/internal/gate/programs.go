@@ -33,9 +33,9 @@ var (
 	scriptShells = []string{"bash", "sh", "zsh", "dash", "ksh", "ash"}
 	awks         = []string{"awk", "gawk", "mawk", "nawk"}
 	// gitReaders leave the work tree as it is: they read, or write only git's
-	// own index, objects and refs; gitReads reads reflog only bare, with options, or as show, exists or list.
-	// commit is listed for its option checks but
-	// classify treats it as a write in its repo.
+	// own index, objects and refs. commit is listed for its option checks but
+	// classify treats it as a write in its repo; gitReads takes reflog only
+	// bare, with options, or as show, exists or list.
 	gitReaders = []string{
 		"status", "log", "show", "diff", "ls-files", "ls-tree", "rev-parse", "cat-file", "grep",
 		"blame", "shortlog", "describe", "rev-list", "show-ref", "for-each-ref", "merge-base",
