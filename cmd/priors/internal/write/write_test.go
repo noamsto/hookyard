@@ -959,3 +959,195 @@ func TestConcurrentAdds(t *testing.T) {
 	}
 	committest.AssertHeadIndexInTree(t, fx.cfg.PersonalStore)
 }
+
+const importedCorpus = "../gate/testdata/imported"
+
+// corpusFixtures returns the imported-corpus fact files, shaped as the
+// importer shapes a native memory.
+func corpusFixtures(t *testing.T) map[string]fact.Fact {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(importedCorpus, "*.md"))
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("corpus %s: %v (%d files)", importedCorpus, err, len(paths))
+	}
+	out := map[string]fact.Fact{}
+	for _, p := range paths {
+		raw, err := os.ReadFile(p) //nolint:gosec // test reads checked-in fixtures
+		if err != nil {
+			t.Fatal(err)
+		}
+		n, err := fact.Parse(raw)
+		if err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
+		out[filepath.Base(p)] = fact.Fact{
+			Name:        n.Name,
+			Description: n.Description,
+			Body:        n.Body,
+			Metadata: fact.Metadata{
+				Type:            n.Metadata.Type,
+				Scope:           "repo",
+				Repos:           []string{personalRepo.Repo},
+				Engines:         []string{"claude"},
+				Confidence:      "proposed",
+				Provenance:      &fact.Provenance{Engine: "claude", Session: "native-1", Host: "laptop"},
+				Source:          &fact.Source{Engine: "claude", Path: "~/.claude/projects/p/memory/" + filepath.Base(p), SHA256: "abc"},
+				OriginSessionID: "native-1",
+				Modified:        "2026-01-02T03:04:05.000Z",
+			},
+		}
+	}
+	return out
+}
+
+func importRequest(f fact.Fact, imported, dryRun bool) Request {
+	req := request(f.Name, personalRepo)
+	req.Fact = f
+	req.Imported = imported
+	req.DryRun = dryRun
+	return req
+}
+
+func pendingMarkers(t *testing.T, fx fixture) []string {
+	t.Helper()
+	entries, err := os.ReadDir(fx.cfg.ReviewDir(string(route.StorePersonal)))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+func TestImportedShellRule(t *testing.T) {
+	fx := setup(t, "work")
+	if err := gate.MarkSession(fx.cfg.ProvenanceDir(), "s1", true); err != nil {
+		t.Fatal(err)
+	}
+	var note, instr fact.Fact
+	for file, f := range corpusFixtures(t) {
+		if note.Name == "" && strings.HasPrefix(file, "note-") {
+			note = f
+		}
+		if instr.Name == "" && strings.HasPrefix(file, "instr-") {
+			instr = f
+		}
+	}
+	tests := []struct {
+		name     string
+		f        fact.Fact
+		imported bool
+		outcome  string
+	}{
+		{"imported note", note, true, "published"},
+		{"imported instruction", instr, true, "flagged"},
+		{"not imported note", note, false, "flagged"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, err := Add(context.Background(), fx.cfg, importRequest(tt.f, tt.imported, true), fx.deps)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Outcome != tt.outcome {
+				t.Fatalf("outcome = %s (%v), want %s", res.Outcome, res.Reasons, tt.outcome)
+			}
+			if got := slices.Contains(res.Reasons, "provenance:shell"); got != (tt.outcome == "flagged") {
+				t.Errorf("reasons = %v, provenance:shell = %v", res.Reasons, got)
+			}
+		})
+	}
+}
+
+func TestFlaggedWriteMarksPending(t *testing.T) {
+	fx := setup(t, "work")
+	req := request("flagged-fact", personalRepo)
+	req.External = true
+
+	req.DryRun = true
+	if _, err := Add(context.Background(), fx.cfg, req, fx.deps); err != nil {
+		t.Fatal(err)
+	}
+	if got := pendingMarkers(t, fx); len(got) != 0 {
+		t.Fatalf("dry run left markers %v", got)
+	}
+
+	req.DryRun = false
+	res, err := Add(context.Background(), fx.cfg, req, fx.deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Outcome != "flagged" || res.Warning != "" {
+		t.Fatalf("result = %+v, want flagged without a warning", res)
+	}
+	if got := pendingMarkers(t, fx); !slices.Equal(got, []string{"flagged-fact"}) {
+		t.Errorf("markers = %v, want [flagged-fact]", got)
+	}
+}
+
+func TestPublishedWriteMarksNothing(t *testing.T) {
+	fx := setup(t, "work")
+	if _, err := Add(context.Background(), fx.cfg, request("plain-fact", personalRepo), fx.deps); err != nil {
+		t.Fatal(err)
+	}
+	if got := pendingMarkers(t, fx); len(got) != 0 {
+		t.Errorf("markers = %v, want none", got)
+	}
+}
+
+// TestImportedShellCorpusCounts measures requirement 7: how many corpus
+// facts the write path flags before and after the import shell rule.
+func TestImportedShellCorpusCounts(t *testing.T) {
+	fx := setup(t, "work")
+	if err := gate.MarkSession(fx.cfg.ProvenanceDir(), "s1", true); err != nil {
+		t.Fatal(err)
+	}
+	type tally struct{ before, after, total int }
+	classes := map[string]*tally{"note": {}, "instr": {}}
+	now := fx.deps.Now()
+	for file, f := range corpusFixtures(t) {
+		class, _, _ := strings.Cut(file, "-")
+		c, ok := classes[class]
+		if !ok {
+			t.Fatalf("%s: unknown corpus class", file)
+		}
+		c.total++
+
+		req := importRequest(f, true, true)
+		data, err := complete(req, now).Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		gated := slices.Concat(
+			gate.Provenance(fx.cfg.RecordDir(), fx.cfg.ProvenanceDir(), req.SessionID, req.External),
+			gate.Content(string(data)),
+			gate.Size(len(data)))
+		if len(gated) > 0 {
+			c.before++
+		}
+
+		res, err := Add(context.Background(), fx.cfg, req, fx.deps)
+		if err != nil {
+			t.Fatalf("%s: %v", file, err)
+		}
+		if res.Outcome == "flagged" {
+			c.after++
+		}
+		if want := class == "instr"; (res.Outcome == "flagged") != want {
+			t.Errorf("%s: outcome %s (%v), want flagged = %v", file, res.Outcome, res.Reasons, want)
+		}
+	}
+	n, i := classes["note"], classes["instr"]
+	total := n.total + i.total
+	before, after := n.before+i.before, n.after+i.after
+	t.Logf("before: %d/%d flagged (note %d/%d, instr %d/%d)", before, total, n.before, n.total, i.before, i.total)
+	t.Logf("after: %d/%d flagged (note %d/%d, instr %d/%d)", after, total, n.after, n.total, i.after, i.total)
+	if before != total {
+		t.Errorf("before = %d/%d, want every corpus fact flagged by the shell rule", before, total)
+	}
+}

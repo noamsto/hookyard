@@ -21,6 +21,7 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/commit"
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
+	"github.com/noamsto/hookyard/cmd/priors/internal/review"
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
 	"github.com/noamsto/hookyard/cmd/priors/internal/write"
@@ -103,13 +104,14 @@ type candidate struct {
 	fact fact.Fact
 }
 
-// Result is a run's reports, one per item, and the commit's warning, as
+// Result is a run's reports, one per item, the review proposals' lines, and the commit's warning, as
 // write.Result.Warning words it. Failed counts the items that did not land
 // because something broke (the scanner, a write), not because the
 // write path refused them: a re-run may clear these, and the caller should
 // not report the run as clean.
 type Result struct {
 	Reports []Report
+	Review  []string
 	Warning string
 	Failed  int
 }
@@ -149,6 +151,9 @@ func Run(ctx context.Context, items []Item, o Options) (Result, error) {
 	}
 	published := writeAll(ctx, o, checkout, pl, &out)
 	out.Warning = joinWarnings(out.Warning, commitImport(ctx, o, checkout, published))
+	lines, warnings := review.SyncLocked(ctx, o.Config, route.StorePersonal, o.Deps.Rules, o.Deps.Scanner)
+	out.Review = lines
+	out.Warning = joinWarnings(out.Warning, strings.Join(warnings, "; "))
 	return out, nil
 }
 
