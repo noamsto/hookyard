@@ -196,9 +196,7 @@ var beforeStage = func() {}
 // prompt cannot hang priors.
 var signTimeout = gitTimeout
 
-// commitTree commits tree on parent with git and moves dir's HEAD to it. It
-// signs only when sign is set: unlike git commit, commit-tree ignores
-// commit.gpgSign.
+// commitTree commits tree on parent with git and moves dir's HEAD to it.
 func commitTree(ctx context.Context, git gitFunc, dir, parent, tree, msg string, sign bool) (commit, warning string) {
 	missing, err := unlisted(git, tree)
 	switch {
@@ -207,6 +205,21 @@ func commitTree(ctx context.Context, git gitFunc, dir, parent, tree, msg string,
 	case len(missing) > 0:
 		return "", fmt.Sprintf("nothing committed in %s: %s would list files the commit lacks: %s", dir, store.IndexFile, strings.Join(missing, ", "))
 	}
+	if commit, warning = newCommit(git, dir, parent, tree, msg, sign); warning != "" {
+		return "", warning
+	}
+	// parent as the old value makes this a compare-and-swap: a HEAD that
+	// moved since the tree was built, or appeared on an unborn branch, fails it.
+	if out, err := runGit(ctx, dir, gitTimeout, nil, "update-ref", "-m", msg, "HEAD", commit, parent); err != nil {
+		return "", gitWarning("git update-ref", out, err)
+	}
+	return commit, ""
+}
+
+// newCommit makes a commit of tree on parent with git, moving no ref. It
+// signs only when sign is set: unlike git commit, commit-tree ignores
+// commit.gpgSign.
+func newCommit(git gitFunc, dir, parent, tree, msg string, sign bool) (commit, warning string) {
 	args, timeout := []string{"commit-tree", "-m", msg}, gitTimeout
 	if parent != "" {
 		args = append(args, "-p", parent)
@@ -215,20 +228,14 @@ func commitTree(ctx context.Context, git gitFunc, dir, parent, tree, msg string,
 		// Plain -S lets git pick the key and format from the config.
 		args, timeout = append(args, "-S"), signTimeout
 	}
-	commit, err = git(timeout, nil, nil, append(args, tree)...)
+	commit, err := git(timeout, nil, nil, append(args, tree)...)
 	switch {
 	case err != nil && sign:
 		return "", fmt.Sprintf("nothing committed in %s: signing the commit failed: %s", dir, gitWarning("git commit-tree", commit, err))
 	case err != nil:
 		return "", gitWarning("git commit-tree", commit, err)
 	}
-	commit = strings.TrimSpace(commit)
-	// parent as the old value makes this a compare-and-swap: a HEAD that
-	// moved since the tree was built, or appeared on an unborn branch, fails it.
-	if out, err := runGit(ctx, dir, gitTimeout, nil, "update-ref", "-m", msg, "HEAD", commit, parent); err != nil {
-		return "", gitWarning("git update-ref", out, err)
-	}
-	return commit, ""
+	return strings.TrimSpace(commit), ""
 }
 
 // push publishes commit, the one just made on parent, to the branch's
@@ -245,48 +252,66 @@ func push(ctx context.Context, dir, remote, parent, commit string) (warning stri
 	if warning := preflight(ctx, dir, remote); warning != "" {
 		return warning
 	}
-	ref, err := runGit(ctx, dir, gitTimeout, nil, "symbolic-ref", "-q", "HEAD")
-	if exitsOne(err) {
-		return refusal(dir, "HEAD is not on a branch")
-	}
-	if err != nil {
-		return refusal(dir, "%s", gitWarning("git symbolic-ref", "", err))
-	}
-	ref = strings.TrimSpace(ref)
-	out, warning := inspect(ctx, dir, "git for-each-ref", "for-each-ref", "--format=%(upstream)%00%(upstream:remotename)%00%(upstream:remoteref)", ref)
+	up, warning := upstream(ctx, dir)
 	if warning != "" {
 		return warning
 	}
-	branch := strings.TrimPrefix(ref, "refs/heads/")
-	fields := strings.Split(out, "\x00")
-	if len(fields) != 3 || fields[0] == "" || fields[1] == "" || fields[1] == "." || !strings.HasPrefix(fields[2], "refs/heads/") {
-		return refusal(dir, "%s has no upstream", branch)
-	}
-	tracking, mergeRef := fields[0], fields[2]
-	upstream, err := runGit(ctx, dir, gitTimeout, nil, "rev-parse", "-q", "--verify", tracking+"^{commit}")
-	if exitsOne(err) {
-		return refusal(dir, "upstream %s is not fetched", tracking)
-	}
-	if err != nil {
-		return refusal(dir, "%s", gitWarning("git rev-parse", "", err))
-	}
-	upstream = strings.TrimSpace(upstream)
-	if out, warning = inspect(ctx, dir, "git rev-list", "rev-list", commit, "--not", upstream); warning != "" {
+	out, warning := inspect(ctx, dir, "git rev-list", "rev-list", commit, "--not", up.commit)
+	if warning != "" {
 		return warning
 	}
 	if out != commit {
-		return refusal(dir, "%s has commits ahead of %s other than this one; push them yourself (git push) to resume", branch, tracking)
+		return refusal(dir, "%s has commits ahead of %s other than this one; push them yourself (git push) to resume", up.branch, up.tracking)
 	}
 
-	if warning := pinnedPush(ctx, dir, remote, commit, mergeRef, parent); warning != "" {
+	if warning := pinnedPush(ctx, dir, remote, commit, up.mergeRef, parent); warning != "" {
 		return warning
 	}
 	// The push from the pinned git dir leaves the checkout's tracking ref behind,
 	// which the next push's ahead check reads.
-	if out, err := runGit(ctx, dir, gitTimeout, nil, "update-ref", tracking, commit, upstream); err != nil {
-		return fmt.Sprintf("pushed, but updating %s failed: %s", tracking, gitWarning("git update-ref", out, err))
+	if out, err := runGit(ctx, dir, gitTimeout, nil, "update-ref", up.tracking, commit, up.commit); err != nil {
+		return fmt.Sprintf("pushed, but updating %s failed: %s", up.tracking, gitWarning("git update-ref", out, err))
 	}
 	return ""
+}
+
+// upstreamRef is the checkout branch's upstream: branch is the branch's
+// short name, tracking the local tracking ref, mergeRef the branch on the
+// remote, and commit what tracking holds.
+type upstreamRef struct {
+	branch, tracking, mergeRef, commit string
+}
+
+// upstream reads the upstream of the branch HEAD is on in the checkout at
+// dir, as already fetched, or a refusal when there is none.
+func upstream(ctx context.Context, dir string) (up upstreamRef, warning string) {
+	ref, err := runGit(ctx, dir, gitTimeout, nil, "symbolic-ref", "-q", "HEAD")
+	if exitsOne(err) {
+		return up, refusal(dir, "HEAD is not on a branch")
+	}
+	if err != nil {
+		return up, refusal(dir, "%s", gitWarning("git symbolic-ref", "", err))
+	}
+	ref = strings.TrimSpace(ref)
+	out, warning := inspect(ctx, dir, "git for-each-ref", "for-each-ref", "--format=%(upstream)%00%(upstream:remotename)%00%(upstream:remoteref)", ref)
+	if warning != "" {
+		return up, warning
+	}
+	up.branch = strings.TrimPrefix(ref, "refs/heads/")
+	fields := strings.Split(out, "\x00")
+	if len(fields) != 3 || fields[0] == "" || fields[1] == "" || fields[1] == "." || !strings.HasPrefix(fields[2], "refs/heads/") {
+		return up, refusal(dir, "%s has no upstream", up.branch)
+	}
+	up.tracking, up.mergeRef = fields[0], fields[2]
+	commit, err := runGit(ctx, dir, gitTimeout, nil, "rev-parse", "-q", "--verify", up.tracking+"^{commit}")
+	if exitsOne(err) {
+		return up, refusal(dir, "upstream %s is not fetched", up.tracking)
+	}
+	if err != nil {
+		return up, refusal(dir, "%s", gitWarning("git rev-parse", "", err))
+	}
+	up.commit = strings.TrimSpace(commit)
+	return up, ""
 }
 
 // beforePush is a test seam that runs once the pin and upstream checks have
