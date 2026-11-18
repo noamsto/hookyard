@@ -435,8 +435,9 @@ The flow:
 Requirements and checks:
 
 - `push = true` (and `commit = true`) in the user config; the push is the
-  pinned push of the config table. Without it nothing is sent and the fact
-  stays pending.
+  pinned push of the config table. Without it nothing is sent, the facts
+  stay pending, and each run prints one `warning: review: <N> flagged
+  fact(s) wait for push = true to be proposed`.
 - The checkout branch needs an upstream on origin that has been fetched.
 - Before every push priors runs the redaction rules and secret scan over the
   exact bytes (a match drops the marker and prints the rule id, never the

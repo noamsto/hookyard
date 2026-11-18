@@ -186,6 +186,14 @@ func SyncLocked(ctx context.Context, cfg config.Config, storeID route.StoreID, r
 	if err != nil {
 		return lines, append(warnings, fmt.Sprintf("review: listing pending facts: %v", err))
 	}
+	// Push defaults to off, so one summary instead of a warning per marker on
+	// every write; the markers wait for push = true.
+	if !cfg.Push || !cfg.CommitEnabled() {
+		if len(names) > 0 {
+			warnings = append(warnings, fmt.Sprintf("review: %d flagged fact(s) wait for push = true to be proposed", len(names)))
+		}
+		return lines, warnings
+	}
 	for _, name := range names {
 		entry, ok := local.FindByName(name)
 		if !ok {

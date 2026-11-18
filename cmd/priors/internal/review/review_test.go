@@ -271,11 +271,12 @@ func TestSyncPushOffKeepsMarkersAndWarnsOnce(t *testing.T) {
 		fx.putLocal(t, testFact(n, nil, nil))
 	}
 	fx.mark(t, "a", "b")
+	got := fakePropose(t, commit.ReviewPushed, "")
 	lines, warnings := syncFx(fx)
-	if len(lines) != 0 {
-		t.Errorf("lines = %v", lines)
+	if len(lines) != 0 || len(*got) != 0 {
+		t.Errorf("lines = %v, propose calls = %d", lines, len(*got))
 	}
-	want := []string{"review a: push is off", "review b: push is off"}
+	want := []string{"review: 2 flagged fact(s) wait for push = true to be proposed"}
 	if !reflect.DeepEqual(warnings, want) {
 		t.Errorf("warnings = %q, want %q", warnings, want)
 	}
