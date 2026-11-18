@@ -3,7 +3,8 @@
 **Status:** design, **ready to implement.** `priors` v0 can be built now for
 tiers 1 and 3, the stores, the gates, the lint, redaction and the host-local
 layer. Unflagged facts publish through the gates, and flagged ones stay
-`proposed` in their host-local layer until a human publishes them. The
+`proposed` in their host-local layer and are proposed as a per-fact review PR
+on the store repo; merging the PR publishes them as `reviewed`. The
 attestation design that
 [#130](https://github.com/noamsto/hookyard/issues/130) settled (§4.4,
 *Attestation*) was removed on 2026-11-10 (#289): `reviewed` is now an
@@ -687,7 +688,7 @@ secret that reaches a pushed store means **rotating the credential**; purging
 history is not the remedy, because every clone already holds it. Which path a
 write then takes before it reaches another host is §4.4's option A with gates:
 published if it passes them, held in the local layer of the host that wrote it
-if flagged.
+and proposed for review as a PR on the store's remote if flagged.
 
 ### 4.4 Read path: three tiers, one budget
 
@@ -1040,10 +1041,34 @@ distillation) and again as each store's required check on its remote:
    markers cannot be read, is flagged. Identity has one weak spot: only
    Claude's `CLAUDE_CODE_SESSION_ID` is verified, so on Codex, Pi and Cursor
    `priors add` relies on a caller-asserted session id.
+
+   `provenance:shell` is meant to catch a fact whose text a session wrote
+   after reading non-owner content through the shell, so injected instructions
+   can ride into the store. For an import that premise fails: the importing
+   session copies bytes it did not write, so its marker, set by whatever the
+   session ran, says nothing about that text. For an imported fact the reason
+   is kept only when the fact's body reads as an instruction to run a command
+   (§4.9, *Trust*), and dropped otherwise. This assumes the import runs with
+   an engine session id; outside an engine session gate 2 returns
+   `provenance:unknown-session`, which is kept. `priors add` and every other
+   provenance reason are unchanged.
 3. **Content heuristics** — imperative or policy-override text is flagged:
    commands to run, URLs, `curl | sh`, `--no-verify`, "always" / "never" aimed
    at tools, instruction-like phrasing.
 4. **Lint and size cap** — the existing lint (§4.6) and a per-fact size cap.
+
+   Gates 3 and 4's content and size checks do not apply to a fact whose
+   `confidence` is `reviewed`, in the store lint (and `priors lint
+   --move-flagged`) and in the commit gate. Without that, a merged review PR
+   would fail the required check it was opened to pass, and a content-flagged
+   fact a human moved into the checkout and marked reviewed would make every
+   later commit refuse the checkout. The secret scan, redaction, a non-empty
+   `flags` in the commit gate and every other lint rule still apply. The
+   trade-off: anyone who can write a store file and set `reviewed` skips gates
+   3 and 4 on the required check. That is the residual the unverified label
+   already carries (single owner, agents running as the owner's uid, the write
+   guard a tripwire); `priors add` and the importer always write `proposed`,
+   so priors writes `reviewed` only in a review commit (§9, decision 10).
 5. **Always fenced** — every injected fact, flagged or not, is framed as
    untrusted data (the common ground above).
 
@@ -1085,13 +1110,68 @@ across stores — moving a work fact to personal stays the separate human act of
 §4.2. It commits into the checkout first and deletes the local copy after; if
 both exist, the checkout copy wins by `name`.
 
+**Flagged facts go to a review PR.** When a write lands a fact flagged, priors
+also drops an empty marker for it in a per-store pending queue
+(`$XDG_STATE_HOME/priors/review/<store>/pending/<name>`). At the end of
+`priors add`, `priors import` and `priors index --write`, under the store's
+lock, `review.Sync` pushes each pending fact to the store's remote as its own
+branch, `review/<host>/<name>-<h8>`: `<host>` is the fact's `provenance.host`
+reduced to `[a-z0-9-]`, `<h8>` the first eight hex digits of the sha256 of the
+review file. The branch is one commit on the checkout branch's already-fetched
+upstream ref (priors does not fetch), built with plumbing in a private index
+so the checkout's HEAD, index and worktree are untouched, and its tree is the
+base tree plus one file at the fact's checkout path. The file is the local
+fact with `confidence: reviewed` and `flags` cleared; the flag reasons go in
+the commit message, which is also the PR body and names only gate reason ids
+and metadata, never matched text. A branch is created once
+(`--force-with-lease=<ref>:`, the ref must not exist) and never moved, so a
+retry of the same bytes finds it and counts as sent, and changed bytes make a
+new branch. The push is the pinned push of §4.2's config table, through the
+same code as `commit.push`, and runs only when `push` and `commit` are on.
+Quarantined facts are never proposed, since they belong to no store.
+
+Two checks run on the exact bytes before the branch is hashed. The redaction
+rules and the secret scan must find nothing; a match drops the marker and
+reports the rule id, never the text. Then `lint.Store` runs with the content
+gates over the base tree plus the file, materialised in a private temp
+directory, exactly as `priors lint --dir` would, and any finding keeps the
+marker for a later retry. The lint runs locally because the store repo's
+GitHub Actions billing is blocked, so its required lint check does not report
+today; the PR body states that the local lint was clean. A path already
+present on the base (the name is taken on main) drops the marker; a missing or
+unfetched upstream and a push or pin failure keep it. A failure never changes
+the command's exit code: the fact is safe in the local layer, and a `warning:
+review <name>: <why>` line is printed.
+
+A merge is the approval and a close is the rejection. The PR is opened by a
+store-repo Action that fires on a push to `review/**` and opens a PR from the
+branch with the workflow's `GITHUB_TOKEN` (§9, decision 11); priors also
+prints a compare URL beside the `review <store> <branch>` line when the pinned
+remote is a GitHub URL, which is the path that works while the Action cannot
+run. After a merge and a pull, the fact is in the checkout as `reviewed`, and
+the same `review.Sync` prunes the local copy and its marker when the checkout
+holds the name with the same `provenance` and `source`; a same-named checkout
+fact from another writer is left alone, since readers already prefer the
+checkout copy by name. After a close the local copy stays, and the importer's
+dedupe, which reads the checkout and the local layer, reports an unchanged
+source as `unchanged`, so a closed PR's fact is not proposed again. Facts
+flagged before this existed have no marker and are not proposed.
+
+A review PR adds only the fact file and leaves `MEMORY.md` alone: two
+branches that both touch it conflict on the hash-derived fence lines, and a
+PR that left it stale would otherwise fail `index-sync` (§4.6). The next write
+on any host regenerates it in full, after which the merged fact is in tier 1
+everywhere. Until then the fact is reachable by `priors show` and `priors
+search`, and the proposing host still injects its local copy.
+
 **`confidence` under A with gates.** `proposed` is a fact that passed the gates
 and has had no human review; `reviewed` is a label a human (or anyone who can
 write the file) sets by hand, and nothing verifies it. Both are injected from a
 checkout, fenced, and shown as stored. A flagged fact is `proposed` in the
-local layer. A human clears the flag with `priors publish`, which commits it
-to the checkout as `proposed`; setting `reviewed` is a separate hand edit of
-the fact (*Attestation*, below, records why no signed check backs it).
+local layer. A human clears it by merging its review PR, whose commit carries
+the fact as `reviewed` with its flags cleared, or by moving the file into the
+checkout and editing it by hand (*Attestation*, below, records why no signed
+check backs the label).
 
 What the gates mean for the other writers: distillation (§4.3b), the importer
 (§4.9) and the migration (decision 2) all go through the same gates. An
@@ -1118,8 +1198,9 @@ What replaced it:
   `list`, the session-start block) shows the stored value as it is. Any writer
   can set `reviewed`; no signature, verdict or check vouches for it, and the
   commit gate accepts it. `priors add` still always writes `proposed`.
-  Promoting a flagged fact is a human publishing it (`proposed`) and, if they
-  want the label, editing `confidence` by hand.
+  Promoting a flagged fact is merging its review PR, which lands the fact as
+  `reviewed` (§4.4, above), or a hand edit: moving it into the checkout and
+  setting `confidence` by hand.
 - **`trust_root` and `attest_keys` in the trust file are deprecated and
   ignored.** A trust file that still has them loads, except that
   `trust_root = "separate"` is rejected with an "attestation was removed"
@@ -1237,8 +1318,13 @@ injected with the same confidence as a fresh one. Four mechanical rules:
    pattern (§4.3's shared rule set), in the personal store a fact naming a
    work org (so §6's tripwire is a check), and an index out of sync with the
    directory, meaning any byte differing from what `priors index` would write
-   (lines and framing alike). An index written before the delimiter became
-   deterministic (§4.7) fails this once, until `priors index` regenerates it.
+   (lines and framing alike), except that it may omit the `confidence:
+   reviewed` facts it does not list, since a merged review PR (§4.4) adds a
+   fact without touching the index; a missing `proposed` fact, an extra,
+   reordered or hand-written line and a broken frame still fail. An index
+   written before the delimiter became deterministic (§4.7) fails this once,
+   until `priors index` regenerates it. The lint's content and size checks skip
+   a `reviewed` fact (§4.4, gate 4).
    It runs in the store's own pre-commit, as a required check on
    the store's remote (§4.3), and in the write path, so a malformed fact
    cannot be injected.
@@ -1530,9 +1616,18 @@ checkout with no `origin` is **unresolvable**. Write-time redaction
 write path, and nothing it reads was reviewed, so it runs §4.4's gates on every
 item: an unflagged fact publishes to the target store, and a flagged one lands
 in the target store's local layer (`$XDG_STATE_HOME/priors/local/<store>/`) on
-the host whose engine wrote it, until reviewed. Native memory is not a
-non-owner source, so gate 2 flags only what the importing session itself
-ingested.
+the host whose engine wrote it, and is proposed for review on the store's
+remote (§4.4). Native memory is not a non-owner source, and the importing
+session copies bytes it did not write, so its shell marker says nothing about
+the text it imports. For an import, gate 2 therefore keeps `provenance:shell`
+only when the fact's body reads as an instruction to run a command
+(`gate.ImperativeCommand`: a line or sentence starting with a run verb such as
+`run`, `use`, `set` or `curl` followed by a code span, a quoted string or a
+path- or flag-shaped word). Every other provenance reason applies as for any
+write. This assumes the import runs with an engine session id. Without one,
+gate 2 raises `provenance:unknown-session`, so every fact flags and gets its
+own review PR; `crew reap`'s call to `priors import` must pass
+`--engine` and `--session`.
 
 **Double injection.** An engine with native memory already injects its own
 copy of a fact, so hookyard injecting the imported copy too would show that
@@ -1643,8 +1738,8 @@ flagged facts stops being optional.
   would first need a routing answer.
 - **Cursor ships a local memory store, or documents its knowledge-base API.**
   Then Cursor joins §4.9's table; until then v0 imports nothing from Cursor.
-- **Flagged facts pile up unpromoted.** Each one waits for a human
-  `priors publish`. If the backlog grows, revisit the digest of flagged facts
+- **Flagged facts pile up unpromoted.** Each one waits for a human to merge
+  its review PR or edit the label by hand. If the backlog grows, revisit the digest of flagged facts
   (§4.6) before anything that weakens the gates.
 - **Owner-readable store credentials keep Administration.** §4.4's deployment
   requirement is unmet, so an agent can rewrite a store remote's history.
@@ -1918,6 +2013,57 @@ Decided by the owner on 2026-09-30 unless marked. Decision 5 is settled
    altogether: `confidence: reviewed` is an unverified label, any writer can
    set it, and the commit gate accepts it. `trust_root` and `attest_keys` in
    the trust file are deprecated and ignored.
+9. **Flagged facts go to review PRs — decided 2026-11-18 (#296), by the
+   owner's request that flagged facts become pull requests; the design choices
+   are recorded here.** A flagged fact still lands `proposed` in the local
+   layer and is also pushed to its store's remote as a review branch, one per
+   fact (`review/<host>/<name>-<h8>`, §4.4), created once and never updated,
+   so a merge or a close is the approve or reject of exactly one fact and no
+   branch state has to be tracked (a reused daily branch would face squash
+   merges and auto-deleted heads). The branch holds main's tree plus one
+   file, and `MEMORY.md` stays out of it, because two branches that both touch
+   it conflict on its hash-derived fence lines. `index-sync` instead accepts a
+   `MEMORY.md` that omits merged `confidence: reviewed` facts, and the next
+   priors write regenerates it in full. The local copy stays while the PR is
+   open, for host-local injection and so the importer's dedupe never
+   re-proposes a closed PR's fact. Rejected: one branch per host per day.
+10. **`reviewed` skips gates 3 and 4 — decided 2026-11-18 (#296).** The store
+    lint's content and size checks and the commit gate's content and size
+    checks do not apply to a fact whose `confidence` is `reviewed`; the secret
+    scan, redaction, a non-empty `flags` in the commit gate and every other
+    lint rule still do. Without this a merged fact that a content gate flagged
+    fails the required check on main and `--move-flagged` moves it back out.
+    Residual: anyone who can write a store file and set `reviewed` skips gates
+    3 and 4 on the required check, the same residual the unverified label
+    already carries (decision 8); priors' own paths write `proposed`, except
+    in a review commit.
+11. **The review PR is opened by a store-repo Action — decided 2026-11-18
+    (#296).** Chosen over a pinned `gh` with the host's token, which puts that
+    token's scope behind priors, and over a compare URL alone, which opens
+    nothing unless the owner clicks (kept as the fallback, printed beside the
+    `review` line for a GitHub remote). Hosts gain no credential beyond the
+    pinned SSH push. Residual: a push-triggered workflow runs the pushed
+    branch's own workflow file and `permissions:` block, so any agent that can
+    push a `review/*` branch controls that run's token scope, and the "allow
+    Actions to create and approve pull requests" repo setting widens what the
+    token may do. Most of that exists already for same-repo branches; the
+    README recommends no auto-merge and a branch rule on main, so the merge
+    stays the owner's act. The Action and the store's lint CI do not run today:
+    the store repo's GitHub Actions billing is blocked. priors therefore lints
+    the review tree locally before every push, and the owner opens PRs from the
+    compare URL; the design does not change when billing is fixed.
+12. **An import's `provenance:shell` is kept only for instruction-shaped text
+    — decided 2026-11-18 (#296).** The importing session copies bytes it did
+    not write, so its shell marker says nothing about their text; in a dry run
+    39 of 43 imported memories flagged because of the importing session's own
+    `gh` calls. For an import, `provenance:shell` is kept only when
+    `gate.ImperativeCommand` holds for the body, and every other provenance
+    reason is unchanged. Assumption: the import runs with an engine session id;
+    without one gate 2 raises `provenance:unknown-session`, which is kept, so
+    every fact flags and gets its own PR. #1668's `crew reap` must pass
+    `--engine` and `--session`. Residual: an instruction in a form the
+    detector does not read publishes unflagged; gate 3 and the fence still
+    apply.
 
 ---
 

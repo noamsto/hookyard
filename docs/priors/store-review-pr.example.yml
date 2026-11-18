@@ -1,0 +1,55 @@
+# Example PR opener for a priors store repository (personal or work).
+# Copy to .github/workflows/review-pr.yml in the store repo. When priors
+# pushes a flagged fact to a review/<host>/<name>-<hash> branch, this opens
+# the pull request for it: the commit subject becomes the title and the commit
+# body the PR description (docs/design/memory-layer.md §4.4). Merging the PR
+# is the approval; closing it is the rejection.
+#
+# One-time repo setting: Settings > Actions > General > Workflow permissions >
+# "Allow GitHub Actions to create and approve pull requests". Without it
+# `gh pr create` fails with the workflow's GITHUB_TOKEN.
+#
+# This Action, like the lint check, does not run while the account's GitHub
+# Actions billing is blocked. Until then the owner opens each PR from the
+# compare URL that priors prints beside the `review` line.
+#
+# Keep auto-merge off and protect the default branch with a branch rule that
+# requires the `lint` check and a review: a push-triggered workflow runs the
+# pushed branch's own workflow file and `permissions:`, so the merge must stay
+# the owner's act.
+name: review-pr
+on:
+  push:
+    branches: ['review/**']
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  open-pr:
+    # A branch deletion (a merged PR's branch being cleaned up) is a push too.
+    if: github.event.deleted == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: open pull request
+        env:
+          BRANCH: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.event.repository.default_branch }}
+        # The commit message is written by an agent-controlled process: it
+        # reaches gh only as a variable and a file, never as script text.
+        run: |
+          open="$(gh pr list --head "$BRANCH" --state open --json number --jq length)"
+          if [ "$open" != 0 ]; then
+            exit 0
+          fi
+          f="$(mktemp)"
+          git log -1 --format=%b > "$f"
+          gh pr create --base "$BASE" --head "$BRANCH" \
+            --title "$(git log -1 --format=%s)" --body-file "$f"
