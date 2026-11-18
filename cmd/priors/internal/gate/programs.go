@@ -33,7 +33,7 @@ var (
 	scriptShells = []string{"bash", "sh", "zsh", "dash", "ksh", "ash"}
 	awks         = []string{"awk", "gawk", "mawk", "nawk"}
 	// gitReaders leave the work tree as it is: they read, or write only git's
-	// own index, objects and refs; gitReads refuses reflog's expire and delete.
+	// own index, objects and refs; gitReads reads reflog only bare, with options, or as show, exists or list.
 	// commit is listed for its option checks but
 	// classify treats it as a write in its repo.
 	gitReaders = []string{
@@ -1338,7 +1338,7 @@ func gitReads(args, heads []string) bool {
 	if !slices.Contains(gitReaders, args[sub]) {
 		return false
 	}
-	if args[sub] == "reflog" && sub+1 < len(args) && slices.Contains([]string{"expire", "delete"}, args[sub+1]) {
+	if args[sub] == "reflog" && sub+1 < len(args) && !strings.HasPrefix(args[sub+1], "-") && !slices.Contains([]string{"show", "exists", "list"}, args[sub+1]) {
 		return false
 	}
 	var skip []int
@@ -2342,6 +2342,9 @@ func (r *reader) findStarts(args []arg) []arg {
 		if out == nil {
 			out = slices.Clone(args)
 		}
+		if !pathValue(boundValue{text: tail, ok: true}) && tail != "" {
+			continue
+		}
 		out[i].text, out[i].ok = vals[0].text+tail, true
 	}
 	if out == nil {
@@ -2353,7 +2356,7 @@ func (r *reader) findStarts(args []arg) []arg {
 // pathValue reports a bound value that is non-empty literal text with no
 // byte that splits, globs or quotes, and does not start like a find primary.
 func pathValue(v boundValue) bool {
-	return v.ok && v.text != "" && !strings.ContainsAny(v.text, " \t\n*?[{\\'\"$`~") && !strings.ContainsRune("-(!,", rune(v.text[0]))
+	return v.ok && v.text != "" && !strings.ContainsAny(v.text, " \t\n*?[{\\'\"$`~()") && !strings.ContainsRune("-(!,", rune(v.text[0]))
 }
 
 // simpleParam reads w as $NAME or ${NAME}, bare or double-quoted, followed
