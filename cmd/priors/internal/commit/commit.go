@@ -28,7 +28,6 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 	"github.com/noamsto/hookyard/cmd/priors/internal/lint"
-	"github.com/noamsto/hookyard/cmd/priors/internal/pin"
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 	"github.com/noamsto/hookyard/cmd/priors/internal/sanitize"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
@@ -233,99 +232,54 @@ func commitTree(ctx context.Context, git gitFunc, dir, parent, tree, msg string,
 }
 
 // push publishes commit, the one just made on parent, to the branch's
-// upstream on origin, which must be remote, the trust file's pin. It pushes to
-// the pinned URL from the build-pinned empty bare git dir, read-only and so
-// beyond the owner's reach, reading the checkout's objects through
-// GIT_OBJECT_DIRECTORY, in pin.PushEnv's environment: neither the checkout's
-// config, where a [remote "<url>"] section redirects even an explicit-URL
-// push, nor the caller's environment reaches it. The lease makes the push a
-// compare-and-swap against the real remote, so only commit is transferred even
-// when the tracking ref is stale or tampered with; commit being parent's
-// child, a passing lease is a fast-forward. A branch with no fetched upstream,
-// including a fresh unborn store, is not pushed: the user's first
-// `git push -u` sets it up.
+// upstream on origin, which must be remote, the trust file's pin, through
+// pinnedPush. The lease makes the push a compare-and-swap against the real
+// remote, so only commit is transferred even when the tracking ref is stale or
+// tampered with; commit being parent's child, a passing lease is a
+// fast-forward. A branch with no fetched upstream, including a fresh unborn
+// store, is not pushed: the user's first `git push -u` sets it up.
 func push(ctx context.Context, dir, remote, parent, commit string) (warning string) {
-	refuse := func(format string, args ...any) string {
-		return fmt.Sprintf("not pushed from %s: ", dir) + fmt.Sprintf(format, args...)
-	}
-	inspect := func(what string, args ...string) (string, string) {
-		out, err := runGit(ctx, dir, gitTimeout, nil, args...)
-		if err != nil {
-			return "", refuse("%s", gitWarning(what, out, err))
-		}
-		return strings.TrimSpace(out), ""
-	}
 	if parent == "" {
-		return refuse("the store has no earlier commit to push onto")
+		return refusal(dir, "the store has no earlier commit to push onto")
 	}
-	if remote == "" {
-		return refuse("the trust file pins no remote for this store")
-	}
-	if _, err := pin.PushEnv(); err != nil {
-		return refuse("%v", err)
-	}
-	// Re-checked under the store's lock, right before pushing.
-	if err := pin.Check(ctx, dir, remote); err != nil {
-		return refuse("%v", err)
+	if warning := preflight(ctx, dir, remote); warning != "" {
+		return warning
 	}
 	ref, err := runGit(ctx, dir, gitTimeout, nil, "symbolic-ref", "-q", "HEAD")
 	if exitsOne(err) {
-		return refuse("HEAD is not on a branch")
+		return refusal(dir, "HEAD is not on a branch")
 	}
 	if err != nil {
-		return refuse("%s", gitWarning("git symbolic-ref", "", err))
+		return refusal(dir, "%s", gitWarning("git symbolic-ref", "", err))
 	}
 	ref = strings.TrimSpace(ref)
-	out, warning := inspect("git for-each-ref", "for-each-ref", "--format=%(upstream)%00%(upstream:remotename)%00%(upstream:remoteref)", ref)
+	out, warning := inspect(ctx, dir, "git for-each-ref", "for-each-ref", "--format=%(upstream)%00%(upstream:remotename)%00%(upstream:remoteref)", ref)
 	if warning != "" {
 		return warning
 	}
 	branch := strings.TrimPrefix(ref, "refs/heads/")
 	fields := strings.Split(out, "\x00")
 	if len(fields) != 3 || fields[0] == "" || fields[1] == "" || fields[1] == "." || !strings.HasPrefix(fields[2], "refs/heads/") {
-		return refuse("%s has no upstream", branch)
+		return refusal(dir, "%s has no upstream", branch)
 	}
 	tracking, mergeRef := fields[0], fields[2]
 	upstream, err := runGit(ctx, dir, gitTimeout, nil, "rev-parse", "-q", "--verify", tracking+"^{commit}")
 	if exitsOne(err) {
-		return refuse("upstream %s is not fetched", tracking)
+		return refusal(dir, "upstream %s is not fetched", tracking)
 	}
 	if err != nil {
-		return refuse("%s", gitWarning("git rev-parse", "", err))
+		return refusal(dir, "%s", gitWarning("git rev-parse", "", err))
 	}
 	upstream = strings.TrimSpace(upstream)
-	if out, warning = inspect("git rev-list", "rev-list", commit, "--not", upstream); warning != "" {
+	if out, warning = inspect(ctx, dir, "git rev-list", "rev-list", commit, "--not", upstream); warning != "" {
 		return warning
 	}
 	if out != commit {
-		return refuse("%s has commits ahead of %s other than this one; push them yourself (git push) to resume", branch, tracking)
+		return refusal(dir, "%s has commits ahead of %s other than this one; push them yourself (git push) to resume", branch, tracking)
 	}
 
-	format, warning := inspect("git rev-parse", "rev-parse", "--show-object-format")
-	if warning != "" {
+	if warning := pinnedPush(ctx, dir, remote, commit, mergeRef, parent); warning != "" {
 		return warning
-	}
-	if format != "sha1" {
-		return refuse("the push repo is sha1; this checkout is %s", format)
-	}
-	common, warning := inspect("git rev-parse", "rev-parse", "--path-format=absolute", "--git-common-dir")
-	if warning != "" {
-		return warning
-	}
-	beforePush()
-	env, err := pin.ObjectsEnv(common)
-	if err != nil {
-		return refuse("%v", err)
-	}
-	url, err := runGitExact(ctx, tools.PushGitDir, env, gitTimeout, nil, "ls-remote", "--get-url", remote)
-	if err != nil {
-		return refuse("%s", gitWarning("git ls-remote", url, err))
-	}
-	if url = strings.TrimSpace(url); url != remote {
-		return refuse("effective push URL %s differs from the pinned %s", url, remote)
-	}
-	if _, err := runGitExact(ctx, tools.PushGitDir, env, pushTimeout, nil, "push", "-q", "--no-follow-tags", "--recurse-submodules=no", "--no-signed", "--force-with-lease="+mergeRef+":"+parent, "--", remote, commit+":"+mergeRef); err != nil {
-		return refuse("git push failed: %v", err)
 	}
 	// The push from the pinned git dir leaves the checkout's tracking ref behind,
 	// which the next push's ahead check reads.
@@ -696,8 +650,11 @@ func (c classifier) factRefusal(rel string) string {
 		rules = append(rules, finding.Rule)
 	}
 	rules = append(rules, c.findings[rel]...)
-	for _, reason := range append(gate.Content(string(raw)), gate.Size(len(raw))...) {
-		rules = append(rules, "gate:"+reason)
+	// A reviewed fact is one a person read past these gates.
+	if f.Metadata.Confidence != "reviewed" {
+		for _, reason := range append(gate.Content(string(raw)), gate.Size(len(raw))...) {
+			rules = append(rules, "gate:"+reason)
+		}
 	}
 	if len(f.Metadata.Flags) > 0 {
 		rules = append(rules, "flagged")

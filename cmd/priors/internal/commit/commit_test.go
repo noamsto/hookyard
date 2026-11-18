@@ -269,6 +269,49 @@ func TestCommitsAReviewedFact(t *testing.T) {
 	committest.AssertHeadIndexInTree(t, fx.dir())
 }
 
+// TestContentGatesSkipReviewedFacts: a reviewed fact passed a person, so the
+// content and size gates no longer hold it back; flags still do.
+func TestContentGatesSkipReviewedFacts(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		confidence string
+		flags      []string
+		want       string // "" to commit, else the refusal reasons
+	}{
+		{"reviewed", "reviewed", nil, ""},
+		{"proposed", "proposed", nil, "gate:content:url"},
+		{"reviewed but flagged", "reviewed", []string{"content:url"}, "flagged"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := setup(t)
+			before := head(t, fx.dir())
+			f := linkyFact("linky-fact")
+			f.Metadata.Confidence = tt.confidence
+			f.Metadata.Flags = tt.flags
+			fx.put(t, "_global/linky-fact.md", f)
+			fx.index(t)
+
+			w := fx.checkout(t)
+			if tt.want == "" {
+				if w != "" {
+					t.Fatalf("warning = %q, want a clean commit", w)
+				}
+				if !slices.Contains(lsFiles(t, fx.dir()), "_global/linky-fact.md") {
+					t.Error("the fact was not committed")
+				}
+				committest.AssertHeadIndexInTree(t, fx.dir())
+				return
+			}
+			if want := "_global/linky-fact.md (" + tt.want + ")"; !strings.Contains(w, want) {
+				t.Errorf("warning = %q, want it to hold %q", w, want)
+			}
+			if head(t, fx.dir()) != before {
+				t.Error("HEAD moved")
+			}
+		})
+	}
+}
+
 func TestNothingDirtyIsNoCommit(t *testing.T) {
 	fx := setup(t)
 	before := head(t, fx.dir())
@@ -1191,6 +1234,51 @@ func TestPushRefusesNonSHA1Checkout(t *testing.T) {
 		t.Errorf("warning = %q", w)
 	}
 	assertMain(t, bare, parent)
+}
+
+// TestPinnedPushEmptyLeaseOnlyCreates: an empty expect pushes a ref the remote
+// lacks and refuses one it already has, which remoteHas reports.
+func TestPinnedPushEmptyLeaseOnlyCreates(t *testing.T) {
+	ctx := context.Background()
+	fx, bare := withRemote(t)
+	const ref = "refs/heads/review/laptop/some-fact"
+	commit := func(msg string) string {
+		return strings.TrimSpace(git(t, fx.dir(), "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", msg))
+	}
+	has := func() bool {
+		t.Helper()
+		exists, w := remoteHas(ctx, fx.dir(), bare, ref)
+		if w != "" {
+			t.Fatalf("remoteHas warning = %q", w)
+		}
+		return exists
+	}
+	if w := preflight(ctx, fx.dir(), bare); w != "" {
+		t.Fatalf("preflight warning = %q", w)
+	}
+	// A ref whose tail matches ref's pattern is not ref.
+	git(t, bare, "update-ref", "refs/heads/x/"+ref, rev(t, bare, "main"))
+	if has() {
+		t.Fatal("remoteHas reports a ref the remote lacks")
+	}
+
+	first := commit("first")
+	if w := pinnedPush(ctx, fx.dir(), bare, first, ref, ""); w != "" {
+		t.Fatalf("creating push warning = %q", w)
+	}
+	if got := rev(t, bare, ref); got != first {
+		t.Errorf("remote %s = %s, want %s", ref, got, first)
+	}
+	if !has() {
+		t.Error("remoteHas misses the pushed ref")
+	}
+
+	if w := pinnedPush(ctx, fx.dir(), bare, commit("second"), ref, ""); !strings.Contains(w, "git push failed") {
+		t.Errorf("push onto an existing ref: warning = %q, want a failed push", w)
+	}
+	if got := rev(t, bare, ref); got != first {
+		t.Errorf("remote %s moved: %s -> %s", ref, first, got)
+	}
 }
 
 func TestPushRefusesUserConfigRewrite(t *testing.T) {

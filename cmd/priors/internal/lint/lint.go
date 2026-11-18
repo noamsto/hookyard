@@ -318,6 +318,12 @@ func (c checker) refs(e store.Entry) []Finding {
 	return out
 }
 
+// index checks MEMORY.md against the facts on disk. The index must be exactly
+// what IndexLines renders, except that a `confidence: reviewed` fact whose line
+// the index does not list is tolerated: a review PR adds only the fact file and
+// leaves MEMORY.md alone, so main carries such a fact until the next priors
+// write regenerates the index. Any other missing fact, extra line or broken
+// frame still fails.
 func (c checker) index(entries []store.Entry) []Finding {
 	kept, _ := store.Unredacted(entries, c.opts.Rules)
 	want := c.root.IndexLines(kept)
@@ -327,7 +333,7 @@ func (c checker) index(entries []store.Entry) []Finding {
 		return nil
 	case err != nil:
 		return []Finding{{File: store.IndexFile, Rule: "index-sync", Msg: "index is missing or unreadable"}}
-	case !slices.Equal(have, want):
+	case !slices.Equal(have, want) && !slices.Equal(have, c.root.IndexLines(withoutUnlistedReviewed(c.root, kept, have))):
 		return []Finding{{File: store.IndexFile, Rule: "index-sync", Msg: "index lines differ from the facts on disk"}}
 	}
 	raw, err := os.ReadFile(filepath.Join(c.root.Path, store.IndexFile))
@@ -335,6 +341,22 @@ func (c checker) index(entries []store.Entry) []Finding {
 		return []Finding{{File: store.IndexFile, Rule: "index-sync", Msg: "index is not as generated"}}
 	}
 	return nil
+}
+
+// withoutUnlistedReviewed drops the reviewed facts whose index line is not in
+// have. An empty rendered line means the fact is archived, superseded or not
+// indexable, which IndexLines never lists, so it is not "missing".
+func withoutUnlistedReviewed(root store.Root, entries []store.Entry, have []string) []store.Entry {
+	out := make([]store.Entry, 0, len(entries))
+	for _, e := range entries {
+		if e.Fact.Metadata.Confidence == "reviewed" {
+			if line := root.IndexLines([]store.Entry{e}); len(line) == 1 && !slices.Contains(have, line[0]) {
+				continue
+			}
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 func (c checker) gates(ctx context.Context, entries []store.Entry) []Finding {
@@ -374,7 +396,11 @@ func (c checker) scan(ctx context.Context) (map[string][]string, error) {
 
 // flagReasons are the gate-3 and gate-4 reasons e trips, in the form stored in
 // metadata.flags.
+// A reviewed fact has passed review, so neither gate applies to it.
 func flagReasons(e store.Entry) []string {
+	if e.Fact.Metadata.Confidence == "reviewed" {
+		return nil
+	}
 	return append(gate.Content(string(e.Raw)), gate.Size(int(e.Size))...)
 }
 

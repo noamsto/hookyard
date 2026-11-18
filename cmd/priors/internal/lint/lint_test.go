@@ -407,6 +407,38 @@ func TestIndexSync(t *testing.T) {
 		}
 		assertOnly(t, Store(context.Background(), root, testOptions(t)), "index-sync")
 	})
+	t.Run("reviewed fact absent from the index passes", func(t *testing.T) {
+		root := checkout(t, route.StoreWork)
+		put(t, root, "repo-a/first.md", cleanFact("first"))
+		index(t, root)
+		merged := cleanFact("merged")
+		merged.Metadata.Confidence = "reviewed"
+		put(t, root, "repo-a/merged.md", merged)
+		if got := Store(context.Background(), root, testOptions(t)); len(got) != 0 {
+			t.Errorf("findings = %v, want none", got)
+		}
+	})
+	t.Run("proposed fact absent from the index fails", func(t *testing.T) {
+		root := checkout(t, route.StoreWork)
+		put(t, root, "repo-a/first.md", cleanFact("first"))
+		index(t, root)
+		other := cleanFact("other")
+		other.Metadata.Confidence = "proposed"
+		put(t, root, "repo-a/other.md", other)
+		assertOnly(t, Store(context.Background(), root, testOptions(t)), "index-sync")
+	})
+	t.Run("extra line fails despite a reviewed fact", func(t *testing.T) {
+		root := checkout(t, route.StoreWork)
+		put(t, root, "repo-a/first.md", cleanFact("first"))
+		second := cleanFact("second")
+		second.Metadata.Confidence = "reviewed"
+		put(t, root, "repo-a/second.md", second)
+		index(t, root)
+		if err := os.Remove(filepath.Join(root.Path, "repo-a", "first.md")); err != nil {
+			t.Fatal(err)
+		}
+		assertOnly(t, Store(context.Background(), root, testOptions(t)), "index-sync")
+	})
 	t.Run("empty store needs no index", func(t *testing.T) {
 		root := checkout(t, route.StoreWork)
 		if got := Store(context.Background(), root, testOptions(t)); len(got) != 0 {
@@ -642,6 +674,50 @@ func TestGateContentAndSize(t *testing.T) {
 		if strings.Contains(f.String(), "example.com") {
 			t.Errorf("finding leaks matched text: %q", f.String())
 		}
+	}
+}
+
+func TestGateReviewedExempt(t *testing.T) {
+	root := checkout(t, route.StoreWork)
+	reviewed := cleanFact("reviewed-url")
+	reviewed.Metadata.Confidence = "reviewed"
+	reviewed.Body = "docs at https://example.com/page\n"
+	proposed := cleanFact("proposed-url")
+	proposed.Metadata.Confidence = "proposed"
+	proposed.Body = "docs at https://example.com/page\n"
+	put(t, root, "repo-a/reviewed-url.md", reviewed)
+	put(t, root, "repo-a/proposed-url.md", proposed)
+	index(t, root)
+
+	opts := testOptions(t)
+	opts.Gates = true
+	opts.Scanner = fakeScanner(t, "[]")
+	got := Store(context.Background(), root, opts)
+	f := assertOnly(t, got, "gate:content:url")
+	if f.File != "repo-a/proposed-url.md" || len(got) != 1 {
+		t.Errorf("findings = %v, want one on proposed-url.md only", got)
+	}
+}
+
+func TestMoveFlaggedLeavesReviewed(t *testing.T) {
+	root := checkout(t, route.StorePersonal)
+	localPath := t.TempDir()
+	local := store.Root{Store: route.StorePersonal, Kind: store.KindLocal, Path: localPath, State: filepath.Dir(localPath)}
+	reviewed := cleanFact("reviewed-url")
+	reviewed.Metadata.Confidence = "reviewed"
+	reviewed.Body = "docs at https://example.com/page\n"
+	put(t, root, "repo-a/reviewed-url.md", reviewed)
+	index(t, root)
+
+	moved, _, err := MoveFlagged(context.Background(), root, local, testOptions(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(moved) != 0 {
+		t.Errorf("moved = %v, want none", moved)
+	}
+	if _, err := os.Stat(filepath.Join(root.Path, "repo-a", "reviewed-url.md")); err != nil {
+		t.Errorf("reviewed fact left the checkout: %v", err)
 	}
 }
 
