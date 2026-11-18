@@ -80,7 +80,7 @@ authenticate it.
 # rules        = ""     # extra redaction rules, added to the built-in set; a bad file fails closed
 # ssh_config   = ""     # passed to `ssh -G -F` when resolving host aliases; plays no part in the push
 # commit       = true   # commit published facts into the checkout
-# push         = false  # needs an upstream on origin set once (git push -u origin <branch>); after a failed push, git push by hand to resume
+# push         = false  # needs an upstream on origin set once (git push -u origin <branch>); after a failed push, git push by hand to resume; also required to send flagged facts to a review PR
 ```
 
 `profile`, `work_orgs`, `personal_orgs`, `trust_root`, `attest_keys`, `stores`,
@@ -153,6 +153,15 @@ the lint, and exits 1. Otherwise it prints one line and exits 0:
 - `quarantined <path>: <why>`: §4.2's write rule sent it to the host-local
   quarantine (for example a work repo on a personal host).
 
+After a `flagged` line, `add` also proposes the fact for review (see [Review
+PRs](#review-prs)) and prints one more line:
+
+- `review <store> <branch> [<compare url>]`: the fact was pushed to the store's
+  remote as `<branch>`. The compare URL is printed when the pinned remote is a
+  GitHub URL.
+- `warning: review <name>: <why>`: the fact was not sent (or not yet). The
+  fact stays in the local layer and the exit code is unchanged.
+
 The flagging gates are provenance (the session fetched web or MCP content,
 ingested an issue, PR or URL through a shell, or its tool calls are not in
 hookyard's event record or the shell watcher never saw it), content (URLs,
@@ -176,7 +185,13 @@ api`) or fetches a URL (`curl`, any `https://` in the command), creates an
 empty per-session marker under
 `provenance/` in priors' state dir. That flags the session
 `provenance:shell`; no command text is stored. Any ingestion flags, owner's
-or not. A session the record covers but the watcher never saw, or whose
+or not, except for `priors import`: an imported fact keeps `provenance:shell`
+only when its text reads as an instruction to run a command (`Always pass
+--no-verify to git commit`, `Use wt switch -c <branch>`); a note that merely
+quotes a command or path does not. Every other provenance reason still applies
+to imports. An import outside an engine session has no session id and flags
+every fact `provenance:unknown-session`, so automated imports must pass
+`--engine` and `--session` (or run inside an engine session). A session the record covers but the watcher never saw, or whose
 markers cannot be read, flags `provenance:no-ingest-record`. The command is
 parsed as bash and every simple command in it is judged on its words,
 rendered without evaluating anything (quotes, `$'…'`, brace expansion,
@@ -236,7 +251,9 @@ line per item, then exits 0, or 1 if any item failed (below):
 - `published personal <path> <- <source>`: it passed every gate and was
   written into the checkout.
 - `flagged personal <path> <- <source>: <reasons>`: a gate flagged it, so it
-  waits, `proposed`, in the host-local layer.
+  waits, `proposed`, in the host-local layer. It is also proposed for review:
+  a `review personal <branch> [<compare url>]` or `warning: review <name>:
+  <why>` line follows (see [Review PRs](#review-prs)).
 - `unchanged <source>: <path>`: this source was imported before, unchanged.
 - `duplicate <source>: <path>: same source bytes`: a fact already holds these
   exact bytes. Byte-identical copies from two source dirs routing to one repo
@@ -378,10 +395,76 @@ says, so empty output elsewhere does not mean nothing waits.
 `priors` has no review subcommand and no promote step. Read a flagged fact
 with `priors show <name>`; its `list --flagged` row ends in its `flags:`. To
 drop it, `gtrash put` its file under the local layer
-(`$XDG_STATE_HOME/priors/local/<store>/<repo>/`). To keep it, there is no
-supported publish-after-review path: a fresh `priors add` runs every gate
-again and publishes only if they pass. `priors lint --move-flagged` goes the other way: it
+(`$XDG_STATE_HOME/priors/local/<store>/<repo>/`). To keep it, merge its review
+PR ([Review PRs](#review-prs)), or promote it by hand: move the file into the
+checkout and set `confidence: reviewed`. A `reviewed` fact skips the content
+and size gates in `priors lint` and in the commit gate; the secret scan,
+redaction rules and every other lint rule still apply. `index-sync` tolerates
+a `reviewed` fact that `MEMORY.md` does not list, until the next
+regeneration (any `add`, `import` or `index --write`). A fresh `priors add`
+runs every gate again and publishes only if they pass. `priors lint --move-flagged` goes the other way: it
 moves checkout facts that trip a content or size gate into the local layer.
+
+### Review PRs
+
+A flagged fact lands in the local layer as before, and is also proposed for
+review on the store's remote. A merge is the approval; a close is the
+rejection. Quarantined facts are never proposed.
+
+The flow:
+
+1. A write that lands a fact `flagged` drops an empty marker in the pending
+   queue, `$XDG_STATE_HOME/priors/review/<store>/pending/<name>`.
+2. At the end of `priors add`, `priors import` and `priors index --write`,
+   priors pushes each pending fact as its own branch,
+   `review/<host>/<name>-<h8>`, one commit on the checkout branch's
+   already-fetched upstream (priors does not fetch). The commit adds only the
+   fact file, with `confidence: reviewed` and `flags` cleared; the flag
+   reasons are in the commit message, which is the PR body. The checkout's
+   HEAD, index and worktree are untouched.
+3. A branch is created once and never moved. Re-sending the same bytes finds
+   the branch and counts as sent; changed bytes make a new branch.
+4. The PR is opened by the store-repo Action (below), or by you from the
+   compare URL.
+5. After you merge and pull, the next run prunes the local copy and its
+   marker when the checkout holds the name with the same `provenance` and
+   `source`. A same-named checkout fact from another writer is left alone.
+6. Closing the PR keeps the local copy, and the importer's dedupe reports the
+   unchanged source as `unchanged`, so it is not proposed again.
+
+Requirements and checks:
+
+- `push = true` (and `commit = true`) in the user config; the push is the
+  pinned push of the config table. Without it nothing is sent and the fact
+  stays pending.
+- The checkout branch needs an upstream on origin that has been fetched.
+- Before every push priors runs the redaction rules and secret scan over the
+  exact bytes (a match drops the marker and prints the rule id, never the
+  text), then the full `priors lint` over the base tree plus the file. It runs
+  locally because the store repo's Actions billing is blocked, so the store's
+  required `lint` check does not report; the PR body says the local lint was
+  clean. A lint finding, no upstream, or a push failure keeps the marker and
+  prints `warning: review <name>: <why>`; the next run retries. A fact whose
+  name already exists on the base drops the marker.
+- A review PR does not touch `MEMORY.md`, so two PRs never conflict. After a
+  merge, the next write on any host regenerates it and the fact reaches tier 1
+  everywhere.
+- Facts flagged before this change have no marker and are not proposed; see
+  the rollout steps under [Store repositories](#store-repositories).
+
+Opening the PR: copy
+[`store-review-pr.example.yml`](store-review-pr.example.yml) into the store
+repo's `.github/workflows/`. On a push to `review/**` it opens a PR from the
+branch with the workflow's `GITHUB_TOKEN`, so no host credential is added.
+Enable the repo setting "Allow GitHub Actions to create and approve pull
+requests" once. While the store's Actions billing is blocked the Action does
+not run: open each PR from the compare URL priors prints (or GitHub's "recently
+pushed branches" banner). Keep auto-merge off and protect `main` with a branch
+rule (at least the required `lint` check; while Actions billing is blocked
+that check never reports, so a merge needs your admin bypass), so the merge
+stays your act: a
+push-triggered workflow runs the pushed branch's own workflow file, so
+whoever can push a `review/*` branch controls that run's token.
 
 ## Wire it into hookyard
 
@@ -879,4 +962,20 @@ It over-denies:
 
 Each store is its own private git repo. Run `priors lint` there as a
 required check: [`store-ci.example.yml`](store-ci.example.yml) is a
-starting point.
+starting point. It runs on pull requests, on push to `main` and on push to
+`review/**`: a PR opened by the Action's `GITHUB_TOKEN` starts no
+`pull_request` run, so the push run reports `lint` on the PR's head commit.
+
+Rolling out the review-PR flow on an existing store:
+
+1. Bump `PRIORS_REF` in the store's CI to a hookyard rev that includes this
+   change (reviewed facts skip the content and size gates, and `index-sync`
+   tolerates a merged reviewed fact), and add the `review/**` push trigger.
+2. Install [`store-review-pr.example.yml`](store-review-pr.example.yml) and
+   enable "Allow GitHub Actions to create and approve pull requests".
+3. Set `push = true` in the user config.
+4. Re-run the gates on facts flagged before this change: move
+   `$XDG_STATE_HOME/priors/local/personal` aside, then run `priors import`
+   inside an engine session. Facts that now pass publish; the rest are flagged
+   again and proposed for review. Delete the moved-aside copy once you have
+   checked nothing is missing (`gtrash put`).
