@@ -2331,12 +2331,15 @@ func (r *reader) namedValues() map[string][]boundValue {
 func (r *reader) findStarts(args []arg) []arg {
 	var out []arg
 	for i, a := range args {
+		if a.ok {
+			continue
+		}
 		name, tail, ok := simpleParam(a.word)
-		if a.ok || !ok || r.pre.computed || bashAssigns(name) || slices.Contains(bashDefaults, name) {
+		if !ok ||r.pre.computed || bashAssigns(name) || slices.Contains(bashDefaults, name) {
 			continue
 		}
 		vals := r.namedValues()[name]
-		if len(vals) == 0 || slices.ContainsFunc(vals, func(v boundValue) bool { return !pathValue(v) }) {
+		if len(vals) == 0 || slices.ContainsFunc(vals, func(v boundValue) bool { return !pathValue(v) || v.text != vals[0].text }) {
 			continue
 		}
 		if out == nil {
@@ -2368,6 +2371,9 @@ func simpleParam(w *syntax.Word) (name, tail string, ok bool) {
 	parts := w.Parts
 	if q, isQ := parts[0].(*syntax.DblQuoted); isQ && len(parts) == 1 {
 		parts = q.Parts
+	}
+	if len(parts) == 0 {
+		return "", "", false
 	}
 	p, isP := parts[0].(*syntax.ParamExp)
 	if !isP || p.Param == nil || p.Exp != nil || p.Slice != nil || p.Repl != nil || p.Length || p.Width || p.Excl || p.Index != nil || p.Names != 0 {
