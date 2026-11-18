@@ -145,6 +145,7 @@ func TestShellAccessReadOnly(t *testing.T) {
 		{name: "find files0-from", cmd: "find . -files0-from f", writes: true, unresolved: "runs find with -files0-from"},
 		{name: "find start built at run time", cmd: "read d; find \"$d\" -name x", writes: true, unresolved: "runs find with an expression built at run time"},
 		{name: "find start set to a path", cmd: "d=/s/x; find $d -name x -newer $d/y"},
+		{name: "find start split by IFS", cmd: "IFS=x; d=/sx-delete; find $d", writes: true, unresolved: "runs find with an expression built at run time"},
 		{name: "find with an empty argument", cmd: `find . -name ""`},
 		{name: "find start with a backslash tail", cmd: `d=/s; find $d\x -delete`, writes: true, unresolved: "runs find with an expression built at run time"},
 		{name: "find start with a brace tail", cmd: "d=/s; find $d/{a,b} -delete", writes: true, unresolved: "runs find with an expression built at run time"},

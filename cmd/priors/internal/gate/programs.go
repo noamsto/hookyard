@@ -2335,7 +2335,7 @@ func (r *reader) findStarts(args []arg) []arg {
 			continue
 		}
 		name, tail, ok := simpleParam(a.word)
-		if !ok ||r.pre.computed || bashAssigns(name) || slices.Contains(bashDefaults, name) {
+		if !ok || r.pre.computed || r.settable("IFS") || bashAssigns(name) || slices.Contains(bashDefaults, name) {
 			continue
 		}
 		vals := r.namedValues()[name]

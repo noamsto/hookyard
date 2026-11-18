@@ -808,7 +808,7 @@ not see:
 - `gh … --web`, which launches a browser while run as a reader;
 - `git add`, `git fetch` and `git push` run in or on a store, and any other
   git reader's writes to git's own index, objects and refs (these count as
-  git reading; `git reflog`, `reflog show` and `reflog exists` read, while
+  git reading; `git reflog`, `reflog show <ref>`, `reflog list` and `reflog exists` read, while
   every other `reflog` subcommand (`expire`, `delete`, `drop`, `write`) writes); `git commit` is a write, so it
   is refused in a store;
 - an environment value a program runs as code (`PAGER='sh -c …'`), which is
