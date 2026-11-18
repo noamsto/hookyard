@@ -1108,13 +1108,19 @@ func TestImportedShellCorpusCounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	type tally struct{ before, after, total int }
-	classes := map[string]*tally{"note": {}, "instr": {}}
+	var note, instr tally
 	now := fx.deps.Now()
 	for file, f := range corpusFixtures(t) {
 		class, _, _ := strings.Cut(file, "-")
-		c, ok := classes[class]
-		if !ok {
+		var c *tally
+		switch class {
+		case "note":
+			c = &note
+		case "instr":
+			c = &instr
+		default:
 			t.Fatalf("%s: unknown corpus class", file)
+			return
 		}
 		c.total++
 
@@ -1142,11 +1148,10 @@ func TestImportedShellCorpusCounts(t *testing.T) {
 			t.Errorf("%s: outcome %s (%v), want flagged = %v", file, res.Outcome, res.Reasons, want)
 		}
 	}
-	n, i := classes["note"], classes["instr"]
-	total := n.total + i.total
-	before, after := n.before+i.before, n.after+i.after
-	t.Logf("before: %d/%d flagged (note %d/%d, instr %d/%d)", before, total, n.before, n.total, i.before, i.total)
-	t.Logf("after: %d/%d flagged (note %d/%d, instr %d/%d)", after, total, n.after, n.total, i.after, i.total)
+	total := note.total + instr.total
+	before, after := note.before+instr.before, note.after+instr.after
+	t.Logf("before: %d/%d flagged (note %d/%d, instr %d/%d)", before, total, note.before, note.total, instr.before, instr.total)
+	t.Logf("after: %d/%d flagged (note %d/%d, instr %d/%d)", after, total, note.after, note.total, instr.after, instr.total)
 	if before != total {
 		t.Errorf("before = %d/%d, want every corpus fact flagged by the shell rule", before, total)
 	}
