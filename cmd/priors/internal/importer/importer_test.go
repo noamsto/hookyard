@@ -165,6 +165,12 @@ func (fx fixture) runResult(t *testing.T, dryRun bool) (Result, []string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The fixture's push is off, so the review sync only warns that flagged
+	// facts wait; the review flow is tested in the review package and end to
+	// end.
+	res.Warning = strings.Join(slices.DeleteFunc(strings.Split(res.Warning, "; "), func(w string) bool {
+		return strings.HasPrefix(w, "review: ") || strings.HasPrefix(w, "review ")
+	}), "; ")
 	var lines []string
 	for _, r := range append(notes, res.Reports...) {
 		lines = append(lines, r.String())

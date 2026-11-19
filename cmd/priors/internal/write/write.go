@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 	"github.com/noamsto/hookyard/cmd/priors/internal/lint"
+	"github.com/noamsto/hookyard/cmd/priors/internal/review"
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
 )
@@ -153,6 +155,9 @@ func add(ctx context.Context, cfg config.Config, req Request, d Deps, lock bool)
 	}
 
 	flags := gate.Provenance(cfg.RecordDir(), cfg.ProvenanceDir(), req.SessionID, req.External)
+	if req.Imported && !gate.ImperativeCommand(f.Description+"\n"+f.Body) {
+		flags = slices.DeleteFunc(flags, func(r string) bool { return r == "provenance:shell" })
+	}
 	if req.IdentityConflict {
 		flags = append(flags, "provenance:asserted-identity")
 	}
@@ -203,8 +208,13 @@ func add(ctx context.Context, cfg config.Config, req Request, d Deps, lock bool)
 	}
 	res.Reports = reports
 
-	if res.Outcome == "published" && !req.NoCommit {
+	switch {
+	case res.Outcome == "published" && !req.NoCommit:
 		res.Warning = commit.Checkout(ctx, cfg, root, d.Rules, d.Scanner, "priors: add "+f.Name)
+	case res.Outcome == "flagged":
+		if err := review.MarkPending(cfg, dest.Store, f.Name); err != nil {
+			res.Warning = "review queue: " + err.Error()
+		}
 	}
 	return res, nil
 }

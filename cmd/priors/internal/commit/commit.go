@@ -28,7 +28,6 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 	"github.com/noamsto/hookyard/cmd/priors/internal/lint"
-	"github.com/noamsto/hookyard/cmd/priors/internal/pin"
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 	"github.com/noamsto/hookyard/cmd/priors/internal/sanitize"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
@@ -118,7 +117,7 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 		parent = ""
 	}
 	git := inCheckout(ctx, dir)
-	tree, warning := gatedTree(git, dir, parent, func(env []string) (map[string]string, string) {
+	tree, gated, warning := gatedTree(git, dir, parent, func(env []string) (map[string]string, string) {
 		return stage(git, dir, env, snapDir, accepted)
 	})
 	if warning != "" {
@@ -144,7 +143,7 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 	}
 	var notes []string
 	if cfg.Push {
-		notes = append(notes, push(ctx, dir, root.Remote, parent, commit))
+		notes = append(notes, push(ctx, dir, root.Remote, parent, commit, gated))
 	}
 	if len(left) > 0 {
 		notes = append(notes, fmt.Sprintf("%s in %s", leftNote(left), dir))
@@ -197,9 +196,7 @@ var beforeStage = func() {}
 // prompt cannot hang priors.
 var signTimeout = gitTimeout
 
-// commitTree commits tree on parent with git and moves dir's HEAD to it. It
-// signs only when sign is set: unlike git commit, commit-tree ignores
-// commit.gpgSign.
+// commitTree commits tree on parent with git and moves dir's HEAD to it.
 func commitTree(ctx context.Context, git gitFunc, dir, parent, tree, msg string, sign bool) (commit, warning string) {
 	missing, err := unlisted(git, tree)
 	switch {
@@ -208,22 +205,9 @@ func commitTree(ctx context.Context, git gitFunc, dir, parent, tree, msg string,
 	case len(missing) > 0:
 		return "", fmt.Sprintf("nothing committed in %s: %s would list files the commit lacks: %s", dir, store.IndexFile, strings.Join(missing, ", "))
 	}
-	args, timeout := []string{"commit-tree", "-m", msg}, gitTimeout
-	if parent != "" {
-		args = append(args, "-p", parent)
+	if commit, warning = newCommit(git, dir, parent, tree, msg, sign); warning != "" {
+		return "", warning
 	}
-	if sign {
-		// Plain -S lets git pick the key and format from the config.
-		args, timeout = append(args, "-S"), signTimeout
-	}
-	commit, err = git(timeout, nil, nil, append(args, tree)...)
-	switch {
-	case err != nil && sign:
-		return "", fmt.Sprintf("nothing committed in %s: signing the commit failed: %s", dir, gitWarning("git commit-tree", commit, err))
-	case err != nil:
-		return "", gitWarning("git commit-tree", commit, err)
-	}
-	commit = strings.TrimSpace(commit)
 	// parent as the old value makes this a compare-and-swap: a HEAD that
 	// moved since the tree was built, or appeared on an unborn branch, fails it.
 	if out, err := runGit(ctx, dir, gitTimeout, nil, "update-ref", "-m", msg, "HEAD", commit, parent); err != nil {
@@ -232,107 +216,102 @@ func commitTree(ctx context.Context, git gitFunc, dir, parent, tree, msg string,
 	return commit, ""
 }
 
+// newCommit makes a commit of tree on parent with git, moving no ref. It
+// signs only when sign is set: unlike git commit, commit-tree ignores
+// commit.gpgSign.
+func newCommit(git gitFunc, dir, parent, tree, msg string, sign bool) (commit, warning string) {
+	args, timeout := []string{"commit-tree", "-m", msg}, gitTimeout
+	if parent != "" {
+		args = append(args, "-p", parent)
+	}
+	if sign {
+		// Plain -S lets git pick the key and format from the config.
+		args, timeout = append(args, "-S"), signTimeout
+	}
+	commit, err := git(timeout, nil, nil, append(args, tree)...)
+	switch {
+	case err != nil && sign:
+		return "", fmt.Sprintf("nothing committed in %s: signing the commit failed: %s", dir, gitWarning("git commit-tree", commit, err))
+	case err != nil:
+		return "", gitWarning("git commit-tree", commit, err)
+	}
+	return strings.TrimSpace(commit), ""
+}
+
 // push publishes commit, the one just made on parent, to the branch's
-// upstream on origin, which must be remote, the trust file's pin. It pushes to
-// the pinned URL from the build-pinned empty bare git dir, read-only and so
-// beyond the owner's reach, reading the checkout's objects through
-// GIT_OBJECT_DIRECTORY, in pin.PushEnv's environment: neither the checkout's
-// config, where a [remote "<url>"] section redirects even an explicit-URL
-// push, nor the caller's environment reaches it. The lease makes the push a
-// compare-and-swap against the real remote, so only commit is transferred even
-// when the tracking ref is stale or tampered with; commit being parent's
-// child, a passing lease is a fast-forward. A branch with no fetched upstream,
-// including a fresh unborn store, is not pushed: the user's first
-// `git push -u` sets it up.
-func push(ctx context.Context, dir, remote, parent, commit string) (warning string) {
-	refuse := func(format string, args ...any) string {
-		return fmt.Sprintf("not pushed from %s: ", dir) + fmt.Sprintf(format, args...)
-	}
-	inspect := func(what string, args ...string) (string, string) {
-		out, err := runGit(ctx, dir, gitTimeout, nil, args...)
-		if err != nil {
-			return "", refuse("%s", gitWarning(what, out, err))
-		}
-		return strings.TrimSpace(out), ""
-	}
+// upstream on origin, which must be remote, the trust file's pin, through
+// pinnedPush. The lease makes the push a compare-and-swap against the real
+// remote, so only commit is transferred even when the tracking ref is stale or
+// tampered with. A branch with no fetched upstream, including a fresh unborn
+// store, is not pushed: the user's first `git push -u` sets it up. gated is
+// what gatedTree returned for commit's tree.
+func push(ctx context.Context, dir, remote, parent, commit string, gated map[string]string) (warning string) {
 	if parent == "" {
-		return refuse("the store has no earlier commit to push onto")
+		return refusal(dir, "the store has no earlier commit to push onto")
 	}
-	if remote == "" {
-		return refuse("the trust file pins no remote for this store")
+	if warning := preflight(ctx, dir, remote); warning != "" {
+		return warning
 	}
-	if _, err := pin.PushEnv(); err != nil {
-		return refuse("%v", err)
-	}
-	// Re-checked under the store's lock, right before pushing.
-	if err := pin.Check(ctx, dir, remote); err != nil {
-		return refuse("%v", err)
-	}
-	ref, err := runGit(ctx, dir, gitTimeout, nil, "symbolic-ref", "-q", "HEAD")
-	if exitsOne(err) {
-		return refuse("HEAD is not on a branch")
-	}
-	if err != nil {
-		return refuse("%s", gitWarning("git symbolic-ref", "", err))
-	}
-	ref = strings.TrimSpace(ref)
-	out, warning := inspect("git for-each-ref", "for-each-ref", "--format=%(upstream)%00%(upstream:remotename)%00%(upstream:remoteref)", ref)
+	up, warning := upstream(ctx, dir)
 	if warning != "" {
 		return warning
 	}
-	branch := strings.TrimPrefix(ref, "refs/heads/")
-	fields := strings.Split(out, "\x00")
-	if len(fields) != 3 || fields[0] == "" || fields[1] == "" || fields[1] == "." || !strings.HasPrefix(fields[2], "refs/heads/") {
-		return refuse("%s has no upstream", branch)
-	}
-	tracking, mergeRef := fields[0], fields[2]
-	upstream, err := runGit(ctx, dir, gitTimeout, nil, "rev-parse", "-q", "--verify", tracking+"^{commit}")
-	if exitsOne(err) {
-		return refuse("upstream %s is not fetched", tracking)
-	}
-	if err != nil {
-		return refuse("%s", gitWarning("git rev-parse", "", err))
-	}
-	upstream = strings.TrimSpace(upstream)
-	if out, warning = inspect("git rev-list", "rev-list", commit, "--not", upstream); warning != "" {
+	out, warning := inspect(ctx, dir, "git rev-list", "rev-list", commit, "--not", up.commit)
+	if warning != "" {
 		return warning
 	}
 	if out != commit {
-		return refuse("%s has commits ahead of %s other than this one; push them yourself (git push) to resume", branch, tracking)
+		return refusal(dir, "%s has commits ahead of %s other than this one; push them yourself (git push) to resume", up.branch, up.tracking)
 	}
 
-	format, warning := inspect("git rev-parse", "rev-parse", "--show-object-format")
-	if warning != "" {
+	if warning := pinnedPush(ctx, dir, remote, commit, up.mergeRef, parent, parent, gated); warning != "" {
 		return warning
-	}
-	if format != "sha1" {
-		return refuse("the push repo is sha1; this checkout is %s", format)
-	}
-	common, warning := inspect("git rev-parse", "rev-parse", "--path-format=absolute", "--git-common-dir")
-	if warning != "" {
-		return warning
-	}
-	beforePush()
-	env, err := pin.ObjectsEnv(common)
-	if err != nil {
-		return refuse("%v", err)
-	}
-	url, err := runGitExact(ctx, tools.PushGitDir, env, gitTimeout, nil, "ls-remote", "--get-url", remote)
-	if err != nil {
-		return refuse("%s", gitWarning("git ls-remote", url, err))
-	}
-	if url = strings.TrimSpace(url); url != remote {
-		return refuse("effective push URL %s differs from the pinned %s", url, remote)
-	}
-	if _, err := runGitExact(ctx, tools.PushGitDir, env, pushTimeout, nil, "push", "-q", "--no-follow-tags", "--recurse-submodules=no", "--no-signed", "--force-with-lease="+mergeRef+":"+parent, "--", remote, commit+":"+mergeRef); err != nil {
-		return refuse("git push failed: %v", err)
 	}
 	// The push from the pinned git dir leaves the checkout's tracking ref behind,
 	// which the next push's ahead check reads.
-	if out, err := runGit(ctx, dir, gitTimeout, nil, "update-ref", tracking, commit, upstream); err != nil {
-		return fmt.Sprintf("pushed, but updating %s failed: %s", tracking, gitWarning("git update-ref", out, err))
+	if out, err := runGit(ctx, dir, gitTimeout, nil, "update-ref", up.tracking, commit, up.commit); err != nil {
+		return fmt.Sprintf("pushed, but updating %s failed: %s", up.tracking, gitWarning("git update-ref", out, err))
 	}
 	return ""
+}
+
+// upstreamRef is the checkout branch's upstream: branch is the branch's
+// short name, tracking the local tracking ref, mergeRef the branch on the
+// remote, and commit what tracking holds.
+type upstreamRef struct {
+	branch, tracking, mergeRef, commit string
+}
+
+// upstream reads the upstream of the branch HEAD is on in the checkout at
+// dir, as already fetched, or a refusal when there is none.
+func upstream(ctx context.Context, dir string) (up upstreamRef, warning string) {
+	ref, err := runGit(ctx, dir, gitTimeout, nil, "symbolic-ref", "-q", "HEAD")
+	if exitsOne(err) {
+		return up, refusal(dir, "HEAD is not on a branch")
+	}
+	if err != nil {
+		return up, refusal(dir, "%s", gitWarning("git symbolic-ref", "", err))
+	}
+	ref = strings.TrimSpace(ref)
+	out, warning := inspect(ctx, dir, "git for-each-ref", "for-each-ref", "--format=%(upstream)%00%(upstream:remotename)%00%(upstream:remoteref)", ref)
+	if warning != "" {
+		return up, warning
+	}
+	up.branch = strings.TrimPrefix(ref, "refs/heads/")
+	fields := strings.Split(out, "\x00")
+	if len(fields) != 3 || fields[0] == "" || fields[1] == "" || fields[1] == "." || !strings.HasPrefix(fields[2], "refs/heads/") {
+		return up, refusal(dir, "%s has no upstream", up.branch)
+	}
+	up.tracking, up.mergeRef = fields[0], fields[2]
+	commit, err := runGit(ctx, dir, gitTimeout, nil, "rev-parse", "-q", "--verify", up.tracking+"^{commit}")
+	if exitsOne(err) {
+		return up, refusal(dir, "upstream %s is not fetched", up.tracking)
+	}
+	if err != nil {
+		return up, refusal(dir, "%s", gitWarning("git rev-parse", "", err))
+	}
+	up.commit = strings.TrimSpace(commit)
+	return up, ""
 }
 
 // beforePush is a test seam that runs once the pin and upstream checks have
@@ -443,12 +422,13 @@ func copyRegular(path, out string) (regular bool, err error) {
 // gatedTree builds, in a private index seeded from parent, the tree of
 // parent with fill's staging applied, and checks it holds nothing else. fill
 // stages into the index env names and returns each path's staged
-// "<mode> <oid>", or "" for a removal. It returns "" for the tree when that is
-// parent's own tree. dir only names the checkout in warnings.
-func gatedTree(git gitFunc, dir, parent string, fill func(env []string) (gated map[string]string, warning string)) (tree, warning string) {
+// "<mode> <oid>", or "" for a removal, which gatedTree returns as gated. It
+// returns "" for the tree when that is parent's own tree. dir only names the
+// checkout in warnings.
+func gatedTree(git gitFunc, dir, parent string, fill func(env []string) (gated map[string]string, warning string)) (tree string, gated map[string]string, warning string) {
 	tmp, err := os.MkdirTemp("", "priors-index-")
 	if err != nil {
-		return "", fmt.Sprintf("nothing committed in %s: making a private index: %v", dir, err)
+		return "", nil, fmt.Sprintf("nothing committed in %s: making a private index: %v", dir, err)
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
 	env := []string{"GIT_INDEX_FILE=" + filepath.Join(tmp, "index")}
@@ -458,27 +438,27 @@ func gatedTree(git gitFunc, dir, parent string, fill func(env []string) (gated m
 		seed = []string{"read-tree", parent}
 	}
 	if out, err := git(gitTimeout, env, nil, seed...); err != nil {
-		return "", gitWarning("git read-tree", out, err)
+		return "", nil, gitWarning("git read-tree", out, err)
 	}
-	gated, warning := fill(env)
+	gated, warning = fill(env)
 	if warning != "" {
-		return "", warning
+		return "", nil, warning
 	}
 	tree, err = git(gitTimeout, env, nil, "write-tree")
 	if err != nil {
-		return "", gitWarning("git write-tree", tree, err)
+		return "", nil, gitWarning("git write-tree", tree, err)
 	}
 	tree = strings.TrimSpace(tree)
 	stray, unchanged, err := checkTree(git, parent, tree, gated)
 	switch {
 	case err != nil:
-		return "", fmt.Sprintf("nothing committed in %s: checking the gated tree: %v", dir, err)
+		return "", nil, fmt.Sprintf("nothing committed in %s: checking the gated tree: %v", dir, err)
 	case len(stray) > 0:
-		return "", fmt.Sprintf("nothing committed in %s: the gated tree holds entries the gates did not pass: %s", dir, strings.Join(stray, ", "))
+		return "", nil, fmt.Sprintf("nothing committed in %s: the gated tree holds entries the gates did not pass: %s", dir, strings.Join(stray, ", "))
 	case unchanged:
-		return "", ""
+		return "", nil, ""
 	}
-	return tree, ""
+	return tree, gated, ""
 }
 
 // stage puts the snapshot's bytes for accepted into the index env names,
@@ -798,8 +778,9 @@ func runGitEnv(ctx context.Context, dir string, env []string, timeout time.Durat
 	// pathspecs keep a file named like a glob from staging its neighbours.
 	// GIT_SSH_COMMAND goes last, as exec keeps the final duplicate, so git's own
 	// transport cannot find ssh on PATH; GIT_EXEC_PATH would swap git's helpers.
+	// The pinned push ignores refs/replace/, so the gates must read past it too.
 	env = append(slices.DeleteFunc(
-		route.RepoEnv(append([]string{"GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "GIT_LITERAL_PATHSPECS=1"}, env...)...),
+		route.RepoEnv(append([]string{"GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "GIT_LITERAL_PATHSPECS=1", "GIT_NO_REPLACE_OBJECTS=1"}, env...)...),
 		func(kv string) bool { return strings.HasPrefix(kv, "GIT_EXEC_PATH=") },
 	), "GIT_SSH_COMMAND="+tools.SSH)
 	return runGitExact(ctx, dir, env, timeout, stdin, args...)

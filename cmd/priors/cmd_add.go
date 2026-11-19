@@ -10,6 +10,7 @@ import (
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/fact"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
+	"github.com/noamsto/hookyard/cmd/priors/internal/review"
 	"github.com/noamsto/hookyard/cmd/priors/internal/write"
 )
 
@@ -121,6 +122,15 @@ func cmdAdd(args []string, s streams) int {
 		s.errln("warning:", res.Warning)
 	}
 	s.outln(addLine(res))
+	if res.Outcome != "quarantined" {
+		lines, warnings := review.Sync(ctx, cfg, res.Store, rules, scanner)
+		for _, l := range lines {
+			s.outln(l)
+		}
+		for _, w := range warnings {
+			s.errln("warning:", w)
+		}
+	}
 	return 0
 }
 

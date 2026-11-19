@@ -12,7 +12,9 @@
 name: lint
 on:
   push:
-    branches: [main]
+    # A PR opened by GITHUB_TOKEN (store-review-pr.example.yml) starts no
+    # pull_request run, so this push run is what reports `lint` on its head.
+    branches: [main, 'review/**']
   pull_request:
 
 permissions:

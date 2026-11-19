@@ -269,6 +269,39 @@ func TestCommitsAReviewedFact(t *testing.T) {
 	committest.AssertHeadIndexInTree(t, fx.dir())
 }
 
+// TestContentGatesHoldReviewedFacts: a merged review reaches the checkout by
+// pull, never dirty, so a dirty fact labelled reviewed is gated like any other.
+func TestContentGatesHoldReviewedFacts(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		confidence string
+		flags      []string
+		want       string // the refusal reasons
+	}{
+		{"reviewed", "reviewed", nil, "gate:content:url"},
+		{"proposed", "proposed", nil, "gate:content:url"},
+		{"reviewed but flagged", "reviewed", []string{"content:url"}, "flagged, gate:content:url"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := setup(t)
+			before := head(t, fx.dir())
+			f := linkyFact("linky-fact")
+			f.Metadata.Confidence = tt.confidence
+			f.Metadata.Flags = tt.flags
+			fx.put(t, "_global/linky-fact.md", f)
+			fx.index(t)
+
+			w := fx.checkout(t)
+			if want := "_global/linky-fact.md (" + tt.want + ")"; !strings.Contains(w, want) {
+				t.Errorf("warning = %q, want it to hold %q", w, want)
+			}
+			if head(t, fx.dir()) != before {
+				t.Error("HEAD moved")
+			}
+		})
+	}
+}
+
 func TestNothingDirtyIsNoCommit(t *testing.T) {
 	fx := setup(t)
 	before := head(t, fx.dir())
@@ -1022,6 +1055,28 @@ func TestPushUpdatesTrackingRef(t *testing.T) {
 	}
 }
 
+// A replace ref on HEAD's tree would seed the gated tree with entries the
+// gates never read, which the push then sends.
+func TestPushIgnoresReplaceRefs(t *testing.T) {
+	fx, bare := withRemote(t)
+	baseTree := rev(t, fx.dir(), "HEAD^{tree}")
+	evil, blob := evilTree(t, fx.dir(), baseTree)
+	git(t, fx.dir(), "replace", "-f", baseTree, evil)
+	fx.put(t, "_global/new-fact.md", cleanFact("new-fact"))
+	fx.index(t)
+
+	w := fx.checkout(t)
+	if exec.Command("git", "-C", bare, "cat-file", "-e", blob).Run() == nil {
+		t.Errorf("the remote received the local-only blob %s", blob)
+	}
+	if w != "" {
+		t.Fatalf("warning = %q", w)
+	}
+	if got := git(t, bare, "diff-tree", "-r", "--name-only", "main^", "main"); got != store.IndexFile+"\n_global/new-fact.md\n" {
+		t.Errorf("pushed commit changes %q, want only the index and the new fact", got)
+	}
+}
+
 func TestPushRefusesRepointedCheckout(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -1187,10 +1242,132 @@ func TestPushRefusesNonSHA1Checkout(t *testing.T) {
 	parent := head(t, dir)
 	git(t, dir, "commit", "-q", "--allow-empty", "-m", "next")
 
-	if w := push(context.Background(), dir, bare, parent, head(t, dir)); !strings.Contains(w, "the push repo is sha1; this checkout is sha256") {
+	if w := push(context.Background(), dir, bare, parent, head(t, dir), nil); !strings.Contains(w, "the push repo is sha1; this checkout is sha256") {
 		t.Errorf("warning = %q", w)
 	}
 	assertMain(t, bare, parent)
+}
+
+// TestPinnedPushEmptyLeaseOnlyCreates: an empty expect pushes a ref the remote
+// lacks and refuses one it already has, which remoteHas reports.
+func TestPinnedPushEmptyLeaseOnlyCreates(t *testing.T) {
+	ctx := context.Background()
+	fx, bare := withRemote(t)
+	const ref = "refs/heads/review/laptop/some-fact"
+	commit := func(msg string) string {
+		return strings.TrimSpace(git(t, fx.dir(), "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", msg))
+	}
+	has := func() bool {
+		t.Helper()
+		exists, w := remoteHas(ctx, fx.dir(), bare, ref)
+		if w != "" {
+			t.Fatalf("remoteHas warning = %q", w)
+		}
+		return exists
+	}
+	if w := preflight(ctx, fx.dir(), bare); w != "" {
+		t.Fatalf("preflight warning = %q", w)
+	}
+	// A ref whose tail matches ref's pattern is not ref.
+	git(t, bare, "update-ref", "refs/heads/x/"+ref, rev(t, bare, "main"))
+	if has() {
+		t.Fatal("remoteHas reports a ref the remote lacks")
+	}
+
+	first := commit("first")
+	if w := pinnedPush(ctx, fx.dir(), bare, first, ref, "", head(t, fx.dir()), nil); w != "" {
+		t.Fatalf("creating push warning = %q", w)
+	}
+	if got := rev(t, bare, ref); got != first {
+		t.Errorf("remote %s = %s, want %s", ref, got, first)
+	}
+	if !has() {
+		t.Error("remoteHas misses the pushed ref")
+	}
+
+	if w := pinnedPush(ctx, fx.dir(), bare, commit("second"), ref, "", head(t, fx.dir()), nil); !strings.Contains(w, "git push failed") {
+		t.Errorf("push onto an existing ref: warning = %q, want a failed push", w)
+	}
+	if got := rev(t, bare, ref); got != first {
+		t.Errorf("remote %s moved: %s -> %s", ref, first, got)
+	}
+}
+
+// The send-set check holds on its own, whatever tree the gates were shown: a
+// commit carrying a blob outside gated is refused before anything is sent.
+func TestPinnedPushRefusesUngatedObjects(t *testing.T) {
+	ctx := context.Background()
+	fx, bare := withRemote(t)
+	const ref = "refs/heads/review/laptop/some-fact"
+	base := head(t, fx.dir())
+	fact := strings.TrimSpace(gitIn(t, fx.dir(), "fact\n", "hash-object", "-w", "--stdin"))
+	gated := map[string]string{"fact.md": "100644 " + fact}
+	honest := strings.TrimSpace(gitIn(t, fx.dir(), git(t, fx.dir(), "ls-tree", base)+"100644 blob "+fact+"\tfact.md\n", "mktree"))
+	evil, blob := evilTree(t, fx.dir(), honest)
+	commit := func(tree string) string {
+		return strings.TrimSpace(git(t, fx.dir(), "commit-tree", tree, "-p", base, "-m", "review"))
+	}
+	if w := preflight(ctx, fx.dir(), bare); w != "" {
+		t.Fatalf("preflight warning = %q", w)
+	}
+
+	want := "not pushed from " + fx.dir() + ": the push would send .github, which the gates did not pass"
+	if w := pinnedPush(ctx, fx.dir(), bare, commit(evil), ref, "", base, gated); w != want {
+		t.Errorf("warning = %q, want %q", w, want)
+	}
+	if exec.Command("git", "-C", bare, "cat-file", "-e", blob).Run() == nil {
+		t.Errorf("the remote received the ungated blob %s", blob)
+	}
+	assertNoReviewRefs(t, bare)
+
+	sent := commit(honest)
+	if w := pinnedPush(ctx, fx.dir(), bare, sent, ref, "", base, gated); w != "" {
+		t.Fatalf("gated push warning = %q", w)
+	}
+	if got := rev(t, bare, ref); got != sent {
+		t.Errorf("remote %s = %s, want %s", ref, got, sent)
+	}
+}
+
+func TestCheckSendSet(t *testing.T) {
+	oid := func(c string) string { return strings.Repeat(c, 40) }
+	src, fact, index, other := oid("c"), oid("f"), oid("d"), oid("e")
+	gated := map[string]string{"_global/fact.md": "100644 " + fact, store.IndexFile: "100644 " + index}
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		gated map[string]string
+		want  string
+	}{
+		{"commit, trees and gated blobs", []string{src, oid("1") + " ", oid("2") + " _global", fact + " _global/fact.md", index + " " + store.IndexFile}, gated, ""},
+		{"root tree only", []string{src, oid("1") + " "}, gated, ""},
+		{"blob already on the remote, mode-only change", []string{src, oid("1") + " ", oid("2") + " _global"}, gated, ""},
+		{"new nested dir", []string{src, oid("1") + " ", oid("2") + " a", oid("3") + " a/b", fact + " a/b/c.md"}, map[string]string{"a/b/c.md": "100755 " + fact}, ""},
+		{"removal's dir", []string{src, oid("1") + " ", oid("2") + " _global", index + " " + store.IndexFile}, map[string]string{"_global/gone.md": "", store.IndexFile: "100644 " + index}, ""},
+		{"blob at a removal", []string{src, oid("1") + " ", oid("2") + " _global", other + " _global/gone.md"}, map[string]string{"_global/gone.md": ""}, "the push would send _global/gone.md, which the gates did not pass"},
+		{"extra commit", []string{src, other, oid("1") + " "}, gated, "the push would send commit " + other + " besides " + src},
+		{"other commit only", []string{other}, gated, "the push would send commit " + other + " besides " + src},
+		{"no commit", nil, gated, "the push would not send " + src},
+		{"smuggled sibling blob", []string{src, oid("1") + " ", oid("2") + " _global", fact + " _global/fact.md", other + " _global/other.md"}, gated, "the push would send _global/other.md, which the gates did not pass"},
+		{"wrong oid at the gated path", []string{src, oid("1") + " ", oid("2") + " _global", other + " _global/fact.md"}, gated, "the push would send _global/fact.md, which the gates did not pass"},
+		{"ungated dir", []string{src, oid("1") + " ", oid("2") + " .github"}, gated, "the push would send .github, which the gates did not pass"},
+		{"unparsable line", []string{src, "not an object"}, gated, "git rev-list gave an unreadable line"},
+		{"blank line", []string{src, ""}, gated, "git rev-list gave an unreadable line"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out string
+			for _, l := range tc.lines {
+				out += l + "\n"
+			}
+			got := ""
+			if err := checkSendSet(out, src, tc.gated); err != nil {
+				got = err.Error()
+			}
+			if got != tc.want {
+				t.Errorf("checkSendSet = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestPushRefusesUserConfigRewrite(t *testing.T) {
@@ -1369,7 +1546,7 @@ func TestPushRefusesDetachedHead(t *testing.T) {
 	fx, _ := withRemote(t)
 	base := head(t, fx.dir())
 	git(t, fx.dir(), "checkout", "-q", "--detach")
-	if w := push(context.Background(), fx.dir(), fx.root.Remote, base, base); !strings.Contains(w, "HEAD is not on a branch") {
+	if w := push(context.Background(), fx.dir(), fx.root.Remote, base, base, nil); !strings.Contains(w, "HEAD is not on a branch") {
 		t.Errorf("warning = %q", w)
 	}
 }

@@ -749,6 +749,12 @@ func TestProvenanceDir(t *testing.T) {
 	}
 }
 
+func TestReviewDir(t *testing.T) {
+	if got, want := (Config{StateDir: "/explicit"}).ReviewDir("work"), "/explicit/review/work/pending"; got != want {
+		t.Errorf("ReviewDir = %q, want %q", got, want)
+	}
+}
+
 func TestStatePathsDeriveFromTheResolvedState(t *testing.T) {
 	isolate(t)
 	real := realPath(t, t.TempDir())

@@ -17,6 +17,7 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/config"
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 	"github.com/noamsto/hookyard/cmd/priors/internal/guard"
+	"github.com/noamsto/hookyard/cmd/priors/internal/review"
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
 	"github.com/noamsto/hookyard/cmd/priors/internal/tier1"
@@ -415,6 +416,15 @@ func writeGroup(ctx context.Context, cfg config.Config, rules gate.Rules, scanne
 			if w := commit.Checkout(ctx, cfg, root, rules, scanner, "priors: regenerate index"); w != "" {
 				s.errf("%s: warning: %s\n", root.Path, w)
 			}
+		}
+	}
+	if g.lock != "quarantine" {
+		lines, warnings := review.SyncLocked(ctx, cfg, route.StoreID(g.lock), rules, scanner)
+		for _, l := range lines {
+			s.outln(l)
+		}
+		for _, w := range warnings {
+			s.errf("%s: warning: %s\n", g.lock, w)
 		}
 	}
 	return skipped, nil

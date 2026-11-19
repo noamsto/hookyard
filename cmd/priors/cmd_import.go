@@ -77,6 +77,9 @@ func cmdImport(args []string, s streams) int {
 	for _, r := range append(notes, res.Reports...) {
 		s.outln(r)
 	}
+	for _, l := range res.Review {
+		s.outln(l)
+	}
 	if res.Warning != "" {
 		s.errln("warning:", res.Warning)
 	}
