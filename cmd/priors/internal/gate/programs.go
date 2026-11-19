@@ -34,11 +34,12 @@ var (
 	awks         = []string{"awk", "gawk", "mawk", "nawk"}
 	// gitReaders leave the work tree as it is: they read, or write only git's
 	// own index, objects and refs. commit is listed for its option checks but
-	// classify treats it as a write in its repo.
+	// classify treats it as a write in its repo; gitReads takes reflog only
+	// bare, with options, or as show, exists or list.
 	gitReaders = []string{
 		"status", "log", "show", "diff", "ls-files", "ls-tree", "rev-parse", "cat-file", "grep",
 		"blame", "shortlog", "describe", "rev-list", "show-ref", "for-each-ref", "merge-base",
-		"name-rev", "add", "commit", "fetch", "push",
+		"name-rev", "reflog", "add", "commit", "fetch", "push",
 	}
 	// gitValueOpts and gitFlagOpts are the options git takes before its
 	// subcommand that set no config and run no program; gitGlueOpts take their
@@ -1337,6 +1338,9 @@ func gitReads(args, heads []string) bool {
 	if !slices.Contains(gitReaders, args[sub]) {
 		return false
 	}
+	if args[sub] == "reflog" && sub+1 < len(args) && !strings.HasPrefix(args[sub+1], "-") && !slices.Contains([]string{"show", "exists", "list"}, args[sub+1]) {
+		return false
+	}
 	var skip []int
 	if args[sub] == "commit" {
 		skip = commitMessages(args, heads, sub+1)
@@ -1726,7 +1730,11 @@ func (r *reader) classifyCall(ce *syntax.CallExpr, f feed) {
 			r.codeOut("mapfile runs a callback as code")
 		}
 	}
-	v := classify(name, args)
+	classified := args
+	if name == "find" {
+		classified = r.findStarts(args)
+	}
+	v := classify(name, classified)
 	if (r.withdrawn || r.pre.scoped[ce]) && v.kind != unknownKind {
 		r.redefines(name)
 		v = verdict{kind: unknownKind}
@@ -1750,7 +1758,7 @@ func (r *reader) classifyCall(ce *syntax.CallExpr, f feed) {
 			}
 		}
 	case unknownKind:
-		r.unknown(name, args, f)
+		r.unknown(name, classified, f)
 	}
 }
 
@@ -2298,6 +2306,13 @@ func (r *reader) cdable(name string) {
 	case slices.Contains(bashDefaults, name):
 		r.dirLost()
 	}
+	for _, v := range r.namedValues()[name] {
+		r.dir(arg{text: v.text, ok: v.ok})
+	}
+}
+
+// namedValues returns each value the command binds, by the name it binds.
+func (r *reader) namedValues() map[string][]boundValue {
 	if r.named == nil {
 		r.named = map[string][]boundValue{}
 		for _, b := range r.pre.bound {
@@ -2306,9 +2321,72 @@ func (r *reader) cdable(name string) {
 			}
 		}
 	}
-	for _, v := range r.named[name] {
-		r.dir(arg{text: v.text, ok: v.ok})
+	return r.named
+}
+
+// findStarts renders the words of a find call that are a plain $NAME, with
+// an optional literal tail, of a variable the command sets only to literal
+// text that is a path: one that can neither split into words nor read as a
+// find primary, so it can only be a start path.
+func (r *reader) findStarts(args []arg) []arg {
+	var out []arg
+	for i, a := range args {
+		if a.ok {
+			continue
+		}
+		name, tail, ok := simpleParam(a.word)
+		if !ok || r.pre.computed || r.settable("IFS") || bashAssigns(name) || slices.Contains(bashDefaults, name) {
+			continue
+		}
+		vals := r.namedValues()[name]
+		if len(vals) == 0 || slices.ContainsFunc(vals, func(v boundValue) bool { return !pathValue(v) || v.text != vals[0].text }) {
+			continue
+		}
+		if out == nil {
+			out = slices.Clone(args)
+		}
+		if !pathValue(boundValue{text: tail, ok: true}) && tail != "" {
+			continue
+		}
+		out[i].text, out[i].ok = vals[0].text+tail, true
 	}
+	if out == nil {
+		return args
+	}
+	return out
+}
+
+// pathValue reports a bound value that is non-empty literal text with no
+// byte that splits, globs or quotes, and does not start like a find primary.
+func pathValue(v boundValue) bool {
+	return v.ok && v.text != "" && !strings.ContainsAny(v.text, " \t\n*?[{\\'\"$`~()") && !strings.ContainsRune("-(!,", rune(v.text[0]))
+}
+
+// simpleParam reads w as $NAME or ${NAME}, bare or double-quoted, followed
+// by literal text.
+func simpleParam(w *syntax.Word) (name, tail string, ok bool) {
+	if w == nil || len(w.Parts) == 0 {
+		return "", "", false
+	}
+	parts := w.Parts
+	if q, isQ := parts[0].(*syntax.DblQuoted); isQ && len(parts) == 1 {
+		parts = q.Parts
+	}
+	if len(parts) == 0 {
+		return "", "", false
+	}
+	p, isP := parts[0].(*syntax.ParamExp)
+	if !isP || p.Param == nil || p.Exp != nil || p.Slice != nil || p.Repl != nil || p.Length || p.Width || p.Excl || p.Index != nil || p.Names != 0 {
+		return "", "", false
+	}
+	for _, rest := range parts[1:] {
+		l, isL := rest.(*syntax.Lit)
+		if !isL {
+			return "", "", false
+		}
+		tail += l.Value
+	}
+	return p.Param.Value, tail, true
 }
 
 // cdpath reports a relative cd operand bash may look up elsewhere: CDPATH
