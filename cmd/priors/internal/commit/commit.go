@@ -675,11 +675,8 @@ func (c classifier) factRefusal(rel string) string {
 		rules = append(rules, finding.Rule)
 	}
 	rules = append(rules, c.findings[rel]...)
-	// A reviewed fact is one a person read past these gates.
-	if f.Metadata.Confidence != "reviewed" {
-		for _, reason := range append(gate.Content(string(raw)), gate.Size(len(raw))...) {
-			rules = append(rules, "gate:"+reason)
-		}
+	for _, reason := range append(gate.Content(string(raw)), gate.Size(len(raw))...) {
+		rules = append(rules, "gate:"+reason)
 	}
 	if len(f.Metadata.Flags) > 0 {
 		rules = append(rules, "flagged")

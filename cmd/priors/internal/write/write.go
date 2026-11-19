@@ -155,7 +155,7 @@ func add(ctx context.Context, cfg config.Config, req Request, d Deps, lock bool)
 	}
 
 	flags := gate.Provenance(cfg.RecordDir(), cfg.ProvenanceDir(), req.SessionID, req.External)
-	if req.Imported && !gate.ImperativeCommand(f.Body) {
+	if req.Imported && !gate.ImperativeCommand(f.Description+"\n"+f.Body) {
 		flags = slices.DeleteFunc(flags, func(r string) bool { return r == "provenance:shell" })
 	}
 	if req.IdentityConflict {

@@ -269,18 +269,18 @@ func TestCommitsAReviewedFact(t *testing.T) {
 	committest.AssertHeadIndexInTree(t, fx.dir())
 }
 
-// TestContentGatesSkipReviewedFacts: a reviewed fact passed a person, so the
-// content and size gates no longer hold it back; flags still do.
-func TestContentGatesSkipReviewedFacts(t *testing.T) {
+// TestContentGatesHoldReviewedFacts: a merged review reaches the checkout by
+// pull, never dirty, so a dirty fact labelled reviewed is gated like any other.
+func TestContentGatesHoldReviewedFacts(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
 		confidence string
 		flags      []string
-		want       string // "" to commit, else the refusal reasons
+		want       string // the refusal reasons
 	}{
-		{"reviewed", "reviewed", nil, ""},
+		{"reviewed", "reviewed", nil, "gate:content:url"},
 		{"proposed", "proposed", nil, "gate:content:url"},
-		{"reviewed but flagged", "reviewed", []string{"content:url"}, "flagged"},
+		{"reviewed but flagged", "reviewed", []string{"content:url"}, "flagged, gate:content:url"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			fx := setup(t)
@@ -292,16 +292,6 @@ func TestContentGatesSkipReviewedFacts(t *testing.T) {
 			fx.index(t)
 
 			w := fx.checkout(t)
-			if tt.want == "" {
-				if w != "" {
-					t.Fatalf("warning = %q, want a clean commit", w)
-				}
-				if !slices.Contains(lsFiles(t, fx.dir()), "_global/linky-fact.md") {
-					t.Error("the fact was not committed")
-				}
-				committest.AssertHeadIndexInTree(t, fx.dir())
-				return
-			}
 			if want := "_global/linky-fact.md (" + tt.want + ")"; !strings.Contains(w, want) {
 				t.Errorf("warning = %q, want it to hold %q", w, want)
 			}

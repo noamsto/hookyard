@@ -253,6 +253,37 @@ func TestMergedReviewReadsReviewedOnce(t *testing.T) {
 	}
 }
 
+// A review PR leaves MEMORY.md alone, so the first write after the pull heals
+// the checkout's index before it prunes the local copy.
+func TestMergedReviewThenUnchangedImportHealsIndex(t *testing.T) {
+	fx, branch := importFlagged(t)
+	sb := fx.sb
+
+	scratch := filepath.Join(sb.dir, "scratch")
+	sb.git(sb.dir, "clone", "-q", fx.pin.url, scratch)
+	sb.git(scratch, "merge", "-q", "--no-ff", "-m", "Merge "+branch, "origin/"+branch)
+	sb.git(scratch, "push", "-q", "origin", "main")
+	sb.git(sb.personal, "pull", "-q", "--ff-only")
+
+	res := fx.importRun()
+	wantContains(t, "import stdout", res.stdout, "unchanged "+fx.sourcePath(flaggedName), "unchanged "+fx.sourcePath(noteName))
+	if _, err := os.Stat(fx.localPath(flaggedName)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the local copy outlived the merge: %v", err)
+	}
+	entry := "[" + flaggedName + "](demo/" + flaggedName + ".md)"
+	wantContains(t, "checkout MEMORY.md", sb.readFile(filepath.Join(sb.personal, "MEMORY.md")), entry)
+	wantContains(t, "committed MEMORY.md", sb.gitOut(sb.personal, "show", "HEAD:MEMORY.md"), entry)
+	if st := sb.gitOut(sb.personal, "status", "--porcelain"); st != "" {
+		t.Errorf("checkout status after the import:\n%s", st)
+	}
+
+	start := sb.run(sessionStartEnvelope(fx.repo))
+	wantExit(t, start, 0)
+	if n := strings.Count(additionalContext(t, start.stdout), "["+flaggedName+"]("); n != 1 {
+		t.Errorf("session_start lists %s %d times, want once:\n%s", flaggedName, n, start.stdout)
+	}
+}
+
 func TestClosedReviewIsNotReproposed(t *testing.T) {
 	fx, branch := importFlagged(t)
 	sb := fx.sb

@@ -16,6 +16,7 @@ import (
 	"github.com/noamsto/hookyard/cmd/priors/internal/gate"
 	"github.com/noamsto/hookyard/cmd/priors/internal/route"
 	"github.com/noamsto/hookyard/cmd/priors/internal/store"
+	"github.com/noamsto/hookyard/cmd/priors/internal/tools"
 	"github.com/noamsto/hookyard/cmd/priors/internal/tools/toolstest"
 )
 
@@ -205,6 +206,13 @@ func TestCompareURL(t *testing.T) {
 		{"git@github.com:o/r", u},
 		{"ssh://git@github.com/o/r.git", u},
 		{"ssh://git@github.com/o/r", u},
+		{"ssh://git@ssh.github.com:443/o/r.git", u},
+		{"ssh://git@ssh.github.com:443/o/r", u},
+		{"ssh://git@github.com:443/o/r.git", u},
+		{"ssh://git@ssh.github.com/o/r.git", u},
+		{"ssh://git@ssh.github.com:22/o/r.git", ""},
+		{"ssh://git@ssh.github.com:443/o/r/extra.git", ""},
+		{"ssh://git@evil.ssh.github.com:443/o/r.git", ""},
 		{"https://github.com/o/r.git", ""},
 		{"git@gitlab.com:o/r.git", ""},
 		{"git@github.com:o/r/extra.git", ""},
@@ -387,5 +395,182 @@ func TestSyncPrunesOnlyTheMatchingWriter(t *testing.T) {
 	index, err := os.ReadFile(filepath.Join(fx.local.Path, "MEMORY.md"))
 	if err != nil || strings.Contains(string(index), "merged") {
 		t.Errorf("local index not regenerated: %q %v", index, err)
+	}
+}
+
+func TestSyncRegeneratesTheCheckoutIndexBeforePruning(t *testing.T) {
+	fx := newFixture(t)
+	f := testFact("merged", &fact.Provenance{Engine: "claude", Session: "s1", Host: "h"}, nil)
+	fx.putLocal(t, f)
+	fx.putCheckout(t, f)
+
+	_, warnings := syncFx(fx)
+
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %q", warnings)
+	}
+	index, err := os.ReadFile(filepath.Join(fx.checkout.Path, "MEMORY.md"))
+	if err != nil || !strings.Contains(string(index), "[merged](_global/merged.md)") {
+		t.Errorf("checkout index does not list the merged fact: %q %v", index, err)
+	}
+	if _, ok := fx.local.FindByName("merged"); ok {
+		t.Error("the merged copy was not pruned")
+	}
+}
+
+func TestSyncKeepsTheLocalCopyTheCheckoutIndexOmits(t *testing.T) {
+	fx := newFixture(t)
+	f := testFact("merged", &fact.Provenance{Engine: "claude", Session: "s1", Host: "h"}, nil)
+	fx.putLocal(t, f)
+	fx.putCheckout(t, f)
+	// A directory in MEMORY.md's place fails the regeneration.
+	if err := os.Mkdir(filepath.Join(fx.checkout.Path, "MEMORY.md"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, warnings := syncFx(fx)
+
+	if len(warnings) != 1 || !strings.HasPrefix(warnings[0], "review: regenerating the personal checkout index: ") {
+		t.Errorf("warnings = %q", warnings)
+	}
+	if _, ok := fx.local.FindByName("merged"); !ok {
+		t.Error("pruned a local copy the checkout's index does not list")
+	}
+}
+
+func TestSyncRefusesToPruneThroughASymlinkedLocalLayer(t *testing.T) {
+	memory := filepath.Join(t.TempDir(), "memory")
+	state := t.TempDir()
+	cfg := config.Config{StateDir: state, PersonalStore: filepath.Join(memory, "personal"), Push: true}
+	// $STATE/local -> ~/memory makes the local layer the checkout itself.
+	if err := os.MkdirAll(cfg.PersonalStore, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(memory, filepath.Join(state, "local")); err != nil {
+		t.Fatal(err)
+	}
+	fx := fixture{
+		cfg:      cfg,
+		checkout: store.Root{Store: personal, Kind: store.KindCheckout, Path: cfg.PersonalStore},
+		local:    store.LocalRoot(cfg, personal),
+	}
+	f := testFact("victim", &fact.Provenance{Engine: "claude", Session: "s", Host: "h"}, nil)
+	fx.putCheckout(t, f)
+	fakePropose(t, commit.ReviewPushed, "")
+
+	_, warnings := syncFx(fx)
+
+	if _, err := os.Stat(fx.checkout.PathFor(f, "")); err != nil {
+		t.Errorf("prune deleted the checkout fact: %v", err)
+	}
+	if len(warnings) != 1 || !strings.HasPrefix(warnings[0], "review: not pruning the personal local layer: ") {
+		t.Errorf("warnings = %q", warnings)
+	}
+}
+
+func TestSyncNeverPrunesInsideTheCheckout(t *testing.T) {
+	cfg := config.Config{StateDir: t.TempDir(), Push: true}
+	cfg.PersonalStore = cfg.LocalDir(string(personal))
+	fx := fixture{
+		cfg:      cfg,
+		checkout: store.Root{Store: personal, Kind: store.KindCheckout, Path: cfg.PersonalStore},
+		local:    store.LocalRoot(cfg, personal),
+	}
+	f := testFact("victim", &fact.Provenance{Engine: "claude", Session: "s", Host: "h"}, nil)
+	fx.putCheckout(t, f)
+	fakePropose(t, commit.ReviewPushed, "")
+
+	_, warnings := syncFx(fx)
+
+	path := fx.checkout.PathFor(f, "")
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("prune deleted the checkout fact: %v", err)
+	}
+	if want := []string{"review: not pruning " + path + ": it lies inside the checkout"}; !reflect.DeepEqual(warnings, want) {
+		t.Errorf("warnings = %q, want %q", warnings, want)
+	}
+}
+
+func TestSyncKeepsMarkerOfUnreadableLocalCopy(t *testing.T) {
+	fx := newFixture(t)
+	path := fx.local.PathFor(testFact("tip", nil, nil), "hookyard")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not a fact\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fx.mark(t, "tip")
+	got := fakePropose(t, commit.ReviewPushed, "")
+
+	lines, warnings := syncFx(fx)
+
+	if len(lines) != 0 || len(*got) != 0 {
+		t.Errorf("lines = %q, propose calls = %d", lines, len(*got))
+	}
+	if want := []string{"review tip: local copy unreadable"}; !reflect.DeepEqual(warnings, want) {
+		t.Errorf("warnings = %q, want %q", warnings, want)
+	}
+	if p := fx.pending(t); !reflect.DeepEqual(p, []string{"tip"}) {
+		t.Errorf("markers = %v", p)
+	}
+}
+
+func TestSyncMessageCarriesOnlyGateIDs(t *testing.T) {
+	fx := newFixture(t)
+	f := testFact("tip", nil, nil)
+	f.Metadata.Flags = []string{"provenance:shell", "Signed-off-by: someone", "a b", "external"}
+	fx.putLocal(t, f)
+	fx.mark(t, "tip")
+	got := fakePropose(t, commit.ReviewPushed, "")
+
+	syncFx(fx)
+
+	if len(*got) != 1 {
+		t.Fatalf("propose calls = %d", len(*got))
+	}
+	if want := Message(f, personal, "_global/tip.md", []string{"provenance:shell", "external"}); (*got)[0].Msg != want {
+		t.Errorf("Msg = %q, want %q", (*got)[0].Msg, want)
+	}
+}
+
+func gitIn(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	if out, err := tools.Command(context.Background(), tools.Git, append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func TestSyncLineCarriesTheCompareURL(t *testing.T) {
+	fx := newFixture(t)
+	const remote = "git@github.com:o/r.git"
+	fx.cfg.PersonalRemote = remote
+	gitconfig := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(gitconfig, []byte("[user]\n\tname = Priors Test\n\temail = priors@example.invalid\n[commit]\n\tgpgsign = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", gitconfig)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	gitIn(t, fx.checkout.Path, "init", "-q")
+	gitIn(t, fx.checkout.Path, "remote", "add", "origin", remote)
+	// A committed, current index leaves the checkout clean, so the sync
+	// commits and pushes nothing.
+	if _, _, err := fx.checkout.WriteIndex(gate.Rules{}); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, fx.checkout.Path, "add", "MEMORY.md")
+	gitIn(t, fx.checkout.Path, "commit", "-q", "-m", "index")
+	fx.putLocal(t, testFact("tip", &fact.Provenance{Host: "Box"}, nil))
+	fx.mark(t, "tip")
+	got := fakePropose(t, commit.ReviewPushed, "")
+
+	lines, warnings := syncFx(fx)
+
+	if len(*got) != 1 || len(warnings) != 0 {
+		t.Fatalf("propose calls = %d, warnings = %q", len(*got), warnings)
+	}
+	branch := (*got)[0].Branch
+	if want := []string{"review personal " + branch + " " + CompareURL(remote, branch)}; !reflect.DeepEqual(lines, want) {
+		t.Errorf("lines = %q, want %q", lines, want)
 	}
 }

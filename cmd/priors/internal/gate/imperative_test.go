@@ -35,6 +35,19 @@ func TestImperativeCommandEdges(t *testing.T) {
 		{"verb prefix is not a word", "running `x` is slow", false},
 		{"case insensitive", "RUN `x`", true},
 		{"second line", "intro\nrun `x`", true},
+		{"remember to", "Remember to run `nix flake check` before pushing.", true},
+		{"make sure to", "Make sure to run `make clean` first.", true},
+		{"make sure you", "Make sure you run `make clean` first.", true},
+		{"dont forget", "Don't forget to run `direnv allow`.", true},
+		{"do not forget", "Do not forget to run `direnv allow`.", true},
+		{"be sure to", "Be sure to run `make clean` first.", true},
+		{"leading if clause", "If the build breaks, run `make clean`.", true},
+		{"leading before clause", "Before pushing, run `nix flake check`.", true},
+		{"leading to clause", "To reset it, run `make clean`.", true},
+		{"noun source code", "Source code for the daemon lives in `./src/daemon`.", false},
+		{"noun type checking", "Type checking runs through `tsc --noEmit` in CI.", false},
+		{"noun call sites", "Call sites of `foo()` are all in the handler.", false},
+		{"noun use of", "Use of `--impure` is required for this flake.", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -64,7 +77,7 @@ func TestImperativeCommandCorpus(t *testing.T) {
 		switch {
 		case strings.HasPrefix(base, "note-"):
 			notes++
-			if ImperativeCommand(f.Body) {
+			if ImperativeCommand(f.Description + "\n" + f.Body) {
 				t.Errorf("%s: ImperativeCommand = true, want false", base)
 			}
 			if got := Content(string(raw)); len(got) != 0 {
@@ -75,15 +88,15 @@ func TestImperativeCommandCorpus(t *testing.T) {
 			}
 		case strings.HasPrefix(base, "instr-"):
 			instrs++
-			if !ImperativeCommand(f.Body) {
+			if !ImperativeCommand(f.Description + "\n" + f.Body) {
 				t.Errorf("%s: ImperativeCommand = false, want true", base)
 			}
 		default:
 			t.Errorf("%s: fixture name needs a note- or instr- prefix", base)
 		}
 	}
-	if notes < 25 || instrs < 8 {
-		t.Errorf("corpus has %d notes and %d instructions, want at least 25 and 8", notes, instrs)
+	if notes < 29 || instrs < 18 {
+		t.Errorf("corpus has %d notes and %d instructions, want at least 29 and 18", notes, instrs)
 	}
 	t.Logf("corpus: %d notes, %d instructions", notes, instrs)
 }

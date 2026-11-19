@@ -45,8 +45,9 @@ const (
 
 // Review pushes a new branch req.Branch to root's pinned remote holding one
 // commit on the checkout branch's fetched upstream that adds req.Data at
-// req.Rel, once the bytes pass the fact rules and the secret scan and the
-// branch's whole tree passes the store lint. It builds the commit with
+// req.Rel, once the remote's branch still holds that upstream, the bytes and
+// message pass the fact rules and the secret scan, and the branch's whole tree
+// passes the store lint. It builds the commit with
 // plumbing in a private index and moves no ref of the checkout, nor touches
 // its index or worktree. The caller holds the store's lock. The detail names
 // what stopped it by rule id and path, never by content.
@@ -86,14 +87,22 @@ func Review(ctx context.Context, cfg config.Config, root store.Root, rules gate.
 	if warning != "" {
 		return ReviewTransient, warning
 	}
+	// The push sends every object of the review commit the remote lacks, so a
+	// base the remote's branch does not hold would carry local commits along.
+	switch tip, _, warning := remoteRef(ctx, dir, root.Remote, up.mergeRef); {
+	case warning != "":
+		return ReviewTransient, warning
+	case tip != up.commit:
+		return ReviewTransient, fmt.Sprintf("%s is not the remote's %s; fetch first", up.tracking, up.mergeRef)
+	}
 	git := inCheckout(ctx, dir)
 	if out, err := git(gitTimeout, nil, nil, "ls-tree", up.commit, "--", req.Rel); err != nil {
 		return ReviewTransient, gitWarning("git ls-tree", out, err)
 	} else if out != "" {
 		return ReviewPermanent, fmt.Sprintf("%s already exists on %s", req.Rel, strings.TrimPrefix(up.tracking, "refs/remotes/"))
 	}
-	if detail := lintBranch(ctx, cfg, root, rules, scanner, git, up.commit, req); detail != "" {
-		return ReviewTransient, detail
+	if outcome, detail := lintBranch(ctx, cfg, root, rules, scanner, git, up.commit, req); detail != "" {
+		return outcome, detail
 	}
 
 	tree, warning := gatedTree(git, dir, up.commit, func(env []string) (map[string]string, string) {
@@ -126,7 +135,8 @@ func Review(ctx context.Context, cfg config.Config, root store.Root, rules gate.
 
 // gateBytes checks req's bytes alone, before any of them is hashed into the
 // checkout's object store: a fact path, a parsable fact passing the fact
-// rules, and a clean secret scan. It returns "" for the detail when they pass.
+// rules, and a clean secret scan of the fact and of the message, which quotes
+// the local fact's flags. It returns "" for the detail when they pass.
 func gateBytes(ctx context.Context, root store.Root, rules gate.Rules, scanner gate.Scanner, req ReviewRequest) (ReviewOutcome, string) {
 	if !indexable(req.Rel) || !filepath.IsLocal(filepath.FromSlash(req.Rel)) {
 		return ReviewPermanent, req.Rel + " is not a fact path"
@@ -153,31 +163,61 @@ func gateBytes(ctx context.Context, root store.Root, rules gate.Rules, scanner g
 	if len(ids) > 0 {
 		return ReviewPermanent, "secret scan matched: " + strings.Join(ids, ", ")
 	}
+	if ids := rules.Match(req.Msg); len(ids) > 0 {
+		return ReviewPermanent, "secret rule(s) in the message: " + strings.Join(ids, ", ")
+	}
+	ids, err = scanner.ScanText(ctx, req.Msg)
+	if err != nil {
+		return ReviewTransient, fmt.Sprintf("secret scan of the message failed: %v", err)
+	}
+	if len(ids) > 0 {
+		return ReviewPermanent, "secret scan matched in the message: " + strings.Join(ids, ", ")
+	}
 	return 0, ""
 }
 
 // lintBranch runs the store lint, gates included, over base's tree with req's
 // bytes added, as `priors lint --dir` would over the branch. It returns ""
-// when the lint is clean, else the findings' files and rules.
-func lintBranch(ctx context.Context, cfg config.Config, root store.Root, rules gate.Rules, scanner gate.Scanner, git gitFunc, base string, req ReviewRequest) string {
+// for the detail when the lint is clean, else the findings' files and rules.
+// A base fact sharing req's name is permanent: the lint reports whichever of
+// the two files it walks second, so both are matched.
+func lintBranch(ctx context.Context, cfg config.Config, root store.Root, rules gate.Rules, scanner gate.Scanner, git gitFunc, base string, req ReviewRequest) (ReviewOutcome, string) {
 	tmp, detail := materialise(git, base)
 	defer func() { _ = os.RemoveAll(tmp) }()
 	if detail != "" {
-		return detail
+		return ReviewTransient, detail
 	}
 	if err := writeBlob(tmp, req.Rel, req.Data); err != nil {
-		return fmt.Sprintf("materialising the review tree: %v", err)
+		return ReviewTransient, fmt.Sprintf("materialising the review tree: %v", err)
 	}
+	name := nameAt(tmp, req.Rel)
 	snap := store.Root{Store: root.Store, Kind: store.KindCheckout, Path: tmp}
 	opts := lint.Options{Store: root.Store, WorkOrgs: cfg.WorkOrgs, WorkNames: cfg.WorkNames(), Rules: rules, Scanner: &scanner, Gates: true}
 	var found []string
 	for _, f := range lint.Store(ctx, snap, opts) {
+		if f.Rule == "duplicate-name" && (f.File == req.Rel || nameAt(tmp, f.File) == name) {
+			return ReviewPermanent, "lint: " + req.Rel + ": duplicate-name"
+		}
 		found = append(found, f.File+": "+f.Rule)
 	}
 	if len(found) == 0 {
+		return 0, ""
+	}
+	return ReviewTransient, "lint: " + strings.Join(slices.Compact(found), ", ")
+}
+
+// nameAt is the name of the fact at rel, a local '/'-separated path under
+// dir, or "" when it does not parse.
+func nameAt(dir, rel string) string {
+	raw, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel))) //nolint:gosec // rel is a lint finding's file inside the private materialised tree
+	if err != nil {
 		return ""
 	}
-	return "lint: " + strings.Join(slices.Compact(found), ", ")
+	f, err := fact.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return f.Name
 }
 
 // materialise writes base's tree into a new private temp dir from its raw

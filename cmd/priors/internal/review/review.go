@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/atomicfile"
@@ -38,7 +39,8 @@ var propose = commit.Review
 var (
 	nonSlug   = regexp.MustCompile(`[^a-z0-9]+`)
 	githubScp = regexp.MustCompile(`^git@github\.com:([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?$`)
-	githubSSH = regexp.MustCompile(`^ssh://git@github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?$`)
+	githubSSH = regexp.MustCompile(`^ssh://git@(?:ssh\.)?github\.com(?::443)?/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?$`)
+	gateID    = regexp.MustCompile(`^[a-z0-9:-]+$`)
 )
 
 // Branch is the review branch for one fact: review/<host>/<name>-<h8>, where
@@ -135,7 +137,7 @@ func pendingDir(cfg config.Config, storeID route.StoreID) (string, error) {
 }
 
 // CompareURL is GitHub's compare page for branch when remote is a GitHub scp
-// or ssh URL, and "" for any other remote.
+// or ssh URL, port-443 form included, and "" for any other remote.
 func CompareURL(remote, branch string) string {
 	m := githubScp.FindStringSubmatch(remote)
 	if m == nil {
@@ -161,9 +163,10 @@ func Sync(ctx context.Context, cfg config.Config, storeID route.StoreID, rules g
 	return SyncLocked(ctx, cfg, storeID, rules, scanner)
 }
 
-// SyncLocked prunes the local copies the checkout now holds, then proposes
-// every pending fact. The caller holds the store's lock. A fact that cannot
-// be proposed yet stays pending and warns; the local copy is safe either way.
+// SyncLocked regenerates the checkout's index, prunes the local copies it now
+// lists, then proposes every pending fact. The caller holds the store's lock.
+// A fact that cannot be proposed yet stays pending and warns; the local copy
+// is safe either way.
 func SyncLocked(ctx context.Context, cfg config.Config, storeID route.StoreID, rules gate.Rules, scanner gate.Scanner) (lines, warnings []string) {
 	checkout, err := store.CheckoutRoot(ctx, cfg, storeID)
 	if err != nil {
@@ -175,8 +178,11 @@ func SyncLocked(ctx context.Context, cfg config.Config, storeID route.StoreID, r
 		return nil, []string{"review: " + err.Error()}
 	}
 
-	pruned, warnings := prune(local, checkout, dir)
-	if pruned {
+	warnings = healIndex(ctx, cfg, checkout, rules, scanner)
+	entries, walkErrs := local.Walk()
+	pruned, pruneWarnings := prune(local, checkout, entries, dir)
+	warnings = append(warnings, pruneWarnings...)
+	if len(pruned) > 0 {
 		if _, _, err := local.WriteIndex(rules); err != nil {
 			warnings = append(warnings, fmt.Sprintf("review: regenerating the %s local index: %v", storeID, err))
 		}
@@ -194,9 +200,15 @@ func SyncLocked(ctx context.Context, cfg config.Config, storeID route.StoreID, r
 		}
 		return lines, warnings
 	}
+	kept := slices.DeleteFunc(entries, func(e store.Entry) bool { return pruned[e.Rel] })
+	localByName := byName(kept)
 	for _, name := range names {
-		entry, ok := local.FindByName(name)
+		entry, ok := localByName[name]
 		if !ok {
+			if unreadable(walkErrs, name) {
+				warnings = append(warnings, fmt.Sprintf("review %s: local copy unreadable", name))
+				continue
+			}
 			dropMarker(dir, name, &warnings)
 			continue
 		}
@@ -221,7 +233,7 @@ func SyncLocked(ctx context.Context, cfg config.Config, storeID route.StoreID, r
 			Rel:    rel,
 			Data:   data,
 			Branch: branch,
-			Msg:    Message(f, storeID, rel, f.Metadata.Flags),
+			Msg:    Message(f, storeID, rel, gateIDs(f.Metadata.Flags)),
 		})
 		switch outcome {
 		case commit.ReviewPushed, commit.ReviewExists:
@@ -241,25 +253,131 @@ func SyncLocked(ctx context.Context, cfg config.Config, storeID route.StoreID, r
 	return lines, warnings
 }
 
-// prune deletes each local fact the checkout holds with the same provenance
-// and source, which is the merged copy coming back, and its marker. A
-// same-named fact from another writer stays.
-func prune(local, checkout store.Root, markerDir string) (removed bool, warnings []string) {
-	entries, _ := local.Walk()
+// healIndex regenerates the checkout's index and commits it when it changed.
+// A merged review PR leaves MEMORY.md without its fact, and session start
+// reads only MEMORY.md, so the first host to write after a pull heals it for
+// every host. A missing checkout stays missing, for a later clone.
+func healIndex(ctx context.Context, cfg config.Config, checkout store.Root, rules gate.Rules, scanner gate.Scanner) []string {
+	if _, err := os.Stat(checkout.Path); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	changed, _, err := checkout.WriteIndex(rules)
+	if err != nil {
+		return []string{fmt.Sprintf("review: regenerating the %s checkout index: %v", checkout.Store, err)}
+	}
+	if !changed {
+		return nil
+	}
+	if w := commit.Checkout(ctx, cfg, checkout, rules, scanner, "priors: regenerate index"); w != "" {
+		return []string{"review: " + w}
+	}
+	return nil
+}
+
+// prune deletes each local fact the checkout's index lists and the checkout
+// holds with the same provenance and source, which is the merged copy coming
+// back, and its marker, and returns the Rels it deleted. A same-named fact
+// from another writer stays, and so does one the index does not list yet, or
+// session start would read it nowhere. The local layer is confined from the
+// state dir like every other local write, and nothing resolving into the
+// checkout is deleted, since there the "local copy" is the checkout's own.
+func prune(local, checkout store.Root, entries []store.Entry, markerDir string) (removed map[string]bool, warnings []string) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	if err := local.CheckWrite(local.Path); err != nil {
+		return nil, []string{fmt.Sprintf("review: not pruning the %s local layer: %v", local.Store, err)}
+	}
+	listed := indexedNames(checkout)
+	if len(listed) == 0 {
+		return nil, nil
+	}
+	theirEntries, _ := checkout.Walk()
+	theirs := byName(theirEntries)
+	resolvedCheckout, err := filepath.EvalSymlinks(checkout.Path)
+	if err != nil {
+		return nil, []string{fmt.Sprintf("review: not pruning the %s local layer: %v", local.Store, err)}
+	}
+	removed = map[string]bool{}
 	for _, e := range entries {
-		theirs, ok := checkout.FindByName(e.Fact.Name)
-		if !ok || !sameWriter(e.Fact, theirs.Fact) {
+		t, ok := theirs[e.Fact.Name]
+		if !ok || !listed[e.Fact.Name] || !sameWriter(e.Fact, t.Fact) {
 			continue
 		}
 		path := filepath.Join(local.Path, filepath.FromSlash(e.Rel))
+		if err := local.CheckWrite(filepath.Dir(path)); err != nil {
+			warnings = append(warnings, fmt.Sprintf("review: not pruning %s: %v", path, err))
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("review: not pruning %s: %v", path, err))
+			continue
+		}
+		if inside, err := filepath.Rel(resolvedCheckout, resolved); err == nil && filepath.IsLocal(inside) {
+			warnings = append(warnings, fmt.Sprintf("review: not pruning %s: it lies inside the checkout", path))
+			continue
+		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			warnings = append(warnings, fmt.Sprintf("review: pruning %s: %v", path, err))
 			continue
 		}
-		removed = true
+		removed[e.Rel] = true
 		dropMarker(markerDir, e.Fact.Name, &warnings)
 	}
 	return removed, warnings
+}
+
+// indexedNames is the set of fact names the checkout's MEMORY.md lists; an
+// unreadable index lists none.
+func indexedNames(checkout store.Root) map[string]bool {
+	lines, err := checkout.ReadIndex()
+	if err != nil {
+		return nil
+	}
+	names := make(map[string]bool, len(lines))
+	for _, line := range lines {
+		if name, _, ok := store.ParseIndexLine(line); ok {
+			names[name] = true
+		}
+	}
+	return names
+}
+
+// byName maps each fact name to its entry, a live one winning over an
+// archived one as in store.Root.FindByName.
+func byName(entries []store.Entry) map[string]store.Entry {
+	m := make(map[string]store.Entry, len(entries))
+	for _, e := range entries {
+		if have, ok := m[e.Fact.Name]; ok && (e.Archived || !have.Archived) {
+			continue
+		}
+		m[e.Fact.Name] = e
+	}
+	return m
+}
+
+// unreadable reports whether the local walk failed on a file named name.md,
+// which is most likely the pending fact itself.
+func unreadable(errs []store.WalkErr, name string) bool {
+	for _, e := range errs {
+		if filepath.Base(filepath.FromSlash(e.Rel)) == name+".md" {
+			return true
+		}
+	}
+	return false
+}
+
+// gateIDs keeps the reasons shaped like gate ids. Only priors writes flags,
+// but a hand edit can change them, and they land in a commit message.
+func gateIDs(reasons []string) []string {
+	var ids []string
+	for _, r := range reasons {
+		if gateID.MatchString(r) {
+			ids = append(ids, r)
+		}
+	}
+	return ids
 }
 
 func sameWriter(a, b fact.Fact) bool {

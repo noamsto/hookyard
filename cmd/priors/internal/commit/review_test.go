@@ -46,8 +46,8 @@ func assertUntouched(t *testing.T, dir, before string) {
 	}
 }
 
-// remoteRef is ref's commit in bare, or "" when bare lacks it.
-func remoteRef(t *testing.T, bare, ref string) string {
+// bareRef is ref's commit in bare, or "" when bare lacks it.
+func bareRef(t *testing.T, bare, ref string) string {
 	t.Helper()
 	out, err := exec.Command("git", "-C", bare, "rev-parse", "-q", "--verify", ref).Output()
 	if err != nil {
@@ -73,12 +73,21 @@ func commitToMain(t *testing.T, fx fixture, rel string, content []byte) {
 	git(t, fx.dir(), "push", "-q", "origin", "main")
 }
 
-// pointUpstream makes the checkout's tracking ref hold a commit of tree on
-// main, without the remote: Review's base is the tracking ref as fetched.
+// pointUpstream makes the remote's main and the checkout's tracking ref hold
+// a commit of tree on HEAD, leaving the checkout's main behind.
 func pointUpstream(t *testing.T, fx fixture, tree string) {
+	t.Helper()
+	commit := pointTracking(t, fx, tree)
+	git(t, fx.dir(), "push", "-q", "origin", commit+":refs/heads/main")
+}
+
+// pointTracking makes only the checkout's tracking ref hold a commit of tree
+// on HEAD, which the remote lacks, and returns the commit.
+func pointTracking(t *testing.T, fx fixture, tree string) string {
 	t.Helper()
 	commit := strings.TrimSpace(git(t, fx.dir(), "commit-tree", tree, "-p", "HEAD", "-m", "base"))
 	git(t, fx.dir(), "update-ref", "refs/remotes/origin/main", commit)
+	return commit
 }
 
 func TestReviewPushesBasePlusOneFile(t *testing.T) {
@@ -113,13 +122,13 @@ func TestReviewSecondCallIsExists(t *testing.T) {
 	if outcome, detail := fx.review(t, req); outcome != ReviewPushed {
 		t.Fatalf("first Review = %d, %q; want pushed", outcome, detail)
 	}
-	pushed := remoteRef(t, bare, "refs/heads/"+req.Branch)
+	pushed := bareRef(t, bare, "refs/heads/"+req.Branch)
 	before := checkoutState(t, fx.dir())
 
 	if outcome, detail := fx.review(t, req); outcome != ReviewExists || detail != "" {
 		t.Errorf("second Review = %d, %q; want exists", outcome, detail)
 	}
-	if got := remoteRef(t, bare, "refs/heads/"+req.Branch); got != pushed {
+	if got := bareRef(t, bare, "refs/heads/"+req.Branch); got != pushed {
 		t.Errorf("review branch moved: %s -> %s", pushed, got)
 	}
 	assertUntouched(t, fx.dir(), before)
@@ -241,6 +250,33 @@ func TestReviewRefusesSecretBytesBeforeHashing(t *testing.T) {
 	}
 }
 
+// The commit message carries the local fact's flags, so it is scanned too.
+func TestReviewRefusesSecretMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name, msg, want, leak string
+	}{
+		{"redaction rule", "priors: review\n\n-----BEGIN " + "RSA PRIVATE" + " KEY-----\n", "secret rule(s) in the message: private-key", "BEGIN"},
+		{"scanner", "priors: review\n\ntoken " + scannerHit + "\n", "secret scan matched in the message: fake", scannerHit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx, bare := withRemote(t)
+			req := reviewRequest(t, "flagged-fact", "plain body\n")
+			req.Msg = tc.msg
+			before := checkoutState(t, fx.dir())
+
+			outcome, detail := fx.review(t, req)
+			if outcome != ReviewPermanent || detail != tc.want {
+				t.Errorf("Review = %d, %q; want permanent %q", outcome, detail, tc.want)
+			}
+			if strings.Contains(detail, tc.leak) {
+				t.Errorf("detail %q repeats the matched text", detail)
+			}
+			assertNoReviewRefs(t, bare)
+			assertUntouched(t, fx.dir(), before)
+		})
+	}
+}
+
 func TestReviewRefusesPathOnBase(t *testing.T) {
 	fx, bare := withRemote(t)
 	req := reviewRequest(t, "flagged-fact", "plain body\n")
@@ -271,6 +307,40 @@ func TestReviewLintFindingIsTransient(t *testing.T) {
 	assertUntouched(t, fx.dir(), before)
 }
 
+// A base fact of the same name elsewhere never goes away by retrying, whichever
+// of the two files the lint reports.
+func TestReviewDuplicateNameIsPermanent(t *testing.T) {
+	for _, tc := range []struct {
+		name, rel string
+		repo      string
+	}{
+		{"reported on the review file", "_archive/_global/flagged-fact.md", ""},
+		{"reported on the base file", "repo-a/flagged-fact.md", "repo-a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx, bare := withRemote(t)
+			f := cleanFact("flagged-fact")
+			if tc.repo != "" {
+				f.Metadata.Scope, f.Metadata.Repos = "repo", []string{tc.repo}
+			}
+			fx.put(t, tc.rel, f)
+			fx.index(t)
+			git(t, fx.dir(), "add", "-A")
+			git(t, fx.dir(), "commit", "-q", "-m", "add "+tc.rel)
+			git(t, fx.dir(), "push", "-q", "origin", "main")
+			req := reviewRequest(t, "flagged-fact", "plain body\n")
+			before := checkoutState(t, fx.dir())
+
+			want := "lint: " + req.Rel + ": duplicate-name"
+			if outcome, detail := fx.review(t, req); outcome != ReviewPermanent || detail != want {
+				t.Errorf("Review = %d, %q; want permanent %q", outcome, detail, want)
+			}
+			assertNoReviewRefs(t, bare)
+			assertUntouched(t, fx.dir(), before)
+		})
+	}
+}
+
 // The lint reads base's blobs as stored: git archive would drop the
 // export-ignore'd fact the review file links to, and checkout-index would run
 // the smudge filter.
@@ -288,7 +358,7 @@ func TestReviewLintReadsRawBlobs(t *testing.T) {
 	if _, err := os.Stat(marker); err == nil {
 		t.Error("the smudge filter ran")
 	}
-	if remoteRef(t, bare, "refs/heads/"+req.Branch) == "" {
+	if bareRef(t, bare, "refs/heads/"+req.Branch) == "" {
 		t.Error("no review branch on the remote")
 	}
 	assertUntouched(t, fx.dir(), before)
@@ -329,6 +399,43 @@ func TestReviewNeedsUpstream(t *testing.T) {
 	assertUntouched(t, fx.dir(), before)
 }
 
+// A tracking ref holding a commit the remote lacks would make the review
+// branch carry that commit, and whatever it adds, to the remote.
+func TestReviewRefusesTrackingRefTheRemoteLacks(t *testing.T) {
+	fx, bare := withRemote(t)
+	blob := strings.TrimSpace(gitIn(t, fx.dir(), "on: push # local only\n", "hash-object", "-w", "--stdin"))
+	workflows := mktree(t, fx.dir(), "100644 blob "+blob+"\tevil.yml")
+	github := mktree(t, fx.dir(), "040000 tree "+workflows+"\tworkflows")
+	tree := strings.TrimSpace(gitIn(t, fx.dir(), git(t, fx.dir(), "ls-tree", "HEAD")+"040000 tree "+github+"\t.github\n", "mktree"))
+	extra := pointTracking(t, fx, tree)
+	base := rev(t, bare, "main")
+	before := checkoutState(t, fx.dir())
+
+	want := "refs/remotes/origin/main is not the remote's refs/heads/main; fetch first"
+	if outcome, detail := fx.review(t, reviewRequest(t, "flagged-fact", "plain body\n")); outcome != ReviewTransient || detail != want {
+		t.Errorf("Review = %d, %q; want transient %q", outcome, detail, want)
+	}
+	for _, oid := range []string{extra, blob} {
+		if exec.Command("git", "-C", bare, "cat-file", "-e", oid).Run() == nil {
+			t.Errorf("the remote received the local-only object %s", oid)
+		}
+	}
+	assertNoReviewRefs(t, bare)
+	assertMain(t, bare, base)
+	assertUntouched(t, fx.dir(), before)
+}
+
+func gitIn(t *testing.T, dir, stdin string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Stdin = strings.NewReader(stdin)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %v: %v", args, err)
+	}
+	return string(out)
+}
+
 // The empty lease refuses a branch another run created between the remote
 // check and the push, which is then as good as sent.
 func TestReviewBranchCreatedDuringPushIsExists(t *testing.T) {
@@ -343,7 +450,7 @@ func TestReviewBranchCreatedDuringPushIsExists(t *testing.T) {
 	if outcome, detail := fx.review(t, req); outcome != ReviewExists || detail != "" {
 		t.Errorf("Review = %d, %q; want exists", outcome, detail)
 	}
-	if got := remoteRef(t, bare, ref); got != main {
+	if got := bareRef(t, bare, ref); got != main {
 		t.Errorf("remote %s = %s, want the other run's %s", ref, got, main)
 	}
 	assertUntouched(t, fx.dir(), before)

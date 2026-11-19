@@ -56,28 +56,35 @@ func pinnedPush(ctx context.Context, dir, remote, src, dstRef, expect string) (w
 	return ""
 }
 
-// remoteHas reports whether ref exists on remote, asked from the pinned push
-// git dir as pinnedPush pushes. Callers run preflight first.
+// remoteHas reports whether ref exists on remote, as remoteRef reads it.
 func remoteHas(ctx context.Context, dir, remote, ref string) (exists bool, warning string) {
+	_, exists, warning = remoteRef(ctx, dir, remote, ref)
+	return exists, warning
+}
+
+// remoteRef reads the object ref names on remote, asked from the pinned push
+// git dir as pinnedPush pushes; exists is false when remote lacks ref.
+// Callers run preflight first.
+func remoteRef(ctx context.Context, dir, remote, ref string) (oid string, exists bool, warning string) {
 	common, warning := inspect(ctx, dir, "git rev-parse", "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if warning != "" {
-		return false, warning
+		return "", false, warning
 	}
 	env, warning := pinnedEnv(ctx, dir, remote, common)
 	if warning != "" {
-		return false, warning
+		return "", false, warning
 	}
 	out, err := runGitExact(ctx, tools.PushGitDir, env, pushTimeout, nil, "ls-remote", "--", remote, ref)
 	if err != nil {
-		return false, refusal(dir, "%s", gitWarning("git ls-remote", out, err))
+		return "", false, refusal(dir, "%s", gitWarning("git ls-remote", out, err))
 	}
 	// ls-remote matches a pattern against any ref's tail.
 	for line := range strings.Lines(out) {
-		if _, name, ok := strings.Cut(strings.TrimSuffix(line, "\n"), "\t"); ok && name == ref {
-			return true, ""
+		if oid, name, ok := strings.Cut(strings.TrimSuffix(line, "\n"), "\t"); ok && name == ref {
+			return oid, true, ""
 		}
 	}
-	return false, ""
+	return "", false, ""
 }
 
 // pinnedEnv is the environment for git in tools.PushGitDir reading the

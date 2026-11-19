@@ -1038,6 +1038,8 @@ func TestImportedShellRule(t *testing.T) {
 			instr = f
 		}
 	}
+	described := note
+	described.Description = "run `direnv allow` after cloning"
 	tests := []struct {
 		name     string
 		f        fact.Fact
@@ -1045,6 +1047,7 @@ func TestImportedShellRule(t *testing.T) {
 		outcome  string
 	}{
 		{"imported note", note, true, "published"},
+		{"imported note, instruction in description", described, true, "flagged"},
 		{"imported instruction", instr, true, "flagged"},
 		{"not imported note", note, false, "flagged"},
 	}

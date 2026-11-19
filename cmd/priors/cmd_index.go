@@ -399,15 +399,6 @@ func writeGroup(ctx context.Context, cfg config.Config, rules gate.Rules, scanne
 		return false, err
 	}
 	defer unlock()
-	if g.lock != "quarantine" {
-		lines, warnings := review.SyncLocked(ctx, cfg, route.StoreID(g.lock), rules, scanner)
-		for _, l := range lines {
-			s.outln(l)
-		}
-		for _, w := range warnings {
-			s.errf("%s: warning: %s\n", g.lock, w)
-		}
-	}
 	for _, root := range g.roots {
 		changed, reports, err := root.WriteIndex(rules)
 		for _, r := range reports {
@@ -425,6 +416,15 @@ func writeGroup(ctx context.Context, cfg config.Config, rules gate.Rules, scanne
 			if w := commit.Checkout(ctx, cfg, root, rules, scanner, "priors: regenerate index"); w != "" {
 				s.errf("%s: warning: %s\n", root.Path, w)
 			}
+		}
+	}
+	if g.lock != "quarantine" {
+		lines, warnings := review.SyncLocked(ctx, cfg, route.StoreID(g.lock), rules, scanner)
+		for _, l := range lines {
+			s.outln(l)
+		}
+		for _, w := range warnings {
+			s.errf("%s: warning: %s\n", g.lock, w)
 		}
 	}
 	return skipped, nil
