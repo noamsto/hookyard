@@ -98,7 +98,7 @@ func claudeProject(memDir string) (items []Item, notes []Report) {
 			continue
 		}
 		topics = append(topics, name)
-		f, err := fact.Parse(raw)
+		f, err := nativeFact(raw)
 		if err != nil {
 			notes = append(notes, Report{Outcome: Skipped, Source: src, Detail: "not a fact file: " + err.Error()})
 			continue
@@ -109,6 +109,32 @@ func claudeProject(memDir string) (items []Item, notes []Report) {
 		notes = append(notes, checkIndex(SourcePath(filepath.Join(memDir, "MEMORY.md")), index, topics)...)
 	}
 	return items, notes
+}
+
+// nativeFact parses one Claude topic file, taking a top-level type or
+// originSessionId when the metadata block does not carry that key: older Claude
+// Code memory files wrote these keys at the top level, and fact.Parse reads
+// them only from metadata.
+func nativeFact(raw []byte) (fact.Fact, error) {
+	f, err := fact.Parse(raw)
+	if err != nil {
+		return f, err
+	}
+	if f.Metadata.Type == "" {
+		f.Metadata.Type = extraString(f.Extra, "type")
+	}
+	if f.Metadata.OriginSessionID == "" {
+		f.Metadata.OriginSessionID = extraString(f.Extra, "originSessionId")
+	}
+	return f, nil
+}
+
+// extraString returns key's value in m when it is a YAML string, and "" for
+// any other shape: a map, list or number there is not a type name, so the item
+// stays refused by lint.
+func extraString(m map[string]any, key string) string {
+	s, _ := m[key].(string)
+	return s
 }
 
 // ReadRegular reads path only if it is a regular file: O_NOFOLLOW refuses a

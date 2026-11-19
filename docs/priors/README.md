@@ -227,8 +227,11 @@ through the same write path as `add`. `--claude-dir` replaces the whole
 `projects/` and imports nothing, exit 0 (the run still reports unreadable
 store facts and commits the checkout, as every run does). The native files
 are never changed. Each copy keeps the native `name` (slugified when it is
-not a valid fact name), `description`, `type`, body and `modified`; the
-importer sets `confidence: proposed`, `scope: repo` with the repo decoded
+not a valid fact name), `description`, `type`, body and `modified`; a native
+file may write `type` and `originSessionId` under `metadata:` or at the top
+level of its frontmatter; the nested value wins when both are present, and
+the store's own files stay nested (`metadata.type`); the importer sets
+`confidence: proposed`, `scope: repo` with the repo decoded
 from the project dir, `verified: null`, `superseded_by: null`, `provenance`
 and a `source` block carrying the `sha256` of the native bytes. It prints one
 line per item, then exits 0, or 1 if any item failed (below):
