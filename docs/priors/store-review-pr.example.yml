@@ -13,10 +13,13 @@
 # Actions billing is blocked. Until then the owner opens each PR from the
 # compare URL that priors prints beside the `review` line.
 #
-# Keep auto-merge off and protect the default branch with a branch rule that
-# requires the `lint` check and a review: a push-triggered workflow runs the
-# pushed branch's own workflow file and `permissions:`, so the merge must stay
-# the owner's act.
+# Keep auto-merge off and protect the default branch with a rule requiring the
+# `lint` check: a push-triggered workflow runs the pushed branch's own workflow
+# file and `permissions:`, so the merge must stay the owner's act. Do not rely
+# on a "require review" rule: a single owner cannot meet it (the author cannot
+# approve their own PR), and a github-actions approval would count toward it
+# once "create and approve" is enabled. While Actions billing is blocked the
+# required check never reports, so the owner merges with an admin bypass.
 name: review-pr
 on:
   push:
