@@ -32,8 +32,7 @@ var nounUse = map[string]bool{
 // ImperativeCommand reports whether text reads as an instruction to run a
 // command: a sentence or clause that opens with a run verb and goes on to name
 // a code span, a quoted string or a path-, flag- or dotted-looking word. It
-// reads prose only, so callers pass the description and the body, not the
-// frontmatter.
+// reads prose only, not the frontmatter.
 func ImperativeCommand(text string) bool {
 	for line := range strings.SplitSeq(text, "\n") {
 		for _, sentence := range imperativeSplit.Split(line, -1) {

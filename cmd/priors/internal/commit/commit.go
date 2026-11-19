@@ -242,8 +242,7 @@ func newCommit(git gitFunc, dir, parent, tree, msg string, sign bool) (commit, w
 // upstream on origin, which must be remote, the trust file's pin, through
 // pinnedPush. The lease makes the push a compare-and-swap against the real
 // remote, so only commit is transferred even when the tracking ref is stale or
-// tampered with; commit being parent's child, a passing lease is a
-// fast-forward. A branch with no fetched upstream, including a fresh unborn
+// tampered with. A branch with no fetched upstream, including a fresh unborn
 // store, is not pushed: the user's first `git push -u` sets it up. gated is
 // what gatedTree returned for commit's tree.
 func push(ctx context.Context, dir, remote, parent, commit string, gated map[string]string) (warning string) {

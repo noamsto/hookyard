@@ -320,10 +320,9 @@ func (c checker) refs(e store.Entry) []Finding {
 
 // index checks MEMORY.md against the facts on disk. The index must be exactly
 // what IndexLines renders, except that a `confidence: reviewed` fact whose line
-// the index does not list is tolerated: a review PR adds only the fact file and
-// leaves MEMORY.md alone, so main carries such a fact until the next priors
-// write regenerates the index. Any other missing fact, extra line or broken
-// frame still fails.
+// the index does not list is tolerated: a review branch adds only the fact
+// file, so main carries such a fact until the next priors write regenerates
+// the index.
 func (c checker) index(entries []store.Entry) []Finding {
 	kept, _ := store.Unredacted(entries, c.opts.Rules)
 	want := c.root.IndexLines(kept)
@@ -395,8 +394,7 @@ func (c checker) scan(ctx context.Context) (map[string][]string, error) {
 }
 
 // flagReasons are the gate-3 and gate-4 reasons e trips, in the form stored in
-// metadata.flags.
-// A reviewed fact has passed review, so neither gate applies to it.
+// metadata.flags. A reviewed fact has passed review, so neither gate applies.
 func flagReasons(e store.Entry) []string {
 	if e.Fact.Metadata.Confidence == "reviewed" {
 		return nil

@@ -104,8 +104,8 @@ type candidate struct {
 	fact fact.Fact
 }
 
-// Result is a run's reports, one per item, the review proposals' lines, and the commit's warning, as
-// write.Result.Warning words it. Failed counts the items that did not land
+// Result is a run's reports, one per item, the review proposals' lines, and
+// the commit's warning, as write.Result.Warning words it. Failed counts the items that did not land
 // because something broke (the scanner, a write), not because the
 // write path refused them: a re-run may clear these, and the caller should
 // not report the run as clean.

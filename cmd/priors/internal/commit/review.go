@@ -49,10 +49,10 @@ const (
 // commit on the checkout branch's fetched upstream that adds req.Data at
 // req.Rel, once the remote's branch still holds that upstream, the bytes and
 // message pass the fact rules and the secret scan, and the branch's whole tree
-// passes the store lint. It builds the commit with
-// plumbing in a private index and moves no ref of the checkout, nor touches
-// its index or worktree. The caller holds the store's lock. The detail names
-// what stopped it by rule id and path, never by content.
+// passes the store lint. It builds the commit with plumbing in a private index,
+// moving no ref of the checkout and touching neither its index nor its
+// worktree. The caller holds the store's lock. The detail names what stopped
+// it by rule id and path, never by content.
 func Review(ctx context.Context, cfg config.Config, root store.Root, rules gate.Rules, scanner gate.Scanner, req ReviewRequest) (ReviewOutcome, string) {
 	if !cfg.Push || !cfg.CommitEnabled() {
 		return ReviewTransient, "push is off"

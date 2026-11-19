@@ -36,8 +36,8 @@ func preflight(ctx context.Context, dir, remote string) (warning string) {
 // [remote "<url>"] section redirects even an explicit-URL push, nor the
 // caller's environment reaches it. base is a commit the remote holds, and
 // gated maps each path the gates passed to its "<mode> <oid>", or "" for a
-// removal; it refuses unless the objects src has beyond base, as that git dir
-// reads them, are src and the gated blobs in their trees (checkSendSet).
+// removal; the push is refused unless the objects src has beyond base are
+// src and the gated blobs (checkSendSet).
 func pinnedPush(ctx context.Context, dir, remote, src, dstRef, expect, base string, gated map[string]string) (warning string) {
 	format, warning := inspect(ctx, dir, "git rev-parse", "rev-parse", "--show-object-format")
 	if warning != "" {
@@ -72,8 +72,7 @@ func pinnedPush(ctx context.Context, dir, remote, src, dstRef, expect, base stri
 // listing of what a push of src sends, against gated as pinnedPush takes it:
 // src must be its one commit, its trees must sit at the root or at a gated
 // path's directory, and its blobs at gated paths that are no removal, each
-// the gated object. A gated blob the remote already has is not listed. The
-// error names the first object out of place, by path where it has one.
+// the gated object. A gated blob the remote already has is not listed.
 func checkSendSet(out, src string, gated map[string]string) error {
 	dirs := map[string]bool{"": true}
 	for rel := range gated {
