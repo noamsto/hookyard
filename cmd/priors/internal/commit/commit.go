@@ -117,7 +117,7 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 		parent = ""
 	}
 	git := inCheckout(ctx, dir)
-	tree, warning := gatedTree(git, dir, parent, func(env []string) (map[string]string, string) {
+	tree, gated, warning := gatedTree(git, dir, parent, func(env []string) (map[string]string, string) {
 		return stage(git, dir, env, snapDir, accepted)
 	})
 	if warning != "" {
@@ -143,7 +143,7 @@ func Checkout(ctx context.Context, cfg config.Config, root store.Root, rules gat
 	}
 	var notes []string
 	if cfg.Push {
-		notes = append(notes, push(ctx, dir, root.Remote, parent, commit))
+		notes = append(notes, push(ctx, dir, root.Remote, parent, commit, gated))
 	}
 	if len(left) > 0 {
 		notes = append(notes, fmt.Sprintf("%s in %s", leftNote(left), dir))
@@ -244,8 +244,9 @@ func newCommit(git gitFunc, dir, parent, tree, msg string, sign bool) (commit, w
 // remote, so only commit is transferred even when the tracking ref is stale or
 // tampered with; commit being parent's child, a passing lease is a
 // fast-forward. A branch with no fetched upstream, including a fresh unborn
-// store, is not pushed: the user's first `git push -u` sets it up.
-func push(ctx context.Context, dir, remote, parent, commit string) (warning string) {
+// store, is not pushed: the user's first `git push -u` sets it up. gated is
+// what gatedTree returned for commit's tree.
+func push(ctx context.Context, dir, remote, parent, commit string, gated map[string]string) (warning string) {
 	if parent == "" {
 		return refusal(dir, "the store has no earlier commit to push onto")
 	}
@@ -264,7 +265,7 @@ func push(ctx context.Context, dir, remote, parent, commit string) (warning stri
 		return refusal(dir, "%s has commits ahead of %s other than this one; push them yourself (git push) to resume", up.branch, up.tracking)
 	}
 
-	if warning := pinnedPush(ctx, dir, remote, commit, up.mergeRef, parent); warning != "" {
+	if warning := pinnedPush(ctx, dir, remote, commit, up.mergeRef, parent, parent, gated); warning != "" {
 		return warning
 	}
 	// The push from the pinned git dir leaves the checkout's tracking ref behind,
@@ -422,12 +423,13 @@ func copyRegular(path, out string) (regular bool, err error) {
 // gatedTree builds, in a private index seeded from parent, the tree of
 // parent with fill's staging applied, and checks it holds nothing else. fill
 // stages into the index env names and returns each path's staged
-// "<mode> <oid>", or "" for a removal. It returns "" for the tree when that is
-// parent's own tree. dir only names the checkout in warnings.
-func gatedTree(git gitFunc, dir, parent string, fill func(env []string) (gated map[string]string, warning string)) (tree, warning string) {
+// "<mode> <oid>", or "" for a removal, which gatedTree returns as gated. It
+// returns "" for the tree when that is parent's own tree. dir only names the
+// checkout in warnings.
+func gatedTree(git gitFunc, dir, parent string, fill func(env []string) (gated map[string]string, warning string)) (tree string, gated map[string]string, warning string) {
 	tmp, err := os.MkdirTemp("", "priors-index-")
 	if err != nil {
-		return "", fmt.Sprintf("nothing committed in %s: making a private index: %v", dir, err)
+		return "", nil, fmt.Sprintf("nothing committed in %s: making a private index: %v", dir, err)
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
 	env := []string{"GIT_INDEX_FILE=" + filepath.Join(tmp, "index")}
@@ -437,27 +439,27 @@ func gatedTree(git gitFunc, dir, parent string, fill func(env []string) (gated m
 		seed = []string{"read-tree", parent}
 	}
 	if out, err := git(gitTimeout, env, nil, seed...); err != nil {
-		return "", gitWarning("git read-tree", out, err)
+		return "", nil, gitWarning("git read-tree", out, err)
 	}
-	gated, warning := fill(env)
+	gated, warning = fill(env)
 	if warning != "" {
-		return "", warning
+		return "", nil, warning
 	}
 	tree, err = git(gitTimeout, env, nil, "write-tree")
 	if err != nil {
-		return "", gitWarning("git write-tree", tree, err)
+		return "", nil, gitWarning("git write-tree", tree, err)
 	}
 	tree = strings.TrimSpace(tree)
 	stray, unchanged, err := checkTree(git, parent, tree, gated)
 	switch {
 	case err != nil:
-		return "", fmt.Sprintf("nothing committed in %s: checking the gated tree: %v", dir, err)
+		return "", nil, fmt.Sprintf("nothing committed in %s: checking the gated tree: %v", dir, err)
 	case len(stray) > 0:
-		return "", fmt.Sprintf("nothing committed in %s: the gated tree holds entries the gates did not pass: %s", dir, strings.Join(stray, ", "))
+		return "", nil, fmt.Sprintf("nothing committed in %s: the gated tree holds entries the gates did not pass: %s", dir, strings.Join(stray, ", "))
 	case unchanged:
-		return "", ""
+		return "", nil, ""
 	}
-	return tree, ""
+	return tree, gated, ""
 }
 
 // stage puts the snapshot's bytes for accepted into the index env names,
@@ -777,8 +779,9 @@ func runGitEnv(ctx context.Context, dir string, env []string, timeout time.Durat
 	// pathspecs keep a file named like a glob from staging its neighbours.
 	// GIT_SSH_COMMAND goes last, as exec keeps the final duplicate, so git's own
 	// transport cannot find ssh on PATH; GIT_EXEC_PATH would swap git's helpers.
+	// The pinned push ignores refs/replace/, so the gates must read past it too.
 	env = append(slices.DeleteFunc(
-		route.RepoEnv(append([]string{"GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "GIT_LITERAL_PATHSPECS=1"}, env...)...),
+		route.RepoEnv(append([]string{"GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "GIT_LITERAL_PATHSPECS=1", "GIT_NO_REPLACE_OBJECTS=1"}, env...)...),
 		func(kv string) bool { return strings.HasPrefix(kv, "GIT_EXEC_PATH=") },
 	), "GIT_SSH_COMMAND="+tools.SSH)
 	return runGitExact(ctx, dir, env, timeout, stdin, args...)

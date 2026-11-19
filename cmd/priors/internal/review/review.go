@@ -183,7 +183,9 @@ func SyncLocked(ctx context.Context, cfg config.Config, storeID route.StoreID, r
 	pruned, pruneWarnings := prune(local, checkout, entries, dir)
 	warnings = append(warnings, pruneWarnings...)
 	if len(pruned) > 0 {
-		if _, _, err := local.WriteIndex(rules); err != nil {
+		_, reports, err := local.WriteIndex(rules)
+		warnings = append(warnings, reportWarnings(local, reports)...)
+		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("review: regenerating the %s local index: %v", storeID, err))
 		}
 	}
@@ -261,17 +263,28 @@ func healIndex(ctx context.Context, cfg config.Config, checkout store.Root, rule
 	if _, err := os.Stat(checkout.Path); errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
-	changed, _, err := checkout.WriteIndex(rules)
+	changed, reports, err := checkout.WriteIndex(rules)
+	warnings := reportWarnings(checkout, reports)
 	if err != nil {
-		return []string{fmt.Sprintf("review: regenerating the %s checkout index: %v", checkout.Store, err)}
+		return append(warnings, fmt.Sprintf("review: regenerating the %s checkout index: %v", checkout.Store, err))
 	}
 	if !changed {
-		return nil
+		return warnings
 	}
 	if w := commit.Checkout(ctx, cfg, checkout, rules, scanner, "priors: regenerate index"); w != "" {
-		return []string{"review: " + w}
+		warnings = append(warnings, "review: "+w)
 	}
-	return nil
+	return warnings
+}
+
+// reportWarnings turns WriteIndex's reports into warnings, so a fact the
+// regenerated index leaves out is never dropped silently.
+func reportWarnings(root store.Root, reports []string) []string {
+	warnings := make([]string, 0, len(reports))
+	for _, report := range reports {
+		warnings = append(warnings, fmt.Sprintf("review: %s: %s", root.Path, report))
+	}
+	return warnings
 }
 
 // prune deletes each local fact the checkout's index lists and the checkout
@@ -358,10 +371,12 @@ func byName(entries []store.Entry) map[string]store.Entry {
 }
 
 // unreadable reports whether the local walk failed on a file named name.md,
-// which is most likely the pending fact itself.
+// which is most likely the pending fact itself, or on a directory or the root,
+// which may hold it.
 func unreadable(errs []store.WalkErr, name string) bool {
 	for _, e := range errs {
-		if filepath.Base(filepath.FromSlash(e.Rel)) == name+".md" {
+		base := filepath.Base(filepath.FromSlash(e.Rel))
+		if base == name+".md" || filepath.Ext(base) != ".md" {
 			return true
 		}
 	}

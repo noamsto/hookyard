@@ -2,7 +2,9 @@ package commit
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"path"
 	"strings"
 
 	"github.com/noamsto/hookyard/cmd/priors/internal/pin"
@@ -32,8 +34,11 @@ func preflight(ctx context.Context, dir, remote string) (warning string) {
 // reading the checkout's objects through GIT_OBJECT_DIRECTORY, in
 // pin.PushEnv's environment: neither the checkout's config, where a
 // [remote "<url>"] section redirects even an explicit-URL push, nor the
-// caller's environment reaches it.
-func pinnedPush(ctx context.Context, dir, remote, src, dstRef, expect string) (warning string) {
+// caller's environment reaches it. base is a commit the remote holds, and
+// gated maps each path the gates passed to its "<mode> <oid>", or "" for a
+// removal; it refuses unless the objects src has beyond base, as that git dir
+// reads them, are src and the gated blobs in their trees (checkSendSet).
+func pinnedPush(ctx context.Context, dir, remote, src, dstRef, expect, base string, gated map[string]string) (warning string) {
 	format, warning := inspect(ctx, dir, "git rev-parse", "rev-parse", "--show-object-format")
 	if warning != "" {
 		return warning
@@ -50,10 +55,52 @@ func pinnedPush(ctx context.Context, dir, remote, src, dstRef, expect string) (w
 	if warning != "" {
 		return warning
 	}
+	out, err := runGitExact(ctx, tools.PushGitDir, env, gitTimeout, nil, "rev-list", "--objects", src, "--not", base)
+	if err != nil {
+		return refusal(dir, "%s", gitWarning("git rev-list", out, err))
+	}
+	if err := checkSendSet(out, src, gated); err != nil {
+		return refusal(dir, "%v", err)
+	}
 	if _, err := runGitExact(ctx, tools.PushGitDir, env, pushTimeout, nil, "push", "-q", "--no-follow-tags", "--recurse-submodules=no", "--no-signed", "--force-with-lease="+dstRef+":"+expect, "--", remote, src+":"+dstRef); err != nil {
 		return refusal(dir, "git push failed: %v", err)
 	}
 	return ""
+}
+
+// checkSendSet checks out, the `git rev-list --objects src --not <base>`
+// listing of what a push of src sends, against gated as pinnedPush takes it:
+// src must be its one commit, its trees must sit at the root or at a gated
+// path's directory, and its blobs at gated paths that are no removal, each
+// the gated object. A gated blob the remote already has is not listed. The
+// error names the first object out of place, by path where it has one.
+func checkSendSet(out, src string, gated map[string]string) error {
+	dirs := map[string]bool{"": true}
+	for rel := range gated {
+		for d := path.Dir(rel); d != "."; d = path.Dir(d) {
+			dirs[d] = true
+		}
+	}
+	sent := false
+	for line := range strings.Lines(out) {
+		oid, name, named := strings.Cut(strings.TrimSuffix(line, "\n"), " ")
+		if len(oid) != 40 || strings.Trim(oid, "0123456789abcdef") != "" {
+			return errors.New("git rev-list gave an unreadable line")
+		}
+		switch _, want, _ := strings.Cut(gated[name], " "); {
+		case !named && oid == src && !sent:
+			sent = true
+		case !named:
+			return fmt.Errorf("the push would send commit %s besides %s", oid, src)
+		case want != "" && oid == want, want == "" && dirs[name]:
+		default:
+			return fmt.Errorf("the push would send %s, which the gates did not pass", name)
+		}
+	}
+	if !sent {
+		return fmt.Errorf("the push would not send %s", src)
+	}
+	return nil
 }
 
 // remoteHas reports whether ref exists on remote, as remoteRef reads it.

@@ -3,6 +3,8 @@ package commit
 import (
 	"bytes"
 	"context"
+	"crypto/sha1" //nolint:gosec // git's object ids, not a password hash
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -105,7 +107,7 @@ func Review(ctx context.Context, cfg config.Config, root store.Root, rules gate.
 		return outcome, detail
 	}
 
-	tree, warning := gatedTree(git, dir, up.commit, func(env []string) (map[string]string, string) {
+	tree, _, warning := gatedTree(git, dir, up.commit, func(env []string) (map[string]string, string) {
 		return stageBytes(git, env, req)
 	})
 	switch {
@@ -123,7 +125,8 @@ func Review(ctx context.Context, cfg config.Config, root store.Root, rules gate.
 		return ReviewTransient, warning
 	}
 
-	if warning := pinnedPush(ctx, dir, root.Remote, commit, ref, ""); warning != "" {
+	gated := map[string]string{req.Rel: "100644 " + blobID(req.Data)}
+	if warning := pinnedPush(ctx, dir, root.Remote, commit, ref, "", up.commit, gated); warning != "" {
 		// The empty lease refuses a branch that appeared since the check above.
 		if exists, _ := remoteHas(ctx, dir, root.Remote, ref); exists {
 			return ReviewExists, ""
@@ -292,6 +295,13 @@ func writeBlob(dir, rel string, b []byte) error {
 		return err
 	}
 	return os.WriteFile(path, b, 0o600)
+}
+
+// blobID is git's sha1 object id of a blob holding data, computed without
+// asking git.
+func blobID(data []byte) string {
+	sum := sha1.Sum(append(fmt.Appendf(nil, "blob %d\x00", len(data)), data...)) //nolint:gosec // sha1 is the object format pinnedPush requires
+	return hex.EncodeToString(sum[:])
 }
 
 // stageBytes hashes req's bytes into the checkout's objects and adds them at

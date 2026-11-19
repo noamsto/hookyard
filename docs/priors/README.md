@@ -204,8 +204,9 @@ code`, `type checking`, `call sites`) is not read as a command. On a corpus of
 55 synthetic memories (36 notes, 19 instructions), all 55 were flagged before
 the rule; after it, 19 of 55 are (notes 0/36, instructions 19/19). It misses
 an imperative after a semicolon, a modal lead-in (`You'll need to run`, `Go
-ahead and run`), `The fix is to run ...`, the passive `should be run`, and
-`Run: ` followed by a code span; and the stoplist can suppress a real command
+ahead and run`), `The fix is to run ...`, the passive `should be run`, the passive
+`--flag is required`, and `Run: ` followed by a code span; and the stoplist can
+suppress a real command
 (`Use file ...`). Gate 3 and the fence still apply to what it misses. Every
 other provenance reason still applies to imports. An import outside an engine session has no session id and flags
 every fact `provenance:unknown-session`, so automated imports must pass
@@ -480,18 +481,31 @@ Requirements and checks:
   file. It runs locally because the store repo's Actions billing is blocked,
   so the store's required `lint` check does not report; the PR body says the
   local lint was clean.
-- A marker ends one of two ways. A permanent refusal drops the marker and
+- A marker ends in one of four ways. It is dropped when the fact is sent
+  (pushed, or its branch already exists), and when you merged and pulled and
+  the next run pruned the local copy. It is dropped silently when its local
+  copy no longer exists (you deleted it). A permanent refusal drops it and
   reports it once: a redaction or secret-scan match in the fact or the commit
   message (the rule id is printed, never the text), a fact-rule failure on the
   reviewed bytes, the fact's path already on the base, or a `duplicate-name`
-  lint finding (the name exists elsewhere on the base). A transient one keeps
-  the marker, prints `warning: review <name>: <why>` and is retried by the
-  next run: any other lint finding, push off, no or unfetched upstream, a
-  stale tracking ref, a pin or push failure, an unreadable local copy.
+  lint finding (the name exists elsewhere on the base). A transient refusal
+  keeps the marker, prints `warning: review <name>: <why>` and is retried by
+  the next run: any other lint finding, no or unfetched upstream, a stale
+  tracking ref, a pin or push failure. An unreadable local copy (file or
+  directory) also keeps the marker, with `review <name>: local copy
+  unreadable`. With push off nothing is proposed and the only warning is the
+  summary above.
+- The checkout-side git ignores replace refs (`GIT_NO_REPLACE_OBJECTS`), and
+  before every pinned push, review branch or `main`, priors checks that the
+  objects the push would send are exactly the commit, the trees on the way to
+  the gated paths and the gated blobs, and refuses anything else. The gates
+  read exactly what is pushed.
 - Output: `add` and `import` print the `review` lines on stdout and warnings
-  as described under `priors add` and `priors import`. `index --write` prints
-  the review lines on stdout, after its `wrote ...` lines, and each warning on
-  stderr as `<store>: warning: <w>`.
+  as described under `priors add` and `priors import`. `index --write` prints,
+  store by store (personal, then work), each store's review lines on stdout
+  after that store's `wrote ...` lines, and each warning on stderr as
+  `<store>: warning: <w>`. The quarantine group has no review lines, and its
+  `wrote` line may come after another store's review lines.
 - A review PR does not touch `MEMORY.md`, so two PRs never conflict. After a
   merge, the next write on any host regenerates it and the fact reaches tier 1
   everywhere.

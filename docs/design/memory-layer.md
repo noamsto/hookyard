@@ -1145,25 +1145,39 @@ would. The lint runs locally because the store repo's GitHub Actions billing
 is blocked, so its required lint check does not report today; the PR body
 states that the local lint was clean.
 
-A marker ends one of two ways. A permanent refusal drops the marker and
-reports it once: a redaction or secret-scan match in the fact bytes or in the
-commit message, a fact-rule failure on the reviewed bytes, the fact's path
-already on the base, or a `duplicate-name` lint finding (the name exists
-elsewhere on the base). A transient one keeps the marker and is retried by the
-next run: any other lint finding, push off, no or unfetched upstream, the local
-tracking ref not equal to the remote's tip ("fetch first"), a pin or push
-failure, an unreadable local copy. A failure never changes the command's exit
-code: the fact is safe in the local layer.
+A marker ends in one of four ways. It is dropped when the fact is sent (pushed,
+or its branch already exists), and when a merge and a pull let the next sync
+prune the local copy. It is dropped silently when its local copy no longer
+exists (deleted). A permanent refusal drops it and reports it once: a redaction
+or secret-scan match in the fact bytes or in the commit message, a fact-rule
+failure on the reviewed bytes, the fact's path already on the base, or a
+`duplicate-name` lint finding (the name exists elsewhere on the base). A
+transient refusal keeps the marker and is retried by the next run: any other
+lint finding, no or unfetched upstream, the local tracking ref not equal to the
+remote's tip ("fetch first"), a pin or push failure. An unreadable local copy
+(file or directory) also keeps the marker, with `review <name>: local copy
+unreadable`. A failure never changes the command's exit code: the fact is safe
+in the local layer.
+
+The checkout-side git ignores replace refs (`GIT_NO_REPLACE_OBJECTS`), and
+before every pinned push, review branch or `main`, priors checks that the
+objects the push would send are exactly the commit, the trees on the way to the
+gated paths and the gated blobs, and refuses anything else, so the gates read
+exactly what is pushed.
 
 Output. `add` prints its one outcome line and then, for any outcome but
 `quarantined`, `review <store> <branch>[ <compare url>]` on stdout for each
-pending fact of the store, from any run, and each warning on stderr as
-`warning: <w>`. `import` prints all review lines after all its reports, and
-joins its review warnings with `; ` into the run's single `warning:` line.
-`index --write` prints the review lines on stdout after its `wrote ...` lines,
-and each warning on stderr as `<store>: warning: <w>`. A per-fact warning reads
-`review <name>: <why>`. With push off the only warning is `review: <N> flagged
-fact(s) wait for push = true to be proposed`.
+pending fact that was sent (pushed or already existing), from any run; a fact
+that was refused gets a warning on stderr instead, as `warning: <w>`. `import`
+prints all review lines after all its reports, and joins its review warnings
+with `; ` into the run's single `warning:` line. `index --write` goes store by
+store (personal, then work): after a store's `wrote ...` lines it prints that
+store's review lines on stdout, and each warning on stderr as
+`<store>: warning: <w>`; the quarantine group has no review lines, and its
+`wrote` line may come after another store's. A per-fact warning reads
+`review <name>: <why>`. With push off nothing is proposed, no per-fact warning
+is printed and the only warning is the summary `review: <N> flagged fact(s)
+wait for push = true to be proposed`.
 
 Before pruning or proposing, every sync regenerates the checkout's `MEMORY.md`
 and commits it (`priors: regenerate index`), so the first host to run after a
@@ -1661,8 +1675,8 @@ optional list marker and lead-ins such as `then`, `please`, `remember to`,
 corpus of 55 synthetic memories, 55 of 55 flagged before and 19 of 55 after
 (notes 0/36, instructions 19/19). Residual misses: an imperative after a
 semicolon, modal lead-ins (`You'll need to run`, `Go ahead and run`), `The fix
-is to run ...`, the passive `should be run`, and `Run:` followed by a code
-span; and the stoplist can suppress a real command (`Use file ...`). Every
+is to run ...`, the passive `should be run`, the passive `--flag is required`,
+and `Run:` followed by a code span; and the stoplist can suppress a real command (`Use file ...`). Every
 other provenance reason applies as for any write. This assumes the import runs with an engine session id. Without one,
 gate 2 raises `provenance:unknown-session`, so every fact flags and gets its
 own review PR; `crew reap`'s call to `priors import` must pass
@@ -2113,7 +2127,8 @@ Decided by the owner on 2026-09-30 unless marked. Decision 5 is settled
     detector does not read publishes unflagged; gate 3 and the fence still
     apply. Known misses: an imperative after a semicolon, modal lead-ins
     (`You'll need to run`, `Go ahead and run`), `The fix is to run ...`, the
-    passive `should be run`, and `Run:` followed by a code span; and the
+    passive `should be run`, the passive `--flag is required`, and `Run:` followed
+    by a code span; and the
     stoplist can suppress a real command (`Use file ...`).
 
 ---

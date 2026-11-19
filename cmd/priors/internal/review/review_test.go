@@ -516,6 +516,73 @@ func TestSyncKeepsMarkerOfUnreadableLocalCopy(t *testing.T) {
 	}
 }
 
+func TestSyncReportsCheckoutFactsTheIndexSkips(t *testing.T) {
+	fx := newFixture(t)
+	good := testFact("good", &fact.Provenance{Engine: "claude", Session: "s", Host: "h"}, nil)
+	fx.putCheckout(t, good)
+	bad := filepath.Join(fx.checkout.Path, "_global", "bad.md")
+	if err := os.WriteFile(bad, []byte("<<<<<<< HEAD\nname: bad\n=======\nname: worse\n>>>>>>> theirs\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, warnings := syncFx(fx)
+
+	want := "review: " + fx.checkout.Path + ": skipped "
+	if !slices.ContainsFunc(warnings, func(w string) bool {
+		return strings.HasPrefix(w, want) && strings.Contains(w, "bad.md")
+	}) {
+		t.Errorf("warnings = %q, want one starting %q naming bad.md", warnings, want)
+	}
+}
+
+func TestSyncReportsLocalFactsTheIndexSkips(t *testing.T) {
+	fx := newFixture(t)
+	f := testFact("merged", &fact.Provenance{Engine: "claude", Session: "s1", Host: "h"}, nil)
+	fx.putLocal(t, f)
+	fx.putCheckout(t, f)
+	bad := filepath.Join(filepath.Dir(fx.local.PathFor(f, "hookyard")), "bad.md")
+	if err := os.WriteFile(bad, []byte("<<<<<<< HEAD\nname: bad\n=======\n>>>>>>> theirs\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, warnings := syncFx(fx)
+
+	want := "review: " + fx.local.Path + ": skipped "
+	if !slices.ContainsFunc(warnings, func(w string) bool {
+		return strings.HasPrefix(w, want) && strings.Contains(w, "bad.md")
+	}) {
+		t.Errorf("warnings = %q, want one starting %q naming bad.md", warnings, want)
+	}
+}
+
+func TestSyncKeepsMarkerWhenALocalDirectoryIsUnreadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads any directory")
+	}
+	fx := newFixture(t)
+	f := testFact("tip", nil, nil)
+	fx.putLocal(t, f)
+	dir := filepath.Dir(fx.local.PathFor(f, "hookyard"))
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	fx.mark(t, "tip")
+	got := fakePropose(t, commit.ReviewPushed, "")
+
+	lines, warnings := syncFx(fx)
+
+	if len(lines) != 0 || len(*got) != 0 {
+		t.Errorf("lines = %q, propose calls = %d", lines, len(*got))
+	}
+	if want := []string{"review tip: local copy unreadable"}; !reflect.DeepEqual(warnings, want) {
+		t.Errorf("warnings = %q, want %q", warnings, want)
+	}
+	if p := fx.pending(t); !reflect.DeepEqual(p, []string{"tip"}) {
+		t.Errorf("markers = %v", p)
+	}
+}
+
 func TestSyncMessageCarriesOnlyGateIDs(t *testing.T) {
 	fx := newFixture(t)
 	f := testFact("tip", nil, nil)

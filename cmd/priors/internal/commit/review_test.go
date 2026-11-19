@@ -216,6 +216,39 @@ func mktree(t *testing.T, dir, entry string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// evilTree is tree with a local-only .github/workflows/evil.yml added, and
+// that file's blob.
+func evilTree(t *testing.T, dir, tree string) (evil, blob string) {
+	t.Helper()
+	blob = strings.TrimSpace(gitIn(t, dir, "on: push # local only\n", "hash-object", "-w", "--stdin"))
+	workflows := mktree(t, dir, "100644 blob "+blob+"\tevil.yml")
+	github := mktree(t, dir, "040000 tree "+workflows+"\tworkflows")
+	return strings.TrimSpace(gitIn(t, dir, git(t, dir, "ls-tree", tree)+"040000 tree "+github+"\t.github\n", "mktree")), blob
+}
+
+// A replace ref on the base tree would show the gates a tree other than the
+// one the push sends.
+func TestReviewIgnoresReplaceRefs(t *testing.T) {
+	fx, bare := withRemote(t)
+	base := rev(t, bare, "main")
+	baseTree := rev(t, fx.dir(), base+"^{tree}")
+	evil, blob := evilTree(t, fx.dir(), baseTree)
+	git(t, fx.dir(), "replace", "-f", baseTree, evil)
+	req := reviewRequest(t, "flagged-fact", "plain body\n")
+
+	outcome, detail := fx.review(t, req)
+	if exec.Command("git", "-C", bare, "cat-file", "-e", blob).Run() == nil {
+		t.Errorf("the remote received the local-only blob %s", blob)
+	}
+	if outcome != ReviewPushed || detail != "" {
+		t.Fatalf("Review = %d, %q; want pushed", outcome, detail)
+	}
+	if got := git(t, bare, "diff-tree", "-r", "--name-status", "main", "refs/heads/"+req.Branch); got != "A\t"+req.Rel+"\n" {
+		t.Errorf("review tree differs from main by %q, want one added %s", got, req.Rel)
+	}
+	assertMain(t, bare, base)
+}
+
 func TestReviewRefusesSecretBytesBeforeHashing(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, want, leak string
@@ -403,10 +436,7 @@ func TestReviewNeedsUpstream(t *testing.T) {
 // branch carry that commit, and whatever it adds, to the remote.
 func TestReviewRefusesTrackingRefTheRemoteLacks(t *testing.T) {
 	fx, bare := withRemote(t)
-	blob := strings.TrimSpace(gitIn(t, fx.dir(), "on: push # local only\n", "hash-object", "-w", "--stdin"))
-	workflows := mktree(t, fx.dir(), "100644 blob "+blob+"\tevil.yml")
-	github := mktree(t, fx.dir(), "040000 tree "+workflows+"\tworkflows")
-	tree := strings.TrimSpace(gitIn(t, fx.dir(), git(t, fx.dir(), "ls-tree", "HEAD")+"040000 tree "+github+"\t.github\n", "mktree"))
+	tree, blob := evilTree(t, fx.dir(), "HEAD")
 	extra := pointTracking(t, fx, tree)
 	base := rev(t, bare, "main")
 	before := checkoutState(t, fx.dir())
