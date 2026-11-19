@@ -1159,11 +1159,14 @@ remote's tip ("fetch first"), a pin or push failure. An unreadable local copy
 unreadable`. A failure never changes the command's exit code: the fact is safe
 in the local layer.
 
-The checkout-side git ignores replace refs (`GIT_NO_REPLACE_OBJECTS`), and
-before every pinned push, review branch or `main`, priors checks that the
-objects the push would send are exactly the commit, the trees on the way to the
-gated paths and the gated blobs, and refuses anything else, so the gates read
-exactly what is pushed.
+The checkout-side git ignores replace refs (`GIT_NO_REPLACE_OBJECTS`), so the
+gates and the tree check (the commit's tree must be its parent's plus exactly
+the gated paths) read the same objects the pinned push sends; the tree check is
+the guard. As a cross-check, before every pinned push, review branch or `main`,
+priors refuses when the objects the push would send, matched by path name, are
+not the commit, the trees on the way to the gated paths and the gated blobs.
+The cross-check classifies objects by name, not type, so it does not stand on
+its own.
 
 Output. `add` prints its one outcome line and then, for any outcome but
 `quarantined`, `review <store> <branch>[ <compare url>]` on stdout for each

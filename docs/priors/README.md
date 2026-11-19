@@ -495,11 +495,12 @@ Requirements and checks:
   directory) also keeps the marker, with `review <name>: local copy
   unreadable`. With push off nothing is proposed and the only warning is the
   summary above.
-- The checkout-side git ignores replace refs (`GIT_NO_REPLACE_OBJECTS`), and
-  before every pinned push, review branch or `main`, priors checks that the
-  objects the push would send are exactly the commit, the trees on the way to
-  the gated paths and the gated blobs, and refuses anything else. The gates
-  read exactly what is pushed.
+- The checkout-side git ignores replace refs (`GIT_NO_REPLACE_OBJECTS`), so
+  the gates and the tree check (the commit's tree must be its parent's plus
+  exactly the gated paths) read the same objects the pinned push sends. As a
+  cross-check, before every pinned push, review branch or `main`, priors
+  refuses when the objects the push would send, matched by path name, are not
+  the commit, the trees on the way to the gated paths and the gated blobs.
 - Output: `add` and `import` print the `review` lines on stdout and warnings
   as described under `priors add` and `priors import`. `index --write` prints,
   store by store (personal, then work), each store's review lines on stdout
