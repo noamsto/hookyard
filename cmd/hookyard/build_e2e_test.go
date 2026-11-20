@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -112,6 +113,29 @@ func runHookyardBuild(t *testing.T, bin, manifestPath, out string) {
 		"--name", "e2e-probe")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("hookyard build: %v\n%s", err, output)
+	}
+	warmPluginExecutables(t, out)
+}
+
+// warmPluginExecutables warms everything a built hook command can exec: the
+// launcher, the bundled binary and the handler scripts, all freshly written.
+func warmPluginExecutables(t *testing.T, root string) {
+	t.Helper()
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode().Perm()&0o111 != 0 {
+			warmExec(t, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
 	}
 }
 

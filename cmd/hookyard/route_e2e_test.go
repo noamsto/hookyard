@@ -30,6 +30,8 @@ const e2eBudget = 10 * time.Second
 // net/http, and without this tag a devshell with CGO_ENABLED=1 (the default
 // here) links the cgo resolver against libc, which is exactly the PT_INTERP
 // regression assertStaticBinary (build_e2e_test.go) exists to catch.
+//
+// The returned binary is already warmed, see warmExec.
 func buildRouteBinary(t *testing.T) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "hookyard")
@@ -37,7 +39,29 @@ func buildRouteBinary(t *testing.T) string {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
+	warmExec(t, bin)
 	return bin
+}
+
+// warmBudget bounds warmExec far above e2eBudget: it only has to outlast
+// the slowest first exec a saturated machine can produce.
+const warmBudget = 2 * time.Minute
+
+// warmExec execs path once and ignores the result. The first exec of a newly
+// written executable is slow on a loaded machine, and that cost belongs to the
+// OS, not to anything the tests assert under e2eBudget.
+func warmExec(t *testing.T, path string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), warmBudget)
+	defer cancel()
+	err := exec.CommandContext(ctx, path, "help").Run()
+	var exitErr *exec.ExitError
+	if err != nil && !errors.As(err, &exitErr) {
+		t.Fatalf("warm %s: %v", path, err)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("warm %s: still running after %s", path, warmBudget)
+	}
 }
 
 // runRouteBinary drives the built binary the way an engine invokes it: argv,
