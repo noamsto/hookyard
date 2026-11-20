@@ -23,14 +23,11 @@ import (
 // slot — the only kind of event a fire-and-forget handler may register for.
 const dispatchEvent = "post_tool"
 
-// dispatchSleep is the handler's own runtime, and dispatchRouterBound the wall
-// clock the router is held to. The gap between them is what keeps the
-// sentinel-absent assertion off a race on a loaded box: the child cannot have
-// written anything yet when the router is reaped.
-const (
-	dispatchSleep       = 2 * time.Second
-	dispatchRouterBound = time.Second
-)
+// dispatchRouterDeadline is only reached by a router that waits on the gated
+// handler without limit, an inherited stdout pipe for instance. A router that
+// dispatches synchronously returns at its own deadline instead, and the
+// outcome assertion catches it.
+const dispatchRouterDeadline = 30 * time.Second
 
 // dispatchArgs is this file's own argv, spelled out rather than shared with
 // routeArgs: every helper in route_e2e_test.go builds pre_tool handlers.
@@ -39,16 +36,18 @@ func dispatchArgs(engine, stateDir string) []string {
 }
 
 // dispatchHandler writes the detachment probe: it records its own session id,
-// outlives the router by sleeping, and only then writes its stdin to the
-// sentinel. Recording the session id first means it lands whether or not the
-// process survives long enough to reach the sentinel.
-func dispatchHandler(t *testing.T, dir, sidPath, sentinelPath string) manifest.Handler {
+// holds until gatePath exists, and only then writes its stdin to the sentinel.
+// Recording the session id first means it lands whether or not the process
+// survives long enough to reach the sentinel. The test's cleanup opens the
+// gate, and the wait self-expires after about two minutes if even that never
+// runs.
+func dispatchHandler(t *testing.T, dir, sidPath, gatePath, sentinelPath string) manifest.Handler {
 	t.Helper()
 	const id = "detach-probe"
 	path := filepath.Join(dir, id)
 	body := "#!/bin/sh\n" +
 		"ps -o sid= -p $$ > \"" + sidPath + "\"\n" +
-		"sleep " + strconv.Itoa(int(dispatchSleep/time.Second)) + "\n" +
+		"i=0; while [ ! -e \"" + gatePath + "\" ] && [ $i -lt 1200 ]; do sleep 0.1; i=$((i+1)); done\n" +
 		"cat > \"" + sentinelPath + "\"\n"
 	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
 		t.Fatalf("write handler: %v", err)
@@ -117,7 +116,7 @@ const dispatchPipeBufferBytes = 65536
 const dispatchPaddingBytes = 200 * 1024
 
 // dispatchEchoHandler writes its stdin straight to the sentinel and exits.
-// Unlike dispatchHandler it needs no sleep or session probing: the payload
+// Unlike dispatchHandler it needs no gate or session probing: the payload
 // size is the point here, and the router has already exited by the time this
 // handler is even scheduled, regardless of how quickly the handler runs.
 func dispatchEchoHandler(t *testing.T, dir, sentinelPath string) manifest.Handler {
@@ -255,8 +254,9 @@ func TestDispatchedHandlerSurvivesTheRouterProcessGroup(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
 	sidPath := filepath.Join(dir, "handler.sid")
+	gatePath := filepath.Join(dir, "gate")
 	sentinelPath := filepath.Join(dir, "sentinel.json")
-	writeTable(t, stateDir, dispatchHandler(t, dir, sidPath, sentinelPath))
+	writeTable(t, stateDir, dispatchHandler(t, dir, sidPath, gatePath, sentinelPath))
 
 	fixture := readFixture(t, "claude-PostToolUse.json")
 
@@ -271,29 +271,40 @@ func TestDispatchedHandlerSurvivesTheRouterProcessGroup(t *testing.T) {
 	cmd.Stderr = &stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	started := time.Now()
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start hookyard: %v", err)
 	}
 	pgid := cmd.Process.Pid
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("run hookyard: %v (stderr: %s)", err, stderr.String())
-	}
-	elapsed := time.Since(started)
+	releaseGate := func() { _ = os.WriteFile(gatePath, nil, 0o600) }
+	t.Cleanup(releaseGate)
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
 
 	// 1. The router did not wait for the handler: this is the "does not count
-	//    against the emitted timeout budget" half of the criterion.
-	if elapsed >= dispatchRouterBound {
-		t.Fatalf("router took %s, want under %s against the handler's %s sleep",
-			elapsed, dispatchRouterBound, dispatchSleep)
+	//    against the emitted timeout budget" half of the criterion. The
+	//    handler cannot finish while the gate is closed, so this catches only a
+	//    router that waits on it without limit; one that runs it synchronously
+	//    returns at its own deadline and fails assertion 5.
+	select {
+	case err := <-waited:
+		if err != nil {
+			t.Fatalf("run hookyard: %v (stderr: %s)", err, stderr.String())
+		}
+	case <-time.After(dispatchRouterDeadline):
+		// Open the gate before draining: Wait can block on a pipe the handler
+		// still holds.
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		releaseGate()
+		<-waited
+		t.Fatalf("router still running %s after start with its handler gated — it waited for the handler",
+			dispatchRouterDeadline)
 	}
 
-	// 2. Without this the test passes vacuously whenever the child happens to
-	//    finish first — including for an implementation with no detachment at
-	//    all, whose child would simply have run to completion inline.
+	// 2. Without this the test passes vacuously whenever the child bypassed the
+	//    gate — including for an implementation with no detachment at all,
+	//    whose child would simply have run to completion inline.
 	if _, err := os.Stat(sentinelPath); err == nil {
-		t.Fatalf("sentinel already exists %s into a %s sleep — the router waited for the handler",
-			elapsed, dispatchSleep)
+		t.Fatalf("sentinel exists with the gate closed — the handler did not wait for it")
 	}
 
 	// 3. The kill deliberately comes AFTER Wait, and its ordering is the test:
@@ -305,13 +316,14 @@ func TestDispatchedHandlerSurvivesTheRouterProcessGroup(t *testing.T) {
 	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("SIGKILL the router's process group %d: %v", pgid, err)
 	}
+	releaseGate()
 
 	// 4. The child receives what the router marshals from its decoded envelope,
 	//    not the fixture bytes an engine wrote to the router's stdin, so the
 	//    expectation is derived from the fixture rather than compared to it:
 	//    the sentinel must parse as JSON and carry the session id the fixture
 	//    supplied alongside the canonical event this argv routed on.
-	payload := dispatchWaitForContent(t, sentinelPath, 15*time.Second)
+	payload := dispatchWaitForContent(t, sentinelPath, 60*time.Second)
 	var delivered struct {
 		SessionID      string `json:"session_id"`
 		CanonicalEvent string `json:"canonical_event"`
