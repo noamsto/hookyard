@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/noamsto/hookyard/schemas/record.schema.json",
+  "title": "hookyard per-hook log record",
+  "description": "One line of the always-on event stream (internal/record.Record). Readers must ignore unknown properties, so none are forbidden. A record whose size cap forced truncation carries only the minimal fields plus truncated:true.",
+  "type": "object",
+  "required": ["v", "ts", "key", "engine", "session_id", "verdict", "router"],
+  "properties": {
+    "v": { "type": "integer" },
+    "ts": { "type": "string" },
+    "key": { "type": "string" },
+    "engine": { "type": "string" },
+    "session_id": { "type": "string" },
+    "canonical_event": { "type": "string" },
+    "native_event": { "type": "string" },
+    "cwd": { "type": "string" },
+    "tool_name": { "type": "string" },
+    "turn_outcome": { "type": "string" },
+    "verdict": { "type": "string" },
+    "enforced": { "type": "boolean" },
+    "reason": { "type": "string" },
+    "router": { "enum": ["ok", "error", "timeout"] },
+    "router_ms": { "type": "integer" },
+    "handlers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/handler" }
+    },
+    "truncated": { "type": "boolean" }
+  },
+  "$defs": {
+    "handler": {
+      "type": "object",
+      "required": ["name", "outcome", "ms"],
+      "properties": {
+        "name": { "type": "string" },
+        "outcome": { "enum": ["allow", "deny", "ask", "advise", "abstain", "error", "timeout", "dispatched", "suppressed"] },
+        "ms": { "type": "integer" },
+        "advice": { "type": "string" },
+        "message": { "type": "string" },
+        "delivered": { "type": "boolean" }
+      }
+    }
+  }
+}

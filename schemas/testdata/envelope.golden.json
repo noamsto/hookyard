@@ -1,0 +1,16 @@
+{
+  "engine": "claude-code",
+  "canonical_event": "pre_tool",
+  "native_event": "PreToolUse",
+  "session_id": "sess-1",
+  "cwd": "/home/u/repo",
+  "protocol": "claude-code",
+  "tool_name": "Bash",
+  "tool_input": {"command": "ls"},
+  "native": {
+    "hook_event_name": "PreToolUse",
+    "prompt_id": "p-1",
+    "tool_name": "Bash",
+    "tool_input": {"command": "ls"}
+  }
+}

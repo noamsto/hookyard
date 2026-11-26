@@ -1,0 +1,25 @@
+{
+  "handlers": [
+    {
+      "id": "guard/bash",
+      "exec": "/usr/local/bin/guard",
+      "events": ["pre_tool"],
+      "engines": ["claude-code", "codex"],
+      "match": ["Bash"],
+      "timeout_ms": 2000,
+      "lane": "verdict"
+    },
+    {
+      "id": "audit",
+      "exec": "bin/audit",
+      "events": ["post_tool"],
+      "engines": ["pi"],
+      "match": [],
+      "timeout_ms": 0,
+      "lane": "fire_and_forget"
+    }
+  ],
+  "commands": [
+    {"name": "audit-now", "description": "Run the audit", "exec": "bin/audit"}
+  ]
+}

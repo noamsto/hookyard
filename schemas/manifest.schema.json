@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/noamsto/hookyard/schemas/manifest.schema.json",
+  "title": "hookyard.json handler manifest",
+  "description": "Per-repo handler declarations (internal/manifest.Manifest). Structural shape only; unknown properties are ignored, as manifest.Load ignores them, so a manifest written against a newer hookyard still validates. match, timeout_ms and lane are optional (Load defaults them). Cross-field rules (exec form per mode, event/engine coverage, lane/timeout interplay) are enforced by manifest.Load.",
+  "type": "object",
+  "required": ["handlers"],
+  "properties": {
+    "handlers": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/handler" }
+    },
+    "commands": {
+      "description": "pi-only, build-mode-only slash commands.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/command" }
+    }
+  },
+  "$defs": {
+    "handler": {
+      "type": "object",
+          "required": ["id", "exec", "events", "engines"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_./-]*$" },
+        "exec": { "type": "string", "minLength": 1 },
+        "events": {
+          "description": "Canonical event names, or engine-scoped \"engine:NativeName\".",
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "engines": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "enum": ["claude-code", "codex", "cursor", "pi"] }
+        },
+        "match": {
+          "type": "array",
+          "items": { "enum": ["Read", "Write", "Bash", "Grep", "Glob"] }
+        },
+        "timeout_ms": { "type": "integer", "minimum": 0, "maximum": 4300 },
+        "lane": { "enum": ["verdict", "fire_and_forget"] }
+      }
+    },
+    "command": {
+      "type": "object",
+          "required": ["name", "description", "exec"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_-]*$" },
+        "description": { "type": "string", "minLength": 1 },
+        "exec": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
