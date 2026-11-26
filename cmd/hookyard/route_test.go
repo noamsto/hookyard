@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/noamsto/hookyard/internal/envelope"
 	"github.com/noamsto/hookyard/internal/manifest"
 	"github.com/noamsto/hookyard/internal/record"
 	"github.com/noamsto/hookyard/internal/vocab"
+	"github.com/noamsto/hookyard/pkg/envelope"
 )
 
 // claudePreTool is a Claude Code PreToolUse payload trimmed to the fields

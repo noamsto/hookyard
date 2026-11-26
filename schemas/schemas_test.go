@@ -17,9 +17,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/noamsto/hookyard/internal/envelope"
 	"github.com/noamsto/hookyard/internal/manifest"
 	"github.com/noamsto/hookyard/internal/record"
+	"github.com/noamsto/hookyard/pkg/envelope"
 )
 
 type schema = map[string]any

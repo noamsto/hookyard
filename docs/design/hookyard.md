@@ -4430,7 +4430,7 @@ supplied.
 bridge-tracked flag.** Unlike pi, where hookyard authors the bridge's own
 payload and the one-continuation cap lives in `pi_bridge.ts`, Claude Code and
 Codex supply `stop_hook_active` themselves, and `Envelope.StopHookActive()`
-(renamed from `PiStopHookActive`, `internal/envelope`) reads it directly off
+(renamed from `PiStopHookActive`, `pkg/envelope`) reads it directly off
 the native payload — no bridge-side state to track, because there is no
 bridge on either engine. `renderTurnEnd` checks it first, ahead of the
 verdict, exactly as `renderPiTurnEnd` did: when true, nothing is
@@ -4552,7 +4552,7 @@ deny/enforced then deny/unenforced, both with the handler's reason.
 | §7, ask-degrades-to-deny rule | Amended | The `turn_end` exception now names pi, Claude Code and Codex, not pi alone |
 | `internal/verdict/capability.go`, `HasDecisionSlot`/`HasAdvisorySlot` | Amended | `HasDecisionSlot` is now true for `claude-code` and `codex` on `turn_end`, beside pi; `HasAdvisorySlot`'s answers are unchanged, and its comment now says a `turn_end` deny's advice rides the block reason — the one route advice reaches Codex (issue #87 separately probes Codex's advisory channel) |
 | `internal/verdict/render.go`, `renderTurnEnd`/`renderStopBlock` | Amended | `renderPiTurnEnd`'s lattice mapping and stand-in reason are shared, not duplicated, across pi and the new Claude Code/Codex path |
-| `internal/envelope`, `StopHookActive` | Amended | Renamed from `PiStopHookActive`; now engine-general, with a per-engine absent/non-bool default (false on pi, true on Claude Code and Codex `turn_end`, false elsewhere) |
+| `pkg/envelope`, `StopHookActive` | Amended | Renamed from `PiStopHookActive`; now engine-general, with a per-engine absent/non-bool default (false on pi, true on Claude Code and Codex `turn_end`, false elsewhere) |
 | `envelope.Detect` residual comment; `internal/vocab/inbound.go` Codex `"Stop"` tag | Amended | Codex `Stop` detection moves from `// assumed` to code-reading grade, on `turn_id`'s required presence in `stop.command.input.schema.json` |
 | §11.2's "What this amends" table, "Cross-engine `Stop` decision slots" row | Resolved here | For Claude Code and Codex; Cursor's `stop`/`followup_message` remains out of scope |
 | §12, engine-detection item | Amended | Codex `Stop` is resolved at code-reading grade; Codex `SessionStart` and Cursor `SessionStart`/`Stop` stay open |

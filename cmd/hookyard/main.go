@@ -21,7 +21,6 @@ import (
 
 	"github.com/noamsto/hookyard/internal/build"
 	"github.com/noamsto/hookyard/internal/doctor"
-	"github.com/noamsto/hookyard/internal/envelope"
 	"github.com/noamsto/hookyard/internal/installstate"
 	"github.com/noamsto/hookyard/internal/manifest"
 	"github.com/noamsto/hookyard/internal/record"
@@ -30,6 +29,7 @@ import (
 	"github.com/noamsto/hookyard/internal/serve"
 	"github.com/noamsto/hookyard/internal/verdict"
 	"github.com/noamsto/hookyard/internal/vocab"
+	"github.com/noamsto/hookyard/pkg/envelope"
 )
 
 const usage = `hookyard — register agent hooks once, route them to every coding agent

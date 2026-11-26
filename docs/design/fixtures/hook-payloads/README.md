@@ -57,13 +57,13 @@ each engine's shipped build and pinned in Go tests:
   `session_id`, `transcript_path` (nullable). It carries **no `turn_id`**, so
   `envelope.Detect` cannot place it; yard mode's `--registered-for` fallback
   routes it (see `cmd/hookyard/main.go`). Tests:
-  `internal/envelope.TestDetectCannotPlaceCodexSessionEnd`,
+  `pkg/envelope.TestDetectCannotPlaceCodexSessionEnd`,
   `TestDecodeAsPlacesCodexSessionEnd`, and
   `cmd/hookyard.TestRunRouteCodexSessionEndRoutesViaRegisteredFor`.
 - **cursor-agent 2026.09.18** builds the `sessionEnd` payload in
   `share/cursor-agent/7021.index.js` (`executeHookForStep(_E.sessionEnd, ...)`)
   and carries `cursor_version`, so `Detect` places it. Tests:
-  `internal/envelope.TestDetectPlacesCursorSessionEnd`,
+  `pkg/envelope.TestDetectPlacesCursorSessionEnd`,
   `cmd/hookyard.TestRunRouteCursorSessionEndRoutes`.
 
 Re-capture both once either engine is authenticated: replace the inferred
