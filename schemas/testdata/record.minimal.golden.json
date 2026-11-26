@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "ts": "2026-01-02T03:04:05.000000Z",
+  "key": "k-2",
+  "engine": "pi",
+  "session_id": "sess-2",
+  "verdict": "allow",
+  "router": "ok",
+  "truncated": true
+}

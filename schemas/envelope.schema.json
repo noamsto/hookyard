@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/noamsto/hookyard/schemas/envelope.schema.json",
+  "title": "hookyard hook envelope",
+  "description": "The normalized hook payload handlers read, regardless of which engine sent it (internal/envelope.Envelope). Unknown properties are tolerated: the envelope grows additively.",
+  "type": "object",
+  "required": ["engine", "canonical_event", "native_event", "session_id", "cwd", "protocol", "tool_name", "native"],
+  "properties": {
+    "engine": { "enum": ["claude-code", "codex", "cursor", "pi"] },
+    "canonical_event": { "type": "string" },
+    "native_event": { "type": "string" },
+    "session_id": { "type": "string" },
+    "cwd": { "type": "string" },
+    "protocol": { "type": "string" },
+    "tool_name": { "type": "string" },
+    "tool_input": { "description": "Engine-native tool input, passed through verbatim; absent when the event has none." },
+    "native": {
+      "description": "The engine's original payload, key by key, untouched.",
+      "type": "object"
+    }
+  }
+}

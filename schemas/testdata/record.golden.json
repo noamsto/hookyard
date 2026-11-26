@@ -1,0 +1,22 @@
+{
+  "v": 1,
+  "ts": "2026-01-02T03:04:05.000000Z",
+  "key": "k-1",
+  "engine": "claude-code",
+  "session_id": "sess-1",
+  "canonical_event": "pre_tool",
+  "native_event": "PreToolUse",
+  "cwd": "/home/u/repo",
+  "tool_name": "Bash",
+  "turn_outcome": "completed",
+  "verdict": "deny",
+  "enforced": true,
+  "reason": "rm -rf is refused",
+  "router": "ok",
+  "router_ms": 12,
+  "handlers": [
+    {"name": "guard/bash", "outcome": "deny", "ms": 7, "message": "refused"},
+    {"name": "advice", "outcome": "advise", "ms": 3, "advice": "use trash", "delivered": true}
+  ],
+  "truncated": true
+}

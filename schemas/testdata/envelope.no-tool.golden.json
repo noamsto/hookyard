@@ -1,0 +1,10 @@
+{
+  "engine": "pi",
+  "canonical_event": "session_start",
+  "native_event": "session_start",
+  "session_id": "sess-2",
+  "cwd": "/home/u/repo",
+  "protocol": "pi",
+  "tool_name": "",
+  "native": {"pi_version": "1"}
+}
