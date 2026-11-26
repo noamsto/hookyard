@@ -2,9 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/noamsto/hookyard/schemas/manifest.schema.json",
   "title": "hookyard.json handler manifest",
-  "description": "Per-repo handler declarations (internal/manifest.Manifest). Structural shape only: cross-field rules (exec form per mode, event/engine coverage, lane/timeout interplay) are enforced by manifest.Load.",
+  "description": "Per-repo handler declarations (internal/manifest.Manifest). Structural shape only; unknown properties are ignored, as manifest.Load ignores them, so a manifest written against a newer hookyard still validates. match, timeout_ms and lane are optional (Load defaults them). Cross-field rules (exec form per mode, event/engine coverage, lane/timeout interplay) are enforced by manifest.Load.",
   "type": "object",
-  "additionalProperties": false,
   "required": ["handlers"],
   "properties": {
     "handlers": {
@@ -21,8 +20,7 @@
   "$defs": {
     "handler": {
       "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "exec", "events", "engines", "match", "timeout_ms", "lane"],
+          "required": ["id", "exec", "events", "engines"],
       "properties": {
         "id": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_./-]*$" },
         "exec": { "type": "string", "minLength": 1 },
@@ -47,11 +45,10 @@
     },
     "command": {
       "type": "object",
-      "additionalProperties": false,
-      "required": ["name", "description", "exec"],
+          "required": ["name", "description", "exec"],
       "properties": {
         "name": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_-]*$" },
-        "description": { "type": "string" },
+        "description": { "type": "string", "minLength": 1 },
         "exec": { "type": "string", "minLength": 1 }
       }
     }

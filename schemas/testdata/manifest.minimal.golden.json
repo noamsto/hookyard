@@ -1,0 +1,10 @@
+{
+  "handlers": [
+    {
+      "id": "guard",
+      "exec": "/usr/local/bin/guard",
+      "events": ["pre_tool"],
+      "engines": ["claude-code"]
+    }
+  ]
+}

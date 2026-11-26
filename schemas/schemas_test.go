@@ -307,7 +307,10 @@ func TestSchemasMatchGoStructs(t *testing.T) {
 
 	man := loadSchema(t, "manifest.schema.json")
 	checkShape(t, "manifest", reflect.TypeFor[manifest.Manifest](), man)
-	checkShape(t, "manifest.handler", reflect.TypeFor[manifest.Handler](), def(t, man, "handler"))
+	// match, timeout_ms and lane are optional in a hand-authored manifest: Load
+	// defaults them.
+	checkShape(t, "manifest.handler", reflect.TypeFor[manifest.Handler](), def(t, man, "handler"),
+		"match", "timeout_ms", "lane")
 	checkShape(t, "manifest.command", reflect.TypeFor[manifest.Command](), def(t, man, "command"))
 
 	// A size-capped record collapses to the minimal fields plus truncated, so
@@ -394,6 +397,7 @@ func TestGoldenFixtures(t *testing.T) {
 		{"envelope.golden.json", "envelope.schema.json", func() any { return new(envelope.Envelope) }},
 		{"envelope.no-tool.golden.json", "envelope.schema.json", func() any { return new(envelope.Envelope) }},
 		{"manifest.golden.json", "manifest.schema.json", func() any { return new(manifest.Manifest) }},
+		{"manifest.minimal.golden.json", "manifest.schema.json", func() any { return new(manifest.Manifest) }},
 		{"record.golden.json", "record.schema.json", func() any { return new(record.Record) }},
 		{"record.minimal.golden.json", "record.schema.json", func() any { return new(record.Record) }},
 	}
@@ -409,7 +413,7 @@ func TestGoldenFixtures(t *testing.T) {
 				t.Errorf("fixture violates %s:\n%s", c.schema, strings.Join(errs, "\n"))
 			}
 			if strings.Contains(c.fixture, "minimal") {
-				// The reduced form legitimately omits fields Record would
+				// A reduced form omits fields the Go type would
 				// emit as zero values, so only decoding is checked.
 				if err := json.Unmarshal(raw, c.into()); err != nil {
 					t.Fatal(err)
@@ -441,7 +445,10 @@ func TestSchemasRejectInvalid(t *testing.T) {
 	}{
 		{"envelope missing session_id", "envelope.golden.json", "envelope.schema.json", func(d map[string]any) { delete(d, "session_id") }},
 		{"envelope unknown engine", "envelope.golden.json", "envelope.schema.json", func(d map[string]any) { d["engine"] = "vim" }},
-		{"manifest unknown handler key", "manifest.golden.json", "manifest.schema.json", func(d map[string]any) { handler0(d)["extra"] = 1 }},
+		{"manifest empty command description", "manifest.golden.json", "manifest.schema.json", func(d map[string]any) {
+			d["commands"].([]any)[0].(map[string]any)["description"] = ""
+		}},
+		{"manifest missing exec", "manifest.golden.json", "manifest.schema.json", func(d map[string]any) { delete(handler0(d), "exec") }},
 		{"manifest bad lane", "manifest.golden.json", "manifest.schema.json", func(d map[string]any) { handler0(d)["lane"] = "fast" }},
 		{"manifest timeout too high", "manifest.golden.json", "manifest.schema.json", func(d map[string]any) { handler0(d)["timeout_ms"] = 4301 }},
 		{"manifest bad id", "manifest.golden.json", "manifest.schema.json", func(d map[string]any) { handler0(d)["id"] = "-x" }},
@@ -469,6 +476,22 @@ func TestRecordUnknownFieldsTolerated(t *testing.T) {
 		t.Fatal(err)
 	}
 	doc["future_field"] = []any{1}
+	if errs := validate(s, s, doc, "$"); len(errs) > 0 {
+		t.Errorf("additive field rejected: %v", errs)
+	}
+}
+
+// TestManifestUnknownFieldsTolerated pins manifest.Load's forward-compat
+// contract (TestLoadIgnoresUnknownFields): the schema must not forbid fields a
+// newer hookyard adds.
+func TestManifestUnknownFieldsTolerated(t *testing.T) {
+	s := loadSchema(t, "manifest.schema.json")
+	doc := map[string]any{}
+	if err := json.Unmarshal(fixture(t, "manifest.minimal.golden.json"), &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["future_root"] = true
+	doc["handlers"].([]any)[0].(map[string]any)["future_field"] = map[string]any{"nested": true}
 	if errs := validate(s, s, doc, "$"); len(errs) > 0 {
 		t.Errorf("additive field rejected: %v", errs)
 	}
