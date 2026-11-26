@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/noamsto/hookyard/internal/envelope"
 	"github.com/noamsto/hookyard/internal/manifest"
 	"github.com/noamsto/hookyard/internal/record"
 	"github.com/noamsto/hookyard/internal/render"
 	"github.com/noamsto/hookyard/internal/verdict"
 	"github.com/noamsto/hookyard/internal/vocab"
+	"github.com/noamsto/hookyard/pkg/envelope"
 )
 
 // loadBudget is for tests whose proof is an outcome or a structure rather than

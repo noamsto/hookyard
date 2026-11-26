@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/noamsto/hookyard/schemas/envelope.schema.json",
   "title": "hookyard hook envelope",
-  "description": "The normalized hook payload handlers read, regardless of which engine sent it (internal/envelope.Envelope). Unknown properties are tolerated: the envelope grows additively.",
+  "description": "The normalized hook payload handlers read, regardless of which engine sent it (pkg/envelope.Envelope). Unknown properties are tolerated: the envelope grows additively.",
   "type": "object",
   "required": ["engine", "canonical_event", "native_event", "session_id", "cwd", "protocol", "tool_name", "native"],
   "properties": {

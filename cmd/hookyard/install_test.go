@@ -10,11 +10,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/noamsto/hookyard/internal/envelope"
 	"github.com/noamsto/hookyard/internal/installstate"
 	"github.com/noamsto/hookyard/internal/manifest"
 	"github.com/noamsto/hookyard/internal/render"
 	"github.com/noamsto/hookyard/internal/vocab"
+	"github.com/noamsto/hookyard/pkg/envelope"
 )
 
 // testRouterPath carries the /bin/hookyard marker BuildPlan requires; tests

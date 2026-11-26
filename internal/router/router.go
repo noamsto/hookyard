@@ -10,10 +10,10 @@ import (
 	"slices"
 	"time"
 
-	"github.com/noamsto/hookyard/internal/envelope"
 	"github.com/noamsto/hookyard/internal/manifest"
 	"github.com/noamsto/hookyard/internal/record"
 	"github.com/noamsto/hookyard/internal/verdict"
+	"github.com/noamsto/hookyard/pkg/envelope"
 )
 
 // DeadlineMS is §5's router deadline: the timeout hookyard registers with each
